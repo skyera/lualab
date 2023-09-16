@@ -34,6 +34,10 @@ describe("my_test", function()
             print(k, v)
         end
     end)
+
+    it("savefile", function()
+        SaveCharacterData("ross", "7", "xteam")
+    end)
 end)
 
 function fact(n)
@@ -50,4 +54,12 @@ end
 
 function twice(x)
     return 2.0 * x
+end
+
+function SaveCharacterData(name, power, team)
+    file = io.open("data.txt", "w")
+    file:write("name " ..name.."\n")
+    file:write("attack ", power, "\n")
+    file:write("team " ..team, "\n")
+    file:close()
 end
