@@ -47,6 +47,13 @@ describe("my_test", function()
             print("\t"..line)
         end
     end)
+
+    it("math", function()
+        x = math.floor(3.1415)
+        print(x)
+        y = math.ceil(4.415)
+        print(y)
+    end)
 end)
 
 function fact(n)
