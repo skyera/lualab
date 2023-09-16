@@ -119,6 +119,13 @@ describe("my_test", function()
             local bar = 8
         end
     end)
+
+    it("bool", function()
+        x = true
+        print(x)
+        print(not x)
+        print(not false)
+    end)
 end)
 
 function fact(n)
