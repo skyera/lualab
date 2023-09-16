@@ -126,6 +126,11 @@ describe("my_test", function()
         print(not x)
         print(not false)
     end)
+
+    it("#not_equal", function()
+        print(1 ~= 0)
+        print(true ~= false)
+    end)
 end)
 
 function fact(n)
