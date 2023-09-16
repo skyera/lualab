@@ -97,6 +97,12 @@ describe("my_test", function()
         message = "he said \"bye\" and left"
         print(message)
     end)
+
+    it("console_input", function()
+        print("Please enter your name")
+        name = io.read()
+        print("Hello " .. name)
+    end)
 end)
 
 function fact(n)
