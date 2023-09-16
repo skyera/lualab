@@ -103,6 +103,22 @@ describe("my_test", function()
         name = io.read()
         print("Hello " .. name)
     end)
+
+    it("globalscope", function()
+        foo = 7
+
+        do
+            bar = 8 --global
+        end
+        print("foo: " .. foo)
+        print("bar: " .. bar)
+
+        foo = 7
+        local x = 9
+        do
+            local bar = 8
+        end
+    end)
 end)
 
 function fact(n)
@@ -128,5 +144,3 @@ function SaveCharacterData(name, power, team)
     file:write("team " ..team, "\n")
     file:close()
 end
-
-
