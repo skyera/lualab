@@ -1,0 +1,3 @@
+name ross
+attack 7
+team xteam

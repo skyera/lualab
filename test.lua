@@ -54,6 +54,17 @@ describe("my_test", function()
         y = math.ceil(4.415)
         print(y)
     end)
+
+    it("concat", function()
+        name = "Mike"
+        color = "Blue"
+        print("Jill " .. "likes" .. " Red")
+        print("Jack dislikes " .. color)
+        print(name .. " likes " .. color)
+        print(name .. color)
+        message = name .. " likes " .. color
+        print(message)
+    end)
 end)
 
 function fact(n)
