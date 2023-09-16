@@ -38,6 +38,15 @@ describe("my_test", function()
     it("savefile", function()
         SaveCharacterData("ross", "7", "xteam")
     end)
+
+    it("read", function()
+        file = io.open("data.txt")
+        lines = file:lines()
+        print("contents of file:")
+        for line in lines do
+            print("\t"..line)
+        end
+    end)
 end)
 
 function fact(n)
@@ -63,3 +72,5 @@ function SaveCharacterData(name, power, team)
     file:write("team " ..team, "\n")
     file:close()
 end
+
+
