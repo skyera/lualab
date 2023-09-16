@@ -65,6 +65,19 @@ describe("my_test", function()
         message = name .. " likes " .. color
         print(message)
     end)
+
+    it("strlength", function()
+        hello = "hello, world"
+        count_hash = #hello
+        count_func = string.len(hello)
+        print("The string:")
+        print(hello)
+        print("Has a length of:")
+        print(count_hash)
+        print(count_func)
+        print(#"hello, world")
+        print(string.len("hello, world"))
+    end)
 end)
 
 function fact(n)
