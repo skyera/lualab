@@ -9,7 +9,7 @@ describe("my_test", function()
 
     it("lots", function()
         assert.are.same({table="great"}, {table="great"})
-        assert.True(1==2)
+        assert.True(2==2)
     end)
 
     it("start", function()
@@ -130,6 +130,22 @@ describe("my_test", function()
     it("#not_equal", function()
         print(1 ~= 0)
         print(true ~= false)
+    end)
+
+    it("math", function()
+        assert.True(3/2 == 1.5)
+        x = 3//2
+        assert.True(x == 1)
+        x = math.max(10.4, 7, -3, 20)
+        assert.True(x == 20)
+        x = math.tointeger(-258.0)
+        assert.True(x == -258)
+    end)
+
+    it("sub", function()
+        a = "one thing"
+        b = string.gsub(a, "one", "another")
+        assert.True(b == "another thing")
     end)
 end)
 
