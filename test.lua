@@ -147,6 +147,19 @@ describe("my_test", function()
         b = string.gsub(a, "one", "another")
         assert.True(b == "another thing")
     end)
+
+    it("swap", function()
+        a, b = 1, 2
+        print(a, b)
+        a, b = b, a
+        assert.True(a == 2)
+        assert.True(b == 1)
+    end)
+
+    it("tonumber", function()
+        x = tonumber("123") + 25
+        assert.True(x==148)
+    end)
 end)
 
 function fact(n)
