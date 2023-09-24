@@ -100,8 +100,8 @@ describe("my_test", function()
 
     it("console_input", function()
         print("Please enter your name")
-        name = io.read()
-        print("Hello " .. name)
+        -- name = io.read()
+        -- print("Hello " .. name)
     end)
 
     it("globalscope", function()
@@ -159,6 +159,22 @@ describe("my_test", function()
     it("tonumber", function()
         x = tonumber("123") + 25
         assert.True(x==148)
+    end)
+
+    it("env", function()
+        print(_ENV == _G)
+    end)
+
+    it("tostring", function()
+        assert.True(tostring(10)=="10")
+    end)
+
+    it("string", function()
+        print(string.rep("abc", 3))
+        print(string.reverse("A Long line!"))
+        s = "[in brackets]"
+        print(string.sub(s, 2, -2))
+        print(string,char(97))
     end)
 end)
 
