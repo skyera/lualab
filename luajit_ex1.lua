@@ -13,4 +13,4 @@ end
 
 local num = ffi.C.atoi("12")
 print(num)
-print("Hello, %s\n", "world")
+ffi.C.printf("Hello, %s\n", "world")
