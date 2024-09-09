@@ -57,3 +57,56 @@ local obj = MyClass(3)
 print(obj:get_value())
 obj:set_value(1)
 print(obj:get_value())
+
+-- Inheritance
+print("Inheritance")
+local BaseClass = {}
+BaseClass.__index = BaseClass
+
+setmetatable(BaseClass, {
+    __call = function(cls, ...)
+        local obj = setmetatable({}, cls)
+        obj:_init(...)
+        return obj
+    end,
+})
+
+function BaseClass:_init(value)
+    print(debug.traceback("BaseClass::_init"))
+    self.value = value
+end
+
+function BaseClass:set_value(newval)
+    self.value = newval
+end
+
+function BaseClass:get_value()
+    return self.value
+end
+
+local DerivedClass = {}
+DerivedClass.__index = DerivedClass
+
+setmetatable(DerivedClass, {
+    __index = BaseClass, -- inheritance
+    __call = function(cls, ...)
+        local obj = setmetatable({}, cls)
+        obj:_init(...)
+        return obj
+    end,
+})
+
+function DerivedClass:_init(val1, val2)
+    BaseClass._init(self, val1)
+    self.value2 = val2
+end
+
+function DerivedClass:get_value()
+    return self.value + self.value2
+end
+
+local obj = DerivedClass(1, 2)
+print(obj:get_value())
+obj:set_value(3)
+print(obj:get_value())
+
