@@ -1,7 +1,8 @@
 -- __index
 --      * if a key does not exist in a table
 --      * run a function or use a table
---
+--      direct table look up(key) fail
+--      use metatable's __index
 local func_ex = setmetatable({}, {
     __index = function(t, key)
         return "key not exist"

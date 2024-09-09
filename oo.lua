@@ -110,3 +110,39 @@ print(obj:get_value())
 obj:set_value(3)
 print(obj:get_value())
 
+-------------------------------------------
+--- Class
+print('\nDog class')
+Dog = {}
+Dog.__index = Dog
+
+function Dog:new()
+    print(debug.traceback('Dog:new()'))
+    obj = {sound='woof'}
+    return setmetatable(obj, self)
+end
+
+function Dog:makeSound()
+    print('I say '..self.sound)
+end
+-------------------------------------------
+-- create object
+mrDog = Dog:new()
+mrDog:makeSound()
+
+-- 
+LoudDog = Dog:new()
+LoudDog.__index = LoudDog
+
+function LoudDog:new()
+    obj = {}
+    return setmetatable(obj, self)
+end
+
+function LoudDog:makeSound()
+    s = self.sound .. ' '
+    print(s .. s .. s)
+end
+
+seymour = LoudDog:new()
+seymour:makeSound()
