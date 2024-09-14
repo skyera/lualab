@@ -16,4 +16,8 @@ end
 local arg1 = arg[1]
 local arg2 = arg[2]
 print("Argument 1:", arg1)
-print("Argument 2:", arg2)
+print("Argument 2:", arg2) 
+
+for i=0, 10 do
+    print("[] Item", i+1)
+end
