@@ -177,3 +177,36 @@ r1:printArea()
 print(r1)
 print(r2)
 
+--- Shape
+Shape = {area=0}
+Shape.__index = Shape
+
+function Shape:new(o, side)
+    o = o or {}
+    setmetatable(o, self)
+    o.side = side or 0
+    o.area = o.side * o.side
+    return o
+end
+
+function Shape:printArea()
+    print("Area: ", self.area)
+end
+
+Square = Shape:new()
+Square.__index = Square
+
+function Square:new(o, side)
+    o = o or Shape:new(o, side)
+    setmetatable(o, self)
+    return o
+end
+
+function Square:printArea()
+    print("Area of Square: ", self.area)
+end
+
+myshape = Shape:new(nil, 10)
+mysquare = Square:new(nil, 20)
+myshape:printArea()
+mysquare:printArea()
