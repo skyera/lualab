@@ -146,3 +146,34 @@ end
 
 seymour = LoudDog:new()
 seymour:makeSound()
+
+-- Rectangle
+Rectangle = {area=0, length=0, width=0}
+Rectangle.__index = Rectangle
+
+function Rectangle:new(o, length, width)
+    o = o or {}
+    setmetatable(o, self)
+    o.length = length or 0
+    o.width = width or 0
+    o.area = o.length * o.width
+    return o
+end
+
+function Rectangle:printArea()
+    print("Area:", self.area)
+end
+
+function Rectangle:__tostring()
+    return string.format("length: %d, width: %d, area: %d", self.length, self.width, self.area)
+end
+
+r1 = Rectangle:new(nil, 10, 20)
+r1:printArea()
+
+r2 = Rectangle:new(nil, 3, 4)
+r2:printArea()
+r1:printArea()
+print(r1)
+print(r2)
+
