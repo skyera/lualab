@@ -177,7 +177,7 @@ r1:printArea()
 print(r1)
 print(r2)
 
---- Shape
+--- Shape Base class
 Shape = {area=0}
 Shape.__index = Shape
 
@@ -193,6 +193,7 @@ function Shape:printArea()
     print("Area: ", self.area)
 end
 
+-- Square derived class
 Square = Shape:new()
 Square.__index = Square
 
@@ -206,7 +207,12 @@ function Square:printArea()
     print("Area of Square: ", self.area)
 end
 
+-- create object
 myshape = Shape:new(nil, 10)
+myshape2 = Shape:new(nil, 3)
 mysquare = Square:new(nil, 20)
+mysquare2 = Square:new(nil, 2)
 myshape:printArea()
 mysquare:printArea()
+myshape2:printArea()
+mysquare2:printArea()
