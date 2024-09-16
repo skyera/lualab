@@ -4,7 +4,6 @@
 --      insert table as self
 local MyClass = {}
 MyClass.__index = MyClass
-print("MyClass ", MyClass)
 
 function MyClass.new(value)
     local obj = setmetatable({}, MyClass)
@@ -13,23 +12,22 @@ function MyClass.new(value)
 end
 
 function MyClass.set_value(self, newval)
-    print("MyClass.set_value ", MyClass)
     self.value = newval
 end
 
 function MyClass.get_value(self)
-    print("MyClass.get_value ", MyClass)
     return self.value
 end
 
+print("Myclass ver1:")
+
 local obj = MyClass.new(3)
-print("obj ", obj)
 print(obj:get_value())
 obj:set_value(4)
 print(obj:get_value())
 
 --
-print("2nd version of class")
+print("My class ver2")
 local MyClass = {}
 MyClass.__index = MyClass
 
@@ -55,7 +53,7 @@ end
 
 local obj = MyClass(3)
 print(obj:get_value())
-obj:set_value(1)
+obj:set_value(4)
 print(obj:get_value())
 
 -- Inheritance
@@ -72,7 +70,7 @@ setmetatable(BaseClass, {
 })
 
 function BaseClass:_init(value)
-    print(debug.traceback("BaseClass::_init"))
+    -- print(debug.traceback("BaseClass::_init"))
     self.value = value
 end
 
