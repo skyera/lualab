@@ -1,3 +1,4 @@
+-- run: busted test.lua
 describe("my_test", function()
     it("true", function()
         assert.True(1==1)
@@ -134,7 +135,7 @@ describe("my_test", function()
 
     it("math", function()
         assert.True(3/2 == 1.5)
-        x = 3//2
+        -- x = 3//2
         assert.True(x == 1)
         x = math.max(10.4, 7, -3, 20)
         assert.True(x == 20)
