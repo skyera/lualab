@@ -1,4 +1,5 @@
 -- run: busted test.lua
+if arg and arg[0] and string.match(arg[0], "busted$") then
 describe("my_test", function()
     it("true", function()
         assert.True(1==1)
@@ -178,6 +179,7 @@ describe("my_test", function()
         print(string,char(97))
     end)
 end)
+end
 
 function fact(n)
     if n == 0 then
@@ -202,3 +204,4 @@ function SaveCharacterData(name, power, team)
     file:write("team " ..team, "\n")
     file:close()
 end
+print("hello")
