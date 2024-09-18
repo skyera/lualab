@@ -1,4 +1,4 @@
-// build: make embed1.cpp -o embed1 /path/libluajit.a -ldl
+// build: make embed1.cpp -o embed1 -I/path/include /path/libluajit.a -ldl
 extern "C" {
 #include "lua.h"
 #include "lauxlib.h"
