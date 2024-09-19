@@ -44,7 +44,7 @@ end
 
 if #arg < 2 or arg[1] == "-h" or arg[1] == "--help" then
     print_help()
-    os.exit(1)
+    -- os.exit(1)
 end
 
 local arg1 = arg[1]

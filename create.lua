@@ -1,4 +1,11 @@
 local json = require 'json'
+local ffi = require 'ffi'
+
+ffi.cdef[[
+int printf(const char *fmt, ...);
+]]
+
+ffi.C.printf("Hello %s!\n", "world")
 
 local t = json.decode('[1,2,3,{"x":10}]') -- Returns { 1, 2, 3, { x = 10 } }
 
