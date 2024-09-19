@@ -17,6 +17,10 @@ for k, v in pairs(arg) do
     print(k, v)
 end
 
+if #arg == 1 and arg[1] == '-h' then
+    print("usage: script.lua arg1 arg2")
+end
+
 local tbl = foo.create_table()
 print(tbl)
 
