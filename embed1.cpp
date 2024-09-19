@@ -37,12 +37,21 @@ int main(int argc, char** argv) {
         .addFunction("bar", bar_func)
         .endNamespace();
     
-    if (argc == 2) {
+    if (argc >= 2) {
+        lua_newtable(L);
+        for (int i = 1; i < argc; ++i) {
+            lua_pushnumber(L, i-1);
+            lua_pushstring(L, argv[i]);
+            lua_settable(L, -3);
+        }
+        lua_setglobal(L, "arg");
+
         char* filename = argv[1];
         int result = luaL_loadfile(L, filename);
 
         if (result != 0) {
             printf("Could not load %s\n", filename);
+            lua_pop(L, 1);
             lua_close(L);
             return -1;
         }
@@ -51,6 +60,7 @@ int main(int argc, char** argv) {
         if (result != 0) {
             const char* error = lua_tostring(L, -1);
             printf("Error %s\n", error);
+            lua_pop(L, 1);
             lua_close(L);
             return -1;;
         }

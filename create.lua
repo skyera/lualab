@@ -12,6 +12,11 @@ for k, v in pairs(t2) do
     print(k, v)
 end
 
+print("arg:")
+for k, v in pairs(arg) do
+    print(k, v)
+end
+
 local tbl = foo.create_table()
 print(tbl)
 
