@@ -20,3 +20,16 @@ for k, v in pairs(tbl) do
 end
 local x = foo.bar()
 print(x)
+
+local handle = io.popen("ls -l")
+local result = handle:read("*a")
+handle:close()
+print(result)
+
+local handle = io.popen("ping -c 4 google.com")
+
+for line in handle:lines() do
+    print(line)
+end
+
+handle:close()
