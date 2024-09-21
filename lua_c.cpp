@@ -1,6 +1,8 @@
- // g++ lua_c.cpp -o lua_c  -I/home/pi/test/luajit/src/ ~/test/luajit/src/libluajit.a  -ldl -lreadline
 // https://lucasklassmann.com/blog/2019-02-02-embedding-lua-in-c/
-//
+
+// Compile:
+// g++ lua_c.cpp -o lua_c  -I/home/pi/test/luajit/src/ ~/test/luajit/src/libluajit.a  -ldl -lreadline
+// g++ lua_c.cpp -o lua_c -llua -ldl
 extern "C" {
 #include "lua.h"
 #include "lauxlib.h"
@@ -26,12 +28,14 @@ void register_functions(lua_State *L, const luaL_Reg* funcs) {
 int main(int argc, char** argv) {
     lua_State* L = luaL_newstate();
     luaL_openlibs(L);
+    
+    {
+        char code[] = "print('Hello, World')";
 
-    char code[] = "print('Hello, World')";
-
-    if (luaL_loadstring(L, code) == LUA_OK) {
-        if (lua_pcall(L, 0, 0, 0) == LUA_OK) {
-            lua_pop(L, lua_gettop(L));
+        if (luaL_loadstring(L, code) == LUA_OK) {
+            if (lua_pcall(L, 0, 0, 0) == LUA_OK) {
+                lua_pop(L, lua_gettop(L));
+            }
         }
     }
 
@@ -72,12 +76,19 @@ int main(int argc, char** argv) {
     }
 
     {
-        luaL_dostring(L, "x=42");
+        luaL_dostring(L, "x=42; message='test'");
         lua_getglobal(L, "x");
 
         if (lua_isnumber(L, -1)) {
             double x_value = lua_tonumber(L, -1);
             printf("value x is: %.f\n", x_value);
+        }
+        lua_pop(L, 1);
+
+        lua_getglobal(L, "message");
+        if (lua_isstring(L, -1)) {
+            const char* message = lua_tostring(L, -1);
+            printf("Message from lua: %s\n", message);
         }
         lua_pop(L, 1);
     }
