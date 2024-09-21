@@ -4,6 +4,10 @@
 // g++ embed1.cpp -o embed1 -I/home/pi/test/luajit/src/ ~/test/luajit/src/libluajit.a  -ldl
 
 // export CPLUS_INCLUDE_PATH="/home/pi/test/LuaBridge/Source/LuaBridge:/home/pi/test/LuaBridge/Source:$CPLUS_INCLUDE_PATH"
+//g++ embed1.cpp -o embed1 -I/home/pi/test/luajit/src/ ~/test/luajit/src/libluajit.a  -ldl -lreadline
+
+#include <readline/readline.h>
+#include <readline/history.h>
 
 extern "C" {
 #include "lua.h"
@@ -37,7 +41,7 @@ int main(int argc, char** argv) {
         .addFunction("bar", bar_func)
         .endNamespace();
     
-    if (argc >= 2) {
+    if (argc == 2 ) {
         lua_newtable(L);
         for (int i = 1; i < argc; ++i) {
             lua_pushnumber(L, i-1);
@@ -63,6 +67,22 @@ int main(int argc, char** argv) {
             lua_pop(L, 1);
             lua_close(L);
             return -1;;
+        }
+    } else {
+        char* input;
+        while ((input = readline("> ")) != nullptr) {
+            if (std::string(input) == "exit") {
+                free(input);
+                break;
+            }
+            if (*input) add_history(input);
+
+            // Step 5: Execute Lua code from input
+            if (luaL_dostring(L, input) != LUA_OK) {
+                // If an error occurred, print the error message
+                std::cerr << lua_tostring(L, -1) << std::endl;
+                lua_pop(L, 1);  // Remove error message from stack
+            }
         }
     }
     printf("Done\n");
