@@ -48,6 +48,23 @@ void print_stacksize(lua_State* L) {
 int main(int argc, char** argv) {
     lua_State* L = luaL_newstate();
     luaL_openlibs(L);
+
+    {
+        lua_getglobal(L, "_VERSION");
+        if (lua_isstring(L, -1)) {
+            const char* version = lua_tostring(L, -1);
+            printf("lua version: %s\n", version);
+        }
+        lua_pop(L, 1);
+    }
+
+    {
+#if LUA_VERSION_NUM >= 502
+        printf("Using Lua 5.2 or higher\n");
+#else
+        printf("Using Lua 5.1 or lower\n");
+#endif
+    }
     
     {
         // run lua script
@@ -168,24 +185,20 @@ int main(int argc, char** argv) {
             int stack_size = lua_gettop(L);
             printf("stack size: %d\n", stack_size);
 
-            auto ok = lua_getfield(L, -1, "foo_number");
+            lua_getfield(L, -1, "foo_number");
             printf("stack size: %d\n", stack_size);
-            assert(ok == LUA_TNUMBER);
             auto foo_number = lua_tonumber(L, -1);
             printf("foo_number %f\n", foo_number);
             printf("stack size: %d\n", stack_size);
 
-            ok = lua_getfield(L, -2, "bar_number");
-            assert(ok == LUA_TNUMBER);
+            lua_getfield(L, -2, "bar_number");
             auto bar_number = lua_tonumber(L, -1);
             printf("stack size: %d\n", stack_size);
 
-            ok = lua_getfield(L, -3, "foo_string");
-            assert(ok == LUA_TSTRING);
+            lua_getfield(L, -3, "foo_string");
             const char* foo_string = lua_tostring(L, -1);
 
-            ok = lua_getfield(L, -4, "bar_string");
-            assert(ok == LUA_TSTRING);
+            lua_getfield(L, -4, "bar_string");
             const char* bar_string = lua_tostring(L, -1);
 
             printf("%f %f\n", foo_number, bar_number);
