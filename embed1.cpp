@@ -66,6 +66,28 @@ int main(int argc, char** argv) {
             lua_pop(L, 1);
         }
     }
+
+    {
+        // read Lua variables
+        char code[] = "x=42; message='hello'; myt={a=1,b='foo'};";
+        auto result = luaL_dostring(L, code);
+        if (result != 0 ) {
+            const char* error = lua_tostring(L, -1);
+            printf("cannot dostring %s\n", error);
+            lua_pop(L, 1);
+        }
+
+        int x = getGlobal(L, "x");
+        std::string message = getGlobal(L, "message");
+        LuaRef myt = getGlobal(L, "myt");
+        printf("x=%d message=%s\n", x, message.c_str());
+
+        if (myt.isTable()) {
+            int a = myt["a"];
+            std::string b = myt["b"];
+            printf("myt.a=%d myt.b=%s\n", a, b.c_str());
+        }
+    }
     
     if (argc == 2 ) {
         lua_newtable(L);
