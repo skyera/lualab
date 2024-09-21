@@ -45,6 +45,7 @@ int main(int argc, char** argv) {
     luaL_openlibs(L);
     
     {
+        // run lua script
         char code[] = "print('Hello, World')";
 
         if (luaL_loadstring(L, code) == LUA_OK) {
@@ -55,6 +56,7 @@ int main(int argc, char** argv) {
     }
 
     {
+        // lua read C var
         lua_pushinteger(L, 42);
         lua_setglobal(L, "answer");
 
@@ -65,6 +67,7 @@ int main(int argc, char** argv) {
     }
     
     {
+        // C expose lua function
         lua_pushcfunction(L, multiplication);
         lua_setglobal(L, "mul");
 
@@ -91,6 +94,7 @@ int main(int argc, char** argv) {
     }
 
     {
+        // C read lua vars
         luaL_dostring(L, "x=42; message='test'");
         lua_getglobal(L, "x");
 
@@ -109,6 +113,7 @@ int main(int argc, char** argv) {
     }
 
     {
+        // C call lua function
         char code[] = "function my_func(a, b) return a * b end";
         if (luaL_dostring(L, code) == LUA_OK) {
             lua_pop(L, lua_gettop(L));
@@ -127,6 +132,7 @@ int main(int argc, char** argv) {
     }
 
     {
+        // Lua call C function to
         lua_pushcfunction(L, create_foo);
         lua_setglobal(L, "create_foo");
 
@@ -136,6 +142,7 @@ int main(int argc, char** argv) {
     }
 
     {
+        // C read lua table
         char code[] = "foo1 = { foo_number=1, bar_number=2, foo_string=\"foo\", bar_string=\"bar\"}";
         
         luaL_dostring(L, code);
