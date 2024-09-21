@@ -142,14 +142,20 @@ int main(int argc, char** argv) {
         lua_getglobal(L, "foo1");
 
         if (lua_istable(L, -1)) {
+            int stack_size = lua_gettop(L);
+            printf("stack size: %d\n", stack_size);
+
             auto ok = lua_getfield(L, -1, "foo_number");
+            printf("stack size: %d\n", stack_size);
             assert(ok == LUA_TNUMBER);
             auto foo_number = lua_tonumber(L, -1);
             printf("foo_number %f\n", foo_number);
+            printf("stack size: %d\n", stack_size);
 
             ok = lua_getfield(L, -2, "bar_number");
             assert(ok == LUA_TNUMBER);
             auto bar_number = lua_tonumber(L, -1);
+            printf("stack size: %d\n", stack_size);
 
             ok = lua_getfield(L, -3, "foo_string");
             assert(ok == LUA_TSTRING);
