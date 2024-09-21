@@ -8,6 +8,7 @@ extern "C" {
 #include "lauxlib.h"
 #include "lualib.h"
 }
+#include <assert.h>
 
 int multiplication(lua_State* L) {
     int a = luaL_checkinteger(L, 1);
@@ -23,6 +24,20 @@ void register_functions(lua_State *L, const luaL_Reg* funcs) {
         //lua_setglobal(L, funcs->name);
         lua_setfield(L, -2, funcs->name);
     }
+}
+
+struct Foo {
+    int x;
+    int y;
+};
+
+int create_foo(lua_State* L) {
+    Foo* foo = static_cast<Foo*>(lua_newuserdata(L, sizeof(Foo)));
+    foo->x = 0;
+    foo->y = 0;
+    
+    printf("created Foo in C\n");
+    return 1;
 }
 
 int main(int argc, char** argv) {
@@ -109,6 +124,44 @@ int main(int argc, char** argv) {
             printf("Result: %d\n", result);
         }
         lua_pop(L, lua_gettop(L));
+    }
+
+    {
+        lua_pushcfunction(L, create_foo);
+        lua_setglobal(L, "create_foo");
+
+        char code[] = "foo = create_foo();print('created userdata Foo')";
+        luaL_dostring(L, code);
+        lua_pop(L, lua_gettop(L));
+    }
+
+    {
+        char code[] = "foo1 = { foo_number=1, bar_number=2, foo_string=\"foo\", bar_string=\"bar\"}";
+        
+        luaL_dostring(L, code);
+        lua_getglobal(L, "foo1");
+
+        if (lua_istable(L, -1)) {
+            auto ok = lua_getfield(L, -1, "foo_number");
+            assert(ok == LUA_TNUMBER);
+            auto foo_number = lua_tonumber(L, -1);
+            printf("foo_number %f\n", foo_number);
+
+            ok = lua_getfield(L, -2, "bar_number");
+            assert(ok == LUA_TNUMBER);
+            auto bar_number = lua_tonumber(L, -1);
+
+            ok = lua_getfield(L, -3, "foo_string");
+            assert(ok == LUA_TSTRING);
+            const char* foo_string = lua_tostring(L, -1);
+
+            ok = lua_getfield(L, -4, "bar_string");
+            assert(ok == LUA_TSTRING);
+            const char* bar_string = lua_tostring(L, -1);
+
+            printf("%f %f\n", foo_number, bar_number);
+            printf("%s %s\n", foo_string, bar_string);
+        }
     }
 
     lua_close(L);
