@@ -31,6 +31,14 @@ int bar_func() {
 	return 2;
 }
 
+class MyClass {
+public:
+    MyClass() {}
+    void greet() {
+        printf("Hello from C++\n");
+    }
+};
+
 int main(int argc, char** argv) {
     lua_State* L = luaL_newstate();
     luaL_openlibs(L);
@@ -40,6 +48,24 @@ int main(int argc, char** argv) {
         .addFunction("create_table", CreateTable)
         .addFunction("bar", bar_func)
         .endNamespace();
+
+    getGlobalNamespace(L)
+        .beginNamespace("test")
+        .beginClass<MyClass>("MyClass")
+            .addConstructor<void(*)(void)>()
+            .addFunction("greet", &MyClass::greet)
+        .endClass()
+        .endNamespace();
+
+    {
+        char code[] = "obj=test.MyClass();obj:greet()";
+        auto result = luaL_dostring(L, code);
+        if (result != 0 ) {
+            const char* error = lua_tostring(L, -1);
+            printf("cannot dostring %s\n", error);
+            lua_pop(L, 1);
+        }
+    }
     
     if (argc == 2 ) {
         lua_newtable(L);
