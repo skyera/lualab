@@ -40,6 +40,11 @@ int create_foo(lua_State* L) {
     return 1;
 }
 
+void print_stacksize(lua_State* L) {
+    int stack_size = lua_gettop(L);
+    printf("stack size: %d\n", stack_size);
+}
+
 int main(int argc, char** argv) {
     lua_State* L = luaL_newstate();
     luaL_openlibs(L);
@@ -57,8 +62,13 @@ int main(int argc, char** argv) {
 
     {
         // lua read C var
+        print_stacksize(L);
+        
         lua_pushinteger(L, 42);
+        print_stacksize(L);
+        
         lua_setglobal(L, "answer");
+        print_stacksize(L);
 
         char code[] = "print(answer)";
         if (luaL_dostring(L, code) == LUA_OK) {
@@ -78,14 +88,20 @@ int main(int argc, char** argv) {
     }
 
     {
+        printf("register module\n");
         const struct luaL_Reg MyMathLib[] = {
             {"mul", multiplication}
         };
         
         lua_newtable(L);
+        print_stacksize(L);
         lua_pushcfunction(L, multiplication);
+        print_stacksize(L);
+
         lua_setfield(L, -2, "mul");
+        print_stacksize(L);
         lua_setglobal(L, "MyMath");
+        print_stacksize(L);
 
         char code[] = "print(MyMath.mul(7, 8))";
         if (luaL_dostring(L, code) == LUA_OK) {
