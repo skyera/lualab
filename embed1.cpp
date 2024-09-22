@@ -184,11 +184,16 @@ int main(int argc, char** argv) {
                 break;
             }
             if (*input) add_history(input);
+            std::string command(input);
+            if (command[0] == '=') {
+                command = "print(" + command.substr(1) + ")";
+            }
 
-            if (luaL_dostring(L, input) != LUA_OK) {
+            if (luaL_dostring(L, command.c_str()) != LUA_OK) {
                 std::cerr << lua_tostring(L, -1) << std::endl;
                 lua_pop(L, 1);
             }
+            free(input);
         }
     }
     printf("Done\n");
