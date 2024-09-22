@@ -49,3 +49,13 @@ for line in handle:lines() do
 end
 
 handle:close()
+
+files = foo.list_files(".")
+for k, v in pairs(files) do
+    print(k, v)
+end
+
+files = foo.list_files2(".")
+for k, v in pairs(files) do
+    print(k, v)
+end

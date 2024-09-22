@@ -8,6 +8,9 @@
 
 #include <readline/readline.h>
 #include <readline/history.h>
+#include <vector>
+#include <dirent.h>
+#include <string>
 
 extern "C" {
 #include "lua.h"
@@ -17,6 +20,52 @@ extern "C" {
 
 #include "LuaBridge.h"
 using namespace luabridge;
+
+
+std::vector<std::string> list_files(const std::string& path) {
+    std::vector<std::string> files;
+    DIR* dir = opendir(path.c_str());
+    if (dir == nullptr) {
+        return files;
+    }
+    if (dir) {
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            if (entry->d_type == DT_REG) {
+                files.push_back(entry->d_name);
+            }
+        }
+        closedir(dir);
+    } else {
+        printf("Could not open directory %s\n", path.c_str());
+    }
+
+    return files;
+}
+
+int lua_listfiles(lua_State* L) {
+    std::string path = luaL_checkstring(L, 1);
+    std::vector<std::string> files = list_files(path);
+    lua_newtable(L);
+    for (int i = 0; i < files.size(); ++i) {
+        lua_pushnumber(L, i+1);
+        lua_pushstring(L, files[i].c_str());
+        lua_settable(L, -3);
+    }
+    return 1;
+}
+
+int lua_listfiles2(lua_State* L) {
+    std::string path = luaL_checkstring(L, 1);
+    std::vector<std::string> files = list_files(path);
+    LuaRef file_table = LuaRef::newTable(L);
+    for (int i = 0; i < files.size(); ++i) {
+        file_table[i+1] = files[i];
+    }
+    push(L, file_table);
+    return 1;
+    //return file_table;
+}
         
 LuaRef CreateTable(lua_State* L) {
     LuaRef table = LuaRef::newTable(L);
@@ -47,6 +96,8 @@ int main(int argc, char** argv) {
         .beginNamespace("foo")
         .addFunction("create_table", CreateTable)
         .addFunction("bar", bar_func)
+        .addFunction("list_files", lua_listfiles)
+        .addFunction("list_files2", lua_listfiles2)
         .endNamespace();
 
     getGlobalNamespace(L)
