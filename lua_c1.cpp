@@ -8,6 +8,41 @@ extern "C" {
 }
 #include <string.h>
 
+void print_stacksize(lua_State* L) {
+    int stack_size = lua_gettop(L);
+    printf("stack size: %d\n", stack_size);
+}
+
+int linear_index(lua_State* L, int row, int col) {
+
+    // push function on stack
+    lua_getglobal(L, "get_index");
+    print_stacksize(L);
+
+    if (lua_isnil(L, -1)) {
+        printf("Error: get_index is nil\n");
+        lua_pop(L, 1);
+        return 0;
+    }
+    
+    // push args on stack
+    lua_pushnumber(L, row);
+    lua_pushnumber(L, col);
+    print_stacksize(L);
+    int pcall = lua_pcall(L, 2, 1, 0);
+    print_stacksize(L);
+    int result = 0;
+    if (pcall != 0) {
+        const char* error = lua_tostring(L, -1);
+        printf("error: %s\n", error);
+        lua_pop(L, 1);
+    } else {
+        result = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+    return result;
+}
+
 int main(int argc, char** argv) {
     lua_State* L = luaL_newstate();
     luaL_openlibs(L);
@@ -63,6 +98,27 @@ int main(int argc, char** argv) {
             lua_close(L);
             return -1;
         }
+    }
+
+    {
+        // C call lua function
+        int result = luaL_loadfile(L, "findindex.lua");
+        if (result != 0) {
+            printf("cannot load lua\n");
+            lua_close(L);
+            return -1;
+        }
+
+        result = lua_pcall(L, 0, 0, 0);
+        if (result != 0) {
+            const char* error = lua_tostring(L, -1);
+            printf("error: %s\n", error);
+            lua_close(L);
+            return -1;
+        }
+
+        int index = linear_index(L, 3, 5);
+        printf("index for (3, 5): %d\n", index);
     }
 
     lua_close(L);
