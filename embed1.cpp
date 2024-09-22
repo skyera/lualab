@@ -5,6 +5,8 @@
 
 // export CPLUS_INCLUDE_PATH="/home/pi/test/LuaBridge/Source/LuaBridge:/home/pi/test/LuaBridge/Source:$CPLUS_INCLUDE_PATH"
 //g++ embed1.cpp -o embed1 -I/home/pi/test/luajit/src/ ~/test/luajit/src/libluajit.a  -ldl -lreadline
+// MAC
+//  g++ embed1.cpp -o embed1 -std=c++11 ~/test/luajit/src/libluajit.a -ldl -lreadline
 
 #include <readline/readline.h>
 #include <readline/history.h>
