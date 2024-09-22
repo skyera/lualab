@@ -7,6 +7,7 @@ extern "C" {
 #include "lualib.h"
 }
 #include <string.h>
+#include <math.h>
 
 void print_stacksize(lua_State* L) {
     int stack_size = lua_gettop(L);
@@ -41,6 +42,22 @@ int linear_index(lua_State* L, int row, int col) {
         lua_pop(L, 1);
     }
     return result;
+}
+
+int lua_vec3_magnitude(lua_State* L) {
+    double x = lua_tonumber(L, 3);
+    double y = lua_tonumber(L, 2);
+    double z = lua_tonumber(L, 1);
+
+    lua_pop(L, 3);
+
+    double dot = x * x + y * y + z * z;
+    if (dot == 0.0) {
+        lua_pushnil(L);
+    } else {
+        lua_pushnumber(L, sqrt(dot));
+    }
+    return 1;
 }
 
 int main(int argc, char** argv) {
@@ -119,6 +136,28 @@ int main(int argc, char** argv) {
 
         int index = linear_index(L, 3, 5);
         printf("index for (3, 5): %d\n", index);
+    }
+
+    {
+        // Lua call C function
+        lua_pushcfunction(L, lua_vec3_magnitude);
+        lua_setglobal(L, "vec3_magnitude");
+
+        int result = luaL_loadfile(L, "callcfunc.lua");
+        if (result != 0) {
+            printf("error\n");
+            lua_close(L);
+            return -1;
+        }
+
+        result = lua_pcall(L, 0, 0, 0);
+        if (result != 0) {
+            const char* error = lua_tostring(L, -1);
+            printf("error: %s\n", error);
+            lua_close(L);
+            return -1;
+        }
+
     }
 
     lua_close(L);
