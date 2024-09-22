@@ -1,3 +1,8 @@
+/* | |_   _  __ _  | | __ _| |__ */  
+/* | | | | |/ _` | | |/ _` | '_ \ */ 
+/* | | |_| | (_| | | | (_| | |_) | */
+/* |_|\__,_|\__,_| |_|\__,_|_.__/ */ 
+
 // build: make embed1.cpp -o embed1 -I/path/include /path/libluajit.a -ldl
 
 // compile: 
@@ -66,10 +71,9 @@ int lua_listfiles2(lua_State* L) {
     }
     push(L, file_table);
     return 1;
-    //return file_table;
 }
         
-LuaRef CreateTable(lua_State* L) {
+LuaRef create_table(lua_State* L) {
     LuaRef table = LuaRef::newTable(L);
 
     table["name"] = std::string("Lua");
@@ -96,7 +100,7 @@ int main(int argc, char** argv) {
 
     getGlobalNamespace(L)
         .beginNamespace("foo")
-        .addFunction("create_table", CreateTable)
+        .addFunction("create_table", create_table)
         .addFunction("bar", bar_func)
         .addFunction("list_files", lua_listfiles)
         .addFunction("list_files2", lua_listfiles2)
@@ -178,11 +182,9 @@ int main(int argc, char** argv) {
             }
             if (*input) add_history(input);
 
-            // Step 5: Execute Lua code from input
             if (luaL_dostring(L, input) != LUA_OK) {
-                // If an error occurred, print the error message
                 std::cerr << lua_tostring(L, -1) << std::endl;
-                lua_pop(L, 1);  // Remove error message from stack
+                lua_pop(L, 1);
             }
         }
     }
