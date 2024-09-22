@@ -115,6 +115,7 @@ int main(int argc, char** argv) {
         .endNamespace();
 
     {
+        // Lua call C class, function
         char code[] = "obj=test.MyClass();obj:greet()";
         auto result = luaL_dostring(L, code);
         if (result != 0 ) {
@@ -125,7 +126,7 @@ int main(int argc, char** argv) {
     }
 
     {
-        // read Lua variables
+        // C read Lua variables
         char code[] = "x=42; message='hello'; myt={a=1,b='foo'};";
         auto result = luaL_dostring(L, code);
         if (result != 0 ) {
@@ -147,6 +148,7 @@ int main(int argc, char** argv) {
     }
     
     if (argc == 2 ) {
+        // pass args to Lua
         lua_newtable(L);
         for (int i = 1; i < argc; ++i) {
             lua_pushnumber(L, i-1);
@@ -154,7 +156,8 @@ int main(int argc, char** argv) {
             lua_settable(L, -3);
         }
         lua_setglobal(L, "arg");
-
+        
+        // run lua script
         char* filename = argv[1];
         int result = luaL_loadfile(L, filename);
 
