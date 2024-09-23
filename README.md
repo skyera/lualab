@@ -15,3 +15,4 @@ to include luajit/src, LuaBridge
 * https://github.com/PacktPublishing/Lua-Quick-Start-Guide
 * https://github.com/LewisJEllis/awesome-lua
 * http://lua-users.org/
+* https://github.com/CodesOtakuYT/luajit-ffi
