@@ -9,6 +9,7 @@ SRC = embed1.cpp lua_c.cpp lua_c1.cpp
 BIN1 = embed1
 BIN2 = lua_c
 BIN3 = lua_c1
+BIN4 = lua_c2
 
 # LuaJIT include and libraries (update paths if necessary)
 #LUAJIT_INC = /usr/include/luajit-2.1
@@ -18,7 +19,7 @@ BIN3 = lua_c1
 LIBS = -lluajit -ldl -lreadline
 
 # Targets
-all: $(BIN1) $(BIN2) $(BIN3)
+all: $(BIN1) $(BIN2) $(BIN3) $(BIN4)
 
 $(BIN1): embed1.cpp
 	$(CXX) $(CXXFLAGS) -o $@ $< $(LIBS)
@@ -29,6 +30,9 @@ $(BIN2): lua_c.cpp
 $(BIN3): lua_c1.cpp
 	$(CXX) $(CXXFLAGS) -o $@ $< $(LIBS)
 
+$(BIN4): lua_c2.cpp
+	$(CXX) $(CXXFLAGS) -o $@ $< $(LIBS)
+
 # Clean up
 clean:
-	rm -f $(BIN1) $(BIN2) $(BIN3)
+	rm -f $(BIN1) $(BIN2) $(BIN3) $(BIN4)
