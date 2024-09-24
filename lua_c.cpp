@@ -10,6 +10,62 @@ extern "C" {
 }
 #include <assert.h>
 
+typedef struct NumArray {
+    int size;
+    double values[1];
+} NumArray;
+
+static int newarray(lua_State* L) {
+    int n = luaL_checkint(L, 1);
+    size_t nbytes = sizeof(NumArray) + (n - 1) * sizeof(double);
+    NumArray* a = (NumArray*) lua_newuserdata(L, nbytes);
+    a->size = n;
+    return 1;
+}
+
+static int setarray(lua_State* L) {
+    NumArray* a  = (NumArray*) lua_touserdata(L, 1);
+    int index = luaL_checkint(L, 2);
+    double value = luaL_checknumber(L, 3);
+
+    luaL_argcheck(L, a != NULL, 1, "array expected");
+    luaL_argcheck(L, 1 <= index && index <= a->size, 2,
+            "index out of range");
+    a->values[index-1]=value;
+    return 0;
+}
+
+static int getarray(lua_State* L) {
+    NumArray* a = (NumArray*) lua_touserdata(L, 1);
+    int index = luaL_checkint(L, 2);
+    
+    luaL_argcheck(L, a != NULL, 1, "array expected");
+    luaL_argcheck(L, 1 <= index && index <= a->size, 2,
+            "index out of range");
+    lua_pushnumber(L, a->values[index-1]);
+    return 1;
+}
+
+static int getsize(lua_State* L) {
+    NumArray* a = (NumArray*) lua_touserdata(L, 1);
+    luaL_argcheck(L, a != NULL, 1, "array expected");
+    lua_pushnumber(L, a->size);
+    return 1;
+}
+
+static const struct luaL_Reg arraylib[] = {
+    {"new", newarray},
+    {"set", setarray},
+    {"get", getarray},
+    {"size", getsize},
+    {NULL, NULL}
+};
+
+int luaopen_array(lua_State* L) {
+    luaL_openlib(L, "array", arraylib, 0);
+    return 1;
+}
+
 int multiplication(lua_State* L) {
     int a = luaL_checkinteger(L, 1);
     int b = luaL_checkinteger(L, 2);
@@ -48,7 +104,7 @@ void print_stacksize(lua_State* L) {
 int main(int argc, char** argv) {
     lua_State* L = luaL_newstate();
     luaL_openlibs(L);
-
+    luaopen_array(L);
     {
         lua_getglobal(L, "_VERSION");
         if (lua_isstring(L, -1)) {
@@ -64,6 +120,21 @@ int main(int argc, char** argv) {
 #else
         printf("Using Lua 5.1 or lower\n");
 #endif
+    }
+
+    {
+        char code[] = "a=array.new(1000)\n"
+            "print(a)\n"
+            "print(array.size(a))\n"
+            "for i=1,1000 do\n"
+            "   array.set(a, i, 1/i)\n"
+            "end\n"
+            "print(array.get(a, 10))\n";
+        auto ok = luaL_dostring(L, code);
+        if (ok != 0) {
+            const char* message = lua_tostring(L, -1);
+            printf("Message from lua: %s\n", message);
+        }
     }
     
     {
