@@ -90,3 +90,25 @@ end
 f()
 x = 6
 f()
+
+-- env in Lua5.1
+-- each func has env table
+-- getfenv/setfenv
+--  * stack lvel
+--  1: curr func
+--  2: func that called curr func
+print(getfenv(1) == _G)
+a = 1
+b = nil
+
+local function f(t)
+    local print=print
+    setfenv(1, t)
+    print(getmetatable)
+    a=2
+    b=3
+end
+local t = {}
+f(t)
+print(a, b)
+print(t.a, t.b)
