@@ -112,3 +112,4 @@ local t = {}
 f(t)
 print(a, b)
 print(t.a, t.b)
+--
