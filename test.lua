@@ -204,4 +204,15 @@ function SaveCharacterData(name, power, team)
     file:write("team " ..team, "\n")
     file:close()
 end
-print("hello")
+
+------
+file = io.open("test.txt", "w")
+file:write("hello, world\n")
+file:close()
+
+file = io.open("test.txt", "r")
+for line in file:lines() do
+    print(line)
+end
+file:close()
+
