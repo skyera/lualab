@@ -235,3 +235,18 @@ coroutine.resume(co)
 coroutine.resume(co)
 coroutine.resume(co)
 print("Coroutine status: ", coroutine.status(co))
+
+function downloaddata()
+    for i =1, 5 do
+        print("Downloading part: ", i)
+        coroutine.yield()
+    end
+    print("Download complete")
+end
+
+local download = coroutine.create(downloaddata)
+
+while coroutine.status(download) ~= "dead" do
+    print("Peforming other task...")
+    coroutine.resume(download)
+end
