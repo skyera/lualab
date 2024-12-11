@@ -215,4 +215,23 @@ for line in file:lines() do
     print(line)
 end
 file:close()
+---
+--- coroutine
+function mycoroutine()
+    print("Coroutine starts")
+    for i = 1, 3 do
+        print("Yielding: ", i)
+        coroutine.yield()
+    end
+    print("Coroutine ends")
+end
 
+local co = coroutine.create(mycoroutine)
+print("Coroutine status: ", coroutine.status(co))
+coroutine.resume(co)
+print("Coroutine status: ", coroutine.status(co))
+
+coroutine.resume(co)
+coroutine.resume(co)
+coroutine.resume(co)
+print("Coroutine status: ", coroutine.status(co))
