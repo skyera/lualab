@@ -4,16 +4,30 @@ function load_tasks()
     local file = io.open("tasks.txt", "r")
     if file then
         for line in file:lines() do
+            table.insert(tasks, line)
         end
+        file:close()
     end
     return tasks
 end
 
 
 function save_tasks(tasks)
+    local file = io.open("tasks.txt", "w")
+    for _, task in ipairs(tasks) do
+        file:write(task .. "\n")
+    end
+    file:close()
 end
 
 function display_tasks(tasks)
+    if #tasks == 0 then
+        print("No tasks to display")
+    else
+        for i, task in ipairs(tasks) do
+            print(i .. "." .. task)
+        end
+    end
 end
 
 function main()
