@@ -24,6 +24,17 @@ function MyClass:get_value()
     return self.value
 end
 
+local function trace(event)
+    local info = debug.getinfo(2)
+    if event == "call" then
+        print("call", info.name)
+    elseif event == "return" then
+        print("return", info.name)
+    end
+end
+
+debug.sethook(trace, "cr")
+
 obj1 = MyClass(3)
 obj2 = MyClass(4)
 print(obj1:get_value())
