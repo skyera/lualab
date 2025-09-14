@@ -27,18 +27,16 @@ end
 local function trace(event)
     local info = debug.getinfo(2)
     if event == "call" then
-        print("call", info.name)
+        print("call", info.name, info.currentline)
     elseif event == "return" then
-        print("return", info.name)
+        print("return", info.name, info.currentline)
     end
 end
 
 debug.sethook(trace, "cr")
 
 obj1 = MyClass(3)
-obj2 = MyClass(4)
 print(obj1:get_value())
-print(obj2:get_value())
 
 obj3 = MyClass.new(5)
 print(obj3:get_value())
