@@ -36,17 +36,17 @@ make
 ### 3. Run
 - **Interactive Shell (with C++ bindings):**
   ```bash
-  ./embed1
+  ./demo_luabridge
   ```
 - **Execute a script:**
   ```bash
-  ./embed1 test.lua
+  ./demo_luabridge test.lua
   ```
 - **Run other examples:**
   ```bash
-  ./lua_c
-  ./lua_c1
-  ./lua_c2
+  ./demo_custom_userdata   # Creating custom C types for Lua
+  ./demo_stack_api        # Low-level Lua stack manipulation
+  ./demo_repl             # Simple interactive REPL
   ```
 
 ## Maintenance

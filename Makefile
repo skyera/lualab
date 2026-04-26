@@ -10,10 +10,10 @@ CXXFLAGS = -Wall -O2 -std=c++11 -ILuaBridge/Source/LuaBridge -ILuaBridge/Source 
 SRC = embed_luabridge_demo.cpp embed_custom_userdata.cpp embed_stack_api.cpp embed_repl_simple.cpp
 
 # Output binaries
-BIN1 = embed1
-BIN2 = lua_c
-BIN3 = lua_c1
-BIN4 = lua_c2
+BIN1 = demo_luabridge
+BIN2 = demo_custom_userdata
+BIN3 = demo_stack_api
+BIN4 = demo_repl
 
 # Linking libraries (LuaJIT, libdl, libreadline)
 LIBS = $(LUAJIT_LIB) -ldl -lreadline
