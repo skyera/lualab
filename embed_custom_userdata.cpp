@@ -1,8 +1,8 @@
 // https://lucasklassmann.com/blog/2019-02-02-embedding-lua-in-c/
 
 // Compile:
-// g++ lua_c.cpp -o lua_c  -I/home/pi/test/luajit/src/ ~/test/luajit/src/libluajit.a  -ldl -lreadline
-// g++ lua_c.cpp -o lua_c -llua -ldl
+// g++ embed_custom_userdata.cpp -o lua_c  -I/home/pi/test/luajit/src/ ~/test/luajit/src/libluajit.a  -ldl -lreadline
+// g++ embed_custom_userdata.cpp -o lua_c -llua -ldl
 extern "C" {
 #include "lua.h"
 #include "lauxlib.h"

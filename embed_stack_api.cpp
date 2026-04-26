@@ -1,6 +1,6 @@
 // compile
-// g++ lua_c1.cpp -o lua_c1 -ldl  ~/test/luajit/src/libluajit.a
-// g++ lua_c1.cpp -o lua_c1 -ldl  -lluajit
+// g++ embed_stack_api.cpp -o lua_c1 -ldl  ~/test/luajit/src/libluajit.a
+// g++ embed_stack_api.cpp -o lua_c1 -ldl  -lluajit
 extern "C" {
 #include "lua.h"
 #include "lauxlib.h"
@@ -119,7 +119,7 @@ int main(int argc, char** argv) {
 
     {
         // C call lua function
-        int result = luaL_loadfile(L, "findindex.lua");
+        int result = luaL_loadfile(L, "algo_2d_index.lua");
         if (result != 0) {
             printf("cannot load lua\n");
             lua_close(L);
@@ -143,7 +143,7 @@ int main(int argc, char** argv) {
         lua_pushcfunction(L, lua_vec3_magnitude);
         lua_setglobal(L, "vec3_magnitude");
 
-        int result = luaL_loadfile(L, "callcfunc.lua");
+        int result = luaL_loadfile(L, "integration_vec3_call.lua");
         if (result != 0) {
             printf("error\n");
             lua_close(L);

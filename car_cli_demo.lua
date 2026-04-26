@@ -33,12 +33,12 @@ function Car:getDetails()
 end
 
 local function print_help()
-    print("Usage: lua script.lua <arg1> <arg2>")
+    print("Usage: lua car_cli_demo.lua <arg1> <arg2>")
     print("Description:")
     print(" <arg1>: First arg")
     print(" <arg2>: Second arg")
     print("Example:")
-    print(" lua script.lya input1 input2")
+    print(" lua car_cli_demo.lua input1 input2")
 end
 
 

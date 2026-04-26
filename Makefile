@@ -7,7 +7,7 @@ LUAJIT_LIB = $(LUAJIT_DIR)/src/libluajit.a
 CXXFLAGS = -Wall -O2 -std=c++11 -ILuaBridge/Source/LuaBridge -ILuaBridge/Source -I$(LUAJIT_INC)
 
 # Files to compile
-SRC = embed1.cpp lua_c.cpp lua_c1.cpp
+SRC = embed_luabridge_demo.cpp embed_custom_userdata.cpp embed_stack_api.cpp embed_repl_simple.cpp
 
 # Output binaries
 BIN1 = embed1
@@ -24,16 +24,16 @@ all: $(LUAJIT_LIB) $(BIN1) $(BIN2) $(BIN3) $(BIN4)
 $(LUAJIT_LIB):
 	cd $(LUAJIT_DIR) && $(MAKE)
 
-$(BIN1): embed1.cpp $(LUAJIT_LIB)
+$(BIN1): embed_luabridge_demo.cpp $(LUAJIT_LIB)
 	$(CXX) $(CXXFLAGS) -o $@ $< $(LIBS)
 
-$(BIN2): lua_c.cpp $(LUAJIT_LIB)
+$(BIN2): embed_custom_userdata.cpp $(LUAJIT_LIB)
 	$(CXX) $(CXXFLAGS) -o $@ $< $(LIBS)
 
-$(BIN3): lua_c1.cpp $(LUAJIT_LIB)
+$(BIN3): embed_stack_api.cpp $(LUAJIT_LIB)
 	$(CXX) $(CXXFLAGS) -o $@ $< $(LIBS)
 
-$(BIN4): lua_c2.cpp $(LUAJIT_LIB)
+$(BIN4): embed_repl_simple.cpp $(LUAJIT_LIB)
 	$(CXX) $(CXXFLAGS) -o $@ $< $(LIBS)
 
 # Clean up

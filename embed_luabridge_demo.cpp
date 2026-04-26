@@ -3,15 +3,15 @@
 /* | | |_| | (_| | | | (_| | |_) | */
 /* |_|\__,_|\__,_| |_|\__,_|_.__/ */ 
 
-// build: make embed1.cpp -o embed1 -I/path/include /path/libluajit.a -ldl
+// build: make embed_luabridge_demo.cpp -o embed1 -I/path/include /path/libluajit.a -ldl
 
 // compile: 
-// g++ embed1.cpp -o embed1 -I/home/pi/test/luajit/src/ ~/test/luajit/src/libluajit.a  -ldl
+// g++ embed_luabridge_demo.cpp -o embed1 -I/home/pi/test/luajit/src/ ~/test/luajit/src/libluajit.a  -ldl
 
 // export CPLUS_INCLUDE_PATH="/home/pi/test/LuaBridge/Source/LuaBridge:/home/pi/test/LuaBridge/Source:$CPLUS_INCLUDE_PATH"
-//g++ embed1.cpp -o embed1 -I/home/pi/test/luajit/src/ ~/test/luajit/src/libluajit.a  -ldl -lreadline
+//g++ embed_luabridge_demo.cpp -o embed1 -I/home/pi/test/luajit/src/ ~/test/luajit/src/libluajit.a  -ldl -lreadline
 // MAC
-//  g++ embed1.cpp -o embed1 -std=c++11 ~/test/luajit/src/libluajit.a -ldl -lreadline
+//  g++ embed_luabridge_demo.cpp -o embed1 -std=c++11 ~/test/luajit/src/libluajit.a -ldl -lreadline
 
 #include <readline/readline.h>
 #include <readline/history.h>
