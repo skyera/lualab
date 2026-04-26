@@ -49,6 +49,11 @@ make
   ./demo_repl             # Simple interactive REPL
   ```
 
+- **Run FFI Example (requires LuaJIT):**
+  ```bash
+  ./LuaJIT/src/luajit ffi_system_info.lua
+  ```
+
 ## Maintenance
 - **Remove binaries:** `make clean`
 - **Remove binaries and clean submodules:** `make clean-all`
