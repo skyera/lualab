@@ -1,18 +1,61 @@
-# lua
+# lualab
 ```
 | |_   _  __ _  | | __ _| |__  
 | | | | |/ _` | | |/ _` | '_ \ 
 | | |_| | (_| | | | (_| | |_) |
 |_|\__,_|\__,_| |_|\__,_|_.__/ 
 ```
-export 
-* CPLUS_INCLUDE_PATH
-* LIBRARY_PATH
-to include luajit/src, LuaBridge
 
-### Reference
-* https://github.com/lunarmodules/busted
-* https://github.com/PacktPublishing/Lua-Quick-Start-Guide
-* https://github.com/LewisJEllis/awesome-lua
-* http://lua-users.org/
-* https://github.com/CodesOtakuYT/luajit-ffi
+A collection of Lua embedding examples using LuaJIT and LuaBridge.
+
+## Prerequisites
+Ensure you have the following installed on your system:
+- `g++` (C++11 or later)
+- `make`
+- `libreadline-dev`
+
+## Getting Started
+
+### 1. Clone the repository
+This project uses submodules for LuaJIT and LuaBridge. Clone with the `--recurse-submodules` flag:
+```bash
+git clone --recurse-submodules https://github.com/skyera/lualab.git
+cd lualab
+```
+If you have already cloned the repository, initialize submodules with:
+```bash
+git submodule update --init --recursive
+```
+
+### 2. Build
+Run `make` to build all binaries. This will automatically build the LuaJIT submodule if it hasn't been built yet.
+```bash
+make
+```
+
+### 3. Run
+- **Interactive Shell (with C++ bindings):**
+  ```bash
+  ./embed1
+  ```
+- **Execute a script:**
+  ```bash
+  ./embed1 test.lua
+  ```
+- **Run other examples:**
+  ```bash
+  ./lua_c
+  ./lua_c1
+  ./lua_c2
+  ```
+
+## Maintenance
+- **Remove binaries:** `make clean`
+- **Remove binaries and clean submodules:** `make clean-all`
+
+## Reference
+* [LuaBridge](https://github.com/vinniefalco/LuaBridge)
+* [LuaJIT](https://github.com/LuaJIT/LuaJIT)
+* [Lua Quick Start Guide](https://github.com/PacktPublishing/Lua-Quick-Start-Guide)
+* [Awesome Lua](https://github.com/LewisJEllis/awesome-lua)
+* [lua-users.org](http://lua-users.org/)
