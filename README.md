@@ -40,7 +40,7 @@ make
   ```
 - **Execute a script:**
   ```bash
-  ./demo_luabridge test.lua
+  ./demo_luabridge scratch_lua_features.lua
   ```
 - **Run other examples:**
   ```bash

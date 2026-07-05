@@ -1,4 +1,4 @@
--- run: busted test.lua
+-- run: busted scratch_lua_features.lua
 if arg and arg[0] and string.match(arg[0], "busted$") then
 describe("my_test", function()
     it("true", function()
