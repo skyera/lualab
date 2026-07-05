@@ -1,4 +1,4 @@
-Car = {}
+local Car = {}
 
 function Car:new(make, model, year)
     local obj = {}
@@ -44,7 +44,7 @@ end
 
 if #arg < 2 or arg[1] == "-h" or arg[1] == "--help" then
     print_help()
-    -- os.exit(1)
+    os.exit(1)
 end
 
 local arg1 = arg[1]
@@ -56,7 +56,7 @@ for i=0, 10 do
     print("[] Item", i+1)
 end
 
-myCar = Car:new("Ford", "Mustang", 1969)
+local myCar = Car:new("Ford", "Mustang", 1969)
 myCar:accelerate(20)
 myCar:brake(5)
 print(myCar:getDetails())

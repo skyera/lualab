@@ -1,4 +1,4 @@
-Animal = {}
+local Animal = {}
 Animal.__index = Animal
 
 function Animal:new(name)
@@ -12,7 +12,7 @@ function Animal:speak()
 end
 
 -- Derived class: inherit from Animal
-Dog = setmetatable({}, {__index = Animal})
+local Dog = setmetatable({}, {__index = Animal})
 Dog.__index = Dog
 
 function Dog:new(name, breed)
@@ -22,7 +22,7 @@ function Dog:new(name, breed)
 end
 
 function Dog:speak()
-    print(self.name .. " barks.i(" .. self.breed .. ")")
+    print(self.name .. " barks (" .. self.breed .. ")")
 end
 
 local a = Animal:new("Generic Animal")

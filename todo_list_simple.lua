@@ -1,5 +1,5 @@
 -- Lua todo
-function load_tasks()
+local function load_tasks()
     local tasks = {}
     local file = io.open("tasks.txt", "r")
     if file then
@@ -12,7 +12,7 @@ function load_tasks()
 end
 
 
-function save_tasks(tasks)
+local function save_tasks(tasks)
     local file = io.open("tasks.txt", "w")
     for _, task in ipairs(tasks) do
         file:write(task .. "\n")
@@ -20,7 +20,7 @@ function save_tasks(tasks)
     file:close()
 end
 
-function display_tasks(tasks)
+local function display_tasks(tasks)
     if #tasks == 0 then
         print("No tasks to display")
     else
@@ -30,7 +30,7 @@ function display_tasks(tasks)
     end
 end
 
-function main()
+local function main()
     print("My todo list")
     local tasks = load_tasks()
 

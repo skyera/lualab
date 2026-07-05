@@ -136,7 +136,7 @@ describe("my_test", function()
 
     it("math", function()
         assert.True(3/2 == 1.5)
-        -- x = 3//2
+        local x = math.floor(3/2)
         assert.True(x == 1)
         x = math.max(10.4, 7, -3, 20)
         assert.True(x == 20)
@@ -176,7 +176,7 @@ describe("my_test", function()
         print(string.reverse("A Long line!"))
         s = "[in brackets]"
         print(string.sub(s, 2, -2))
-        print(string,char(97))
+        print(string.char(97))
     end)
 end)
 end

@@ -14,6 +14,7 @@ end
 
 function Todo:add(task)
     table.insert(self.tasks, {text=task, done=false})
+    self:save()
 end
 
 function Todo:done(index)

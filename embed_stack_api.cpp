@@ -45,11 +45,9 @@ int linear_index(lua_State* L, int row, int col) {
 }
 
 int lua_vec3_magnitude(lua_State* L) {
-    double x = lua_tonumber(L, 3);
+    double x = lua_tonumber(L, 1);
     double y = lua_tonumber(L, 2);
-    double z = lua_tonumber(L, 1);
-
-    lua_pop(L, 3);
+    double z = lua_tonumber(L, 3);
 
     double dot = x * x + y * y + z * z;
     if (dot == 0.0) {
@@ -86,14 +84,15 @@ int main(int argc, char** argv) {
 
         // read values on stack
         const char* class_p = lua_tostring(L, stack_base + 1);
-        char class_sz[32];
-        strcpy(class_sz, class_p);
+        if (class_p == nullptr) {
+            class_p = "Unknown";
+        }
         int attack = lua_tointeger(L, stack_base + 2);
         int defense = lua_tointeger(L, stack_base + 3);
 
         // clean up stack
         lua_pop(L, 3);  
-        printf("class=%s;attack=%d;defense=%d\n", class_sz, attack, defense);
+        printf("class=%s;attack=%d;defense=%d\n", class_p, attack, defense);
     }
 
     {

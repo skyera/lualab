@@ -111,12 +111,12 @@ print(obj:get_value())
 -------------------------------------------
 --- Class
 print('\nDog class')
-Dog = {}
+local Dog = {}
 Dog.__index = Dog
 
 function Dog:new()
     print(debug.traceback('Dog:new()'))
-    obj = {sound='woof'}
+    local obj = {sound='woof'}
     return setmetatable(obj, self)
 end
 
@@ -125,28 +125,28 @@ function Dog:makeSound()
 end
 -------------------------------------------
 -- create object
-mrDog = Dog:new()
+local mrDog = Dog:new()
 mrDog:makeSound()
 
 -- 
-LoudDog = Dog:new()
+local LoudDog = Dog:new()
 LoudDog.__index = LoudDog
 
 function LoudDog:new()
-    obj = {}
+    local obj = {}
     return setmetatable(obj, self)
 end
 
 function LoudDog:makeSound()
-    s = self.sound .. ' '
+    local s = self.sound .. ' '
     print(s .. s .. s)
 end
 
-seymour = LoudDog:new()
+local seymour = LoudDog:new()
 seymour:makeSound()
 
 -- Rectangle
-Rectangle = {area=0, length=0, width=0}
+local Rectangle = {area=0, length=0, width=0}
 Rectangle.__index = Rectangle
 
 function Rectangle:new(o, length, width)
@@ -166,17 +166,17 @@ function Rectangle:__tostring()
     return string.format("length: %d, width: %d, area: %d", self.length, self.width, self.area)
 end
 
-r1 = Rectangle:new(nil, 10, 20)
+local r1 = Rectangle:new(nil, 10, 20)
 r1:printArea()
 
-r2 = Rectangle:new(nil, 3, 4)
+local r2 = Rectangle:new(nil, 3, 4)
 r2:printArea()
 r1:printArea()
 print(r1)
 print(r2)
 
 --- Shape Base class
-Shape = {area=0}
+local Shape = {area=0}
 Shape.__index = Shape
 
 function Shape:new(o, side)
@@ -192,7 +192,7 @@ function Shape:printArea()
 end
 
 -- Square derived class
-Square = Shape:new()
+local Square = Shape:new()
 Square.__index = Square
 
 function Square:new(o, side)
@@ -206,10 +206,10 @@ function Square:printArea()
 end
 
 -- create object
-myshape = Shape:new(nil, 10)
-myshape2 = Shape:new(nil, 3)
-mysquare = Square:new(nil, 20)
-mysquare2 = Square:new(nil, 2)
+local myshape = Shape:new(nil, 10)
+local myshape2 = Shape:new(nil, 3)
+local mysquare = Square:new(nil, 20)
+local mysquare2 = Square:new(nil, 2)
 myshape:printArea()
 mysquare:printArea()
 myshape2:printArea()

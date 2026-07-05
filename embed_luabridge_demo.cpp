@@ -18,6 +18,7 @@
 #include <vector>
 #include <dirent.h>
 #include <string>
+#include <iostream>
 
 extern "C" {
 #include "lua.h"
@@ -33,19 +34,16 @@ std::vector<std::string> list_files(const std::string& path) {
     std::vector<std::string> files;
     DIR* dir = opendir(path.c_str());
     if (dir == nullptr) {
+        printf("Could not open directory %s\n", path.c_str());
         return files;
     }
-    if (dir) {
-        struct dirent* entry;
-        while ((entry = readdir(dir)) != nullptr) {
-            if (entry->d_type == DT_REG) {
-                files.push_back(entry->d_name);
-            }
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        if (entry->d_type == DT_REG) {
+            files.push_back(entry->d_name);
         }
-        closedir(dir);
-    } else {
-        printf("Could not open directory %s\n", path.c_str());
     }
+    closedir(dir);
 
     return files;
 }
@@ -147,7 +145,7 @@ int main(int argc, char** argv) {
         }
     }
     
-    if (argc == 2 ) {
+    if (argc >= 2 ) {
         // pass args to Lua
         lua_newtable(L);
         for (int i = 1; i < argc; ++i) {
