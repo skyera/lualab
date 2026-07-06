@@ -13,14 +13,14 @@
 // MAC
 //  g++ embed_luabridge_demo.cpp -o embed1 -std=c++11 ~/test/luajit/src/libluajit.a -ldl -lreadline
 
-#include <readline/readline.h>
-#include <readline/history.h>
 #include <vector>
 #include <dirent.h>
 #include <string>
 #include <iostream>
 
 extern "C" {
+#include <readline/readline.h>
+#include <readline/history.h>
 #include "lua.h"
 #include "lauxlib.h"
 #include "lualib.h"
