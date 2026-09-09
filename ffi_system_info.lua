@@ -7,28 +7,12 @@ ffi.cdef[[
     int getpid(void);
     int gethostname(char *name, size_t len);
     
-    // File status structure (simplified for Linux x64)
-    typedef struct {
-        unsigned long st_dev;
-        unsigned long st_ino;
-        unsigned long st_nlink;
-        unsigned int  st_mode;
-        unsigned int  st_uid;
-        unsigned int  st_gid;
-        unsigned int  __pad0;
-        unsigned long st_rdev;
-        long          st_size;
-        long          st_blksize;
-        long          st_blocks;
-        long          st_atime;
-        long          st_atime_nsec;
-        long          st_mtime;
-        long          st_mtime_nsec;
-        long          st_ctime;
-        long          st_ctime_nsec;
-    } stat_t;
-
-    int stat(const char *path, stat_t *buf);
+    // Standard libc file handling (portable across OS and architecture)
+    typedef void FILE;
+    FILE *fopen(const char *path, const char *mode);
+    int fseek(FILE *stream, long offset, int whence);
+    long ftell(FILE *stream);
+    int fclose(FILE *stream);
 ]]
 
 print("--- System Information using FFI ---")
@@ -45,14 +29,14 @@ local hostname = ffi.string(buffer)
 assert(#hostname > 0, "Hostname should not be empty")
 print("Hostname: " .. hostname)
 
--- 4. Get File Info (stat)
+-- 4. Get File Info (Portable libc file sizing)
 local function get_file_size(filename)
-    local st = ffi.new("stat_t")
-    if ffi.C.stat(filename, st) == 0 then
-        return tonumber(st.st_size)
-    else
-        return nil, "Could not stat file"
-    end
+    local f = ffi.C.fopen(filename, "rb")
+    if f == nil then return nil, "Could not open file" end
+    ffi.C.fseek(f, 0, 2) -- SEEK_END = 2
+    local size = ffi.C.ftell(f)
+    ffi.C.fclose(f)
+    return tonumber(size)
 end
 
 local size, err = get_file_size("Makefile")
