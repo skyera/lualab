@@ -5,3 +5,6 @@ demo_repl
 tasks.txt
 data.txt
 test.txt
+*.o
+*.so
+*.dylib

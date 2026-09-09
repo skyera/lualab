@@ -49,9 +49,12 @@ make
   ./demo_repl             # Simple interactive REPL
   ```
 
-- **Run FFI Example (requires LuaJIT):**
+- **Run FFI Examples (requires LuaJIT):**
   ```bash
   ./LuaJIT/src/luajit ffi_system_info.lua
+  ./LuaJIT/src/luajit ffi_advanced_demo.lua
+  ./LuaJIT/src/luajit ffi_sqlite_demo.lua   # In-memory SQLite3 FFI engine & benchmark
+  ./LuaJIT/src/luajit game_snake_ffi.lua    # Real-time terminal Snake game via POSIX FFI
   ```
 
 ## Maintenance

@@ -18,11 +18,13 @@ BIN4 = demo_repl
 # Linking libraries (LuaJIT, libdl, libreadline)
 LIBS = $(LUAJIT_LIB) -ldl -lreadline
 
+.PHONY: all clean clean-all
+
 # Targets
 all: $(LUAJIT_LIB) $(BIN1) $(BIN2) $(BIN3) $(BIN4)
 
 $(LUAJIT_LIB):
-	cd $(LUAJIT_DIR) && $(MAKE)
+	$(MAKE) -C $(LUAJIT_DIR)
 
 $(BIN1): embed_luabridge_demo.cpp $(LUAJIT_LIB)
 	$(CXX) $(CXXFLAGS) -o $@ $< $(LIBS)
@@ -38,7 +40,7 @@ $(BIN4): embed_repl_simple.cpp $(LUAJIT_LIB)
 
 # Clean up
 clean:
-	rm -f $(BIN1) $(BIN2) $(BIN3) $(BIN4)
+	rm -f $(BIN1) $(BIN2) $(BIN3) $(BIN4) *.o
 
 clean-all: clean
-	cd $(LUAJIT_DIR) && $(MAKE) clean
+	$(MAKE) -C $(LUAJIT_DIR) clean
