@@ -57,6 +57,13 @@ make
   ./LuaJIT/src/luajit game_snake_ffi.lua    # Real-time terminal Snake game via POSIX FFI
   ```
 
+- **Run Unit Tests:**
+  ```bash
+  make test
+  # or directly:
+  ./LuaJIT/src/luajit test_ffi_suite.lua
+  ```
+
 ## Maintenance
 - **Remove binaries:** `make clean`
 - **Remove binaries and clean submodules:** `make clean-all`

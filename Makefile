@@ -18,10 +18,13 @@ BIN4 = demo_repl
 # Linking libraries (LuaJIT, libdl, libreadline)
 LIBS = $(LUAJIT_LIB) -ldl -lreadline
 
-.PHONY: all clean clean-all
+.PHONY: all clean clean-all test
 
 # Targets
 all: $(LUAJIT_LIB) $(BIN1) $(BIN2) $(BIN3) $(BIN4)
+
+test: $(LUAJIT_LIB)
+	$(LUAJIT_DIR)/src/luajit test_ffi_suite.lua
 
 $(LUAJIT_LIB):
 	$(MAKE) -C $(LUAJIT_DIR)
