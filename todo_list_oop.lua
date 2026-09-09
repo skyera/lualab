@@ -46,7 +46,9 @@ function Todo:load()
     if not f then return end
     for line in f:lines() do
         local done, text = line:match("^(%d);%s*(.+)$")
-        table.insert(self.tasks, {text=text, done=="1"})
+        if done and text then
+            table.insert(self.tasks, {text=text, done=(done=="1")})
+        end
     end
     f:close()
 end
