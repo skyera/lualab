@@ -12,7 +12,7 @@ local t = json.decode('[1,2,3,{"x":10}]') -- Returns { 1, 2, 3, { x = 10 } }
 for k, v in pairs(t) do
     print(k, v)
 end
-t2 = t[4]
+local t2 = t[4]
 
 print(t2.x)
 for k, v in pairs(t2) do
@@ -42,15 +42,13 @@ local result = handle:read("*a")
 handle:close()
 print(result)
 
-local handle = io.popen("ping -c 4 google.com")
-
+local handle = io.popen("uname -s")
 for line in handle:lines() do
-    print(line)
+    print("OS:", line)
 end
-
 handle:close()
 
-files = foo.list_files(".")
+local files = foo.list_files(".")
 for k, v in pairs(files) do
     print(k, v)
 end
@@ -59,3 +57,4 @@ files = foo.list_files2(".")
 for k, v in pairs(files) do
     print(k, v)
 end
+
