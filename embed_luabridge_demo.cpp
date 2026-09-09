@@ -15,6 +15,7 @@
 
 #include <vector>
 #include <dirent.h>
+#include <sys/stat.h>
 #include <string>
 #include <iostream>
 
@@ -39,7 +40,15 @@ std::vector<std::string> list_files(const std::string& path) {
     }
     struct dirent* entry;
     while ((entry = readdir(dir)) != nullptr) {
-        if (entry->d_type == DT_REG) {
+        bool is_reg = (entry->d_type == DT_REG);
+        if (entry->d_type == DT_UNKNOWN) {
+            std::string full_path = path + "/" + entry->d_name;
+            struct stat st;
+            if (stat(full_path.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+                is_reg = true;
+            }
+        }
+        if (is_reg) {
             files.push_back(entry->d_name);
         }
     }
@@ -52,7 +61,7 @@ int lua_listfiles(lua_State* L) {
     std::string path = luaL_checkstring(L, 1);
     std::vector<std::string> files = list_files(path);
     lua_newtable(L);
-    for (int i = 0; i < files.size(); ++i) {
+    for (size_t i = 0; i < files.size(); ++i) {
         lua_pushnumber(L, i+1);
         lua_pushstring(L, files[i].c_str());
         lua_settable(L, -3);
@@ -64,7 +73,7 @@ int lua_listfiles2(lua_State* L) {
     std::string path = luaL_checkstring(L, 1);
     std::vector<std::string> files = list_files(path);
     LuaRef file_table = LuaRef::newTable(L);
-    for (int i = 0; i < files.size(); ++i) {
+    for (size_t i = 0; i < files.size(); ++i) {
         file_table[i+1] = files[i];
     }
     push(L, file_table);
@@ -172,7 +181,7 @@ int main(int argc, char** argv) {
             printf("Error %s\n", error);
             lua_pop(L, 1);
             lua_close(L);
-            return -1;;
+            return -1;
         }
     } else {
         char* input;
