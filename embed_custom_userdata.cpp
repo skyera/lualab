@@ -186,15 +186,13 @@ int main(int argc, char** argv) {
     {
         printf("register module\n");
         const struct luaL_Reg MyMathLib[] = {
-            {"mul", multiplication}
+            {"mul", multiplication},
+            {NULL, NULL}
         };
         
         lua_newtable(L);
         print_stacksize(L);
-        lua_pushcfunction(L, multiplication);
-        print_stacksize(L);
-
-        lua_setfield(L, -2, "mul");
+        register_functions(L, MyMathLib);
         print_stacksize(L);
         lua_setglobal(L, "MyMath");
         print_stacksize(L);
@@ -282,6 +280,11 @@ int main(int argc, char** argv) {
 
             printf("%f %f\n", foo_number, bar_number);
             printf("%s %s\n", foo_string, bar_string);
+
+            // Pop 4 pushed fields and the foo1 table
+            lua_pop(L, 5);
+        } else {
+            lua_pop(L, 1);
         }
     }
 
