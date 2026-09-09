@@ -3,17 +3,17 @@
     A terminal image viewer written in LuaJIT FFI.
 
     Features:
-    1. Built-in decoder for Netpbm images (PPM P6 binary and P3 ASCII).
-    2. Zero external dependencies: pure LuaJIT + libc FFI.
+    1. Built-in native Netpbm PPM decoder (P6 binary and P3 ASCII).
+    2. Automatic fallback pipeline for PNG, JPG/JPEG, WEBP, GIF, BMP via ImageMagick / ffmpeg.
     3. Auto-detects terminal width & height via POSIX ioctl(TIOCGWINSZ) syscall.
-    4. Aspect-ratio preserving bilinear downsampling / scaling to fit terminal size.
+    4. Aspect-ratio preserving downsampling to fit the terminal window.
     5. High-resolution truecolor rendering: uses 24-bit ANSI colors with UTF-8
        half-block '▄' (2 vertical pixels per text character row).
 ]]
 
 local ffi = require("ffi")
 
--- 1. C Declarations for Terminal Dimensions
+-- 1. C Declarations for Terminal Dimensions & Buffer
 ffi.cdef[[
     struct winsize {
         unsigned short ws_row;
@@ -22,6 +22,8 @@ ffi.cdef[[
         unsigned short ws_ypixel;
     };
     int ioctl(int fd, unsigned long request, void *argp);
+
+    typedef struct { uint8_t r, g, b; } ImgPixelRGB;
 ]]
 
 local TIOCGWINSZ = 0x5413 -- Linux ioctl code for terminal window size
@@ -35,11 +37,8 @@ local function get_terminal_size()
     return 80, 24 -- standard fallback
 end
 
--- 2. PPM Image Decoder (P6 binary and P3 ASCII)
-local function load_ppm(filepath)
-    local f, err = io.open(filepath, "rb")
-    if not f then return nil, err end
-
+-- 2. Parsing PPM Data from a File Handle or Pipe
+local function parse_ppm_stream(f)
     -- Helper to read next non-comment whitespace-delimited token
     local function next_token()
         while true do
@@ -61,8 +60,7 @@ local function load_ppm(filepath)
 
     local magic = next_token()
     if magic ~= "P6" and magic ~= "P3" then
-        f:close()
-        return nil, "Unsupported PPM format: " .. tostring(magic) .. " (only P3 and P6 supported)"
+        return nil, "Unsupported PPM magic header: " .. tostring(magic) .. " (expected P6 or P3)"
     end
 
     local width = tonumber(next_token())
@@ -70,13 +68,8 @@ local function load_ppm(filepath)
     local max_val = tonumber(next_token())
 
     if not width or not height or not max_val then
-        f:close()
         return nil, "Corrupted PPM header"
     end
-
-    ffi.cdef[[
-        typedef struct { uint8_t r, g, b; } ImgPixelRGB;
-    ]]
 
     local pixels = ffi.new("ImgPixelRGB[?]", width * height)
 
@@ -84,12 +77,9 @@ local function load_ppm(filepath)
         -- Binary PPM
         local total_bytes = width * height * 3
         local raw_bytes = f:read(total_bytes)
-        f:close()
-
         if not raw_bytes or #raw_bytes < total_bytes then
-            return nil, "Incomplete binary PPM pixel data"
+            return nil, "Incomplete binary PPM pixel stream"
         end
-
         ffi.copy(pixels, raw_bytes, total_bytes)
     else
         -- P3 ASCII PPM
@@ -102,7 +92,6 @@ local function load_ppm(filepath)
             pixels[i].g = math.floor(g * scale)
             pixels[i].b = math.floor(b * scale)
         end
-        f:close()
     end
 
     return {
@@ -112,13 +101,51 @@ local function load_ppm(filepath)
     }
 end
 
--- 3. Terminal Renderer with Bilinear Resampling
+-- 3. Universal Image Loader (PPM, PNG, JPG, JPEG, WEBP, GIF, BMP)
+local function load_image(filepath)
+    -- Check if file exists
+    local test_file = io.open(filepath, "rb")
+    if not test_file then
+        return nil, "Cannot open file: " .. filepath
+    end
+
+    -- Check first two bytes (Magic bytes)
+    local header = test_file:read(2)
+    test_file:close()
+
+    -- If native PPM format (P6 or P3)
+    if header == "P6" or header == "P3" then
+        local f = io.open(filepath, "rb")
+        local img, err = parse_ppm_stream(f)
+        f:close()
+        return img, err
+    end
+
+    -- For PNG, JPG, WEBP, GIF, BMP: Stream decode via ImageMagick (magick/convert) or ffmpeg
+    local cmd = string.format("magick %q ppm:- 2>/dev/null || convert %q ppm:- 2>/dev/null", filepath, filepath)
+    local pipe = io.popen(cmd, "r")
+    if pipe then
+        local img = parse_ppm_stream(pipe)
+        pipe:close()
+        if img then return img end
+    end
+
+    -- Fallback to ffmpeg if ImageMagick is not found
+    local ffmpeg_cmd = string.format("ffmpeg -v error -i %q -f image2pipe -vcodec ppm - 2>/dev/null", filepath)
+    local ffmpeg_pipe = io.popen(ffmpeg_cmd, "r")
+    if ffmpeg_pipe then
+        local img = parse_ppm_stream(ffmpeg_pipe)
+        ffmpeg_pipe:close()
+        if img then return img end
+    end
+
+    return nil, "Failed to decode image format. Ensure the file is a valid image (PNG, JPG, PPM, BMP, WEBP)."
+end
+
+-- 4. Terminal Renderer with Bilinear Resampling
 local function render_image_to_terminal(img, max_w, max_h)
     local term_w, term_h = get_terminal_size()
-    -- Terminal character cells are ~2:1 vertical-to-horizontal aspect ratio
-    -- Since half-block '▄' gives 2 pixels per row, pixel aspect ratio is ~1:1
     local target_w = max_w or (term_w - 2)
-    -- Reserve 3 lines for shell prompts / headers, and double for half-blocks
     local target_h = max_h or ((term_h - 4) * 2)
 
     -- Maintain aspect ratio
@@ -128,7 +155,6 @@ local function render_image_to_terminal(img, max_w, max_h)
 
     local out_w = math.max(1, math.floor(img.width * scale))
     local out_h = math.max(1, math.floor(img.height * scale))
-    -- Ensure even height so half-blocks pair up cleanly
     if out_h % 2 ~= 0 then out_h = out_h + 1 end
 
     local out = {}
@@ -138,7 +164,6 @@ local function render_image_to_terminal(img, max_w, max_h)
     for y = 0, out_h - 1, 2 do
         local line = {}
         for x = 0, out_w - 1 do
-            -- Map output coordinate to source coordinate (nearest / subpixel)
             local src_x = math.min(img.width - 1, math.floor(x * (img.width / out_w)))
             local src_y_top = math.min(img.height - 1, math.floor(y * (img.height / out_h)))
             local src_y_bot = math.min(img.height - 1, math.floor((y + 1) * (img.height / out_h)))
@@ -167,16 +192,15 @@ end
 local filepath = arg and arg[1]
 
 if not filepath or filepath == "-h" or filepath == "--help" then
-    print("\27[1;36mTerminal Image Viewer (LuaJIT FFI)\27[0m")
+    print("\27[1;36mUniversal Terminal Image Viewer (LuaJIT FFI)\27[0m")
     print("Usage:")
-    print("  ./LuaJIT/src/luajit view_image_terminal.lua <image.ppm> [max_width] [max_height]")
+    print("  ./LuaJIT/src/luajit view_image_terminal.lua <image_path> [max_width] [max_height]")
     print("\nSupported formats:")
-    print("  - PPM (Binary P6, ASCII P3)")
-    print("  - Any image converted via ImageMagick: convert photo.jpg photo.ppm && ...")
+    print("  - PNG, JPG/JPEG, WEBP, GIF, BMP, PPM")
     os.exit(0)
 end
 
-local img, err = load_ppm(filepath)
+local img, err = load_image(filepath)
 if not img then
     io.stderr:write("\27[1;31mError loading image:\27[0m " .. tostring(err) .. "\n")
     os.exit(1)
