@@ -8,3 +8,5 @@ test.txt
 *.o
 *.so
 *.dylib
+*.ppm
+*.bmp
