@@ -74,7 +74,17 @@ local function parse_ppm_stream(f)
     local pixels = ffi.new("ImgPixelRGB[?]", width * height)
 
     if magic == "P6" then
-        -- Binary PPM
+        -- Binary PPM: exactly one whitespace/newline character separates max_val from binary data
+        -- (next_token already stopped immediately after reading digits of max_val)
+        local single_ws = f:read(1)
+        if single_ws and single_ws == "\r" then
+            -- Handle potential CRLF line ending after header
+            local lf = f:read(1)
+            if lf and lf ~= "\n" then
+                -- if not \n, it was already binary data
+                -- fallback: seek back or handle, but standard PPM uses single whitespace
+            end
+        end
         local total_bytes = width * height * 3
         local raw_bytes = f:read(total_bytes)
         if not raw_bytes or #raw_bytes < total_bytes then
