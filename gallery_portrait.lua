@@ -1045,6 +1045,32 @@ local function render_detail_screen(item, msg)
 
     -- Side-by-side Layout: Image on Left (detail_w chars), Info Card on Right
     local num_char_rows = math.floor(detail_h / 2)
+    -- Total horizontal space taken by photo column and spacing:
+    -- 2 chars margin ("  ") + 1 char left border ("│") + detail_w + 1 char right border ("│") + 3 spaces ("   ")
+    local img_col_w = 2 + 1 + detail_w + 1 + 3
+    local max_info_w = math.max(10, term_w - img_col_w)
+    local desc_str = item.desc or "Portrait of a lady"
+
+    -- Word-wrap description if it exceeds available space
+    local desc_wrapped = {}
+    local desc_prefix = "  \27[90m• Description:\27[0m  \27[37m"
+    local desc_indent = "                  \27[37m"
+    local available_desc_w = math.max(12, max_info_w - 18)
+
+    local cur_line = ""
+    for word in desc_str:gmatch("%S+") do
+        if #cur_line == 0 then
+            cur_line = word
+        elseif #cur_line + 1 + #word <= available_desc_w then
+            cur_line = cur_line .. " " .. word
+        else
+            table.insert(desc_wrapped, cur_line)
+            cur_line = word
+        end
+    end
+    if #cur_line > 0 then
+        table.insert(desc_wrapped, cur_line)
+    end
 
     local info_lines = {
         string.format("\27[1;37m═══ Portrait Metadata ═══\27[0m"),
@@ -1052,21 +1078,28 @@ local function render_detail_screen(item, msg)
         string.format("  \27[90m• Category:\27[0m     \27[1;36m%s\27[0m", item.category or "Portrait of Lady"),
         string.format("  \27[90m• Dimensions:\27[0m   \27[37m%dx%d pixels (portrait 2:3 / 3:4)\27[0m", detail_w, detail_h),
         string.format("  \27[90m• Processing:\27[0m   \27[32m%.2f ms (FFI Pixel Stream)\27[0m", dt_hires),
-        string.format("  \27[90m• Description:\27[0m  \27[37m%s\27[0m", item.desc or "Portrait of a lady"),
-        "",
-        string.format("\27[1;37m═══ Dominant Color Palette ═══\27[0m"),
     }
+    for idx, dline in ipairs(desc_wrapped) do
+        if idx == 1 then
+            table.insert(info_lines, desc_prefix .. dline .. "\27[0m")
+        else
+            table.insert(info_lines, desc_indent .. dline .. "\27[0m")
+        end
+    end
+    table.insert(info_lines, "")
+    table.insert(info_lines, string.format("\27[1;37m═══ Dominant Color Palette ═══\27[0m"))
 
     local swatch_line = {"  "}
+    local hex_line = {"  "}
+    local swatch_used_w = 2
     for _, col in ipairs(palette) do
-        table.insert(swatch_line, string.format("\27[48;2;%d;%d;%dm    \27[0m ", col.r, col.g, col.b))
+        if swatch_used_w + 5 <= max_info_w then
+            table.insert(swatch_line, string.format("\27[48;2;%d;%d;%dm    \27[0m ", col.r, col.g, col.b))
+            table.insert(hex_line, string.format("\27[90m#%02X%02X%02X \27[0m", col.r, col.g, col.b))
+            swatch_used_w = swatch_used_w + 5
+        end
     end
     table.insert(info_lines, table.concat(swatch_line))
-
-    local hex_line = {"  "}
-    for _, col in ipairs(palette) do
-        table.insert(hex_line, string.format("\27[90m#%02X%02X%02X \27[0m", col.r, col.g, col.b))
-    end
     table.insert(info_lines, table.concat(hex_line))
 
     table.insert(info_lines, "")
@@ -1080,9 +1113,51 @@ local function render_detail_screen(item, msg)
     -- Top border for image box
     table.insert(out, string.format("  \27[1;93m┌%s┐\27[0m\n", string.rep("─", detail_w)))
 
+    -- Helper to truncate formatted text to visible width without breaking ANSI escapes or multi-byte UTF-8
+    local function truncate_visible_ansi(str, max_w)
+        local visible_len = 0
+        local res = {}
+        local i = 1
+        local len = #str
+        while i <= len do
+            if str:byte(i) == 27 and str:sub(i, i+1) == "\27[" then
+                local m_end = str:find("m", i, true)
+                if m_end then
+                    table.insert(res, str:sub(i, m_end))
+                    i = m_end + 1
+                else
+                    table.insert(res, str:sub(i, i))
+                    i = i + 1
+                end
+            else
+                local b = str:byte(i)
+                local char_len = 1
+                if b >= 240 then char_len = 4
+                elseif b >= 224 then char_len = 3
+                elseif b >= 192 then char_len = 2
+                end
+                if visible_len < max_w then
+                    table.insert(res, str:sub(i, i + char_len - 1))
+                    visible_len = visible_len + 1
+                    i = i + char_len
+                else
+                    break
+                end
+            end
+        end
+        table.insert(res, "\27[0m")
+        return table.concat(res)
+    end
+
     for tr = 0, num_char_rows - 1 do
         local line_img = string.format("  \27[1;93m│\27[0m%s\27[1;93m│\27[0m", high_res:render_row_ansi(tr * 2))
-        local info = info_lines[tr + 1] or ""
+        local raw_info = info_lines[tr + 1] or ""
+        local info = raw_info
+        if #raw_info > 0 and max_info_w > 0 then
+            info = truncate_visible_ansi(raw_info, max_info_w)
+        elseif max_info_w <= 0 then
+            info = ""
+        end
         table.insert(out, line_img .. "   " .. info .. "\n")
     end
 
