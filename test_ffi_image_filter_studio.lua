@@ -33,6 +33,16 @@ end
 
 print("=== Running Unit Tests for ffi_image_filter_studio.lua ===")
 
+-- Ensure required test fixture image exists (auto-generate if running in clean environment)
+local sample_img = "portraits/portrait_1_lady.png"
+local f_check = io.open(sample_img, "rb")
+if not f_check then
+    print("  [Setup] Generating portrait fixtures for test suite...")
+    os.execute(string.format("printf 'q\\n' | %s gallery_portrait.lua --save-all --no-interactive > /dev/null 2>&1", luajit))
+else
+    f_check:close()
+end
+
 -- 1. Help Banner
 test("Help banner displays correctly", function()
     local ok, out = run_cmd(string.format("%s ffi_image_filter_studio.lua --help", luajit))
