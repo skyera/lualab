@@ -175,6 +175,56 @@ TestRunner.describe("4. Error Safety and Boundary Checks", function()
     end)
 end)
 
+TestRunner.describe("5. FFI Metatype and Operator Overloading", function()
+    local Vec = require("ffi_metatype_vector")
+
+    TestRunner.it("should create vec2 instances with operator overloading", function()
+        local v1 = Vec.vec2(3, 4)
+        local v2 = Vec.vec2(1, 2)
+
+        local v_add = v1 + v2
+        assert_eq(v_add.x, 4)
+        assert_eq(v_add.y, 6)
+
+        local v_sub = v1 - v2
+        assert_eq(v_sub.x, 2)
+        assert_eq(v_sub.y, 2)
+
+        local v_scale = v1 * 2.0
+        assert_eq(v_scale.x, 6)
+        assert_eq(v_scale.y, 8)
+
+        local v_scale_left = 2.0 * v1
+        assert_eq(v_scale_left.x, 6)
+        assert_eq(v_scale_left.y, 8)
+    end)
+
+    TestRunner.it("should compute vector methods (dot, length, normalized)", function()
+        local v = Vec.vec2(3, 4)
+        assert_eq(v:length_sq(), 25)
+        assert_eq(v:length(), 5)
+
+        local norm = v:normalized()
+        assert_eq(norm.x, 0.6)
+        assert_eq(norm.y, 0.8)
+        assert_true(math.abs(norm:length() - 1.0) < 1e-9)
+
+        local v2 = Vec.vec2(2, -1)
+        assert_eq(v:dot(v2), 2)
+    end)
+
+    TestRunner.it("should compute vec3 cross product and formatting", function()
+        local vx = Vec.vec3(1, 0, 0)
+        local vy = Vec.vec3(0, 1, 0)
+        local vz = vx:cross(vy)
+
+        assert_eq(vz.x, 0)
+        assert_eq(vz.y, 0)
+        assert_eq(vz.z, 1)
+        assert_eq(tostring(vz), "Vec3(0.00, 0.00, 1.00)")
+    end)
+end)
+
 -- Exit with status code for CI / automation
 local exit_code = TestRunner.summary()
 os.exit(exit_code)
