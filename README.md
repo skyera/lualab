@@ -57,6 +57,7 @@ make
   ./LuaJIT/src/luajit game_snake_ffi.lua    # Real-time terminal Snake game via POSIX FFI
   ./LuaJIT/src/luajit ffi_image_terminal_demo.lua  # Fast C image generation & terminal truecolor viewer
   ./LuaJIT/src/luajit view_image_terminal.lua <image.png|jpg|ppm>  # Terminal image viewer with auto-scaling
+  ./LuaJIT/src/luajit gallery_portrait.lua  # Dynamic procedural portrait gallery with interactive selection
   ```
 
 - **Run Unit Tests:**
