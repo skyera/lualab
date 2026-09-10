@@ -1,8 +1,9 @@
 math.randomseed(os.time())
-number = math.random(1, 100)
-player = {}
-player.guess = 0
-player.count = 0
+local number = math.random(1, 100)
+local player = {
+    guess = 0,
+    count = 0,
+}
 
 while player.guess ~= number do
     print("Guess a number between 1 and 100")
