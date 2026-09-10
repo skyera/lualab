@@ -49,18 +49,24 @@ local function image_to_gray(img, n)
 end
 
 local N = 400*400
+local ITERS = 200
+
+print(string.format("\n--- Benchmark: Grayscale conversion (%d pixels, %d iterations) ---", N, ITERS))
+
+local t0 = os.clock()
 local img = image_ramp_green(N)
-for i=1, 1000 do
+for i=1, ITERS do
     image_to_gray(img, N)
 end
+local t_lua = os.clock() - t0
+print(string.format("Pure Lua tables : %.4f seconds", t_lua))
 
 -- ffi: use C data structure
-print("ffi")
 ffi.cdef[[
 typedef struct { uint8_t red, green, blue, alpha; } rgba_pixel;
 ]]
 
-local function image_ramp_green(n)
+local function ffi_image_ramp_green(n)
     local img = ffi.new("rgba_pixel[?]", n)
     local f=255/(n-1)
     for i=0,n-1 do
@@ -70,7 +76,7 @@ local function image_ramp_green(n)
     return img
 end
 
-local function image_to_gray(img, n)
+local function ffi_image_to_gray(img, n)
     for i=0, n-1 do
         local y = 0.3*img[i].red + 0.59*img[i].green + 0.11*img[i].blue
         img[i].red = y
@@ -79,8 +85,11 @@ local function image_to_gray(img, n)
     end
 end
 
-local N = 400*400
-local img = image_ramp_green(N)
-for i=0, 1000 do
-    image_to_gray(img, N)
+local t1 = os.clock()
+local ffi_img = ffi_image_ramp_green(N)
+for i=1, ITERS do
+    ffi_image_to_gray(ffi_img, N)
 end
+local t_ffi = os.clock() - t1
+print(string.format("LuaJIT FFI struct: %.4f seconds", t_ffi))
+print(string.format("FFI speedup     : %.2fx faster", t_lua / t_ffi))
