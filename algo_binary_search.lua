@@ -1,4 +1,4 @@
-function binary_search(array, value)
+local function binary_search(array, value)
     local low = 1
     local high = #array
 
@@ -18,7 +18,7 @@ function binary_search(array, value)
     return nil
 end
 
-res = binary_search({2,4,6,8,9}, 6)
+local res = binary_search({2,4,6,8,9}, 6)
 assert(res == 3, "Expected 3, got " .. res)
 
 res = binary_search({2,4,6,8,9}, 7)
