@@ -43,7 +43,7 @@ end)
 
 -- 2. Procedural test rendering with Sobel filter
 test("Single frame procedural render with Sobel filter", function()
-    local ok, out = run_cmd(string.format("%s ffi_image_filter_studio.lua --once --filter 6", luajit))
+    local ok, out = run_cmd(string.format("%s ffi_image_filter_studio.lua --once --filter 7", luajit))
     assert(ok, "Command failed")
     local plain = strip_ansi(out)
     assert(plain:find("FILTER STUDIO"), "Missing header bar")
@@ -53,10 +53,18 @@ end)
 
 -- 3. Gaussian Blur on real portrait image
 test("Single frame render on real image with Gaussian Blur", function()
-    local ok, out = run_cmd(string.format("%s ffi_image_filter_studio.lua --once --filter 3 portraits/portrait_1_lady.png", luajit))
+    local ok, out = run_cmd(string.format("%s ffi_image_filter_studio.lua --once --filter 4 portraits/portrait_1_lady.png", luajit))
     assert(ok, "Command failed")
     local plain = strip_ansi(out)
     assert(plain:find("Gaussian Blur (5x5)", 1, true), "Gaussian blur title missing")
+end)
+
+-- 4. Cartoon / Cel-Shading filter test
+test("Cartoon / Comic Cel-shading filter renders properly", function()
+    local ok, out = run_cmd(string.format("%s ffi_image_filter_studio.lua --once --filter 2 portraits/portrait_1_lady.png", luajit))
+    assert(ok, "Cartoon command failed")
+    local plain = strip_ansi(out)
+    assert(plain:find("Cartoon / Comic Cel-Shading", 1, true), "Cartoon title missing")
 end)
 
 -- 4. Color adjustments: Invert, Brightness, Contrast, Saturation

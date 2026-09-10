@@ -305,6 +305,7 @@ end
 -- =====================================
 local FILTERS = {
     { id = "none",        name = "Original (No Filter)" },
+    { id = "cartoon",     name = "Cartoon / Comic Cel-Shading" },
     { id = "blur_box",    name = "Box Blur (3x3)" },
     { id = "blur_gauss",  name = "Gaussian Blur (5x5)" },
     { id = "sharpen",     name = "Sharpen" },
@@ -431,9 +432,79 @@ local function apply_sobel(src)
     return dst
 end
 
+-- Cartoon / Comic Cel-Shading: Bilateral/Gaussian edge-preserving smoothing + Sobel ink outlines + Color Quantization
+local function apply_cartoon(src)
+    local w, h = src.width, src.height
+
+    -- 1. Pre-smooth image to reduce noise while keeping major color blocks
+    local smoothed = apply_gaussian_blur_5x5(src)
+
+    -- 2. Detect strong outlines using Sobel gradient on smoothed image
+    local gx = { -1, 0, 1, -2, 0, 2, -1, 0, 1 }
+    local gy = { -1, -2, -1,  0,  0,  0,  1,  2,  1 }
+    local edge_mask = ffi.new("uint8_t[?]", w * h)
+
+    local edge_thresh = 42 -- Threshold for comic ink contours
+    for y = 0, h - 1 do
+        for x = 0, w - 1 do
+            local sum_x, sum_y = 0, 0
+            local ki = 1
+            for ky = -1, 1 do
+                for kx = -1, 1 do
+                    local px = math.min(w - 1, math.max(0, x + kx))
+                    local py = math.min(h - 1, math.max(0, y + ky))
+                    local p = smoothed.pixels[py * w + px]
+                    -- Rec 709 luminance
+                    local lum = 0.2126 * p.r + 0.7152 * p.g + 0.0722 * p.b
+                    sum_x = sum_x + lum * gx[ki]
+                    sum_y = sum_y + lum * gy[ki]
+                    ki = ki + 1
+                end
+            end
+            local mag = math.sqrt(sum_x * sum_x + sum_y * sum_y)
+            edge_mask[y * w + x] = (mag > edge_thresh) and 1 or 0
+        end
+    end
+
+    -- 3. Cel-shading / Color quantization (posterize into 6 discrete bands per channel)
+    -- and composite with black ink outlines
+    local dst = create_image(w, h)
+    local bands = 6
+    local step = 255.0 / (bands - 1)
+
+    for y = 0, h - 1 do
+        for x = 0, w - 1 do
+            local idx = y * w + x
+            if edge_mask[idx] == 1 then
+                -- Comic ink outline: stark black / dark ink line
+                set_pixel(dst, x, y, 12, 12, 18)
+            else
+                local p = smoothed.pixels[idx]
+                -- Quantize R, G, B channels
+                local qr = math.floor(math.floor(p.r / step + 0.5) * step)
+                local qg = math.floor(math.floor(p.g / step + 0.5) * step)
+                local qb = math.floor(math.floor(p.b / step + 0.5) * step)
+
+                -- Slight saturation & contrast punch for cartoon vibrancy
+                local lum = 0.2126 * qr + 0.7152 * qg + 0.0722 * qb
+                local sat = 1.25
+                qr = math.min(255, math.max(0, math.floor(lum + (qr - lum) * sat)))
+                qg = math.min(255, math.max(0, math.floor(lum + (qg - lum) * sat)))
+                qb = math.min(255, math.max(0, math.floor(lum + (qb - lum) * sat)))
+
+                set_pixel(dst, x, y, qr, qg, qb)
+            end
+        end
+    end
+
+    return dst
+end
+
 local function apply_filter(src, filter_id)
     if filter_id == "none" then
         return clone_image(src)
+    elseif filter_id == "cartoon" then
+        return apply_cartoon(src)
     elseif filter_id == "blur_box" then
         return apply_kernel_3x3(src, { 1, 1, 1,  1, 1, 1,  1, 1, 1 }, 9.0, 0)
     elseif filter_id == "blur_gauss" then
@@ -729,12 +800,12 @@ Usage:
   ./LuaJIT/src/luajit ffi_image_filter_studio.lua [options] [image_path]
 
 Options:
-  --filter, -f <1-9>       Apply initial convolution filter:
-                           1: None (Original)      2: Box Blur
-                           3: Gaussian Blur 5x5    4: Sharpen
-                           5: Unsharp Mask         6: Sobel Edge Detection
-                           7: Laplacian Edges      8: Emboss / Relief
-                           9: Ridge / Outline
+  --filter, -f <1-10>      Apply initial convolution/stylization filter:
+                           1: None (Original)      2: Cartoon / Cel-Shading
+                           3: Box Blur             4: Gaussian Blur 5x5
+                           5: Sharpen              6: Unsharp Mask
+                           7: Sobel Edge Detection 8: Laplacian Edges
+                           9: Emboss / Relief      10: Ridge / Outline
   --brightness, -b <num>   Adjust brightness (-100 to 100, default: 0)
   --contrast, -c <num>     Adjust contrast (0.2 to 3.0, default: 1.0)
   --gamma, -g <num>        Adjust gamma (0.2 to 3.0, default: 1.0)
