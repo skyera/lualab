@@ -159,6 +159,8 @@ local function read_key(timeout_ms)
                     if c2 == 66 then return "DOWN" end
                     if c2 == 67 then return "RIGHT" end
                     if c2 == 68 then return "LEFT" end
+                    if c2 == 53 and n >= 4 and key_buf[3] == 126 then return "PAGE_UP" end
+                    if c2 == 54 and n >= 4 and key_buf[3] == 126 then return "PAGE_DOWN" end
                 end
                 return "ESC"
             elseif c0 == 10 or c0 == 13 then
@@ -374,7 +376,7 @@ local function render_image_screen(img_entry, current_idx, total_count)
         current_idx, total_count, img_entry.filename))
     table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d pixels | Path: %s\27[0m\n",
         img_entry.size_str, img.width, img.height, img_entry.filepath))
-    table.insert(out, string.format("  \27[93m[←/P]\27[0m Prev   \27[93m[→/N]\27[0m Next   \27[1;92m[Enter/B]\27[0m Back to File List   \27[91m[Q]\27[0m Quit\n"))
+    table.insert(out, string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;92m[Enter/B]\27[0m Back to File List   \27[91m[Q]\27[0m Quit\n"))
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n\n")
 
     -- Calculate render scale to fit remaining terminal height
@@ -433,7 +435,7 @@ local function render_file_list(dir_path, images, selected_idx, page_offset, msg
     table.insert(out, "\27[1;34m" .. string.rep("═", bar_len) .. "\27[0m\n")
     table.insert(out, string.format("  \27[1;37mTERMINAL DIRECTORY IMAGE VIEWER\27[0m \27[90m(LuaJIT FFI Truecolor)\27[0m\n"))
     table.insert(out, string.format("  \27[90mDirectory:\27[0m \27[1;33m%s\27[0m \27[90m(Found %d image files, Level 1)\27[0m\n", dir_path, #images))
-    table.insert(out, string.format("  \27[93m[↑/↓/K/J]\27[0m Move Selection   \27[1;92m[Enter/Space]\27[0m View Image   \27[93m[1-9]\27[0m Direct Pick   \27[91m[Q]\27[0m Quit\n"))
+    table.insert(out, string.format("  \27[93m[↑/↓/K/J]\27[0m Move   \27[93m[PgUp/PgDn]\27[0m Page Scroll   \27[1;92m[Enter/Space]\27[0m View   \27[93m[1-9]\27[0m Pick   \27[91m[Q]\27[0m Quit\n"))
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
     if msg and #msg > 0 then
@@ -489,7 +491,7 @@ local function render_file_list(dir_path, images, selected_idx, page_offset, msg
 
     table.insert(out, "\n")
     if #images > max_items_per_page then
-        table.insert(out, string.format("  \27[90mShowing %d-%d of %d images. Use ↑ / ↓ to scroll.\27[0m\n",
+        table.insert(out, string.format("  \27[90mShowing %d-%d of %d images. Use ↑ / ↓ or PgUp / PgDn to scroll.\27[0m\n",
             page_start, page_end, #images))
     end
 
@@ -600,10 +602,10 @@ local function main()
                     break
                 elseif k == "ENTER" or k == "b" or k == "BACKSPACE" then
                     in_viewer = false
-                elseif k == "RIGHT" or k == "n" or k == "SPACE" then
+                elseif k == "RIGHT" or k == "n" or k == "SPACE" or k == "PAGE_DOWN" then
                     selected_idx = (selected_idx % #images) + 1
                     update_page_window()
-                elseif k == "LEFT" or k == "p" then
+                elseif k == "LEFT" or k == "p" or k == "PAGE_UP" then
                     selected_idx = (selected_idx - 2 + #images) % #images + 1
                     update_page_window()
                 end
@@ -614,12 +616,19 @@ local function main()
             current_msg = nil
 
             local k = read_key()
+            local _, term_h = get_terminal_size()
+            local page_step = math.max(4, term_h - 11)
+
             if not k or k == "q" or k == "ESC" then
                 break
             elseif k == "UP" or k == "k" then
                 if selected_idx > 1 then selected_idx = selected_idx - 1 end
             elseif k == "DOWN" or k == "j" then
                 if selected_idx < #images then selected_idx = selected_idx + 1 end
+            elseif k == "PAGE_DOWN" then
+                selected_idx = math.min(#images, selected_idx + page_step)
+            elseif k == "PAGE_UP" then
+                selected_idx = math.max(1, selected_idx - page_step)
             elseif k == "ENTER" or k == "SPACE" then
                 in_viewer = true
             elseif tonumber(k) and tonumber(k) >= 1 and tonumber(k) <= math.min(9, #images) then
