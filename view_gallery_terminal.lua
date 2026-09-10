@@ -1,5 +1,5 @@
 --[[
-    image_gallery_viewer.lua
+    view_gallery_terminal.lua
     Interactive Terminal Directory Image Viewer written in LuaJIT FFI.
 
     Features:
@@ -522,7 +522,7 @@ local function main()
     if args["-h"] or args["--help"] then
         print("\27[1;36mTerminal Directory Image Viewer (LuaJIT FFI Truecolor)\27[0m")
         print("Usage:")
-        print("  ./LuaJIT/src/luajit image_gallery_viewer.lua [directory] [options]")
+        print("  ./LuaJIT/src/luajit view_gallery_terminal.lua [directory] [options]")
         print("\nOptions:")
         print("  [directory]           Directory to scan (default: current directory '.')")
         print("  --select, -s <id>     Directly select and display image #id")

@@ -1,5 +1,5 @@
 --[[
-    game_snake_ffi.lua
+    ffi_game_snake.lua
     A terminal Snake arcade game built entirely using LuaJIT FFI.
 
     Demonstrates FFI capabilities:
