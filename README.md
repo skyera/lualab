@@ -59,6 +59,7 @@ make
   ./LuaJIT/src/luajit view_image_terminal.lua <image.png|jpg|ppm>  # Terminal image viewer with auto-scaling
   ./LuaJIT/src/luajit view_gallery_terminal.lua [dir]              # Interactive directory image viewer (defaults to current dir)
   ./LuaJIT/src/luajit gallery_portrait.lua  # Dynamic procedural portrait gallery with interactive selection
+  ./LuaJIT/src/luajit ffi_3d_viewer.lua     # Real-time interactive 3D polygonal mesh engine with Z-buffer shading
   ```
 
 - **Run Unit Tests:**
