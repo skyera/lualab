@@ -12,10 +12,11 @@
        - Supports arrow keys (↑ / ↓), direct number entry, Enter/Space to view, 'q' to quit.
        - CLI direct selection flag: --select <n> or -s <n>.
        - Non-interactive / pipe friendly fallback.
-    3. Terminal Truecolor Image Viewer:
-       - High-resolution rendering using 24-bit ANSI colors with UTF-8 half-block '▄' (2 vertical pixels per text row).
+    3. Dual Graphics Rendering Engine:
+       - Kitty Graphics Protocol: Auto-detected (Kitty, Ghostty, WezTerm). Renders native pixel-perfect images.
+       - ANSI Truecolor Half-Block: Clean fallback using 24-bit ANSI '▄' (2 vertical pixels per cell).
        - Auto-detects terminal width & height via POSIX ioctl(TIOCGWINSZ) and scales image to fit cleanly.
-       - Displays image dimensions, aspect ratio, and filename info.
+       - Command-line overrides: --kitty (force Kitty protocol), --half-block (force ANSI half-block).
        - In view mode: allows browsing previous/next images with ← / → / [P] / [N] or returning to menu with [Enter] / [B].
 ]]
 
@@ -357,10 +358,169 @@ local function load_image(filepath)
 end
 
 -- =========================================================================
--- 5. Terminal Truecolor Image Display
+-- 5. Kitty Graphics Protocol & Fallback Truecolor Renderer
 -- =========================================================================
-local function render_image_screen(img_entry, current_idx, total_count)
-    local term_w, term_h = get_terminal_size()
+local b64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+local function base64_encode(data)
+    local len = #data
+    local t = {}
+    local n = 0
+    for i = 1, len, 3 do
+        local b0 = data:byte(i)
+        local b1 = (i + 1 <= len) and data:byte(i + 1) or 0
+        local b2 = (i + 2 <= len) and data:byte(i + 2) or 0
+        local n3 = bit.bor(bit.lshift(b0, 16), bit.lshift(b1, 8), b2)
+        local c1 = bit.band(bit.rshift(n3, 18), 63)
+        local c2 = bit.band(bit.rshift(n3, 12), 63)
+        local c3 = bit.band(bit.rshift(n3, 6), 63)
+        local c4 = bit.band(n3, 63)
+        n = n + 1; t[n] = b64_chars:sub(c1 + 1, c1 + 1)
+        n = n + 1; t[n] = b64_chars:sub(c2 + 1, c2 + 1)
+        n = n + 1; t[n] = (i + 1 <= len) and b64_chars:sub(c3 + 1, c3 + 1) or "="
+        n = n + 1; t[n] = (i + 2 <= len) and b64_chars:sub(c4 + 1, c4 + 1) or "="
+    end
+    return table.concat(t)
+end
+
+-- Check if running inside tmux
+local function is_inside_tmux()
+    return os.getenv("TMUX") ~= nil
+end
+
+-- Write escape sequence with tmux DCS passthrough wrapper if inside tmux
+local function write_raw_terminal_seq(seq)
+    if is_inside_tmux() then
+        -- In tmux, graphics escape sequences need to be wrapped in DCS passthrough:
+        -- \027Ptmux;\027<escaped_seq_where_esc_is_doubled>\027\\
+        local escaped = seq:gsub("\027", "\027\027")
+        io.write("\027Ptmux;" .. escaped .. "\027\\")
+    else
+        io.write(seq)
+    end
+end
+
+-- Detect if Kitty graphics protocol is supported
+local function detect_kitty_support(force_mode)
+    if force_mode == "kitty" then return true end
+    if force_mode == "halfblock" then return false end
+
+    -- Direct environment variable checks
+    local term = os.getenv("TERM") or ""
+    local term_prog = os.getenv("TERM_PROGRAM") or ""
+    local kitty_pid = os.getenv("KITTY_PID")
+    local ghostty_res = os.getenv("GHOSTTY_RESOURCES_DIR")
+    local wezterm_pane = os.getenv("WEZTERM_PANE")
+
+    if kitty_pid or ghostty_res or wezterm_pane then
+        return true
+    end
+    if term:lower():find("kitty") or term_prog:lower():find("ghostty") or term_prog:lower():find("wezterm") then
+        return true
+    end
+
+    -- If inside tmux, query the outer terminal client type
+    if is_inside_tmux() then
+        local p = io.popen("tmux display-message -p '#{client_termname} #{client_termtype}' 2>/dev/null", "r")
+        if p then
+            local client_info = p:read("*a") or ""
+            p:close()
+            local cl = client_info:lower()
+            if cl:find("wezterm") or cl:find("kitty") or cl:find("ghostty") then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+-- Clear any Kitty graphics rendered on screen
+local function kitty_clear_screen()
+    write_raw_terminal_seq("\27_Ga=d,d=a\27\\")
+    io.flush()
+end
+
+-- Render image using Kitty Graphics Protocol
+local function render_image_kitty(img_entry, current_idx, total_count, term_w, term_h)
+    -- Check if image format is direct PNG, otherwise convert to PNG via ImageMagick/ffmpeg
+    local ext = img_entry.extension:lower()
+    local png_data = nil
+
+    if ext == "png" then
+        local f = io.open(img_entry.filepath, "rb")
+        if f then
+            png_data = f:read("*all")
+            f:close()
+        end
+    end
+
+    if not png_data then
+        -- Convert file to PNG in memory using magick or ffmpeg
+        local cmd = string.format("magick %q png:- 2>/dev/null || convert %q png:- 2>/dev/null", img_entry.filepath, img_entry.filepath)
+        local pipe = io.popen(cmd, "r")
+        if pipe then
+            png_data = pipe:read("*all")
+            pipe:close()
+        end
+    end
+
+    if not png_data or #png_data == 0 then
+        -- Fallback to ffmpeg
+        local ffmpeg_cmd = string.format("ffmpeg -v error -i %q -f image2pipe -vcodec png - 2>/dev/null", img_entry.filepath)
+        local ffmpeg_pipe = io.popen(ffmpeg_cmd, "r")
+        if ffmpeg_pipe then
+            png_data = ffmpeg_pipe:read("*all")
+            ffmpeg_pipe:close()
+        end
+    end
+
+    if not png_data or #png_data == 0 then
+        return false, "Could not convert image to PNG for Kitty protocol"
+    end
+
+    local b64 = base64_encode(png_data)
+    local reserved_header_rows = 7
+    local max_rows = math.max(6, term_h - reserved_header_rows - 1)
+    local max_cols = math.max(10, term_w - 4)
+
+    -- Header
+    local bar_len = math.min(term_w - 2, 80)
+    io.write("\27[H\27[2J") -- Clear screen & home cursor
+    kitty_clear_screen()
+
+    io.write("\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
+    io.write(string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m \27[1;95m(Kitty Graphics Protocol)\27[0m\n",
+        current_idx, total_count, img_entry.filename))
+    io.write(string.format("  \27[90mSize: %s | Max display area: %dx%d cells | Path: %s\27[0m\n",
+        img_entry.size_str, max_cols, max_rows, img_entry.filepath))
+    io.write(string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;92m[Enter/B]\27[0m Back to File List   \27[91m[Q]\27[0m Quit\n"))
+    io.write("\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n\n")
+
+    -- Stream chunks (4096 bytes per chunk as recommended by Kitty spec)
+    local chunk_size = 4096
+    local total_len = #b64
+    local pos = 1
+
+    while pos <= total_len do
+        local chunk = b64:sub(pos, pos + chunk_size - 1)
+        pos = pos + chunk_size
+        local has_more = (pos <= total_len) and 1 or 0
+
+        if pos - chunk_size == 1 then
+            -- First chunk: specify f=100 (PNG), a=T (transmit & display), c=cols, r=rows
+            write_raw_terminal_seq(string.format("\27_Gf=100,a=T,c=%d,r=%d,m=%d;%s\27\\", max_cols, max_rows, has_more, chunk))
+        else
+            write_raw_terminal_seq(string.format("\27_Gm=%d;%s\27\\", has_more, chunk))
+        end
+    end
+
+    io.write("\n")
+    io.flush()
+    return true
+end
+
+-- Render image using ANSI Truecolor Half-Block (▄)
+local function render_image_halfblock(img_entry, current_idx, total_count, term_w, term_h)
     local img, err = load_image(img_entry.filepath)
     if not img then
         return false, err
@@ -372,25 +532,35 @@ local function render_image_screen(img_entry, current_idx, total_count)
     -- Top header bar
     local bar_len = math.min(term_w - 2, 80)
     table.insert(out, "\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
-    table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
+    table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m \27[90m(ANSI Truecolor Half-Block)\27[0m\n",
         current_idx, total_count, img_entry.filename))
     table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d pixels | Path: %s\27[0m\n",
         img_entry.size_str, img.width, img.height, img_entry.filepath))
     table.insert(out, string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;92m[Enter/B]\27[0m Back to File List   \27[91m[Q]\27[0m Quit\n"))
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n\n")
 
-    -- Calculate render scale to fit remaining terminal height
+    -- Calculate render scale to fit remaining terminal height while preserving original aspect ratio.
+    -- Note: A terminal character cell is roughly twice as tall as it is wide (approx 1:2 ratio).
+    -- Since each character cell row contains 2 vertical pixels ('▄' top & bottom),
+    -- one character column horizontally corresponds to 1 character cell vertically (2 half-block pixels).
     local reserved_header_rows = 7
     local max_char_h = math.max(6, term_h - reserved_header_rows)
     local target_w = math.max(10, term_w - 4)
-    local target_h = max_char_h * 2 -- Each character row holds 2 vertical pixels
+    local target_h = max_char_h * 2 -- 2 vertical pixels per text row
 
-    local scale_x = target_w / img.width
-    local scale_y = target_h / img.height
-    local scale = math.min(scale_x, scale_y)
+    -- Character cell aspect ratio correction: terminal font height/width ~ 2.0
+    -- So in half-block space, 1 column = 1 pixel width, but represents ~2 vertical half-block pixels of optical height.
+    -- To keep the physical image aspect ratio (img.width / img.height):
+    local optical_aspect = (img.width / img.height) * 2.0 -- scale horizontal columns
+    local scale_by_height = target_h / img.height
+    local out_h = math.max(2, math.floor(img.height * scale_by_height))
+    local out_w = math.max(2, math.floor((out_h / 2) * optical_aspect))
 
-    local out_w = math.max(1, math.floor(img.width * scale))
-    local out_h = math.max(1, math.floor(img.height * scale))
+    if out_w > target_w then
+        out_w = target_w
+        out_h = math.max(2, math.floor((out_w / optical_aspect) * 2))
+    end
+
     if out_h % 2 ~= 0 then out_h = out_h + 1 end
 
     local margin_left = math.max(0, math.floor((term_w - out_w) / 2))
@@ -421,6 +591,66 @@ local function render_image_screen(img_entry, current_idx, total_count)
     io.write(table.concat(out))
     io.flush()
     return true
+end
+
+-- Render image using iTerm2 Graphics Protocol (widely supported by WezTerm, iTerm2, and tmux)
+local function render_image_iterm2(img_entry, current_idx, total_count, term_w, term_h)
+    local f = io.open(img_entry.filepath, "rb")
+    if not f then return false, "Cannot open image file" end
+    local raw_data = f:read("*all")
+    f:close()
+
+    local b64 = base64_encode(raw_data)
+    local reserved_header_rows = 7
+    local max_rows = math.max(6, term_h - reserved_header_rows - 1)
+    local max_cols = math.max(10, term_w - 4)
+
+    local bar_len = math.min(term_w - 2, 80)
+    io.write("\27[H\27[2J") -- Clear screen & home cursor
+    kitty_clear_screen()
+
+    io.write("\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
+    io.write(string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m \27[1;95m(Pixel Graphics - WezTerm/iTerm2/Kitty)\27[0m\n",
+        current_idx, total_count, img_entry.filename))
+    io.write(string.format("  \27[90mSize: %s | Max display area: %dx%d cells | Path: %s\27[0m\n",
+        img_entry.size_str, max_cols, max_rows, img_entry.filepath))
+    io.write(string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;92m[Enter/B]\27[0m Back to File List   \27[91m[Q]\27[0m Quit\n"))
+    io.write("\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n\n")
+
+    -- iTerm2 OSC 1337 escape sequence:
+    -- In iTerm2/WezTerm specification: setting height=<rows> and width=auto with preserveAspectRatio=1
+    -- fits the image within the screen height while strictly preserving its original aspect ratio!
+    local iterm_seq = string.format("\27]1337;File=inline=1;height=%d;width=auto;preserveAspectRatio=1:%s\007\n",
+        max_rows, b64)
+    write_raw_terminal_seq(iterm_seq)
+    io.flush()
+    return true
+end
+
+-- Unified image renderer: Dispatches to high-res pixel protocol (Kitty or iTerm2) if supported, falls back to Half-Block
+-- Unified image renderer: Dispatches to high-res pixel protocol (iTerm2 or Kitty) if supported, falls back to Half-Block
+local function render_image_screen(img_entry, current_idx, total_count, force_protocol)
+    local term_w, term_h = get_terminal_size()
+
+    if force_protocol == "kitty" then
+        local ok, err = render_image_kitty(img_entry, current_idx, total_count, term_w, term_h)
+        if ok then return true end
+    elseif force_protocol == "iterm" then
+        local ok, err = render_image_iterm2(img_entry, current_idx, total_count, term_w, term_h)
+        if ok then return true end
+    elseif force_protocol ~= "halfblock" then
+        local use_pixel = detect_kitty_support(nil)
+        if use_pixel then
+            -- For WezTerm (especially through tmux), iTerm2 protocol is exceptionally reliable:
+            local ok_iterm, _ = render_image_iterm2(img_entry, current_idx, total_count, term_w, term_h)
+            if ok_iterm then return true end
+
+            local ok_kitty, _ = render_image_kitty(img_entry, current_idx, total_count, term_w, term_h)
+            if ok_kitty then return true end
+        end
+    end
+
+    return render_image_halfblock(img_entry, current_idx, total_count, term_w, term_h)
 end
 
 -- =========================================================================
@@ -520,17 +750,30 @@ local function main()
     end
 
     if args["-h"] or args["--help"] then
-        print("\27[1;36mTerminal Directory Image Viewer (LuaJIT FFI Truecolor)\27[0m")
+        print("\27[1;36mTerminal Directory Image Viewer (LuaJIT FFI)\27[0m")
         print("Usage:")
         print("  ./LuaJIT/src/luajit view_gallery_terminal.lua [directory] [options]")
         print("\nOptions:")
         print("  [directory]           Directory to scan (default: current directory '.')")
         print("  --select, -s <id>     Directly select and display image #id")
+        print("  --kitty               Force Kitty Graphics Protocol (high-res pixel rendering)")
+        print("  --iterm               Force iTerm2 / WezTerm inline image protocol")
+        print("  --half-block          Force ANSI Truecolor Half-Block fallback renderer")
         print("  --no-interactive      Non-interactive script/batch mode")
         print("  -h, --help            Show this help information")
         print("\nSupported formats:")
         print("  - PNG, JPG/JPEG, PPM, WEBP, GIF, BMP")
         os.exit(0)
+    end
+
+    -- Force mode flag: --kitty, --iterm, or --half-block
+    local force_protocol = nil
+    if args["--kitty"] then
+        force_protocol = "kitty"
+    elseif args["--iterm"] or args["--iterm2"] then
+        force_protocol = "iterm"
+    elseif args["--half-block"] or args["--halfblock"] then
+        force_protocol = "halfblock"
     end
 
     -- 1. Determine target directory: positional arg or default '.'
@@ -553,7 +796,7 @@ local function main()
 
     -- 3. If direct CLI selection is specified
     if cli_select and cli_select >= 1 and cli_select <= #images then
-        render_image_screen(images[cli_select], cli_select, #images)
+        render_image_screen(images[cli_select], cli_select, #images, force_protocol)
         return
     end
 
@@ -566,7 +809,7 @@ local function main()
         if line and line ~= "q" and line ~= "Q" then
             local sel = tonumber(line:match("%d+"))
             if sel and sel >= 1 and sel <= #images then
-                render_image_screen(images[sel], sel, #images)
+                render_image_screen(images[sel], sel, #images, force_protocol)
             end
         end
         return
@@ -592,7 +835,7 @@ local function main()
 
     while true do
         if in_viewer then
-            local ok, view_err = render_image_screen(images[selected_idx], selected_idx, #images)
+            local ok, view_err = render_image_screen(images[selected_idx], selected_idx, #images, force_protocol)
             if not ok then
                 in_viewer = false
                 current_msg = "Failed to load image: " .. tostring(view_err)
@@ -601,11 +844,14 @@ local function main()
                 if k == "q" or k == "ESC" then
                     break
                 elseif k == "ENTER" or k == "b" or k == "BACKSPACE" then
+                    kitty_clear_screen()
                     in_viewer = false
                 elseif k == "RIGHT" or k == "n" or k == "SPACE" or k == "PAGE_DOWN" then
+                    kitty_clear_screen()
                     selected_idx = (selected_idx % #images) + 1
                     update_page_window()
                 elseif k == "LEFT" or k == "p" or k == "PAGE_UP" then
+                    kitty_clear_screen()
                     selected_idx = (selected_idx - 2 + #images) % #images + 1
                     update_page_window()
                 end
@@ -638,6 +884,7 @@ local function main()
         end
     end
 
+    kitty_clear_screen()
     disable_raw_mode()
     print("\n\27[1;36mExited Terminal Image Viewer. Goodbye!\27[0m")
 end
