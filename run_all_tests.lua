@@ -12,6 +12,7 @@ local test_suites = {
     { file = "test_ffi_3d_viewer.lua", description = "FFI 3D Wireframe/Lambertian Software Renderer" },
     { file = "test_ffi_fractal_explorer.lua", description = "FFI Multi-Fractal Interactive Renderer" },
     { file = "test_ffi_image_filter_studio.lua", description = "FFI Image Filter & Convolution Studio" },
+    { file = "test_todo_tui.lua", description = "LuaJIT FFI Todo TUI Application Suite" },
 }
 
 local luajit_bin = "./LuaJIT/src/luajit"

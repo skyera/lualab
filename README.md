@@ -62,6 +62,7 @@ make
   ./LuaJIT/src/luajit ffi_3d_viewer.lua     # Real-time interactive 3D polygonal mesh engine with Z-buffer shading
   ./LuaJIT/src/luajit ffi_fractal_explorer.lua # Real-time truecolor mathematical fractal explorer (Mandelbrot, Julia, etc.)
   ./LuaJIT/src/luajit ffi_image_filter_studio.lua # Interactive Photoshop/Lightroom-style image processing & filter studio
+  ./LuaJIT/src/luajit todo_tui.lua         # Interactive keyboard-driven Todo TUI with modal dialogs & categories
   ```
 
 - **Run Unit Tests:**
