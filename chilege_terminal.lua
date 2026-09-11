@@ -63,7 +63,8 @@ end
 -- =========================================================================
 -- 2. Procedural Landscape: 敕勒川 (Chile Steppe, Yin Mountains, Yurt, Sheep)
 -- =========================================================================
-local function draw_chile_landscape(width, height)
+local function draw_chile_landscape(width, height, pad_str)
+    pad_str = pad_str or ""
     local buf = ffi.new("PixelRGB[?]", width * height)
 
     -- Sky palette: "天似穹庐，笼盖四野" (Vast dome sky)
@@ -77,30 +78,32 @@ local function draw_chile_landscape(width, height)
         local m1 = math.sin(nx * 5.5) * (height * 0.08)
         local m2 = math.cos(nx * 11.2) * (height * 0.04)
         local m3 = math.sin(nx * 22.0) * (height * 0.02)
-        return height * 0.38 + m1 + m2 + m3
+        return height * 0.36 + m1 + m2 + m3
     end
 
     -- Rolling Steppe Grassland (敕勒川，天苍苍，野茫茫)
     local function hill1_y(x)
-        return height * 0.54 + math.sin(x * 0.05) * (height * 0.05)
+        local nx = x / width
+        return height * 0.54 + math.sin(nx * 6.28) * (height * 0.05)
     end
     local function hill2_y(x)
-        return height * 0.70 + math.sin(x * 0.035 + 2.1) * (height * 0.06)
+        local nx = x / width
+        return height * 0.70 + math.sin(nx * 5.0 + 2.1) * (height * 0.05)
     end
 
     -- Yurt (穹庐) position
-    local yurt_cx = math.floor(width * 0.72)
+    local yurt_cx = math.floor(width * 0.74)
     local yurt_cy = math.floor(hill1_y(yurt_cx))
-    local yurt_rad = math.max(3, math.floor(height * 0.08))
+    local yurt_rad = math.max(2, math.floor(height * 0.08))
 
     -- Sheep & cattle positions (见牛羊)
     local animals = {
-        { x = math.floor(width * 0.22), y = math.floor(hill2_y(width * 0.22) + 2), type = "cow" },
-        { x = math.floor(width * 0.26), y = math.floor(hill2_y(width * 0.26) + 3), type = "calf" },
-        { x = math.floor(width * 0.40), y = math.floor(hill2_y(width * 0.40) + 1), type = "sheep" },
-        { x = math.floor(width * 0.43), y = math.floor(hill2_y(width * 0.43) + 2), type = "sheep" },
-        { x = math.floor(width * 0.47), y = math.floor(hill2_y(width * 0.47) + 1), type = "sheep" },
-        { x = math.floor(width * 0.82), y = math.floor(hill1_y(width * 0.82) + 1), type = "sheep" },
+        { x = math.floor(width * 0.22), y = math.floor(hill2_y(math.floor(width * 0.22))), type = "cow" },
+        { x = math.floor(width * 0.27), y = math.floor(hill2_y(math.floor(width * 0.27)) + 1), type = "calf" },
+        { x = math.floor(width * 0.40), y = math.floor(hill2_y(math.floor(width * 0.40))), type = "sheep" },
+        { x = math.floor(width * 0.44), y = math.floor(hill2_y(math.floor(width * 0.44)) + 1), type = "sheep" },
+        { x = math.floor(width * 0.48), y = math.floor(hill2_y(math.floor(width * 0.48))), type = "sheep" },
+        { x = math.floor(width * 0.84), y = math.floor(hill1_y(math.floor(width * 0.84))), type = "sheep" },
     }
 
     for y = 0, height - 1 do
@@ -118,37 +121,34 @@ local function draw_chile_landscape(width, height)
 
             -- Subtle steppe clouds
             local cloud_dist = math.abs(y - height * 0.18)
-            local cloud_density = math.sin(x * 0.08) * math.cos(y * 0.15)
+            local cloud_density = math.sin((x / width) * 8.0) * math.cos(ny * 12.0)
             if cloud_dist < height * 0.08 and cloud_density > 0.3 then
                 pixel = lerp_rgb(pixel, { r = 250, g = 252, b = 255 }, 0.55)
             end
 
             -- 2. Yin Mountain Ridge (阴山)
             local ym = mountain_y(x)
-            if y >= ym and y < hill1_y(x) then
-                local mt = (y - ym) / (hill1_y(x) - ym)
+            local h1 = hill1_y(x)
+            local h2 = hill2_y(x)
+
+            if y >= ym and y < h1 then
+                local mt = (y - ym) / math.max(0.01, (h1 - ym))
                 local mountain_crest = { r = 95,  g = 120, b = 155 } -- Slate blue haze
                 local mountain_base  = { r = 70,  g = 105, b = 125 }
                 pixel = lerp_rgb(mountain_crest, mountain_base, mt)
                 -- Crest sunlight rim
-                if y <= ym + 1.2 then
+                if y <= ym + 1.1 then
                     pixel = lerp_rgb(pixel, { r = 180, g = 205, b = 230 }, 0.5)
                 end
-            end
-
-            -- 3. Middle Steppe (敕勒川远景)
-            local h1 = hill1_y(x)
-            local h2 = hill2_y(x)
-            if y >= h1 and y < h2 then
-                local t = (y - h1) / (h2 - h1)
+            elseif y >= h1 and y < h2 then
+                -- 3. Middle Steppe (敕勒川远景)
+                local t = (y - h1) / math.max(0.01, (h2 - h1))
                 local grass_far = { r = 110, g = 160, b = 80 }
                 local grass_mid = { r = 75,  g = 135, b = 55 }
                 pixel = lerp_rgb(grass_far, grass_mid, t)
-            end
-
-            -- 4. Foreground Steppe (天苍苍，野茫茫，风吹草低)
-            if y >= h2 then
-                local t = (y - h2) / (height - h2)
+            elseif y >= h2 then
+                -- 4. Foreground Steppe (天苍苍，野茫茫，风吹草低)
+                local t = (y - h2) / math.max(0.01, (height - h2))
                 local grass_near = { r = 90, g = 180, b = 50 }
                 local grass_deep = { r = 35, g = 115, b = 30 }
                 pixel = lerp_rgb(grass_near, grass_deep, t)
@@ -178,18 +178,24 @@ local function draw_chile_landscape(width, height)
 
     -- 6. Stamp Grazing Cattle & Sheep (风吹草低见牛羊)
     for _, a in ipairs(animals) do
-        if a.x >= 0 and a.x < width - 3 and a.y >= 0 and a.y < height - 2 then
-            if a.type == "sheep" then
-                -- White fluffy sheep
-                buf[a.y * width + a.x]     = { r = 255, g = 255, b = 255 }
-                buf[a.y * width + a.x + 1] = { r = 250, g = 250, b = 245 }
-                buf[(a.y + 1) * width + a.x] = { r = 40, g = 30, b = 25 } -- Dark legs
-            elseif a.type == "cow" then
-                -- Brown prairie cattle
-                buf[a.y * width + a.x]     = { r = 160, g = 95,  b = 45  }
-                buf[a.y * width + a.x + 1] = { r = 145, g = 80,  b = 35  }
-                buf[a.y * width + a.x + 2] = { r = 115, g = 60,  b = 25  }
-                buf[(a.y + 1) * width + a.x + 1] = { r = 30, g = 25, b = 20 }
+        local ay = math.min(height - 2, math.max(0, a.y))
+        local ax = math.min(width - 3, math.max(0, a.x))
+        if a.type == "sheep" then
+            -- White fluffy sheep
+            buf[ay * width + ax]     = { r = 255, g = 255, b = 255 }
+            buf[ay * width + ax + 1] = { r = 250, g = 250, b = 245 }
+            if ay + 1 < height then
+                buf[(ay + 1) * width + ax] = { r = 40, g = 30, b = 25 } -- Dark legs
+            end
+        elseif a.type == "cow" then
+            -- Brown prairie cattle
+            buf[ay * width + ax]     = { r = 160, g = 95,  b = 45  }
+            buf[ay * width + ax + 1] = { r = 145, g = 80,  b = 35  }
+            if ax + 2 < width then
+                buf[ay * width + ax + 2] = { r = 115, g = 60,  b = 25  }
+            end
+            if ay + 1 < height and ax + 1 < width then
+                buf[(ay + 1) * width + ax + 1] = { r = 30, g = 25, b = 20 }
             end
         end
     end
@@ -197,7 +203,7 @@ local function draw_chile_landscape(width, height)
     -- Return 24-bit Truecolor half-block ANSI string
     local out = {}
     for y = 0, height - 1, 2 do
-        local line = {}
+        local line = { pad_str }
         for x = 0, width - 1 do
             local top = buf[y * width + x]
             local bot_y = math.min(height - 1, y + 1)
@@ -216,23 +222,31 @@ end
 -- =========================================================================
 -- 3. Display Poem & Landscape
 -- =========================================================================
-local function display_chilege()
+local function display_chilege(opt_w, opt_h)
     local term_w, term_h = get_terminal_size()
     local out = {}
 
     table.insert(out, "\27[H\27[2J") -- Clear screen & home
-
-    -- Render Landscape backdrop (top half)
-    local landscape_w = math.max(40, term_w)
-    local landscape_h = math.max(16, math.floor(term_h * 0.75))
-    table.insert(out, draw_chile_landscape(landscape_w, landscape_h))
 
     -- Classical Poem Card
     local card_w = math.min(term_w - 4, 76)
     local pad_l = math.max(0, math.floor((term_w - card_w) / 2))
     local p_str = string.rep(" ", pad_l)
 
-    table.insert(out, "\n" .. p_str .. "\27[38;2;212;175;55m╭" .. string.rep("─", card_w - 2) .. "╮\27[0m\n")
+    -- Sizing the landscape image to be a compact vignette centered above the card
+    local landscape_w = opt_w or math.min(card_w - 6, 56)
+    if landscape_w < 24 then landscape_w = 24 end
+    if landscape_w > term_w then landscape_w = term_w end
+
+    local landscape_h = opt_h or 10 -- 10 pixels = 5 terminal rows
+    if landscape_h % 2 ~= 0 then landscape_h = landscape_h + 1 end
+
+    local img_pad = string.rep(" ", math.max(0, math.floor((term_w - landscape_w) / 2)))
+
+    table.insert(out, "\n")
+    table.insert(out, draw_chile_landscape(landscape_w, landscape_h, img_pad))
+
+    table.insert(out, p_str .. "\27[38;2;212;175;55m╭" .. string.rep("─", card_w - 2) .. "╮\27[0m\n")
 
     -- Helper function to calculate exact visual character cell width
     -- (Chinese/CJK characters & full-width punctuation = 2 columns, ASCII = 1 column)
@@ -299,4 +313,4 @@ local function display_chilege()
     io.flush()
 end
 
-display_chilege()
+display_chilege(tonumber(arg and arg[1]), tonumber(arg and arg[2]))
