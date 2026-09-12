@@ -68,6 +68,7 @@ make
   ./LuaJIT/src/luajit ffi_chip8.lua        # Retro Chip-8 CPU emulator & VM with 7 built-in classic games
   ./LuaJIT/src/luajit ffi_falling_sand.lua # Interactive Falling Sand & Cellular Physics Sandbox (Truecolor & Mouse)
   ./LuaJIT/src/luajit ffi_demoscene_studio.lua # Classic 1990s Demoscene Effects Studio (DOOM Fire, Plasma, Comanche Voxel, Starfield, Matrix)
+  ./LuaJIT/src/luajit ffi_wolf3d_raycaster.lua # Wolfenstein-style 3D Raycasting Engine (DDA, Textures, Doors, Sprites & Weapons)
   ```
 
 - **Run Unit Tests:**
