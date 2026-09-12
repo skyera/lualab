@@ -10,26 +10,33 @@ print("=== Running Unit Tests for gallery_portrait.lua ===")
 -- Load gallery_portrait in non-executing mode or require components
 local chunk = assert(loadfile("gallery_portrait.lua"))
 
+local luajit = "luajit"
+local f_check = io.open("./LuaJIT/src/luajit", "rb") or io.open("./LuaJIT/src/luajit.exe", "rb")
+if f_check then
+    f_check:close()
+    luajit = (package.config:sub(1,1) == '\\') and ".\\LuaJIT\\src\\luajit.exe" or "./LuaJIT/src/luajit"
+end
+
 -- Test direct execution with flags
 local tests = {
     {
         name = "Help banner output",
-        cmd = "./LuaJIT/src/luajit gallery_portrait.lua --help",
+        cmd = luajit .. " gallery_portrait.lua --help",
         expect = "Portrait Gallery of Ladies"
     },
     {
         name = "Batch image generation and save-all",
-        cmd = "printf 'q\\n' | ./LuaJIT/src/luajit gallery_portrait.lua --save-all --no-interactive",
+        cmd = "echo q| " .. luajit .. " gallery_portrait.lua --save-all --no-interactive",
         expect = "Saved portraits/portrait_1_lady.ppm"
     },
     {
         name = "Direct portrait selection (--select 3)",
-        cmd = "./LuaJIT/src/luajit gallery_portrait.lua --select 3",
+        cmd = luajit .. " gallery_portrait.lua --select 3",
         expect = "LADY PORTRAIT INSPECTOR #3"
     },
     {
         name = "HTML gallery generation",
-        cmd = "printf 'q\\n' | ./LuaJIT/src/luajit gallery_portrait.lua --html test_gallery.html --no-interactive",
+        cmd = "echo q| " .. luajit .. " gallery_portrait.lua --html test_gallery.html --no-interactive",
         expect = "Exported interactive HTML gallery to 'test_gallery.html'"
     }
 }
