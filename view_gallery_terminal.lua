@@ -539,21 +539,17 @@ local function load_image(filepath)
         return img, err
     end
 
-    -- ImageMagick conversion pipeline
-    local cmd = string.format("magick %q ppm:- 2>/dev/null || convert %q ppm:- 2>/dev/null", filepath, filepath)
+    local devnull = is_windows and "nul" or "/dev/null"
+    local cmd
+    if is_windows then
+        cmd = string.format("magick %q ppm:- 2>%s || ffmpeg -v error -i %q -f image2pipe -vcodec ppm - 2>%s", filepath, devnull, filepath, devnull)
+    else
+        cmd = string.format("magick %q ppm:- 2>%s || convert %q ppm:- 2>%s || ffmpeg -v error -i %q -f image2pipe -vcodec ppm - 2>%s", filepath, devnull, filepath, devnull, filepath, devnull)
+    end
     local pipe = io.popen(cmd, "r")
     if pipe then
         local img = parse_ppm_stream(pipe)
         pipe:close()
-        if img then return img end
-    end
-
-    -- ffmpeg conversion fallback
-    local ffmpeg_cmd = string.format("ffmpeg -v error -i %q -f image2pipe -vcodec ppm - 2>/dev/null", filepath)
-    local ffmpeg_pipe = io.popen(ffmpeg_cmd, "r")
-    if ffmpeg_pipe then
-        local img = parse_ppm_stream(ffmpeg_pipe)
-        ffmpeg_pipe:close()
         if img then return img end
     end
 
@@ -658,22 +654,17 @@ local function render_image_kitty(img_entry, current_idx, total_count, term_w, t
     end
 
     if not png_data then
-        -- Convert file to PNG in memory using magick or ffmpeg
-        local cmd = string.format("magick %q png:- 2>/dev/null || convert %q png:- 2>/dev/null", img_entry.filepath, img_entry.filepath)
+        local devnull = is_windows and "nul" or "/dev/null"
+        local cmd
+        if is_windows then
+            cmd = string.format("magick %q png:- 2>%s || ffmpeg -v error -i %q -f image2pipe -vcodec png - 2>%s", img_entry.filepath, devnull, img_entry.filepath, devnull)
+        else
+            cmd = string.format("magick %q png:- 2>%s || convert %q png:- 2>%s || ffmpeg -v error -i %q -f image2pipe -vcodec png - 2>%s", img_entry.filepath, devnull, img_entry.filepath, devnull, img_entry.filepath, devnull)
+        end
         local pipe = io.popen(cmd, "r")
         if pipe then
             png_data = pipe:read("*all")
             pipe:close()
-        end
-    end
-
-    if not png_data or #png_data == 0 then
-        -- Fallback to ffmpeg
-        local ffmpeg_cmd = string.format("ffmpeg -v error -i %q -f image2pipe -vcodec png - 2>/dev/null", img_entry.filepath)
-        local ffmpeg_pipe = io.popen(ffmpeg_cmd, "r")
-        if ffmpeg_pipe then
-            png_data = ffmpeg_pipe:read("*all")
-            ffmpeg_pipe:close()
         end
     end
 
