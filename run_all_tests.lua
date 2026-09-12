@@ -17,6 +17,7 @@ local test_suites = {
     { file = "test_ffi_russian_block.lua", description = "LuaJIT FFI Russian Block (Tetris) Suite" },
     { file = "test_ffi_chinese_chess.lua", description = "LuaJIT FFI Chinese Chess (Xiangqi) Engine & Rules Suite" },
     { file = "test_ffi_chip8.lua", description = "LuaJIT FFI Retro Chip-8 CPU Emulator & VM Suite" },
+    { file = "test_ffi_falling_sand.lua", description = "LuaJIT FFI Falling Sand & Cellular Physics Suite" },
 }
 
 local luajit_bin = "luajit"

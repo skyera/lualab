@@ -66,6 +66,7 @@ make
   ./LuaJIT/src/luajit ffi_russian_block.lua # Classic Russian Block (Tetris) terminal game in pure LuaJIT FFI
   ./LuaJIT/src/luajit ffi_chinese_chess.lua # Chinese Chess (Xiangqi) engine with Alpha-Beta AI & ANSI/ASCII TUI
   ./LuaJIT/src/luajit ffi_chip8.lua        # Retro Chip-8 CPU emulator & VM with 7 built-in classic games
+  ./LuaJIT/src/luajit ffi_falling_sand.lua # Interactive Falling Sand & Cellular Physics Sandbox (Truecolor & Mouse)
   ```
 
 - **Run Unit Tests:**
