@@ -925,7 +925,7 @@ local function main()
         local frame_duration = get_time_sec() - now
         local sleep_rem = 0.033 - frame_duration
         if sleep_rem > 0.001 then
-            ffi.C.poll(nil, 0, math.floor(sleep_rem * 1000))
+            sleep_ms(math.floor(sleep_rem * 1000))
         end
     end
 
