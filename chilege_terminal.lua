@@ -14,28 +14,79 @@
 local ffi = require("ffi")
 
 -- =========================================================================
--- 1. FFI POSIX Terminal Window Size
+-- 1. FFI Terminal Window Size & OS Initialization
 -- =========================================================================
-ffi.cdef[[
-    struct winsize {
-        unsigned short ws_row;
-        unsigned short ws_col;
-        unsigned short ws_xpixel;
-        unsigned short ws_ypixel;
-    };
-    int ioctl(int fd, unsigned long request, void *argp);
+local is_windows = (ffi.os == "Windows")
 
+ffi.cdef[[
     typedef struct {
         uint8_t r, g, b;
     } PixelRGB;
 ]]
 
+if is_windows then
+    ffi.cdef[[
+        typedef struct { short X; short Y; } COORD;
+        typedef struct { short Left; short Top; short Right; short Bottom; } SMALL_RECT;
+        typedef struct {
+            COORD      dwSize;
+            COORD      dwCursorPosition;
+            uint16_t   wAttributes;
+            SMALL_RECT srWindow;
+            COORD      dwMaximumWindowSize;
+        } CONSOLE_SCREEN_BUFFER_INFO;
+
+        void* __stdcall GetStdHandle(uint32_t nStdHandle);
+        int   __stdcall GetConsoleScreenBufferInfo(void* hConsoleOutput, CONSOLE_SCREEN_BUFFER_INFO* lpConsoleScreenBufferInfo);
+        int   __stdcall GetConsoleMode(void* hConsoleHandle, uint32_t* lpMode);
+        int   __stdcall SetConsoleMode(void* hConsoleHandle, uint32_t dwMode);
+        int   __stdcall SetConsoleOutputCP(uint32_t wCodePageID);
+    ]]
+
+    -- Initialize Windows console for UTF-8 and ANSI Virtual Terminal Processing
+    pcall(function()
+        local STD_OUTPUT_HANDLE = 0xFFFFFFF5 -- ((uint32_t)-11)
+        local hOut = ffi.C.GetStdHandle(STD_OUTPUT_HANDLE)
+        ffi.C.SetConsoleOutputCP(65001) -- UTF-8
+
+        local mode = ffi.new("uint32_t[1]")
+        if ffi.C.GetConsoleMode(hOut, mode) ~= 0 then
+            local ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+            local bit = require("bit")
+            ffi.C.SetConsoleMode(hOut, bit.bor(mode[0], ENABLE_VIRTUAL_TERMINAL_PROCESSING))
+        end
+    end)
+else
+    ffi.cdef[[
+        struct winsize {
+            unsigned short ws_row;
+            unsigned short ws_col;
+            unsigned short ws_xpixel;
+            unsigned short ws_ypixel;
+        };
+        int ioctl(int fd, unsigned long request, void *argp);
+    ]]
+end
+
 local TIOCGWINSZ = 0x5413
 
 local function get_terminal_size()
-    local ws = ffi.new("struct winsize")
-    if ffi.C.ioctl(1, TIOCGWINSZ, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
-        return tonumber(ws.ws_col), tonumber(ws.ws_row)
+    if is_windows then
+        local STD_OUTPUT_HANDLE = 0xFFFFFFF5
+        local hOut = ffi.C.GetStdHandle(STD_OUTPUT_HANDLE)
+        local csbi = ffi.new("CONSOLE_SCREEN_BUFFER_INFO")
+        if ffi.C.GetConsoleScreenBufferInfo(hOut, csbi) ~= 0 then
+            local w = csbi.srWindow.Right - csbi.srWindow.Left + 1
+            local h = csbi.srWindow.Bottom - csbi.srWindow.Top + 1
+            if w > 0 and h > 0 then
+                return tonumber(w), tonumber(h)
+            end
+        end
+    else
+        local ws = ffi.new("struct winsize")
+        if pcall(function() return ffi.C.ioctl(1, TIOCGWINSZ, ws) end) and ws.ws_col > 0 and ws.ws_row > 0 then
+            return tonumber(ws.ws_col), tonumber(ws.ws_row)
+        end
     end
     return 80, 24
 end
