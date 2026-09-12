@@ -23,164 +23,21 @@
 local ffi = require("ffi")
 
 -- =========================================================================
--- 1. C Declarations for POSIX, Terminal Window, Poll, Dirent, and Stat
+-- 1. C Declarations for Windows / POSIX, Terminal Window, Input, & Directory
 -- =========================================================================
+local is_windows = (ffi.os == "Windows")
+
 ffi.cdef[[
-    struct winsize {
-        unsigned short ws_row;
-        unsigned short ws_col;
-        unsigned short ws_xpixel;
-        unsigned short ws_ypixel;
-    };
-    int ioctl(int fd, unsigned long request, void *argp);
-    int isatty(int fd);
-
-    typedef unsigned char cc_t;
-    typedef unsigned int  speed_t;
-    typedef unsigned int  tcflag_t;
-
-    struct termios {
-        tcflag_t c_iflag;
-        tcflag_t c_oflag;
-        tcflag_t c_cflag;
-        tcflag_t c_lflag;
-        cc_t     c_line;
-        cc_t     c_cc[32];
-        speed_t  c_ispeed;
-        speed_t  c_ospeed;
-    };
-
-    int tcgetattr(int fd, struct termios *termios_p);
-    int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
-
-    struct pollfd {
-        int   fd;
-        short events;
-        short revents;
-    };
-    int poll(struct pollfd *fds, unsigned long nfds, int timeout);
-    long read(int fd, void *buf, size_t count);
-
-    typedef struct DIR DIR;
-    struct dirent {
-        unsigned long  d_ino;
-        long           d_off;
-        unsigned short d_reclen;
-        unsigned char  d_type;
-        char           d_name[256];
-    };
-    DIR *opendir(const char *name);
-    struct dirent *readdir(DIR *dirp);
-    int closedir(DIR *dirp);
-
-    typedef long time_t;
-    struct stat {
-        unsigned long  st_dev;
-        unsigned long  st_ino;
-        unsigned long  st_nlink;
-        unsigned int   st_mode;
-        unsigned int   st_uid;
-        unsigned int   st_gid;
-        unsigned long  st_rdev;
-        long           st_size;
-        long           st_blksize;
-        long           st_blocks;
-        time_t         st_atime;
-        unsigned long  st_atime_nsec;
-        time_t         st_mtime;
-        unsigned long  st_mtime_nsec;
-        time_t         st_ctime;
-        unsigned long  st_ctime_nsec;
-        long           __unused[3];
-    };
-    int stat(const char *pathname, struct stat *statbuf);
-
     typedef struct { uint8_t r, g, b; } PixelRGB;
 ]]
 
-local TIOCGWINSZ = 0x5413
-local STDIN_FILENO = 0
-local TCSANOW = 0
-local ICANON = 2
-local ECHO = 8
-local POLLIN = 1
+local get_terminal_size
+local enable_raw_mode
+local disable_raw_mode
+local read_key
+local is_stdin_tty
+local scan_directory_images
 
-local function get_terminal_size()
-    local ws = ffi.new("struct winsize")
-    if ffi.C.ioctl(1, TIOCGWINSZ, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
-        return tonumber(ws.ws_col), tonumber(ws.ws_row)
-    end
-    return 80, 24
-end
-
--- =========================================================================
--- 2. Raw Mode Input Management
--- =========================================================================
-local orig_termios = ffi.new("struct termios")
-local raw_termios = ffi.new("struct termios")
-local raw_mode_enabled = false
-
-local function enable_raw_mode()
-    if ffi.C.isatty(STDIN_FILENO) ~= 1 then return false end
-    ffi.C.tcgetattr(STDIN_FILENO, orig_termios)
-    ffi.C.tcgetattr(STDIN_FILENO, raw_termios)
-
-    raw_termios.c_lflag = bit.band(raw_termios.c_lflag, bit.bnot(bit.bor(ICANON, ECHO)))
-    ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
-    raw_mode_enabled = true
-
-    io.write("\27[?25l") -- Hide cursor
-    io.flush()
-    return true
-end
-
-local function disable_raw_mode()
-    if raw_mode_enabled then
-        io.write("\27[?25h\27[0m\n") -- Restore cursor and reset color
-        io.flush()
-        ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
-        raw_mode_enabled = false
-    end
-end
-
-local pfd = ffi.new("struct pollfd", { fd = STDIN_FILENO, events = POLLIN, revents = 0 })
-local key_buf = ffi.new("char[16]")
-
-local function read_key(timeout_ms)
-    timeout_ms = timeout_ms or -1
-    local ret = ffi.C.poll(pfd, 1, timeout_ms)
-    if ret > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
-        local n = ffi.C.read(STDIN_FILENO, key_buf, 16)
-        if n > 0 then
-            local c0 = key_buf[0]
-            if c0 == 27 then -- ESC sequence
-                if n >= 3 and key_buf[1] == 91 then
-                    local c2 = key_buf[2]
-                    if c2 == 65 then return "UP" end
-                    if c2 == 66 then return "DOWN" end
-                    if c2 == 67 then return "RIGHT" end
-                    if c2 == 68 then return "LEFT" end
-                    if c2 == 53 and n >= 4 and key_buf[3] == 126 then return "PAGE_UP" end
-                    if c2 == 54 and n >= 4 and key_buf[3] == 126 then return "PAGE_DOWN" end
-                end
-                return "ESC"
-            elseif c0 == 10 or c0 == 13 then
-                return "ENTER"
-            elseif c0 == 32 then
-                return "SPACE"
-            elseif c0 == 127 or c0 == 8 then
-                return "BACKSPACE"
-            else
-                return string.char(c0):lower()
-            end
-        end
-    end
-    return nil
-end
-
--- =========================================================================
--- 3. Directory Scanner (Level 1 only, no recursion)
--- =========================================================================
 local SUPPORTED_EXTENSIONS = {
     png  = true,
     jpg  = true,
@@ -201,61 +58,407 @@ local function format_file_size(bytes)
     end
 end
 
-local function scan_directory_images(dir_path)
-    dir_path = dir_path or "."
-    -- Strip trailing slash if present (except root)
-    if #dir_path > 1 and dir_path:sub(-1) == "/" then
-        dir_path = dir_path:sub(1, -2)
+if is_windows then
+    ffi.cdef[[
+        typedef struct { short X; short Y; } COORD;
+        typedef struct { short Left; short Top; short Right; short Bottom; } SMALL_RECT;
+        typedef struct {
+            COORD      dwSize;
+            COORD      dwCursorPosition;
+            uint16_t   wAttributes;
+            SMALL_RECT srWindow;
+            COORD      dwMaximumWindowSize;
+        } CONSOLE_SCREEN_BUFFER_INFO;
+
+        typedef struct {
+            uint32_t dwLowDateTime;
+            uint32_t dwHighDateTime;
+        } FILETIME;
+
+        typedef struct {
+            uint32_t dwFileAttributes;
+            FILETIME ftCreationTime;
+            FILETIME ftLastAccessTime;
+            FILETIME ftLastWriteTime;
+            uint32_t nFileSizeHigh;
+            uint32_t nFileSizeLow;
+            uint32_t dwReserved0;
+            uint32_t dwReserved1;
+            char     cFileName[260];
+            char     cAlternateFileName[14];
+        } WIN32_FIND_DATAA;
+
+        void*    __stdcall GetStdHandle(uint32_t nStdHandle);
+        int      __stdcall GetConsoleScreenBufferInfo(void* hConsoleOutput, CONSOLE_SCREEN_BUFFER_INFO* lpConsoleScreenBufferInfo);
+        int      __stdcall GetConsoleMode(void* hConsoleHandle, uint32_t* lpMode);
+        int      __stdcall SetConsoleMode(void* hConsoleHandle, uint32_t dwMode);
+        int      __stdcall SetConsoleOutputCP(uint32_t wCodePageID);
+        uint32_t __stdcall GetFileType(void* hFile);
+        void*    __stdcall FindFirstFileA(const char* lpFileName, WIN32_FIND_DATAA* lpFindFileData);
+        int      __stdcall FindNextFileA(void* hFindFile, WIN32_FIND_DATAA* lpFindFileData);
+        int      __stdcall FindClose(void* hFindFile);
+        void     __stdcall Sleep(uint32_t dwMilliseconds);
+
+        int _kbhit(void);
+        int _getch(void);
+    ]]
+
+    local STD_INPUT_HANDLE  = 0xFFFFFFF6 -- ((uint32_t)-10)
+    local STD_OUTPUT_HANDLE = 0xFFFFFFF5 -- ((uint32_t)-11)
+    local INVALID_HANDLE_VALUE = ffi.cast("void*", -1)
+    local FILE_ATTRIBUTE_DIRECTORY = 0x10
+
+    local orig_in_mode = ffi.new("uint32_t[1]")
+    local raw_mode_enabled = false
+
+    -- Initialize Windows UTF-8 console output and ANSI Virtual Terminal Processing
+    pcall(function()
+        local hOut = ffi.C.GetStdHandle(STD_OUTPUT_HANDLE)
+        ffi.C.SetConsoleOutputCP(65001) -- UTF-8
+        local out_mode = ffi.new("uint32_t[1]")
+        if ffi.C.GetConsoleMode(hOut, out_mode) ~= 0 then
+            local ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+            ffi.C.SetConsoleMode(hOut, bit.bor(out_mode[0], ENABLE_VIRTUAL_TERMINAL_PROCESSING))
+        end
+    end)
+
+    is_stdin_tty = function()
+        local hIn = ffi.C.GetStdHandle(STD_INPUT_HANDLE)
+        local mode = ffi.new("uint32_t[1]")
+        return ffi.C.GetConsoleMode(hIn, mode) ~= 0
     end
 
-    local d = ffi.C.opendir(dir_path)
-    if d == nil then
-        return nil, "Could not open directory: " .. dir_path
+    get_terminal_size = function()
+        local hOut = ffi.C.GetStdHandle(STD_OUTPUT_HANDLE)
+        local csbi = ffi.new("CONSOLE_SCREEN_BUFFER_INFO")
+        if ffi.C.GetConsoleScreenBufferInfo(hOut, csbi) ~= 0 then
+            local w = csbi.srWindow.Right - csbi.srWindow.Left + 1
+            local h = csbi.srWindow.Bottom - csbi.srWindow.Top + 1
+            if w > 0 and h > 0 then
+                return tonumber(w), tonumber(h)
+            end
+        end
+        return 80, 24
     end
 
-    local images = {}
-    local st = ffi.new("struct stat")
+    enable_raw_mode = function()
+        if not is_stdin_tty() then return false end
+        local hIn = ffi.C.GetStdHandle(STD_INPUT_HANDLE)
+        if ffi.C.GetConsoleMode(hIn, orig_in_mode) == 0 then return false end
 
-    while true do
-        local ent = ffi.C.readdir(d)
-        if ent == nil then break end
-        local fname = ffi.string(ent.d_name)
+        local ENABLE_LINE_INPUT = 0x0002
+        local ENABLE_ECHO_INPUT = 0x0004
+        local new_mode = bit.band(orig_in_mode[0], bit.bnot(bit.bor(ENABLE_LINE_INPUT, ENABLE_ECHO_INPUT)))
+        ffi.C.SetConsoleMode(hIn, new_mode)
+        raw_mode_enabled = true
 
-        -- Skip . and .. and hidden files
-        if fname ~= "." and fname ~= ".." and not fname:match("^%.") then
-            local ext = fname:match("%.([^.]+)$")
-            if ext and SUPPORTED_EXTENSIONS[ext:lower()] then
-                local full_path = (dir_path == ".") and fname or (dir_path .. "/" .. fname)
-                local size = 0
-                local mtime = 0
-                if ffi.C.stat(full_path, st) == 0 then
-                    -- Check if it is a regular file (S_ISREG)
-                    local mode = tonumber(st.st_mode)
-                    local is_reg = (bit.band(mode, 0xF000) == 0x8000)
-                    if is_reg then
-                        size = tonumber(st.st_size)
-                        mtime = tonumber(st.st_mtime)
-                        table.insert(images, {
-                            filename = fname,
-                            filepath = full_path,
-                            extension = ext:upper(),
-                            size = size,
-                            size_str = format_file_size(size),
-                            mtime = mtime,
-                        })
+        io.write("\27[?25l") -- Hide cursor
+        io.flush()
+        return true
+    end
+
+    disable_raw_mode = function()
+        if raw_mode_enabled then
+            io.write("\27[?25h\27[0m\n")
+            io.flush()
+            local hIn = ffi.C.GetStdHandle(STD_INPUT_HANDLE)
+            ffi.C.SetConsoleMode(hIn, orig_in_mode[0])
+            raw_mode_enabled = false
+        end
+    end
+
+    read_key = function(timeout_ms)
+        timeout_ms = timeout_ms or -1
+        local elapsed = 0
+        while timeout_ms < 0 or elapsed <= timeout_ms do
+            if ffi.C._kbhit() ~= 0 then
+                local ch = ffi.C._getch()
+                if ch == 0 or ch == 224 then
+                    -- Extended key code
+                    local code = ffi.C._getch()
+                    if code == 72 then return "UP"
+                    elseif code == 80 then return "DOWN"
+                    elseif code == 75 then return "LEFT"
+                    elseif code == 77 then return "RIGHT"
+                    elseif code == 73 then return "PAGE_UP"
+                    elseif code == 81 then return "PAGE_DOWN"
+                    end
+                elseif ch == 27 then
+                    return "ESC"
+                elseif ch == 13 or ch == 10 then
+                    return "ENTER"
+                elseif ch == 32 then
+                    return "SPACE"
+                elseif ch == 8 then
+                    return "BACKSPACE"
+                else
+                    return string.char(ch):lower()
+                end
+            end
+            if timeout_ms >= 0 then
+                ffi.C.Sleep(20)
+                elapsed = elapsed + 20
+            else
+                ffi.C.Sleep(10)
+            end
+        end
+        return nil
+    end
+
+    scan_directory_images = function(dir_path)
+        dir_path = dir_path or "."
+        -- Normalize path separators
+        dir_path = dir_path:gsub("[/\\]+$", "")
+        if dir_path == "" then dir_path = "." end
+
+        local search_pattern = (dir_path == ".") and "*.*" or (dir_path .. "\\*.*")
+        local find_data = ffi.new("WIN32_FIND_DATAA")
+        local hFind = ffi.C.FindFirstFileA(search_pattern, find_data)
+
+        if hFind == INVALID_HANDLE_VALUE then
+            return nil, "Could not open directory: " .. dir_path
+        end
+
+        local images = {}
+        repeat
+            local fname = ffi.string(find_data.cFileName)
+            local is_dir = bit.band(find_data.dwFileAttributes, FILE_ATTRIBUTE_DIRECTORY) ~= 0
+
+            if not is_dir and fname ~= "." and fname ~= ".." and not fname:match("^%.") then
+                local ext = fname:match("%.([^.]+)$")
+                if ext and SUPPORTED_EXTENSIONS[ext:lower()] then
+                    local full_path = (dir_path == ".") and fname or (dir_path .. "/" .. fname)
+                    local size = tonumber(find_data.nFileSizeHigh) * 4294967296 + tonumber(find_data.nFileSizeLow)
+                    -- Windows FILETIME to Unix timestamp (100-nanosecond intervals since Jan 1, 1601 to Jan 1, 1970)
+                    local ft = tonumber(find_data.ftLastWriteTime.dwHighDateTime) * 4294967296 + tonumber(find_data.ftLastWriteTime.dwLowDateTime)
+                    local mtime = math.floor((ft - 116444736000000000) / 10000000)
+
+                    table.insert(images, {
+                        filename = fname,
+                        filepath = full_path,
+                        extension = ext:upper(),
+                        size = size,
+                        size_str = format_file_size(size),
+                        mtime = mtime,
+                    })
+                end
+            end
+        until ffi.C.FindNextFileA(hFind, find_data) == 0
+
+        ffi.C.FindClose(hFind)
+
+        table.sort(images, function(a, b)
+            return a.filename:lower() < b.filename:lower()
+        end)
+
+        return images
+    end
+else
+    -- POSIX / Linux / macOS
+    ffi.cdef[[
+        struct winsize {
+            unsigned short ws_row;
+            unsigned short ws_col;
+            unsigned short ws_xpixel;
+            unsigned short ws_ypixel;
+        };
+        int ioctl(int fd, unsigned long request, void *argp);
+        int isatty(int fd);
+
+        typedef unsigned char cc_t;
+        typedef unsigned int  speed_t;
+        typedef unsigned int  tcflag_t;
+
+        struct termios {
+            tcflag_t c_iflag;
+            tcflag_t c_oflag;
+            tcflag_t c_cflag;
+            tcflag_t c_lflag;
+            cc_t     c_line;
+            cc_t     c_cc[32];
+            speed_t  c_ispeed;
+            speed_t  c_ospeed;
+        };
+
+        int tcgetattr(int fd, struct termios *termios_p);
+        int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
+
+        struct pollfd {
+            int   fd;
+            short events;
+            short revents;
+        };
+        int poll(struct pollfd *fds, unsigned long nfds, int timeout);
+        long read(int fd, void *buf, size_t count);
+
+        typedef struct DIR DIR;
+        struct dirent {
+            unsigned long  d_ino;
+            long           d_off;
+            unsigned short d_reclen;
+            unsigned char  d_type;
+            char           d_name[256];
+        };
+        DIR *opendir(const char *name);
+        struct dirent *readdir(DIR *dirp);
+        int closedir(DIR *dirp);
+
+        typedef long time_t;
+        struct stat {
+            unsigned long  st_dev;
+            unsigned long  st_ino;
+            unsigned long  st_nlink;
+            unsigned int   st_mode;
+            unsigned int   st_uid;
+            unsigned int   st_gid;
+            unsigned long  st_rdev;
+            long           st_size;
+            long           st_blksize;
+            long           st_blocks;
+            time_t         st_atime;
+            unsigned long  st_atime_nsec;
+            time_t         st_mtime;
+            unsigned long  st_mtime_nsec;
+            time_t         st_ctime;
+            unsigned long  st_ctime_nsec;
+            long           __unused[3];
+        };
+        int stat(const char *pathname, struct stat *statbuf);
+    ]]
+
+    local TIOCGWINSZ = 0x5413
+    local STDIN_FILENO = 0
+    local TCSANOW = 0
+    local ICANON = 2
+    local ECHO = 8
+    local POLLIN = 1
+
+    is_stdin_tty = function()
+        return ffi.C.isatty(STDIN_FILENO) == 1
+    end
+
+    get_terminal_size = function()
+        local ws = ffi.new("struct winsize")
+        if pcall(function() return ffi.C.ioctl(1, TIOCGWINSZ, ws) end) and ws.ws_col > 0 and ws.ws_row > 0 then
+            return tonumber(ws.ws_col), tonumber(ws.ws_row)
+        end
+        return 80, 24
+    end
+
+    local orig_termios = ffi.new("struct termios")
+    local raw_termios = ffi.new("struct termios")
+    local raw_mode_enabled = false
+
+    enable_raw_mode = function()
+        if not is_stdin_tty() then return false end
+        ffi.C.tcgetattr(STDIN_FILENO, orig_termios)
+        ffi.C.tcgetattr(STDIN_FILENO, raw_termios)
+
+        raw_termios.c_lflag = bit.band(raw_termios.c_lflag, bit.bnot(bit.bor(ICANON, ECHO)))
+        ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
+        raw_mode_enabled = true
+
+        io.write("\27[?25l")
+        io.flush()
+        return true
+    end
+
+    disable_raw_mode = function()
+        if raw_mode_enabled then
+            io.write("\27[?25h\27[0m\n")
+            io.flush()
+            ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
+            raw_mode_enabled = false
+        end
+    end
+
+    local pfd = ffi.new("struct pollfd", { fd = STDIN_FILENO, events = POLLIN, revents = 0 })
+    local key_buf = ffi.new("char[16]")
+
+    read_key = function(timeout_ms)
+        timeout_ms = timeout_ms or -1
+        local ret = ffi.C.poll(pfd, 1, timeout_ms)
+        if ret > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
+            local n = ffi.C.read(STDIN_FILENO, key_buf, 16)
+            if n > 0 then
+                local c0 = key_buf[0]
+                if c0 == 27 then
+                    if n >= 3 and key_buf[1] == 91 then
+                        local c2 = key_buf[2]
+                        if c2 == 65 then return "UP" end
+                        if c2 == 66 then return "DOWN" end
+                        if c2 == 67 then return "RIGHT" end
+                        if c2 == 68 then return "LEFT" end
+                        if c2 == 53 and n >= 4 and key_buf[3] == 126 then return "PAGE_UP" end
+                        if c2 == 54 and n >= 4 and key_buf[3] == 126 then return "PAGE_DOWN" end
+                    end
+                    return "ESC"
+                elseif c0 == 10 or c0 == 13 then
+                    return "ENTER"
+                elseif c0 == 32 then
+                    return "SPACE"
+                elseif c0 == 127 or c0 == 8 then
+                    return "BACKSPACE"
+                else
+                    return string.char(c0):lower()
+                end
+            end
+        end
+        return nil
+    end
+
+    scan_directory_images = function(dir_path)
+        dir_path = dir_path or "."
+        if #dir_path > 1 and dir_path:sub(-1) == "/" then
+            dir_path = dir_path:sub(1, -2)
+        end
+
+        local d = ffi.C.opendir(dir_path)
+        if d == nil then
+            return nil, "Could not open directory: " .. dir_path
+        end
+
+        local images = {}
+        local st = ffi.new("struct stat")
+
+        while true do
+            local ent = ffi.C.readdir(d)
+            if ent == nil then break end
+            local fname = ffi.string(ent.d_name)
+
+            if fname ~= "." and fname ~= ".." and not fname:match("^%.") then
+                local ext = fname:match("%.([^.]+)$")
+                if ext and SUPPORTED_EXTENSIONS[ext:lower()] then
+                    local full_path = (dir_path == ".") and fname or (dir_path .. "/" .. fname)
+                    local size = 0
+                    local mtime = 0
+                    if ffi.C.stat(full_path, st) == 0 then
+                        local mode = tonumber(st.st_mode)
+                        local is_reg = (bit.band(mode, 0xF000) == 0x8000)
+                        if is_reg then
+                            size = tonumber(st.st_size)
+                            mtime = tonumber(st.st_mtime)
+                            table.insert(images, {
+                                filename = fname,
+                                filepath = full_path,
+                                extension = ext:upper(),
+                                size = size,
+                                size_str = format_file_size(size),
+                                mtime = mtime,
+                            })
+                        end
                     end
                 end
             end
         end
+        ffi.C.closedir(d)
+
+        table.sort(images, function(a, b)
+            return a.filename:lower() < b.filename:lower()
+        end)
+
+        return images
     end
-    ffi.C.closedir(d)
-
-    -- Sort alphabetically by filename
-    table.sort(images, function(a, b)
-        return a.filename:lower() < b.filename:lower()
-    end)
-
-    return images
 end
 
 -- =========================================================================
@@ -779,7 +982,7 @@ local function main()
     -- 1. Determine target directory: positional arg or default '.'
     local target_dir = positional[1] or "."
     local cli_select = tonumber(args["--select"])
-    local non_interactive = args["--no-interactive"] or (ffi.C.isatty(STDIN_FILENO) ~= 1)
+    local non_interactive = args["--no-interactive"] or (not is_stdin_tty())
 
     -- 2. Scan Directory for Images
     local images, err = scan_directory_images(target_dir)
