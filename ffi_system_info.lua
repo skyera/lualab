@@ -20,32 +20,10 @@ local bit = require("bit")
 -- =========================================================================
 -- 1. C Declarations via ffi.cdef
 -- =========================================================================
+local is_windows = (ffi.os == "Windows")
+
 ffi.cdef[[
-    // 1. Process & Hostname
-    int getpid(void);
-    int getppid(void);
-    int getpgrp(void);
-    int gethostname(char *name, size_t len);
-    char *getcwd(char *buf, size_t size);
-
-    // 2. User & Groups
-    unsigned int getuid(void);
-    unsigned int geteuid(void);
-    unsigned int getgid(void);
-    unsigned int getegid(void);
-
-    struct passwd {
-        char   *pw_name;
-        char   *pw_passwd;
-        unsigned int pw_uid;
-        unsigned int pw_gid;
-        char   *pw_gecos;
-        char   *pw_dir;
-        char   *pw_shell;
-    };
-    struct passwd *getpwuid(unsigned int uid);
-
-    // 3. File I/O & Stat
+    // Common File I/O & Memory Functions
     typedef void FILE;
     FILE *fopen(const char *path, const char *mode);
     int fseek(FILE *stream, long offset, int whence);
@@ -53,147 +31,362 @@ ffi.cdef[[
     int fclose(FILE *stream);
     size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream);
 
-    typedef long time_t;
-    struct timespec {
-        time_t tv_sec;
-        long   tv_nsec;
-    };
-
-    struct stat {
-        unsigned long  st_dev;
-        unsigned long  st_ino;
-        unsigned long  st_nlink;
-        unsigned int   st_mode;
-        unsigned int   st_uid;
-        unsigned int   st_gid;
-        unsigned int   __pad0;
-        unsigned long  st_rdev;
-        long           st_size;
-        long           st_blksize;
-        long           st_blocks;
-        struct timespec st_atim;
-        struct timespec st_mtim;
-        struct timespec st_ctim;
-        long           __glibc_reserved[3];
-    };
-    int stat(const char *pathname, struct stat *statbuf);
-
-    // 4. Memory & Performance
     void *memset(void *s, int c, size_t n);
     void *memcpy(void *dest, const void *src, size_t n);
     int memcmp(const void *s1, const void *s2, size_t n);
-    int clock_gettime(int clk_id, struct timespec *tp);
-
-    // 5. OS & Kernel Info
-    struct utsname {
-        char sysname[65];
-        char nodename[65];
-        char release[65];
-        char version[65];
-        char machine[65];
-        char __domainname[65];
-    };
-    int uname(struct utsname *buf);
-
-    // 6. Sysinfo & Loads
-    struct sysinfo {
-        long uptime;
-        unsigned long loads[3];
-        unsigned long totalram;
-        unsigned long freeram;
-        unsigned long sharedram;
-        unsigned long bufferram;
-        unsigned long totalswap;
-        unsigned long freeswap;
-        unsigned short procs;
-        unsigned short pad;
-        unsigned long totalhigh;
-        unsigned long freehigh;
-        unsigned int mem_unit;
-        char _f[20-2*sizeof(long)-sizeof(int)];
-    };
-    int sysinfo(struct sysinfo *info);
-    int getloadavg(double loadavg[], int nelem);
-    long sysconf(int name);
-
-    // 7. Filesystem (statvfs)
-    typedef unsigned long fsblkcnt_t;
-    typedef unsigned long fsfilcnt_t;
-    struct statvfs {
-        unsigned long f_bsize;
-        unsigned long f_frsize;
-        fsblkcnt_t    f_blocks;
-        fsblkcnt_t    f_bfree;
-        fsblkcnt_t    f_bavail;
-        fsfilcnt_t    f_files;
-        fsfilcnt_t    f_ffree;
-        fsfilcnt_t    f_favail;
-        unsigned long f_fsid;
-        unsigned long f_flag;
-        unsigned long f_namemax;
-        int __f_spare[6];
-    };
-    int statvfs(const char *path, struct statvfs *buf);
-
-    // 8. Resource Usage & Limits
-    struct timeval {
-        time_t tv_sec;
-        long   tv_usec;
-    };
-    struct rusage {
-        struct timeval ru_utime;
-        struct timeval ru_stime;
-        long   ru_maxrss;
-        long   ru_ixrss;
-        long   ru_idrss;
-        long   ru_isrss;
-        long   ru_minflt;
-        long   ru_majflt;
-        long   ru_nswap;
-        long   ru_inblock;
-        long   ru_oublock;
-        long   ru_msgsnd;
-        long   ru_msgrcv;
-        long   ru_nsignals;
-        long   ru_nvcsw;
-        long   ru_nivcsw;
-    };
-    int getrusage(int who, struct rusage *usage);
-
-    struct rlimit {
-        unsigned long rlim_cur;
-        unsigned long rlim_max;
-    };
-    int getrlimit(int resource, struct rlimit *rlim);
-
-    // 9. Network Interfaces
-    struct in_addr { uint32_t s_addr; };
-    struct in6_addr { uint8_t s6_addr[16]; };
-    struct sockaddr { unsigned short sa_family; char sa_data[14]; };
-    struct sockaddr_in { unsigned short sin_family; uint16_t sin_port; struct in_addr sin_addr; char sin_zero[8]; };
-    struct sockaddr_in6 { unsigned short sin6_family; uint16_t sin6_port; uint32_t sin6_flowinfo; struct in6_addr sin6_addr; uint32_t sin6_scope_id; };
-    struct sockaddr_ll {
-        unsigned short sll_family;
-        unsigned short sll_protocol;
-        int            sll_ifindex;
-        unsigned short sll_hatype;
-        unsigned char  sll_pkttype;
-        unsigned char  sll_halen;
-        unsigned char  sll_addr[8];
-    };
-    struct ifaddrs {
-        struct ifaddrs  *ifa_next;
-        char            *ifa_name;
-        unsigned int     ifa_flags;
-        struct sockaddr *ifa_addr;
-        struct sockaddr *ifa_netmask;
-        void            *ifu;
-        void            *ifa_data;
-    };
-    int getifaddrs(struct ifaddrs **ifap);
-    void freeifaddrs(struct ifaddrs *ifa);
-    const char *inet_ntop(int af, const void *src, char *dst, unsigned int size);
 ]]
+
+local kernel32, advapi32, iphlpapi, ws2_32, ntdll
+if is_windows then
+    kernel32 = ffi.load("kernel32")
+    advapi32 = ffi.load("advapi32")
+    iphlpapi = ffi.load("iphlpapi")
+    ws2_32   = ffi.load("ws2_32")
+    ntdll    = ffi.load("ntdll")
+
+    ffi.cdef[[
+        typedef void *HANDLE;
+        typedef void *HKEY;
+        typedef unsigned long DWORD;
+        typedef unsigned char BYTE;
+        typedef unsigned long ULONG;
+        typedef unsigned short USHORT;
+        typedef unsigned char UCHAR;
+
+        int _getpid(void);
+        char *_getcwd(char *buf, size_t size);
+
+        struct _stat64 {
+            uint32_t st_dev;
+            uint16_t st_ino;
+            uint16_t st_mode;
+            int16_t  st_nlink;
+            int16_t  st_uid;
+            int16_t  st_gid;
+            uint32_t st_rdev;
+            int64_t  st_size;
+            int64_t  st_atime;
+            int64_t  st_mtime;
+            int64_t  st_ctime;
+        };
+        int _stat64(const char *path, struct _stat64 *buffer);
+
+        uint32_t GetCurrentProcessId(void);
+        int GetComputerNameA(char *lpBuffer, uint32_t *nSize);
+        uint32_t GetCurrentDirectoryA(uint32_t nBufferLength, char *lpBuffer);
+        uint64_t GetTickCount64(void);
+        int QueryPerformanceCounter(int64_t *lpPerformanceCount);
+        int QueryPerformanceFrequency(int64_t *lpFrequency);
+
+        typedef struct _SYSTEM_INFO {
+            union {
+                uint32_t dwOemId;
+                struct {
+                    uint16_t wProcessorArchitecture;
+                    uint16_t wReserved;
+                };
+            };
+            uint32_t dwPageSize;
+            void *lpMinimumApplicationAddress;
+            void *lpMaximumApplicationAddress;
+            uintptr_t dwActiveProcessorMask;
+            uint32_t dwNumberOfProcessors;
+            uint32_t dwProcessorType;
+            uint32_t dwAllocationGranularity;
+            uint16_t wProcessorLevel;
+            uint16_t wProcessorRevision;
+        } SYSTEM_INFO;
+        void GetSystemInfo(SYSTEM_INFO *lpSystemInfo);
+
+        typedef struct _MEMORYSTATUSEX {
+            uint32_t dwLength;
+            uint32_t dwMemoryLoad;
+            uint64_t ullTotalPhys;
+            uint64_t ullAvailPhys;
+            uint64_t ullTotalPageFile;
+            uint64_t ullAvailPageFile;
+            uint64_t ullTotalVirtual;
+            uint64_t ullAvailVirtual;
+            uint64_t ullAvailExtendedVirtual;
+        } MEMORYSTATUSEX;
+        int GlobalMemoryStatusEx(MEMORYSTATUSEX *lpBuffer);
+
+        int GetDiskFreeSpaceExA(const char *lpDirectoryName, uint64_t *lpFreeBytesAvailableToCaller, uint64_t *lpTotalNumberOfBytes, uint64_t *lpTotalNumberOfFreeBytes);
+        int GetDiskFreeSpaceA(const char *lpRootPathName, uint32_t *lpSectorsPerCluster, uint32_t *lpBytesPerSector, uint32_t *lpNumberOfFreeClusters, uint32_t *lpTotalNumberOfClusters);
+
+        typedef struct tagPROCESSENTRY32 {
+            uint32_t dwSize;
+            uint32_t cntUsage;
+            uint32_t th32ProcessID;
+            uintptr_t th32DefaultHeapID;
+            uint32_t th32ModuleID;
+            uint32_t cntThreads;
+            uint32_t th32ParentProcessID;
+            long pcPriClassBase;
+            uint32_t dwFlags;
+            char szExeFile[260];
+        } PROCESSENTRY32;
+        HANDLE CreateToolhelp32Snapshot(uint32_t dwFlags, uint32_t th32ProcessID);
+        int Process32First(HANDLE hSnapshot, PROCESSENTRY32 *lppe);
+        int Process32Next(HANDLE hSnapshot, PROCESSENTRY32 *lppe);
+        int CloseHandle(HANDLE hObject);
+
+        typedef struct _FILETIME {
+            uint32_t dwLowDateTime;
+            uint32_t dwHighDateTime;
+        } FILETIME;
+        typedef struct _PROCESS_MEMORY_COUNTERS {
+            uint32_t cb;
+            uint32_t PageFaultCount;
+            size_t PeakWorkingSetSize;
+            size_t WorkingSetSize;
+            size_t QuotaPeakPagedPoolUsage;
+            size_t QuotaPagedPoolUsage;
+            size_t QuotaPeakNonPagedPoolUsage;
+            size_t QuotaNonPagedPoolUsage;
+            size_t PagefileUsage;
+            size_t PeakPagefileUsage;
+        } PROCESS_MEMORY_COUNTERS;
+        int GetProcessTimes(HANDLE hProcess, FILETIME *lpCreationTime, FILETIME *lpExitTime, FILETIME *lpKernelTime, FILETIME *lpUserTime);
+        int K32GetProcessMemoryInfo(HANDLE Process, PROCESS_MEMORY_COUNTERS *ppsmemCounters, uint32_t cb);
+        HANDLE GetCurrentProcess(void);
+
+        typedef struct _OSVERSIONINFOW {
+            uint32_t dwOSVersionInfoSize;
+            uint32_t dwMajorVersion;
+            uint32_t dwMinorVersion;
+            uint32_t dwBuildNumber;
+            uint32_t dwPlatformId;
+            uint16_t szCSDVersion[128];
+        } OSVERSIONINFOW;
+        int RtlGetVersion(OSVERSIONINFOW *lpVersionInformation);
+
+        int RegOpenKeyExA(HKEY hKey, const char *lpSubKey, DWORD ulOptions, DWORD samDesired, HKEY *phkResult);
+        int RegQueryValueExA(HKEY hKey, const char *lpValueName, DWORD *lpReserved, DWORD *lpType, BYTE *lpData, DWORD *lpcbData);
+        int RegCloseKey(HKEY hKey);
+
+        int WideCharToMultiByte(unsigned int cp, unsigned long flags, const wchar_t *wstr, int cchWideChar, char *str, int cbMultiByte, const char *defChar, int *usedDefChar);
+
+        struct in_addr { uint32_t s_addr; };
+        struct in6_addr { uint8_t s6_addr[16]; };
+        struct sockaddr { unsigned short sa_family; char sa_data[14]; };
+        struct sockaddr_in { unsigned short sin_family; uint16_t sin_port; struct in_addr sin_addr; char sin_zero[8]; };
+        struct sockaddr_in6 { unsigned short sin6_family; uint16_t sin6_port; uint32_t sin6_flowinfo; struct in6_addr sin6_addr; uint32_t sin6_scope_id; };
+        typedef struct _SOCKET_ADDRESS {
+            struct sockaddr *lpSockaddr;
+            int iSockaddrLength;
+        } SOCKET_ADDRESS;
+        typedef struct _IP_ADAPTER_UNICAST_ADDRESS {
+            union {
+                unsigned long long Alignment;
+                struct {
+                    ULONG Length;
+                    ULONG Flags;
+                };
+            };
+            struct _IP_ADAPTER_UNICAST_ADDRESS *Next;
+            SOCKET_ADDRESS Address;
+            int PrefixOrigin;
+            int SuffixOrigin;
+            int DadState;
+            ULONG ValidLifetime;
+            ULONG PreferredLifetime;
+            ULONG LeaseLifetime;
+            uint8_t OnLinkPrefixLength;
+        } IP_ADAPTER_UNICAST_ADDRESS;
+        typedef struct _IP_ADAPTER_ADDRESSES {
+            union {
+                unsigned long long Alignment;
+                struct {
+                    ULONG Length;
+                    ULONG IfIndex;
+                };
+            };
+            struct _IP_ADAPTER_ADDRESSES *Next;
+            char *AdapterName;
+            IP_ADAPTER_UNICAST_ADDRESS *FirstUnicastAddress;
+            void *FirstAnycastAddress;
+            void *FirstMulticastAddress;
+            void *FirstDnsServerAddress;
+            wchar_t *DnsSuffix;
+            wchar_t *Description;
+            wchar_t *FriendlyName;
+            UCHAR PhysicalAddress[8];
+            ULONG PhysicalAddressLength;
+            ULONG Flags;
+            ULONG Mtu;
+            ULONG IfType;
+            int OperStatus;
+        } IP_ADAPTER_ADDRESSES;
+        ULONG GetAdaptersAddresses(ULONG Family, ULONG Flags, void *Reserved, IP_ADAPTER_ADDRESSES *AdapterAddresses, ULONG *SizePointer);
+        const char *inet_ntop(int af, const void *src, char *dst, unsigned int size);
+    ]]
+else
+    ffi.cdef[[
+        // 1. Process & Hostname
+        int getpid(void);
+        int getppid(void);
+        int getpgrp(void);
+        int gethostname(char *name, size_t len);
+        char *getcwd(char *buf, size_t size);
+
+        // 2. User & Groups
+        unsigned int getuid(void);
+        unsigned int geteuid(void);
+        unsigned int getgid(void);
+        unsigned int getegid(void);
+
+        struct passwd {
+            char   *pw_name;
+            char   *pw_passwd;
+            unsigned int pw_uid;
+            unsigned int pw_gid;
+            char   *pw_gecos;
+            char   *pw_dir;
+            char   *pw_shell;
+        };
+        struct passwd *getpwuid(unsigned int uid);
+
+        // 3. File I/O & Stat
+        typedef long time_t;
+        struct timespec {
+            time_t tv_sec;
+            long   tv_nsec;
+        };
+
+        struct stat {
+            unsigned long  st_dev;
+            unsigned long  st_ino;
+            unsigned long  st_nlink;
+            unsigned int   st_mode;
+            unsigned int   st_uid;
+            unsigned int   st_gid;
+            unsigned int   __pad0;
+            unsigned long  st_rdev;
+            long           st_size;
+            long           st_blksize;
+            long           st_blocks;
+            struct timespec st_atim;
+            struct timespec st_mtim;
+            struct timespec st_ctim;
+            long           __glibc_reserved[3];
+        };
+        int stat(const char *pathname, struct stat *statbuf);
+
+        // 4. Clocks
+        int clock_gettime(int clk_id, struct timespec *tp);
+
+        // 5. OS & Kernel Info
+        struct utsname {
+            char sysname[65];
+            char nodename[65];
+            char release[65];
+            char version[65];
+            char machine[65];
+            char __domainname[65];
+        };
+        int uname(struct utsname *buf);
+
+        // 6. Sysinfo & Loads
+        struct sysinfo {
+            long uptime;
+            unsigned long loads[3];
+            unsigned long totalram;
+            unsigned long freeram;
+            unsigned long sharedram;
+            unsigned long bufferram;
+            unsigned long totalswap;
+            unsigned long freeswap;
+            unsigned short procs;
+            unsigned short pad;
+            unsigned long totalhigh;
+            unsigned long freehigh;
+            unsigned int mem_unit;
+            char _f[20-2*sizeof(long)-sizeof(int)];
+        };
+        int sysinfo(struct sysinfo *info);
+        int getloadavg(double loadavg[], int nelem);
+        long sysconf(int name);
+
+        // 7. Filesystem (statvfs)
+        typedef unsigned long fsblkcnt_t;
+        typedef unsigned long fsfilcnt_t;
+        struct statvfs {
+            unsigned long f_bsize;
+            unsigned long f_frsize;
+            fsblkcnt_t    f_blocks;
+            fsblkcnt_t    f_bfree;
+            fsblkcnt_t    f_bavail;
+            fsfilcnt_t    f_files;
+            fsfilcnt_t    f_ffree;
+            fsfilcnt_t    f_favail;
+            unsigned long f_fsid;
+            unsigned long f_flag;
+            unsigned long f_namemax;
+            int __f_spare[6];
+        };
+        int statvfs(const char *path, struct statvfs *buf);
+
+        // 8. Resource Usage & Limits
+        struct timeval {
+            time_t tv_sec;
+            long   tv_usec;
+        };
+        struct rusage {
+            struct timeval ru_utime;
+            struct timeval ru_stime;
+            long   ru_maxrss;
+            long   ru_ixrss;
+            long   ru_idrss;
+            long   ru_isrss;
+            long   ru_minflt;
+            long   ru_majflt;
+            long   ru_nswap;
+            long   ru_inblock;
+            long   ru_oublock;
+            long   ru_msgsnd;
+            long   ru_msgrcv;
+            long   ru_nsignals;
+            long   ru_nvcsw;
+            long   ru_nivcsw;
+        };
+        int getrusage(int who, struct rusage *usage);
+
+        struct rlimit {
+            unsigned long rlim_cur;
+            unsigned long rlim_max;
+        };
+        int getrlimit(int resource, struct rlimit *rlim);
+
+        // 9. Network Interfaces
+        struct in_addr { uint32_t s_addr; };
+        struct in6_addr { uint8_t s6_addr[16]; };
+        struct sockaddr { unsigned short sa_family; char sa_data[14]; };
+        struct sockaddr_in { unsigned short sin_family; uint16_t sin_port; struct in_addr sin_addr; char sin_zero[8]; };
+        struct sockaddr_in6 { unsigned short sin6_family; uint16_t sin6_port; uint32_t sin6_flowinfo; struct in6_addr sin6_addr; uint32_t sin6_scope_id; };
+        struct sockaddr_ll {
+            unsigned short sll_family;
+            unsigned short sll_protocol;
+            int            sll_ifindex;
+            unsigned short sll_hatype;
+            unsigned char  sll_pkttype;
+            unsigned char  sll_halen;
+            unsigned char  sll_addr[8];
+        };
+        struct ifaddrs {
+            struct ifaddrs  *ifa_next;
+            char            *ifa_name;
+            unsigned int     ifa_flags;
+            struct sockaddr *ifa_addr;
+            struct sockaddr *ifa_netmask;
+            void            *ifu;
+            void            *ifa_data;
+        };
+        int getifaddrs(struct ifaddrs **ifap);
+        void freeifaddrs(struct ifaddrs *ifa);
+        const char *inet_ntop(int af, const void *src, char *dst, unsigned int size);
+    ]]
+end
 
 -- =========================================================================
 -- 2. Module Definition & ANSI Color Theme
@@ -316,10 +509,22 @@ local function render_bar(ratio, width, custom_color)
         C.bold, ratio * 100, C.reset)
 end
 
-local function get_hrtime_sec()
-    local ts = ffi.new("struct timespec")
-    ffi.C.clock_gettime(1, ts) -- CLOCK_MONOTONIC = 1
-    return tonumber(ts.tv_sec) + tonumber(ts.tv_nsec) * 1e-9
+local get_hrtime_sec
+if is_windows then
+    local qpc_freq = ffi.new("int64_t[1]")
+    kernel32.QueryPerformanceFrequency(qpc_freq)
+    local freq = tonumber(qpc_freq[0])
+    get_hrtime_sec = function()
+        local count = ffi.new("int64_t[1]")
+        kernel32.QueryPerformanceCounter(count)
+        return tonumber(count[0]) / freq
+    end
+else
+    get_hrtime_sec = function()
+        local ts = ffi.new("struct timespec")
+        ffi.C.clock_gettime(1, ts) -- CLOCK_MONOTONIC = 1
+        return tonumber(ts.tv_sec) + tonumber(ts.tv_nsec) * 1e-9
+    end
 end
 
 -- =========================================================================
@@ -328,6 +533,62 @@ end
 
 --- 1. Get OS, Kernel, and System Uptime Info
 function SysInfo.get_os_info()
+    if is_windows then
+        local hostname = os.getenv("COMPUTERNAME") or "Windows-PC"
+        local hbuf = ffi.new("char[256]")
+        local hlen = ffi.new("uint32_t[1]", 256)
+        if kernel32.GetComputerNameA(hbuf, hlen) ~= 0 then
+            hostname = ffi.string(hbuf)
+        end
+
+        local vi = ffi.new("OSVERSIONINFOW")
+        vi.dwOSVersionInfoSize = ffi.sizeof(vi)
+        ntdll.RtlGetVersion(vi)
+        local release = string.format("%d.%d.%d", vi.dwMajorVersion, vi.dwMinorVersion, vi.dwBuildNumber)
+        local version = string.format("Build %d", vi.dwBuildNumber)
+
+        local si = ffi.new("SYSTEM_INFO")
+        kernel32.GetSystemInfo(si)
+        local machine = "x86_64"
+        if si.wProcessorArchitecture == 0 then machine = "x86"
+        elseif si.wProcessorArchitecture == 12 then machine = "aarch64" end
+
+        local uptime_sec = tonumber(kernel32.GetTickCount64()) / 1000
+
+        -- Count running processes
+        local procs_count = 0
+        local hSnap = kernel32.CreateToolhelp32Snapshot(2, 0)
+        if hSnap ~= ffi.cast("HANDLE", -1) and hSnap ~= nil then
+            local pe = ffi.new("PROCESSENTRY32")
+            pe.dwSize = ffi.sizeof(pe)
+            if kernel32.Process32First(hSnap, pe) ~= 0 then
+                repeat
+                    procs_count = procs_count + 1
+                until kernel32.Process32Next(hSnap, pe) == 0
+            end
+            kernel32.CloseHandle(hSnap)
+        end
+        if procs_count == 0 then procs_count = 1 end
+
+        return {
+            hostname        = hostname,
+            sysname         = "Windows",
+            nodename        = hostname,
+            release         = release,
+            version         = version,
+            machine         = machine,
+            domainname      = os.getenv("USERDOMAIN") or "",
+            uptime_seconds  = uptime_sec,
+            uptime_formatted= format_uptime(uptime_sec),
+            processes_count = procs_count,
+            loadavg         = {
+                load_1m  = 0.0,
+                load_5m  = 0.0,
+                load_15m = 0.0,
+            }
+        }
+    end
+
     local u = ffi.new("struct utsname")
     local uname_ok = (ffi.C.uname(u) == 0)
 
@@ -368,6 +629,29 @@ end
 
 --- 2. Get User and Environment Info
 function SysInfo.get_user_info()
+    if is_windows then
+        local username = os.getenv("USERNAME") or "User"
+        local home_dir = os.getenv("USERPROFILE") or os.getenv("HOME") or ""
+        local shell = os.getenv("COMSPEC") or "cmd.exe"
+        local cwd = "."
+        local cwdbuf = ffi.new("char[2048]")
+        if kernel32.GetCurrentDirectoryA(2048, cwdbuf) > 0 then
+            cwd = ffi.string(cwdbuf)
+        end
+
+        return {
+            uid       = 1000,
+            euid      = 1000,
+            gid       = 1000,
+            egid      = 1000,
+            username  = username,
+            home_dir  = home_dir,
+            shell     = shell,
+            full_name = username,
+            cwd       = cwd
+        }
+    end
+
     local uid = ffi.C.getuid()
     local euid = ffi.C.geteuid()
     local gid = ffi.C.getgid()
@@ -407,6 +691,34 @@ end
 
 --- 3. Get CPU and Hardware Architecture
 function SysInfo.get_cpu_info()
+    if is_windows then
+        local cpu_model = os.getenv("PROCESSOR_IDENTIFIER") or "Windows Processor"
+        local HKEY_LOCAL_MACHINE = ffi.cast("HKEY", 0x80000002)
+        local hk = ffi.new("HKEY[1]")
+        if advapi32.RegOpenKeyExA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", 0, 0x20019, hk) == 0 then
+            local buf = ffi.new("char[256]")
+            local sz = ffi.new("DWORD[1]", 256)
+            if advapi32.RegQueryValueExA(hk[0], "ProcessorNameString", nil, nil, ffi.cast("BYTE*", buf), sz) == 0 then
+                local model = ffi.string(buf):gsub("^%s+", ""):gsub("%s+$", "")
+                if #model > 0 then cpu_model = model end
+            end
+            advapi32.RegCloseKey(hk[0])
+        end
+
+        local si = ffi.new("SYSTEM_INFO")
+        kernel32.GetSystemInfo(si)
+        local cpus = tonumber(si.dwNumberOfProcessors)
+        if cpus <= 0 then cpus = 1 end
+
+        return {
+            model           = cpu_model,
+            online_cpus     = cpus,
+            configured_cpus = cpus,
+            page_size_bytes = tonumber(si.dwPageSize) > 0 and tonumber(si.dwPageSize) or 4096,
+            clock_ticks_hz  = 1000
+        }
+    end
+
     local cpu_model = "Generic Processor"
     local f = ffi.C.fopen("/proc/cpuinfo", "r")
     if f ~= nil then
@@ -441,6 +753,41 @@ end
 
 --- 4. Get Memory and Swap Statistics
 function SysInfo.get_memory_info()
+    if is_windows then
+        local st = ffi.new("MEMORYSTATUSEX")
+        st.dwLength = ffi.sizeof(st)
+        if kernel32.GlobalMemoryStatusEx(st) == 0 then
+            return nil, "GlobalMemoryStatusEx failed"
+        end
+
+        local total_ram = tonumber(st.ullTotalPhys)
+        local free_ram  = tonumber(st.ullAvailPhys)
+        local used_ram  = math.max(0, total_ram - free_ram)
+        local total_page = tonumber(st.ullTotalPageFile)
+        local avail_page = tonumber(st.ullAvailPageFile)
+        local total_swap = total_page > total_ram and (total_page - total_ram) or total_page
+        local free_swap  = math.min(avail_page, total_swap)
+        local used_swap  = math.max(0, total_swap - free_swap)
+
+        local ram_ratio  = total_ram > 0 and (used_ram / total_ram) or 0
+        local swap_ratio = total_swap > 0 and (used_swap / total_swap) or 0
+
+        return {
+            total_ram        = total_ram,
+            free_ram         = free_ram,
+            buffer_ram       = 0,
+            shared_ram       = 0,
+            used_ram         = used_ram,
+            ram_ratio        = ram_ratio,
+            ram_percent      = ram_ratio * 100,
+            total_swap       = total_swap,
+            free_swap        = free_swap,
+            used_swap        = used_swap,
+            swap_ratio       = swap_ratio,
+            swap_percent     = swap_ratio * 100
+        }
+    end
+
     local si = ffi.new("struct sysinfo")
     if ffi.C.sysinfo(si) ~= 0 then
         return nil, "sysinfo failed"
@@ -476,9 +823,49 @@ function SysInfo.get_memory_info()
     }
 end
 
---- 5. Get Storage & Filesystem Statistics via statvfs
+--- 5. Get Storage & Filesystem Statistics via statvfs / GetDiskFreeSpace
 function SysInfo.get_storage_info(path)
     path = path or "."
+    if is_windows then
+        local free_avail = ffi.new("uint64_t[1]")
+        local total_bytes = ffi.new("uint64_t[1]")
+        local total_free = ffi.new("uint64_t[1]")
+        if kernel32.GetDiskFreeSpaceExA(path, free_avail, total_bytes, total_free) == 0 then
+            return nil, "GetDiskFreeSpaceExA failed for: " .. path
+        end
+
+        local total = tonumber(total_bytes[0])
+        local avail = tonumber(free_avail[0])
+        local free_b = tonumber(total_free[0])
+        local used = math.max(0, total - free_b)
+        local used_ratio = total > 0 and (used / total) or 0
+
+        local spc = ffi.new("uint32_t[1]")
+        local bps = ffi.new("uint32_t[1]")
+        local nfc = ffi.new("uint32_t[1]")
+        local tnc = ffi.new("uint32_t[1]")
+        local bsize = 4096
+        if kernel32.GetDiskFreeSpaceA(nil, spc, bps, nfc, tnc) ~= 0 then
+            bsize = tonumber(spc[0]) * tonumber(bps[0])
+        end
+
+        return {
+            path          = path,
+            block_size    = bsize,
+            total_bytes   = total,
+            free_bytes    = free_b,
+            avail_bytes   = avail,
+            used_bytes    = used,
+            used_ratio    = used_ratio,
+            used_percent  = used_ratio * 100,
+            total_inodes  = 0,
+            free_inodes   = 0,
+            used_inodes   = 0,
+            inode_ratio   = 0,
+            inode_percent = 0
+        }
+    end
+
     local sv = ffi.new("struct statvfs")
     if ffi.C.statvfs(path, sv) ~= 0 then
         return nil, "statvfs failed for: " .. path
@@ -516,9 +903,39 @@ function SysInfo.get_storage_info(path)
     }
 end
 
---- 6. Target File Inspection (POSIX stat + backward compatible libc fopen)
+--- 6. Target File Inspection (POSIX stat / Win32 _stat64 + libc fopen)
 function SysInfo.get_file_stat(filepath)
     filepath = filepath or "Makefile"
+    if is_windows then
+        local st = ffi.new("struct _stat64")
+        if ffi.C._stat64(filepath, st) ~= 0 then
+            return nil, "File not found or inaccessible: " .. filepath
+        end
+
+        local mode = tonumber(st.st_mode)
+        local mtime_sec = tonumber(st.st_mtime)
+        local is_reg = bit.band(mode, 0xF000) == 0x8000
+        local is_dir = bit.band(mode, 0xF000) == 0x4000
+
+        return {
+            path            = filepath,
+            exists          = true,
+            size_bytes      = tonumber(st.st_size),
+            mode_raw        = mode,
+            mode_octal      = string.format("%04o", bit.band(mode, 0x1FF)),
+            permissions     = format_permissions(mode),
+            is_regular_file = is_reg,
+            is_directory    = is_dir,
+            is_symlink      = false,
+            inode           = tonumber(st.st_ino),
+            hard_links      = tonumber(st.st_nlink),
+            uid             = tonumber(st.st_uid),
+            gid             = tonumber(st.st_gid),
+            mtime_epoch     = mtime_sec,
+            mtime_formatted = os.date("%Y-%m-%d %H:%M:%S", mtime_sec)
+        }
+    end
+
     local st = ffi.new("struct stat")
     if ffi.C.stat(filepath, st) ~= 0 then
         return nil, "File not found or inaccessible: " .. filepath
@@ -559,8 +976,64 @@ function SysInfo.get_file_size(filename)
     return tonumber(size)
 end
 
---- 7. Process Execution Context & Resource Usage via getrusage
+--- 7. Process Execution Context & Resource Usage via getrusage / Win32
 function SysInfo.get_process_info()
+    if is_windows then
+        local pid = tonumber(kernel32.GetCurrentProcessId())
+        local ppid = 0
+        local hSnap = kernel32.CreateToolhelp32Snapshot(2, 0)
+        if hSnap ~= ffi.cast("HANDLE", -1) and hSnap ~= nil then
+            local pe = ffi.new("PROCESSENTRY32")
+            pe.dwSize = ffi.sizeof(pe)
+            if kernel32.Process32First(hSnap, pe) ~= 0 then
+                repeat
+                    if pe.th32ProcessID == pid then
+                        ppid = tonumber(pe.th32ParentProcessID)
+                        break
+                    end
+                until kernel32.Process32Next(hSnap, pe) == 0
+            end
+            kernel32.CloseHandle(hSnap)
+        end
+
+        local hProc = kernel32.GetCurrentProcess()
+        local ftC, ftE, ftK, ftU = ffi.new("FILETIME"), ffi.new("FILETIME"), ffi.new("FILETIME"), ffi.new("FILETIME")
+        local sys_time, user_time = 0, 0
+        if kernel32.GetProcessTimes(hProc, ftC, ftE, ftK, ftU) ~= 0 then
+            sys_time = (ftK.dwHighDateTime * 4294967296 + ftK.dwLowDateTime) * 1e-7
+            user_time = (ftU.dwHighDateTime * 4294967296 + ftU.dwLowDateTime) * 1e-7
+        end
+
+        local pmc = ffi.new("PROCESS_MEMORY_COUNTERS")
+        pmc.cb = ffi.sizeof(pmc)
+        local max_rss_bytes = 0
+        local page_faults = 0
+        if kernel32.K32GetProcessMemoryInfo(hProc, pmc, pmc.cb) ~= 0 then
+            max_rss_bytes = tonumber(pmc.PeakWorkingSetSize)
+            page_faults = tonumber(pmc.PageFaultCount)
+        end
+        local max_rss_kb = math.floor(max_rss_bytes / 1024)
+        if max_rss_kb <= 0 then max_rss_kb = 4096 end
+
+        return {
+            pid                     = pid,
+            ppid                    = ppid,
+            pgrp                    = pid,
+            user_time_sec           = user_time,
+            sys_time_sec            = sys_time,
+            total_cpu_time_sec      = user_time + sys_time,
+            max_rss_kb              = max_rss_kb,
+            max_rss_bytes           = max_rss_kb * 1024,
+            minor_page_faults       = page_faults,
+            major_page_faults       = 0,
+            voluntary_ctx_switches  = 0,
+            involuntary_ctx_switches= 0,
+            rlimit_nofile_cur       = 512,
+            rlimit_nofile_max       = 2048,
+            rlimit_stack_cur        = 1024 * 1024,
+        }
+    end
+
     local pid = tonumber(ffi.C.getpid())
     local ppid = tonumber(ffi.C.getppid())
     local pgrp = tonumber(ffi.C.getpgrp())
@@ -598,8 +1071,66 @@ function SysInfo.get_process_info()
     }
 end
 
---- 8. Network Interface Enumeration via getifaddrs
+--- 8. Network Interface Enumeration via getifaddrs / GetAdaptersAddresses
 function SysInfo.get_network_info()
+    if is_windows then
+        local size = ffi.new("ULONG[1]", 32768)
+        local buf = ffi.new("char[?]", 32768)
+        local ret = iphlpapi.GetAdaptersAddresses(0, 0, nil, ffi.cast("IP_ADAPTER_ADDRESSES*", buf), size)
+        if ret ~= 0 then return {} end
+
+        local result = {}
+        local curr = ffi.cast("IP_ADAPTER_ADDRESSES*", buf)
+        while curr ~= nil do
+            local name_buf = ffi.new("char[256]")
+            kernel32.WideCharToMultiByte(65001, 0, curr.FriendlyName, -1, name_buf, 256, nil, nil)
+            local name = ffi.string(name_buf)
+            local is_loopback = (curr.IfType == 24)
+            local is_up = (curr.OperStatus == 1)
+
+            local item = {
+                name = name,
+                flags = tonumber(curr.Flags),
+                is_up = is_up,
+                is_loopback = is_loopback,
+                is_running = is_up,
+                ipv4 = {},
+                ipv6 = {},
+                mac = nil
+            }
+
+            if curr.PhysicalAddressLength == 6 then
+                item.mac = string.format("%02x:%02x:%02x:%02x:%02x:%02x",
+                    curr.PhysicalAddress[0], curr.PhysicalAddress[1], curr.PhysicalAddress[2],
+                    curr.PhysicalAddress[3], curr.PhysicalAddress[4], curr.PhysicalAddress[5])
+            end
+
+            local uni = curr.FirstUnicastAddress
+            while uni ~= nil do
+                if uni.Address.lpSockaddr ~= nil then
+                    local fam = uni.Address.lpSockaddr.sa_family
+                    local ipbuf = ffi.new("char[128]")
+                    if fam == 2 then -- AF_INET
+                        local sin = ffi.cast("struct sockaddr_in*", uni.Address.lpSockaddr)
+                        if ws2_32.inet_ntop(2, sin.sin_addr, ipbuf, 128) ~= nil then
+                            item.ipv4[#item.ipv4 + 1] = ffi.string(ipbuf)
+                        end
+                    elseif fam == 23 then -- AF_INET6 on Windows
+                        local sin6 = ffi.cast("struct sockaddr_in6*", uni.Address.lpSockaddr)
+                        if ws2_32.inet_ntop(23, sin6.sin6_addr, ipbuf, 128) ~= nil then
+                            item.ipv6[#item.ipv6 + 1] = ffi.string(ipbuf)
+                        end
+                    end
+                end
+                uni = uni.Next
+            end
+
+            result[#result + 1] = item
+            curr = curr.Next
+        end
+        return result
+    end
+
     local ifap = ffi.new("struct ifaddrs*[1]")
     if ffi.C.getifaddrs(ifap) ~= 0 then
         return {}
@@ -1007,14 +1538,14 @@ function SysInfo.run_tests()
     print("--- Running FFI System Info Test Suite ---")
 
     -- 1. getpid test
-    local pid = ffi.C.getpid()
+    local pinfo = SysInfo.get_process_info()
+    local pid = pinfo.pid
     assert(type(pid) == "number" and pid > 0, "PID should be a positive number")
     print(string.format("  ✔ Current Process ID: %d", pid))
 
     -- 2. gethostname test
-    local buffer = ffi.new("char[256]")
-    assert(ffi.C.gethostname(buffer, 256) == 0, "gethostname failed")
-    local hostname = ffi.string(buffer)
+    local osinfo = SysInfo.get_os_info()
+    local hostname = osinfo.hostname
     assert(#hostname > 0, "Hostname should not be empty")
     print(string.format("  ✔ Hostname: %s", hostname))
 
@@ -1130,7 +1661,7 @@ local function main(args)
 end
 
 -- If executed directly as a script from CLI, invoke main
-if arg and arg[0] and (arg[0] == "ffi_system_info.lua" or arg[0]:match("/ffi_system_info%.lua$")) then
+if arg and arg[0] and (arg[0] == "ffi_system_info.lua" or arg[0]:match("[/\\]ffi_system_info%.lua$")) then
     main(arg)
 end
 
