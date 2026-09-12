@@ -22,9 +22,13 @@ ffi.cdef[[
 ]]
 
 local function get_time_ms()
-    local ts = ffi.new("ffi_timespec")
-    ffi.C.clock_gettime(1, ts)
-    return tonumber(ts.tv_sec) * 1000 + tonumber(ts.tv_nsec) / 1e6
+    if ffi.os == "Windows" then
+        return os.clock() * 1000
+    else
+        local ts = ffi.new("ffi_timespec")
+        ffi.C.clock_gettime(1, ts)
+        return tonumber(ts.tv_sec) * 1000 + tonumber(ts.tv_nsec) / 1e6
+    end
 end
 
 -- =========================================================================
