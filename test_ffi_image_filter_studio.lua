@@ -15,7 +15,16 @@ local function run_cmd(cmd)
     return (code == 0 or code == nil or success == true), out
 end
 
-local luajit = "./LuaJIT/src/luajit"
+local luajit = "luajit"
+local f_check = io.open("./LuaJIT/src/luajit", "rb") or io.open("./LuaJIT/src/luajit.exe", "rb")
+if f_check then
+    f_check:close()
+    luajit = (package.config:sub(1,1) == '\\') and ".\\LuaJIT\\src\\luajit.exe" or "./LuaJIT/src/luajit"
+end
+
+local is_windows = (package.config:sub(1,1) == '\\')
+local devnull = is_windows and "nul" or "/dev/null"
+
 local total_tests = 0
 local passed_tests = 0
 
@@ -38,7 +47,7 @@ local sample_img = "portraits/portrait_1_lady.png"
 local f_check = io.open(sample_img, "rb")
 if not f_check then
     print("  [Setup] Generating portrait fixtures for test suite...")
-    os.execute(string.format("printf 'q\\n' | %s gallery_portrait.lua --save-all --no-interactive > /dev/null 2>&1", luajit))
+    os.execute(string.format("echo q| %s gallery_portrait.lua --save-all --no-interactive > %s 2>&1", luajit, devnull))
 else
     f_check:close()
 end
@@ -89,7 +98,7 @@ end)
 
 -- 5. Export processed image to PPM
 test("Process and export image to PPM file", function()
-    local tmp_file = "/tmp/test_studio_export.ppm"
+    local tmp_file = "test_studio_export.ppm"
     os.remove(tmp_file)
     local ok, out = run_cmd(string.format("%s ffi_image_filter_studio.lua --once --filter 4 --save %s portraits/portrait_1_lady.png", luajit, tmp_file))
     assert(ok, "Export command failed")
@@ -103,7 +112,7 @@ end)
 
 -- 6. Export processed image to PNG
 test("Process and export image to PNG file", function()
-    local tmp_file = "/tmp/test_studio_export.png"
+    local tmp_file = "test_studio_export.png"
     os.remove(tmp_file)
     local ok, out = run_cmd(string.format("%s ffi_image_filter_studio.lua --once --filter 7 --sepia --save %s", luajit, tmp_file))
     assert(ok, "Export PNG command failed")
