@@ -49,13 +49,21 @@ ffi.cdef[[
     double sqlite3_column_double(sqlite3_stmt *pStmt, int iCol);
     const unsigned char *sqlite3_column_text(sqlite3_stmt *pStmt, int iCol);
 
-    // High-resolution clock for benchmarking
+    // High-resolution clock for benchmarking (POSIX)
     typedef struct { long tv_sec; long tv_nsec; } ffi_timespec;
     int clock_gettime(int clk_id, ffi_timespec *tp);
 ]]
 
--- 2. Load SQLite3 Library
-local sqlite = ffi.load("sqlite3")
+-- 2. Load SQLite3 Library (cross-platform candidates)
+local function load_sqlite()
+    local candidates = { "sqlite3", "libsqlite3.so.0", "libsqlite3.so", "sqlite3.dll" }
+    for _, name in ipairs(candidates) do
+        local ok, lib = pcall(ffi.load, name)
+        if ok and lib then return lib end
+    end
+    error("Could not load sqlite3 shared library (tried: " .. table.concat(candidates, ", ") .. ")")
+end
+local sqlite = load_sqlite()
 
 -- SQLite constants
 local SQLITE_OK   = 0
@@ -70,11 +78,15 @@ local SQLITE_NULL    = 5
 
 local SQLITE_TRANSIENT = ffi.cast("void(*)(void*)", -1)
 
--- Helper: nanosecond timing
+-- Helper: nanosecond timing (cross-platform)
 local function get_time_ms()
-    local ts = ffi.new("ffi_timespec")
-    ffi.C.clock_gettime(1, ts) -- CLOCK_MONOTONIC = 1
-    return tonumber(ts.tv_sec) * 1000 + tonumber(ts.tv_nsec) / 1e6
+    if ffi.os == "Windows" then
+        return os.clock() * 1000
+    else
+        local ts = ffi.new("ffi_timespec")
+        ffi.C.clock_gettime(1, ts) -- CLOCK_MONOTONIC = 1
+        return tonumber(ts.tv_sec) * 1000 + tonumber(ts.tv_nsec) / 1e6
+    end
 end
 
 -- 3. Lua OOP Wrapper around SQLite3
