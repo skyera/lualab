@@ -73,130 +73,276 @@ if not json_ok then
 end
 
 -- =========================================================================
--- 1. FFI POSIX Terminal, Polling, and Window Size C Definitions
+-- 1. FFI Terminal, Polling, and Window Size C Definitions (Windows & POSIX)
 -- =========================================================================
-ffi.cdef[[
-    struct winsize {
-        unsigned short ws_row;
-        unsigned short ws_col;
-        unsigned short ws_xpixel;
-        unsigned short ws_ypixel;
-    };
-    int ioctl(int fd, unsigned long request, void *argp);
-    int isatty(int fd);
+local is_windows = (ffi.os == "Windows")
 
-    typedef unsigned char cc_t;
-    typedef unsigned int  speed_t;
-    typedef unsigned int  tcflag_t;
+local get_terminal_size
+local enable_raw_mode
+local disable_raw_mode
+local read_key
+local is_stdin_tty
 
-    struct termios {
-        tcflag_t c_iflag;
-        tcflag_t c_oflag;
-        tcflag_t c_cflag;
-        tcflag_t c_lflag;
-        cc_t     c_line;
-        cc_t     c_cc[32];
-        speed_t  c_ispeed;
-        speed_t  c_ospeed;
-    };
+if is_windows then
+    ffi.cdef[[
+        typedef struct { short X; short Y; } COORD;
+        typedef struct { short Left; short Top; short Right; short Bottom; } SMALL_RECT;
+        typedef struct {
+            COORD      dwSize;
+            COORD      dwCursorPosition;
+            uint16_t   wAttributes;
+            SMALL_RECT srWindow;
+            COORD      dwMaximumWindowSize;
+        } CONSOLE_SCREEN_BUFFER_INFO;
 
-    int tcgetattr(int fd, struct termios *termios_p);
-    int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
+        void*    __stdcall GetStdHandle(uint32_t nStdHandle);
+        int      __stdcall GetConsoleScreenBufferInfo(void* hConsoleOutput, CONSOLE_SCREEN_BUFFER_INFO* lpConsoleScreenBufferInfo);
+        int      __stdcall GetConsoleMode(void* hConsoleHandle, uint32_t* lpMode);
+        int      __stdcall SetConsoleMode(void* hConsoleHandle, uint32_t dwMode);
+        int      __stdcall SetConsoleOutputCP(uint32_t wCodePageID);
+        void     __stdcall Sleep(uint32_t dwMilliseconds);
 
-    struct pollfd {
-        int   fd;
-        short events;
-        short revents;
-    };
-    int poll(struct pollfd *fds, unsigned long nfds, int timeout);
-    long read(int fd, void *buf, size_t count);
-]]
+        int _kbhit(void);
+        int _getch(void);
+    ]]
 
-local TIOCGWINSZ   = 0x5413
-local STDIN_FILENO = 0
-local TCSANOW      = 0
-local ICANON       = 2
-local ECHO         = 8
-local POLLIN       = 1
+    local STD_INPUT_HANDLE  = 0xFFFFFFF6 -- ((uint32_t)-10)
+    local STD_OUTPUT_HANDLE = 0xFFFFFFF5 -- ((uint32_t)-11)
 
-local orig_termios = ffi.new("struct termios")
-local raw_termios  = ffi.new("struct termios")
-local in_raw_mode  = false
+    local orig_in_mode = ffi.new("uint32_t[1]")
+    local in_raw_mode  = false
 
-local function enable_raw_mode()
-    if ffi.C.isatty(STDIN_FILENO) ~= 1 then return false end
-    ffi.C.tcgetattr(STDIN_FILENO, orig_termios)
-    ffi.C.tcgetattr(STDIN_FILENO, raw_termios)
-    raw_termios.c_lflag = bit.band(raw_termios.c_lflag, bit.bnot(bit.bor(ICANON, ECHO)))
-    ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
-    in_raw_mode = true
+    -- Initialize Windows UTF-8 console output and ANSI Virtual Terminal Processing
+    pcall(function()
+        local hOut = ffi.C.GetStdHandle(STD_OUTPUT_HANDLE)
+        ffi.C.SetConsoleOutputCP(65001) -- UTF-8
+        local out_mode = ffi.new("uint32_t[1]")
+        if ffi.C.GetConsoleMode(hOut, out_mode) ~= 0 then
+            local ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+            local bit = require("bit")
+            ffi.C.SetConsoleMode(hOut, bit.bor(out_mode[0], ENABLE_VIRTUAL_TERMINAL_PROCESSING))
+        end
+    end)
 
-    -- Switch to alternate screen buffer, hide cursor, clear screen
-    io.write("\27[?1049h\27[?25l\27[2J\27[H")
-    io.flush()
-    return true
-end
-
-local function disable_raw_mode()
-    if in_raw_mode then
-        -- Return to main screen buffer, show cursor, reset styling
-        io.write("\27[?1049l\27[?25h\27[0m")
-        io.flush()
-        ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
-        in_raw_mode = false
+    is_stdin_tty = function()
+        local hIn = ffi.C.GetStdHandle(STD_INPUT_HANDLE)
+        local mode = ffi.new("uint32_t[1]")
+        return ffi.C.GetConsoleMode(hIn, mode) ~= 0
     end
-end
 
-local function get_terminal_size()
-    local ws = ffi.new("struct winsize")
-    if ffi.C.ioctl(1, TIOCGWINSZ, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
-        return tonumber(ws.ws_col), tonumber(ws.ws_row)
-    end
-    return 100, 30
-end
-
-local pfd = ffi.new("struct pollfd", { fd = STDIN_FILENO, events = POLLIN, revents = 0 })
-local key_buf = ffi.new("char[64]")
-
-local function read_key(timeout_ms)
-    timeout_ms = timeout_ms or 50
-    local ret = ffi.C.poll(pfd, 1, timeout_ms)
-    if ret > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
-        local n = ffi.C.read(STDIN_FILENO, key_buf, 64)
-        if n > 0 then
-            local c0 = key_buf[0]
-            if c0 == 27 then
-                if n >= 3 and key_buf[1] == 91 then
-                    local c2 = key_buf[2]
-                    if c2 == 65 then return "UP" end
-                    if c2 == 66 then return "DOWN" end
-                    if c2 == 67 then return "RIGHT" end
-                    if c2 == 68 then return "LEFT" end
-                    if c2 == 72 then return "HOME" end
-                    if c2 == 70 then return "END" end
-                    if c2 == 53 and n >= 4 and key_buf[3] == 126 then return "PAGE_UP" end
-                    if c2 == 54 and n >= 4 and key_buf[3] == 126 then return "PAGE_DOWN" end
-                end
-                return "ESC"
-            elseif c0 == 9 then
-                return "TAB"
-            elseif c0 == 10 or c0 == 13 then
-                return "ENTER"
-            elseif c0 == 32 then
-                return "SPACE"
-            elseif c0 == 127 or c0 == 8 then
-                return "BACKSPACE"
-            elseif c0 == 3 then
-                return "CTRL_C"
-            elseif c0 >= 32 and c0 <= 126 then
-                return string.char(c0)
-            else
-                -- UTF-8 multibyte sequence
-                return ffi.string(key_buf, n)
+    get_terminal_size = function()
+        local hOut = ffi.C.GetStdHandle(STD_OUTPUT_HANDLE)
+        local csbi = ffi.new("CONSOLE_SCREEN_BUFFER_INFO")
+        if ffi.C.GetConsoleScreenBufferInfo(hOut, csbi) ~= 0 then
+            local w = csbi.srWindow.Right - csbi.srWindow.Left + 1
+            local h = csbi.srWindow.Bottom - csbi.srWindow.Top + 1
+            if w > 0 and h > 0 then
+                return tonumber(w), tonumber(h)
             end
         end
+        return 100, 30
     end
-    return nil
+
+    enable_raw_mode = function()
+        if not is_stdin_tty() then return false end
+        local hIn = ffi.C.GetStdHandle(STD_INPUT_HANDLE)
+        if ffi.C.GetConsoleMode(hIn, orig_in_mode) == 0 then return false end
+
+        local ENABLE_LINE_INPUT = 0x0002
+        local ENABLE_ECHO_INPUT = 0x0004
+        local bit = require("bit")
+        local new_mode = bit.band(orig_in_mode[0], bit.bnot(bit.bor(ENABLE_LINE_INPUT, ENABLE_ECHO_INPUT)))
+        ffi.C.SetConsoleMode(hIn, new_mode)
+        in_raw_mode = true
+
+        -- Switch to alternate screen buffer, hide cursor, clear screen
+        io.write("\27[?1049h\27[?25l\27[2J\27[H")
+        io.flush()
+        return true
+    end
+
+    disable_raw_mode = function()
+        if in_raw_mode then
+            io.write("\27[?1049l\27[?25h\27[0m")
+            io.flush()
+            local hIn = ffi.C.GetStdHandle(STD_INPUT_HANDLE)
+            ffi.C.SetConsoleMode(hIn, orig_in_mode[0])
+            in_raw_mode = false
+        end
+    end
+
+    read_key = function(timeout_ms)
+        timeout_ms = timeout_ms or 50
+        local elapsed = 0
+        while timeout_ms <= 0 or elapsed <= timeout_ms do
+            if ffi.C._kbhit() ~= 0 then
+                local ch = ffi.C._getch()
+                if ch == 0 or ch == 224 then
+                    local code = ffi.C._getch()
+                    if code == 72 then return "UP"
+                    elseif code == 80 then return "DOWN"
+                    elseif code == 75 then return "LEFT"
+                    elseif code == 77 then return "RIGHT"
+                    elseif code == 71 then return "HOME"
+                    elseif code == 79 then return "END"
+                    elseif code == 73 then return "PAGE_UP"
+                    elseif code == 81 then return "PAGE_DOWN"
+                    end
+                elseif ch == 27 then
+                    return "ESC"
+                elseif ch == 9 then
+                    return "TAB"
+                elseif ch == 13 or ch == 10 then
+                    return "ENTER"
+                elseif ch == 32 then
+                    return "SPACE"
+                elseif ch == 8 or ch == 127 then
+                    return "BACKSPACE"
+                elseif ch == 3 then
+                    return "CTRL_C"
+                elseif ch >= 32 and ch <= 126 then
+                    return string.char(ch)
+                else
+                    return string.char(ch)
+                end
+            end
+            if timeout_ms > 0 then
+                ffi.C.Sleep(10)
+                elapsed = elapsed + 10
+            else
+                break
+            end
+        end
+        return nil
+    end
+else
+    ffi.cdef[[
+        struct winsize {
+            unsigned short ws_row;
+            unsigned short ws_col;
+            unsigned short ws_xpixel;
+            unsigned short ws_ypixel;
+        };
+        int ioctl(int fd, unsigned long request, void *argp);
+        int isatty(int fd);
+
+        typedef unsigned char cc_t;
+        typedef unsigned int  speed_t;
+        typedef unsigned int  tcflag_t;
+
+        struct termios {
+            tcflag_t c_iflag;
+            tcflag_t c_oflag;
+            tcflag_t c_cflag;
+            tcflag_t c_lflag;
+            cc_t     c_line;
+            cc_t     c_cc[32];
+            speed_t  c_ispeed;
+            speed_t  c_ospeed;
+        };
+
+        int tcgetattr(int fd, struct termios *termios_p);
+        int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
+
+        struct pollfd {
+            int   fd;
+            short events;
+            short revents;
+        };
+        int poll(struct pollfd *fds, unsigned long nfds, int timeout);
+        long read(int fd, void *buf, size_t count);
+    ]]
+
+    local TIOCGWINSZ   = 0x5413
+    local STDIN_FILENO = 0
+    local TCSANOW      = 0
+    local ICANON       = 2
+    local ECHO         = 8
+    local POLLIN       = 1
+
+    local orig_termios = ffi.new("struct termios")
+    local raw_termios  = ffi.new("struct termios")
+    local in_raw_mode  = false
+
+    is_stdin_tty = function()
+        return ffi.C.isatty(STDIN_FILENO) == 1
+    end
+
+    enable_raw_mode = function()
+        if not is_stdin_tty() then return false end
+        ffi.C.tcgetattr(STDIN_FILENO, orig_termios)
+        ffi.C.tcgetattr(STDIN_FILENO, raw_termios)
+        raw_termios.c_lflag = bit.band(raw_termios.c_lflag, bit.bnot(bit.bor(ICANON, ECHO)))
+        ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
+        in_raw_mode = true
+
+        -- Switch to alternate screen buffer, hide cursor, clear screen
+        io.write("\27[?1049h\27[?25l\27[2J\27[H")
+        io.flush()
+        return true
+    end
+
+    disable_raw_mode = function()
+        if in_raw_mode then
+            -- Return to main screen buffer, show cursor, reset styling
+            io.write("\27[?1049l\27[?25h\27[0m")
+            io.flush()
+            ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
+            in_raw_mode = false
+        end
+    end
+
+    get_terminal_size = function()
+        local ws = ffi.new("struct winsize")
+        if pcall(function() return ffi.C.ioctl(1, TIOCGWINSZ, ws) end) and ws.ws_col > 0 and ws.ws_row > 0 then
+            return tonumber(ws.ws_col), tonumber(ws.ws_row)
+        end
+        return 100, 30
+    end
+
+    local pfd = ffi.new("struct pollfd", { fd = STDIN_FILENO, events = POLLIN, revents = 0 })
+    local key_buf = ffi.new("char[64]")
+
+    read_key = function(timeout_ms)
+        timeout_ms = timeout_ms or 50
+        local ret = ffi.C.poll(pfd, 1, timeout_ms)
+        if ret > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
+            local n = ffi.C.read(STDIN_FILENO, key_buf, 64)
+            if n > 0 then
+                local c0 = key_buf[0]
+                if c0 == 27 then
+                    if n >= 3 and key_buf[1] == 91 then
+                        local c2 = key_buf[2]
+                        if c2 == 65 then return "UP" end
+                        if c2 == 66 then return "DOWN" end
+                        if c2 == 67 then return "RIGHT" end
+                        if c2 == 68 then return "LEFT" end
+                        if c2 == 72 then return "HOME" end
+                        if c2 == 70 then return "END" end
+                        if c2 == 53 and n >= 4 and key_buf[3] == 126 then return "PAGE_UP" end
+                        if c2 == 54 and n >= 4 and key_buf[3] == 126 then return "PAGE_DOWN" end
+                    end
+                    return "ESC"
+                elseif c0 == 9 then
+                    return "TAB"
+                elseif c0 == 10 or c0 == 13 then
+                    return "ENTER"
+                elseif c0 == 32 then
+                    return "SPACE"
+                elseif c0 == 127 or c0 == 8 then
+                    return "BACKSPACE"
+                elseif c0 == 3 then
+                    return "CTRL_C"
+                elseif c0 >= 32 and c0 <= 126 then
+                    return string.char(c0)
+                else
+                    -- UTF-8 multibyte sequence
+                    return ffi.string(key_buf, n)
+                end
+            end
+        end
+        return nil
+    end
 end
 
 -- =========================================================================
