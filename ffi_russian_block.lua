@@ -1113,6 +1113,57 @@ local UI_CHARS = {
     }
 }
 
+local function utf8_visible_width(s)
+    local clean = s:gsub("\27%[[0-9;]*[a-zA-Z]", "")
+    local w = 0
+    local i = 1
+    local len = #clean
+    while i <= len do
+        local b1 = string.byte(clean, i)
+        if b1 < 0x80 then
+            w = w + 1
+            i = i + 1
+        elseif b1 < 0xE0 then
+            w = w + 1
+            i = i + 2
+        elseif b1 < 0xF0 then
+            local b2 = string.byte(clean, i + 1)
+            local b3 = string.byte(clean, i + 2)
+            local cp = (b1 - 0xE0) * 4096 + (b2 - 0x80) * 64 + (b3 - 0x80)
+            if (cp >= 0x4E00 and cp <= 0x9FFF) or (cp >= 0x3400 and cp <= 0x4DBF) or (cp >= 0xFF01 and cp <= 0xFF60) then
+                w = w + 2
+            else
+                w = w + 1
+            end
+            i = i + 3
+        elseif b1 < 0xF8 then
+            w = w + 2
+            i = i + 4
+        else
+            i = i + 1
+        end
+    end
+    return w
+end
+
+local function pad_right(s, target_w)
+    local cur_w = utf8_visible_width(s)
+    if cur_w < target_w then
+        return s .. string.rep(" ", target_w - cur_w)
+    end
+    return s
+end
+
+local function fmt_num_5(val)
+    if val < 100000 then
+        return string.format("%-5d", val)
+    elseif val < 1000000 then
+        return string.format("%4dk", math.floor(val / 1000))
+    else
+        return string.format("%4.1fM", val / 1000000)
+    end
+end
+
 function TetrisGame:render_frame()
     local U = self.ascii_mode and UI_CHARS.ascii or UI_CHARS.unicode
     local out = { "\27[H" } -- Move cursor home
@@ -1149,12 +1200,15 @@ function TetrisGame:render_frame()
         end
     end
 
-    -- Header Banner
-    table.insert(out, " \27[1;36m" .. U.tl .. string.rep(U.h_line, 58) .. U.tr .. "\27[0m\n")
-    table.insert(out, string.format(" \27[1;36m%s\27[1;33m       🎮  RUSSIAN BLOCK (俄罗斯方块) - LUAJIT FFI  🎮        \27[1;36m%s\27[0m\n", U.v_line, U.v_line))
-    table.insert(out, " \27[1;36m" .. U.bl .. string.rep(U.h_line, 58) .. U.br .. "\27[0m\n")
+    -- Header Banner (width: 59 columns = 1 space + 1 corner + 56 h_lines + 1 corner)
+    table.insert(out, " \27[1;36m" .. U.tl .. string.rep(U.h_line, 56) .. U.tr .. "\27[0m\n")
+    local title_str = self.ascii_mode
+        and "          RUSSIAN BLOCK (TETRIS) - LUAJIT FFI           "
+        or  "    🎮  RUSSIAN BLOCK (俄罗斯方块) - LUAJIT FFI  🎮     "
+    table.insert(out, string.format(" \27[1;36m%s\27[1;33m%s\27[1;36m%s\27[0m\n", U.v_line, title_str, U.v_line))
+    table.insert(out, " \27[1;36m" .. U.bl .. string.rep(U.h_line, 56) .. U.br .. "\27[0m\n")
 
-    -- Prepare side panels (20 rows total)
+    -- Prepare side panels (20 rows total, each exactly 15 visible columns wide)
     local left_lines = {}
     local right_lines = {}
 
@@ -1178,7 +1232,7 @@ function TetrisGame:render_frame()
     end
     table.insert(left_lines, string.format("\27[1;34m%s%s%s\27[0m", U.b_bl, string.rep(U.b_box_h, 13), U.b_br))
 
-    -- Controls box (rows 7..20)
+    -- Controls box (rows 7..18)
     local k_left  = self.ascii_mode and "<" or "←"
     local k_right = self.ascii_mode and ">" or "→"
     local k_up    = self.ascii_mode and "^" or "↑"
@@ -1196,8 +1250,16 @@ function TetrisGame:render_frame()
     table.insert(left_lines, string.format("\27[1;35m%s\27[0m R    : Reset\27[1;35m%s\27[0m", U.b_box_v, U.b_box_v))
     table.insert(left_lines, string.format("\27[1;35m%s\27[0m Q    : Quit \27[1;35m%s\27[0m", U.b_box_v, U.b_box_v))
     table.insert(left_lines, string.format("\27[1;35m%s%s%s\27[0m", U.b_bl, string.rep(U.b_box_h, 13), U.b_br))
-    table.insert(left_lines, string.format("   \27[90m(FFI %-5s)\27[0m  ", ffi.os))
-    table.insert(left_lines, "               ")
+
+    -- Left panel footer (rows 19..20): FFI OS centered in 15 columns
+    local os_tag = string.format("(FFI %s)", ffi.os)
+    local os_tag_len = #os_tag
+    local l_pad = math.max(0, math.floor((15 - os_tag_len) / 2))
+    local r_pad = math.max(0, 15 - os_tag_len - l_pad)
+    table.insert(left_lines, string.format("%s\27[90m%s\27[0m%s", string.rep(" ", l_pad), os_tag, string.rep(" ", r_pad)))
+    while #left_lines < BOARD_ROWS do
+        table.insert(left_lines, string.rep(" ", 15))
+    end
 
     -- Next queue box (rows 1..6)
     table.insert(right_lines, string.format("\27[1;32m%s%s NEXT %s%s\27[0m", U.b_tl, string.rep(U.b_box_h, 3), string.rep(U.b_box_h, 4), U.b_tr))
@@ -1222,29 +1284,36 @@ function TetrisGame:render_frame()
 
     -- Stats box (rows 7..20)
     table.insert(right_lines, string.format("\27[1;33m%s%s STATS %s%s\27[0m", U.b_tl, string.rep(U.b_box_h, 3), string.rep(U.b_box_h, 3), U.b_tr))
-    table.insert(right_lines, string.format("\27[1;33m%s\27[0m SCORE: \27[1;32m%-5d\27[0m\27[1;33m%s\27[0m", U.b_box_v, self.stats.score, U.b_box_v))
+    table.insert(right_lines, string.format("\27[1;33m%s\27[0m SCORE: \27[1;32m%s\27[0m\27[1;33m%s\27[0m", U.b_box_v, fmt_num_5(self.stats.score), U.b_box_v))
     table.insert(right_lines, string.format("\27[1;33m%s\27[0m LEVEL: \27[1;33m%-5d\27[0m\27[1;33m%s\27[0m", U.b_box_v, self.stats.level, U.b_box_v))
     table.insert(right_lines, string.format("\27[1;33m%s\27[0m LINES: \27[1;36m%-5d\27[0m\27[1;33m%s\27[0m", U.b_box_v, self.stats.lines, U.b_box_v))
     table.insert(right_lines, string.format("\27[1;33m%s\27[0m COMBO: \27[1;35mx%-4d\27[0m\27[1;33m%s\27[0m", U.b_box_v, self.stats.combos, U.b_box_v))
-    table.insert(right_lines, string.format("\27[1;33m%s\27[0m HIGH:  \27[1;31m%-5d\27[0m\27[1;33m%s\27[0m", U.b_box_v, self.stats.high_score, U.b_box_v))
-    table.insert(right_lines, string.format("\27[1;33m%s\27[0m SPEED: \27[90m%3dms\27[0m\27[1;33m%s\27[0m", U.b_box_v, self.gravity_ms, U.b_box_v))
+    table.insert(right_lines, string.format("\27[1;33m%s\27[0m HIGH:  \27[1;31m%s\27[0m\27[1;33m%s\27[0m", U.b_box_v, fmt_num_5(self.stats.high_score), U.b_box_v))
+    table.insert(right_lines, string.format("\27[1;33m%s\27[0m SPEED: \27[90m%3dms\27[0m\27[1;33m%s\27[0m", U.b_box_v, math.min(self.gravity_ms, 999), U.b_box_v))
     table.insert(right_lines, string.format("\27[1;33m%s%s%s\27[0m", U.b_bl, string.rep(U.b_box_h, 13), U.b_br))
 
-    local status_str = "\27[32mPLAYING\27[0m"
+    local status_text = "PLAYING"
+    local status_color = "\27[32m"
     if self.game_over then
-        status_str = "\27[1;31mGAME OVER\27[0m"
+        status_text = "GAME OVER"
+        status_color = "\27[1;31m"
     elseif self.paused then
-        status_str = "\27[1;33mPAUSED\27[0m"
+        status_text = "PAUSED"
+        status_color = "\27[1;33m"
     end
-    table.insert(right_lines, string.format("  [%s]  ", status_str))
-    table.insert(right_lines, "              ")
-    table.insert(right_lines, "              ")
-    table.insert(right_lines, "              ")
-    table.insert(right_lines, "              ")
+    local tag_len = #status_text + 2
+    local s_l_pad = math.floor((15 - tag_len) / 2)
+    local s_r_pad = 15 - tag_len - s_l_pad
+    table.insert(right_lines, string.format("%s[%s%s\27[0m]%s",
+        string.rep(" ", s_l_pad), status_color, status_text, string.rep(" ", s_r_pad)))
+
+    while #right_lines < BOARD_ROWS do
+        table.insert(right_lines, string.rep(" ", 15))
+    end
 
     -- Top border of playfield
-    table.insert(out, string.format(" %-15s   \27[1;37m%s%s%s\27[0m   %-15s\n",
-        "", U.b_tl, string.rep(U.b_box_h, BOARD_COLS * 2), U.b_tr, ""))
+    table.insert(out, string.format(" %s   \27[1;37m%s%s%s\27[0m   %s\n",
+        string.rep(" ", 15), U.b_tl, string.rep(U.b_box_h, BOARD_COLS * 2), U.b_tr, string.rep(" ", 15)))
 
     -- Visible Board Rows (rows 5 to 24 internally)
     for vi = 1, BOARD_ROWS do
@@ -1283,18 +1352,18 @@ function TetrisGame:render_frame()
         if self.paused and vi == 10 then
             playfield_line = "  \27[1;33;44m  ** PAUSED **  \27[0m  "
         elseif self.game_over and vi == 10 then
-            playfield_line = " \27[1;37;41m  GAME OVER!   \27[0m  "
+            playfield_line = "  \27[1;37;41m   GAME OVER!   \27[0m  "
         elseif self.game_over and vi == 11 then
-            playfield_line = " \27[1;33;41m Press R: Retry \27[0m  "
+            playfield_line = "  \27[1;33;41m Press R: Retry \27[0m  "
         end
 
-        table.insert(out, string.format(" %-15s   \27[1;37m%s\27[0m%s\27[1;37m%s\27[0m   %-15s\n",
-            left_col, U.b_box_v, playfield_line, U.b_box_v, right_col))
+        table.insert(out, string.format(" %s   \27[1;37m%s\27[0m%s\27[1;37m%s\27[0m   %s\n",
+            pad_right(left_col, 15), U.b_box_v, playfield_line, U.b_box_v, pad_right(right_col, 15)))
     end
 
     -- Bottom border of playfield
-    table.insert(out, string.format(" %-15s   \27[1;37m%s%s%s\27[0m   %-15s\n",
-        "", U.b_bl, string.rep(U.b_box_h, BOARD_COLS * 2), U.b_br, ""))
+    table.insert(out, string.format(" %s   \27[1;37m%s%s%s\27[0m   %s\n",
+        string.rep(" ", 15), U.b_bl, string.rep(U.b_box_h, BOARD_COLS * 2), U.b_br, string.rep(" ", 15)))
 
     return table.concat(out)
 end
@@ -1532,9 +1601,22 @@ local function run_self_tests()
     check("Active piece held into hold slot", g.held_piece == "I")
     check("can_hold flag prevents holding twice in one turn", g.can_hold == false)
 
-    -- 10. Frame Snapshot Rendering
+    -- 10. Frame Snapshot Rendering & Layout Width
     local snapshot = g:render_frame()
     check("Frame render produces valid ANSI string", type(snapshot) == "string" and #snapshot > 200)
+
+    -- 11. Terminal UI Layout Width & Box Alignment
+    local function verify_layout_uniformity(g_obj)
+        local frame = g_obj:render_frame()
+        for line in frame:gmatch("([^\r\n]+)") do
+            local w = utf8_visible_width(line)
+            if w > 0 and w ~= 59 then return false end
+        end
+        return true
+    end
+    check("Layout width is uniformly 59 columns in Unicode mode", verify_layout_uniformity(g))
+    local g_ascii = TetrisGame.new({ ascii_mode = true })
+    check("Layout width is uniformly 59 columns in ASCII mode", verify_layout_uniformity(g_ascii))
 
     print(string.format("\nSelf-Test Summary: %d / %d tests passed.", passed, total))
     if passed == total then
@@ -1620,5 +1702,6 @@ return {
     BOARD_COLS = BOARD_COLS,
     BOARD_ROWS = BOARD_ROWS,
     TOTAL_ROWS = TOTAL_ROWS,
+    utf8_visible_width = utf8_visible_width,
     run_self_tests = run_self_tests
 }

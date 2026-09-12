@@ -149,6 +149,35 @@ game:collapse_lines(tetris_rows)
 assert_test("Back-to-Back Tetris awarded 1.5x score bonus (1200+ pts)",
     (game.stats.score - prev_score) >= 1200)
 
+-- 4. Terminal UI Layout Width & Box Alignment Tests
+local utf8_w = rb.utf8_visible_width
+local function verify_frame_layout(g_inst)
+    local frame = g_inst:render_frame()
+    for line in frame:gmatch("([^\r\n]+)") do
+        local w = utf8_w(line)
+        if w > 0 and w ~= 59 then
+            return false, string.format("Mismatch width %d on line: %s", w, line)
+        end
+    end
+    return true
+end
+
+local g_uni = TetrisGame.new()
+local g_ascii = TetrisGame.new({ ascii_mode = true })
+local g_over = TetrisGame.new()
+g_over.game_over = true
+local g_pause = TetrisGame.new()
+g_pause.paused = true
+local g_high = TetrisGame.new()
+g_high.stats.score = 999999
+g_high.stats.high_score = 1234567
+
+assert_test("Layout width is uniform 59 columns in Unicode mode", verify_frame_layout(g_uni))
+assert_test("Layout width is uniform 59 columns in ASCII mode", verify_frame_layout(g_ascii))
+assert_test("Layout borders remain aligned during Game Over overlay", verify_frame_layout(g_over))
+assert_test("Layout borders remain aligned during Paused overlay", verify_frame_layout(g_pause))
+assert_test("Layout borders remain aligned with 6+ digit high scores", verify_frame_layout(g_high))
+
 print(string.format("\nTest Summary: %d / %d tests passed.", passed, total_cli))
 if passed == total_cli then
     print("\27[1;32mALL RUSSIAN BLOCK TESTS PASSED SUCCESSFULLY!\27[0m\n")
