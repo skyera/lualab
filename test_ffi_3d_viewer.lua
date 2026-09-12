@@ -5,35 +5,42 @@
 
 print("=== Running Unit Tests for ffi_3d_viewer.lua ===")
 
+local luajit = "luajit"
+local f_check = io.open("./LuaJIT/src/luajit", "rb") or io.open("./LuaJIT/src/luajit.exe", "rb")
+if f_check then
+    f_check:close()
+    luajit = (package.config:sub(1,1) == '\\') and ".\\LuaJIT\\src\\luajit.exe" or "./LuaJIT/src/luajit"
+end
+
 local tests = {
     {
         name = "CLI Help output",
-        cmd = "./LuaJIT/src/luajit ffi_3d_viewer.lua --help",
+        cmd = luajit .. " ffi_3d_viewer.lua --help",
         expect = "Terminal 3D Mesh Renderer"
     },
     {
         name = "Cube shaded single frame render",
-        cmd = "./LuaJIT/src/luajit ffi_3d_viewer.lua 1 --once",
+        cmd = luajit .. " ffi_3d_viewer.lua 1 --once",
         expect = "Model: [1] Cube"
     },
     {
         name = "Torus 3D Donut shaded single frame render",
-        cmd = "./LuaJIT/src/luajit ffi_3d_viewer.lua 2 --once",
+        cmd = luajit .. " ffi_3d_viewer.lua 2 --once",
         expect = "Model: [2] Torus"
     },
     {
         name = "Pyramid wireframe single frame render",
-        cmd = "./LuaJIT/src/luajit ffi_3d_viewer.lua 3 --wireframe --once",
+        cmd = luajit .. " ffi_3d_viewer.lua 3 --wireframe --once",
         expect = "Mode: Wireframe"
     },
     {
         name = "Octahedron Gem single frame render",
-        cmd = "./LuaJIT/src/luajit ffi_3d_viewer.lua 4 --once",
+        cmd = luajit .. " ffi_3d_viewer.lua 4 --once",
         expect = "Model: [4] Octahedron Gem"
     },
     {
         name = "Cylinder Prism single frame render",
-        cmd = "./LuaJIT/src/luajit ffi_3d_viewer.lua 5 --once",
+        cmd = luajit .. " ffi_3d_viewer.lua 5 --once",
         expect = "Model: [5] Cylinder Prism"
     }
 }
