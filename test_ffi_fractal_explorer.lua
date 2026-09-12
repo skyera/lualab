@@ -5,35 +5,42 @@
 
 print("=== Running Unit Tests for ffi_fractal_explorer.lua ===")
 
+local luajit = "luajit"
+local f_check = io.open("./LuaJIT/src/luajit", "rb") or io.open("./LuaJIT/src/luajit.exe", "rb")
+if f_check then
+    f_check:close()
+    luajit = (package.config:sub(1,1) == '\\') and ".\\LuaJIT\\src\\luajit.exe" or "./LuaJIT/src/luajit"
+end
+
 local tests = {
     {
         name = "Help display (--help)",
-        cmd = "./LuaJIT/src/luajit ffi_fractal_explorer.lua --help",
+        cmd = luajit .. " ffi_fractal_explorer.lua --help",
         expect = "Terminal Fractal Explorer"
     },
     {
         name = "Mandelbrot Set frame render",
-        cmd = "./LuaJIT/src/luajit ffi_fractal_explorer.lua 1 --once",
+        cmd = luajit .. " ffi_fractal_explorer.lua 1 --once",
         expect = "Fractal: [1] Mandelbrot Set"
     },
     {
         name = "Julia Set with Fire palette",
-        cmd = "./LuaJIT/src/luajit ffi_fractal_explorer.lua 2 -p 2 --once",
+        cmd = luajit .. " ffi_fractal_explorer.lua 2 -p 2 --once",
         expect = "Fractal: [2] Julia Set"
     },
     {
         name = "Burning Ship fractal render",
-        cmd = "./LuaJIT/src/luajit ffi_fractal_explorer.lua 3 --once",
+        cmd = luajit .. " ffi_fractal_explorer.lua 3 --once",
         expect = "Fractal: [3] Burning Ship"
     },
     {
         name = "Tricorn fractal render",
-        cmd = "./LuaJIT/src/luajit ffi_fractal_explorer.lua 4 --once",
+        cmd = luajit .. " ffi_fractal_explorer.lua 4 --once",
         expect = "Fractal: [4] Tricorn (Mandelbar)"
     },
     {
         name = "Newton-Raphson basins render",
-        cmd = "./LuaJIT/src/luajit ffi_fractal_explorer.lua 5 --once",
+        cmd = luajit .. " ffi_fractal_explorer.lua 5 --once",
         expect = "Fractal: [5] Newton-Raphson"
     }
 }
