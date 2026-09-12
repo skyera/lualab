@@ -5,30 +5,37 @@
 
 print("=== Running Unit Tests for view_gallery_terminal.lua ===")
 
+local luajit = "luajit"
+local f_check = io.open("./LuaJIT/src/luajit", "rb") or io.open("./LuaJIT/src/luajit.exe", "rb")
+if f_check then
+    f_check:close()
+    luajit = (package.config:sub(1,1) == '\\') and ".\\LuaJIT\\src\\luajit.exe" or "./LuaJIT/src/luajit"
+end
+
 local tests = {
     {
         name = "Help display (--help)",
-        cmd = "./LuaJIT/src/luajit view_gallery_terminal.lua --help",
+        cmd = luajit .. " view_gallery_terminal.lua --help",
         expect = "Terminal Directory Image Viewer"
     },
     {
         name = "Default current directory listing",
-        cmd = "printf 'q\\n' | ./LuaJIT/src/luajit view_gallery_terminal.lua --no-interactive",
+        cmd = "echo q| " .. luajit .. " view_gallery_terminal.lua --no-interactive",
         expect = "portrait.png"
     },
     {
         name = "Custom input directory listing (portraits)",
-        cmd = "printf 'q\\n' | ./LuaJIT/src/luajit view_gallery_terminal.lua portraits --no-interactive",
+        cmd = "echo q| " .. luajit .. " view_gallery_terminal.lua portraits --no-interactive",
         expect = "01_traditional_hanfu_lady.png"
     },
     {
         name = "Direct image view via --select flag",
-        cmd = "./LuaJIT/src/luajit view_gallery_terminal.lua portraits --select 1",
+        cmd = luajit .. " view_gallery_terminal.lua portraits --select 1",
         expect = "IMAGE VIEWER [1/"
     },
     {
         name = "Empty directory graceful notification",
-        cmd = "./LuaJIT/src/luajit view_gallery_terminal.lua LuaBridge",
+        cmd = luajit .. " view_gallery_terminal.lua LuaBridge",
         expect = "No supported images found"
     }
 }
