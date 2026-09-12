@@ -16,18 +16,22 @@ ffi.cdef[[
     double sin(double x);
 ]]
 
--- 2. Loading an external shared library (libm - Math library)
--- On Linux, math functions are often in a separate library
-local libm = ffi.load("m")
+-- 2. Loading math functions
+-- On Linux math is in libm ("m"), on Windows it is exported by C runtime
+local libm = (ffi.os == "Windows") and ffi.C or ffi.load("m")
 
 print("--- Advanced FFI Demo ---")
 
 -- Example A: High-Resolution Timer (Nanoseconds)
 local function get_nanos()
-    local ts = ffi.new("timespec_t")
-    -- 1 is CLOCK_MONOTONIC
-    ffi.C.clock_gettime(1, ts)
-    return tonumber(ts.tv_sec) * 1e9 + tonumber(ts.tv_nsec)
+    if ffi.os == "Windows" then
+        return os.clock() * 1e9
+    else
+        local ts = ffi.new("timespec_t")
+        -- 1 is CLOCK_MONOTONIC
+        ffi.C.clock_gettime(1, ts)
+        return tonumber(ts.tv_sec) * 1e9 + tonumber(ts.tv_nsec)
+    end
 end
 
 local start_t = get_nanos()
