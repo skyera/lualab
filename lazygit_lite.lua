@@ -26,123 +26,249 @@
 local ffi = require("ffi")
 
 -- =========================================================================
--- 1. FFI C Definitions for POSIX Terminal, Polling, and Window
+-- 1. FFI C Definitions for Terminal, Polling, and Window
 -- =========================================================================
-ffi.cdef[[
-    struct winsize {
-        unsigned short ws_row;
-        unsigned short ws_col;
-        unsigned short ws_xpixel;
-        unsigned short ws_ypixel;
-    };
-    int ioctl(int fd, unsigned long request, void *argp);
-    int isatty(int fd);
+local is_windows = (ffi.os == "Windows")
+local devnull = is_windows and "nul" or "/dev/null"
 
-    typedef unsigned char cc_t;
-    typedef unsigned int  speed_t;
-    typedef unsigned int  tcflag_t;
+local enable_raw_mode, disable_raw_mode, get_terminal_size, read_key
+local in_raw_mode = false
 
-    struct termios {
-        tcflag_t c_iflag;
-        tcflag_t c_oflag;
-        tcflag_t c_cflag;
-        tcflag_t c_lflag;
-        cc_t     c_line;
-        cc_t     c_cc[32];
-        speed_t  c_ispeed;
-        speed_t  c_ospeed;
-    };
+if is_windows then
+    local kernel32 = ffi.load("kernel32")
+    ffi.cdef[[
+        typedef void *HANDLE;
+        typedef struct _COORD { short X; short Y; } COORD;
+        typedef struct _SMALL_RECT { short Left; short Top; short Right; short Bottom; } SMALL_RECT;
+        typedef struct _CONSOLE_SCREEN_BUFFER_INFO {
+            COORD      dwSize;
+            COORD      dwCursorPosition;
+            uint16_t   wAttributes;
+            SMALL_RECT srWindow;
+            COORD      dwMaximumWindowSize;
+        } CONSOLE_SCREEN_BUFFER_INFO;
+        HANDLE GetStdHandle(uint32_t nStdHandle);
+        int GetConsoleScreenBufferInfo(HANDLE hConsoleOutput, CONSOLE_SCREEN_BUFFER_INFO *lpConsoleScreenBufferInfo);
+        int GetConsoleMode(HANDLE hConsoleHandle, uint32_t *lpMode);
+        int SetConsoleMode(HANDLE hConsoleHandle, uint32_t dwMode);
+        int SetConsoleOutputCP(uint32_t wCodePageID);
+        void Sleep(uint32_t dwMilliseconds);
+        int _kbhit(void);
+        int _getch(void);
+    ]]
 
-    int tcgetattr(int fd, struct termios *termios_p);
-    int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
+    local STD_INPUT_HANDLE  = 0xFFFFFFF6
+    local STD_OUTPUT_HANDLE = 0xFFFFFFF5
+    local orig_in_mode = ffi.new("uint32_t[1]")
+    local orig_out_mode = ffi.new("uint32_t[1]")
 
-    struct pollfd {
-        int   fd;
-        short events;
-        short revents;
-    };
-    int poll(struct pollfd *fds, unsigned long nfds, int timeout);
-    long read(int fd, void *buf, size_t count);
-]]
+    enable_raw_mode = function()
+        local hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+        local hOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        if kernel32.GetConsoleMode(hIn, orig_in_mode) == 0 then return false end
+        kernel32.GetConsoleMode(hOut, orig_out_mode)
 
-local TIOCGWINSZ   = 0x5413
-local STDIN_FILENO = 0
-local TCSANOW      = 0
-local ICANON       = 2
-local ECHO         = 8
-local POLLIN       = 1
+        kernel32.SetConsoleOutputCP(65001)
+        local ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        kernel32.SetConsoleMode(hOut, bit.bor(orig_out_mode[0], ENABLE_VIRTUAL_TERMINAL_PROCESSING))
 
-local orig_termios = ffi.new("struct termios")
-local raw_termios  = ffi.new("struct termios")
-local in_raw_mode  = false
+        local raw_mode = bit.band(orig_in_mode[0], bit.bnot(0x0001 + 0x0002 + 0x0004))
+        kernel32.SetConsoleMode(hIn, raw_mode)
 
-local function enable_raw_mode()
-    if ffi.C.isatty(STDIN_FILENO) ~= 1 then return false end
-    ffi.C.tcgetattr(STDIN_FILENO, orig_termios)
-    ffi.C.tcgetattr(STDIN_FILENO, raw_termios)
-    raw_termios.c_lflag = bit.band(raw_termios.c_lflag, bit.bnot(bit.bor(ICANON, ECHO)))
-    ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
-    in_raw_mode = true
-
-    -- Switch to alternate screen buffer, hide cursor, enable bracketed paste
-    io.write("\27[?1049h\27[?25l")
-    io.flush()
-    return true
-end
-
-local function disable_raw_mode()
-    if in_raw_mode then
-        -- Return to main screen buffer, restore cursor, reset color
-        io.write("\27[?1049l\27[?25h\27[0m")
+        in_raw_mode = true
+        io.write("\27[?1049h\27[?25l")
         io.flush()
-        ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
-        in_raw_mode = false
+        return true
     end
-end
 
-local function get_terminal_size()
-    local ws = ffi.new("struct winsize")
-    if ffi.C.ioctl(1, TIOCGWINSZ, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
-        return tonumber(ws.ws_col), tonumber(ws.ws_row)
-    end
-    return 100, 30
-end
-
-local pfd = ffi.new("struct pollfd", { fd = STDIN_FILENO, events = POLLIN, revents = 0 })
-local key_buf = ffi.new("char[32]")
-
-local function read_key(timeout_ms)
-    timeout_ms = timeout_ms or 50
-    local ret = ffi.C.poll(pfd, 1, timeout_ms)
-    if ret > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
-        local n = ffi.C.read(STDIN_FILENO, key_buf, 32)
-        if n > 0 then
-            local c0 = key_buf[0]
-            if c0 == 27 then
-                if n >= 3 and key_buf[1] == 91 then
-                    local c2 = key_buf[2]
-                    if c2 == 65 then return "UP" end
-                    if c2 == 66 then return "DOWN" end
-                    if c2 == 67 then return "RIGHT" end
-                    if c2 == 68 then return "LEFT" end
-                    if c2 == 53 and n >= 4 and key_buf[3] == 126 then return "PAGE_UP" end
-                    if c2 == 54 and n >= 4 and key_buf[3] == 126 then return "PAGE_DOWN" end
-                end
-                return "ESC"
-            elseif c0 == 9 then
-                return "TAB"
-            elseif c0 == 10 or c0 == 13 then
-                return "ENTER"
-            elseif c0 == 32 then
-                return "SPACE"
-            elseif c0 == 127 or c0 == 8 then
-                return "BACKSPACE"
-            else
-                return string.char(c0)
-            end
+    disable_raw_mode = function()
+        if in_raw_mode then
+            io.write("\27[?1049l\27[?25h\27[0m")
+            io.flush()
+            local hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+            local hOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+            kernel32.SetConsoleMode(hIn, orig_in_mode[0])
+            kernel32.SetConsoleMode(hOut, orig_out_mode[0])
+            in_raw_mode = false
         end
     end
-    return nil
+
+    get_terminal_size = function()
+        local hOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        local csbi = ffi.new("CONSOLE_SCREEN_BUFFER_INFO")
+        if kernel32.GetConsoleScreenBufferInfo(hOut, csbi) ~= 0 then
+            local w = csbi.srWindow.Right - csbi.srWindow.Left + 1
+            local h = csbi.srWindow.Bottom - csbi.srWindow.Top + 1
+            if w > 0 and h > 0 then return tonumber(w), tonumber(h) end
+        end
+        return 100, 30
+    end
+
+    read_key = function(timeout_ms)
+        local hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+        local mode = ffi.new("uint32_t[1]")
+        if kernel32.GetConsoleMode(hIn, mode) == 0 then
+            local ch = io.read(1)
+            if not ch then return "q" end
+            if ch == "\n" or ch == "\r" then return "ENTER" end
+            return ch
+        end
+
+        timeout_ms = timeout_ms or 50
+        local elapsed = 0
+        while elapsed < timeout_ms do
+            if ffi.C._kbhit() ~= 0 then
+                local c0 = ffi.C._getch()
+                if c0 == 0 or c0 == 224 then
+                    local c1 = ffi.C._getch()
+                    if c1 == 72 then return "UP"
+                    elseif c1 == 80 then return "DOWN"
+                    elseif c1 == 75 then return "LEFT"
+                    elseif c1 == 77 then return "RIGHT"
+                    elseif c1 == 73 then return "PAGE_UP"
+                    elseif c1 == 81 then return "PAGE_DOWN"
+                    end
+                elseif c0 == 27 then
+                    return "ESC"
+                elseif c0 == 9 then
+                    return "TAB"
+                elseif c0 == 13 or c0 == 10 then
+                    return "ENTER"
+                elseif c0 == 32 then
+                    return "SPACE"
+                elseif c0 == 8 or c0 == 127 then
+                    return "BACKSPACE"
+                else
+                    return string.char(c0)
+                end
+            end
+            kernel32.Sleep(10)
+            elapsed = elapsed + 10
+        end
+        return nil
+    end
+else
+    ffi.cdef[[
+        struct winsize {
+            unsigned short ws_row;
+            unsigned short ws_col;
+            unsigned short ws_xpixel;
+            unsigned short ws_ypixel;
+        };
+        int ioctl(int fd, unsigned long request, void *argp);
+        int isatty(int fd);
+
+        typedef unsigned char cc_t;
+        typedef unsigned int  speed_t;
+        typedef unsigned int  tcflag_t;
+
+        struct termios {
+            tcflag_t c_iflag;
+            tcflag_t c_oflag;
+            tcflag_t c_cflag;
+            tcflag_t c_lflag;
+            cc_t     c_line;
+            cc_t     c_cc[32];
+            speed_t  c_ispeed;
+            speed_t  c_ospeed;
+        };
+
+        int tcgetattr(int fd, struct termios *termios_p);
+        int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
+
+        struct pollfd {
+            int   fd;
+            short events;
+            short revents;
+        };
+        int poll(struct pollfd *fds, unsigned long nfds, int timeout);
+        long read(int fd, void *buf, size_t count);
+    ]]
+
+    local TIOCGWINSZ   = 0x5413
+    local STDIN_FILENO = 0
+    local TCSANOW      = 0
+    local ICANON       = 2
+    local ECHO         = 8
+    local POLLIN       = 1
+
+    local orig_termios = ffi.new("struct termios")
+    local raw_termios  = ffi.new("struct termios")
+
+    enable_raw_mode = function()
+        if ffi.C.isatty(STDIN_FILENO) ~= 1 then return false end
+        ffi.C.tcgetattr(STDIN_FILENO, orig_termios)
+        ffi.C.tcgetattr(STDIN_FILENO, raw_termios)
+        raw_termios.c_lflag = bit.band(raw_termios.c_lflag, bit.bnot(bit.bor(ICANON, ECHO)))
+        ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
+        in_raw_mode = true
+
+        -- Switch to alternate screen buffer, hide cursor, enable bracketed paste
+        io.write("\27[?1049h\27[?25l")
+        io.flush()
+        return true
+    end
+
+    disable_raw_mode = function()
+        if in_raw_mode then
+            io.write("\27[?1049l\27[?25h\27[0m")
+            io.flush()
+            ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
+            in_raw_mode = false
+        end
+    end
+
+    get_terminal_size = function()
+        local ws = ffi.new("struct winsize")
+        if ffi.C.ioctl(1, TIOCGWINSZ, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
+            return tonumber(ws.ws_col), tonumber(ws.ws_row)
+        end
+        return 100, 30
+    end
+
+    local pfd = ffi.new("struct pollfd", { fd = STDIN_FILENO, events = POLLIN, revents = 0 })
+    local key_buf = ffi.new("char[32]")
+
+    read_key = function(timeout_ms)
+        if ffi.C.isatty(STDIN_FILENO) ~= 1 then
+            local ch = io.read(1)
+            if not ch then return "q" end
+            if ch == "\n" or ch == "\r" then return "ENTER" end
+            return ch
+        end
+
+        timeout_ms = timeout_ms or 50
+        local ret = ffi.C.poll(pfd, 1, timeout_ms)
+        if ret > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
+            local n = ffi.C.read(STDIN_FILENO, key_buf, 32)
+            if n > 0 then
+                local c0 = key_buf[0]
+                if c0 == 27 then
+                    if n >= 3 and key_buf[1] == 91 then
+                        local c2 = key_buf[2]
+                        if c2 == 65 then return "UP" end
+                        if c2 == 66 then return "DOWN" end
+                        if c2 == 67 then return "RIGHT" end
+                        if c2 == 68 then return "LEFT" end
+                        if c2 == 53 and n >= 4 and key_buf[3] == 126 then return "PAGE_UP" end
+                        if c2 == 54 and n >= 4 and key_buf[3] == 126 then return "PAGE_DOWN" end
+                    end
+                    return "ESC"
+                elseif c0 == 9 then
+                    return "TAB"
+                elseif c0 == 10 or c0 == 13 then
+                    return "ENTER"
+                elseif c0 == 32 then
+                    return "SPACE"
+                elseif c0 == 127 or c0 == 8 then
+                    return "BACKSPACE"
+                else
+                    return string.char(c0)
+                end
+            end
+        end
+        return nil
+    end
 end
 
 -- =========================================================================
@@ -207,7 +333,7 @@ end
 -- 3. Git Querying Engine
 -- =========================================================================
 local function exec_git(cmd)
-    local p = io.popen("git " .. cmd .. " 2>/dev/null", "r")
+    local p = io.popen("git " .. cmd .. " 2>" .. devnull, "r")
     if not p then return "" end
     local res = p:read("*a")
     p:close()
@@ -279,7 +405,7 @@ end
 
 local function get_git_commits(limit)
     limit = limit or 25
-    local raw = exec_git(string.format("log -n %d --pretty=format:'%%h|%%an|%%cr|%%s'", limit))
+    local raw = exec_git(string.format('log -n %d --pretty=format:"%%h|%%an|%%cr|%%s"', limit))
     local commits = {}
 
     for line in raw:gmatch("[^\r\n]+") do
@@ -446,7 +572,7 @@ local function main()
 
             -- Home cursor without blanking the screen (never emit \27[2J in regular loops to avoid screen flash)
             table.insert(out, "\27[H")
-            local repo_name = exec_git("rev-parse --show-toplevel"):match("([^/]+)%s*$") or "repository"
+            local repo_name = exec_git("rev-parse --show-toplevel"):match("([^/\\]+)%s*$") or "repository"
             local current_branch = exec_git("branch --show-current"):gsub("%s+", "")
             local header_text = string.format("  \27[1;38;2;56;189;248m⚡ LAZYGIT-LITE\27[0m \27[90m│\27[0m \27[1;97m%s\27[0m \27[90m(\27[1;38;2;52;211;153m%s\27[0m\27[90m)\27[0m\27[K",
                 repo_name, current_branch ~= "" and current_branch or "detached")
