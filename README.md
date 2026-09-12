@@ -63,6 +63,9 @@ make
   ./LuaJIT/src/luajit ffi_fractal_explorer.lua # Real-time truecolor mathematical fractal explorer (Mandelbrot, Julia, etc.)
   ./LuaJIT/src/luajit ffi_image_filter_studio.lua # Interactive Photoshop/Lightroom-style image processing & filter studio
   ./LuaJIT/src/luajit todo_tui.lua         # Interactive keyboard-driven Todo TUI with modal dialogs & categories
+  ./LuaJIT/src/luajit ffi_russian_block.lua # Classic Russian Block (Tetris) terminal game in pure LuaJIT FFI
+  ./LuaJIT/src/luajit ffi_chinese_chess.lua # Chinese Chess (Xiangqi) engine with Alpha-Beta AI & ANSI/ASCII TUI
+  ./LuaJIT/src/luajit ffi_chip8.lua        # Retro Chip-8 CPU emulator & VM with 7 built-in classic games
   ```
 
 - **Run Unit Tests:**
