@@ -31,161 +31,309 @@
 local ffi = require("ffi")
 
 -- =========================================================================
--- 1. FFI POSIX Definitions: Terminal, Polling, Dirent, and Stat
 -- =========================================================================
-ffi.cdef[[
-    struct winsize {
-        unsigned short ws_row;
-        unsigned short ws_col;
-        unsigned short ws_xpixel;
-        unsigned short ws_ypixel;
-    };
-    int ioctl(int fd, unsigned long request, void *argp);
-    int isatty(int fd);
+-- 1. FFI Definitions: Terminal, Polling, Dirent, and Stat
+-- =========================================================================
+local is_windows = (ffi.os == "Windows")
+local devnull = is_windows and "nul" or "/dev/null"
+local popen_rb = is_windows and "rb" or "r"
 
-    typedef unsigned char cc_t;
-    typedef unsigned int  speed_t;
-    typedef unsigned int  tcflag_t;
+local enable_raw_mode, disable_raw_mode, get_terminal_size, read_key
+local read_dir_entries, resolve_canonical_path, get_parent_dir
+local in_raw_mode = false
+local kernel32
 
-    struct termios {
-        tcflag_t c_iflag;
-        tcflag_t c_oflag;
-        tcflag_t c_cflag;
-        tcflag_t c_lflag;
-        cc_t     c_line;
-        cc_t     c_cc[32];
-        speed_t  c_ispeed;
-        speed_t  c_ospeed;
-    };
+if is_windows then
+    kernel32 = ffi.load("kernel32")
+    ffi.cdef[[
+        typedef void *HANDLE;
+        typedef struct _COORD { short X; short Y; } COORD;
+        typedef struct _SMALL_RECT { short Left; short Top; short Right; short Bottom; } SMALL_RECT;
+        typedef struct _CONSOLE_SCREEN_BUFFER_INFO {
+            COORD      dwSize;
+            COORD      dwCursorPosition;
+            uint16_t   wAttributes;
+            SMALL_RECT srWindow;
+            COORD      dwMaximumWindowSize;
+        } CONSOLE_SCREEN_BUFFER_INFO;
+        HANDLE GetStdHandle(uint32_t nStdHandle);
+        int GetConsoleScreenBufferInfo(HANDLE hConsoleOutput, CONSOLE_SCREEN_BUFFER_INFO *lpConsoleScreenBufferInfo);
+        int GetConsoleMode(HANDLE hConsoleHandle, uint32_t *lpMode);
+        int SetConsoleMode(HANDLE hConsoleHandle, uint32_t dwMode);
+        int SetConsoleOutputCP(uint32_t wCodePageID);
+        void Sleep(uint32_t dwMilliseconds);
+        int _kbhit(void);
+        int _getch(void);
 
-    int tcgetattr(int fd, struct termios *termios_p);
-    int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
+        typedef struct _FILETIME { uint32_t dwLowDateTime; uint32_t dwHighDateTime; } FILETIME;
+        typedef struct _WIN32_FIND_DATAA {
+            uint32_t dwFileAttributes;
+            FILETIME ftCreationTime;
+            FILETIME ftLastAccessTime;
+            FILETIME ftLastWriteTime;
+            uint32_t nFileSizeHigh;
+            uint32_t nFileSizeLow;
+            uint32_t dwReserved0;
+            uint32_t dwReserved1;
+            char     cFileName[260];
+            char     cAlternateFileName[14];
+        } WIN32_FIND_DATAA;
+        void* FindFirstFileA(const char* lpFileName, WIN32_FIND_DATAA* lpFindFileData);
+        int   FindNextFileA(void* hFindFile, WIN32_FIND_DATAA* lpFindFileData);
+        int   FindClose(void* hFindFile);
+        char* _fullpath(char *absPath, const char *relPath, size_t maxLength);
+    ]]
 
-    struct pollfd {
-        int   fd;
-        short events;
-        short revents;
-    };
-    int poll(struct pollfd *fds, unsigned long nfds, int timeout);
-    long read(int fd, void *buf, size_t count);
+    local STD_INPUT_HANDLE  = 0xFFFFFFF6
+    local STD_OUTPUT_HANDLE = 0xFFFFFFF5
+    local orig_in_mode = ffi.new("uint32_t[1]")
+    local orig_out_mode = ffi.new("uint32_t[1]")
 
-    typedef struct DIR DIR;
-    struct dirent {
-        unsigned long  d_ino;
-        long           d_off;
-        unsigned short d_reclen;
-        unsigned char  d_type;
-        char           d_name[256];
-    };
-    DIR *opendir(const char *name);
-    struct dirent *readdir(DIR *dirp);
-    int closedir(DIR *dirp);
+    enable_raw_mode = function()
+        local hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+        local hOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        if kernel32.GetConsoleMode(hIn, orig_in_mode) == 0 then return false end
+        kernel32.GetConsoleMode(hOut, orig_out_mode)
 
-    typedef long time_t;
-    struct stat {
-        unsigned long  st_dev;
-        unsigned long  st_ino;
-        unsigned long  st_nlink;
-        unsigned int   st_mode;
-        unsigned int   st_uid;
-        unsigned int   st_gid;
-        unsigned long  st_rdev;
-        long           st_size;
-        long           st_blksize;
-        long           st_blocks;
-        time_t         st_atime;
-        unsigned long  st_atime_nsec;
-        time_t         st_mtime;
-        unsigned long  st_mtime_nsec;
-        time_t         st_ctime;
-        unsigned long  st_ctime_nsec;
-        long           __unused[3];
-    };
-    int stat(const char *pathname, struct stat *statbuf);
+        kernel32.SetConsoleOutputCP(65001)
+        local ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        kernel32.SetConsoleMode(hOut, bit.bor(orig_out_mode[0], ENABLE_VIRTUAL_TERMINAL_PROCESSING))
 
-    char *realpath(const char *path, char *resolved_path);
+        local raw_mode = bit.band(orig_in_mode[0], bit.bnot(0x0001 + 0x0002 + 0x0004))
+        kernel32.SetConsoleMode(hIn, raw_mode)
 
-    typedef struct { uint8_t r, g, b; } PixelRGB;
-]]
-
-local TIOCGWINSZ   = 0x5413
-local STDIN_FILENO = 0
-local TCSANOW      = 0
-local ICANON       = 2
-local ECHO         = 8
-local POLLIN       = 1
-
-local orig_termios = ffi.new("struct termios")
-local raw_termios  = ffi.new("struct termios")
-local in_raw_mode  = false
-
-local function enable_raw_mode()
-    if ffi.C.isatty(STDIN_FILENO) ~= 1 then return false end
-    ffi.C.tcgetattr(STDIN_FILENO, orig_termios)
-    ffi.C.tcgetattr(STDIN_FILENO, raw_termios)
-    raw_termios.c_lflag = bit.band(raw_termios.c_lflag, bit.bnot(bit.bor(ICANON, ECHO)))
-    ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
-    in_raw_mode = true
-
-    -- Switch to alternate screen buffer, hide cursor
-    io.write("\27[?1049h\27[?25l")
-    io.flush()
-    return true
-end
-
-local function disable_raw_mode()
-    if in_raw_mode then
-        -- Return to main screen buffer, restore cursor, reset color
-        io.write("\27[?1049l\27[?25h\27[0m")
+        in_raw_mode = true
+        io.write("\27[?1049h\27[?25l")
         io.flush()
-        ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
-        in_raw_mode = false
+        return true
     end
-end
 
-local function get_terminal_size()
-    local ws = ffi.new("struct winsize")
-    if ffi.C.ioctl(1, TIOCGWINSZ, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
-        return tonumber(ws.ws_col), tonumber(ws.ws_row)
-    end
-    return 100, 30
-end
-
-local pfd = ffi.new("struct pollfd", { fd = STDIN_FILENO, events = POLLIN, revents = 0 })
-local key_buf = ffi.new("char[32]")
-
-local function read_key(timeout_ms)
-    timeout_ms = timeout_ms or 50
-    local ret = ffi.C.poll(pfd, 1, timeout_ms)
-    if ret > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
-        local n = ffi.C.read(STDIN_FILENO, key_buf, 32)
-        if n > 0 then
-            local c0 = key_buf[0]
-            if c0 == 27 then
-                if n >= 3 and key_buf[1] == 91 then
-                    local c2 = key_buf[2]
-                    if c2 == 65 then return "UP" end
-                    if c2 == 66 then return "DOWN" end
-                    if c2 == 67 then return "RIGHT" end
-                    if c2 == 68 then return "LEFT" end
-                    if c2 == 53 and n >= 4 and key_buf[3] == 126 then return "PAGE_UP" end
-                    if c2 == 54 and n >= 4 and key_buf[3] == 126 then return "PAGE_DOWN" end
-                    if c2 == 72 then return "HOME" end
-                    if c2 == 70 then return "END" end
-                end
-                return "ESC"
-            elseif c0 == 10 or c0 == 13 then
-                return "ENTER"
-            elseif c0 == 127 or c0 == 8 then
-                return "BACKSPACE"
-            elseif c0 == 32 then
-                return "SPACE"
-            else
-                return string.char(c0)
-            end
+    disable_raw_mode = function()
+        if in_raw_mode then
+            io.write("\27[?1049l\27[?25h\27[0m")
+            io.flush()
+            local hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+            local hOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+            kernel32.SetConsoleMode(hIn, orig_in_mode[0])
+            kernel32.SetConsoleMode(hOut, orig_out_mode[0])
+            in_raw_mode = false
         end
     end
-    return nil
+
+    get_terminal_size = function()
+        local hOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        local csbi = ffi.new("CONSOLE_SCREEN_BUFFER_INFO")
+        if kernel32.GetConsoleScreenBufferInfo(hOut, csbi) ~= 0 then
+            local w = csbi.srWindow.Right - csbi.srWindow.Left + 1
+            local h = csbi.srWindow.Bottom - csbi.srWindow.Top + 1
+            if w > 0 and h > 0 then return tonumber(w), tonumber(h) end
+        end
+        return 100, 30
+    end
+
+    read_key = function(timeout_ms)
+        local hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+        local mode = ffi.new("uint32_t[1]")
+        if kernel32.GetConsoleMode(hIn, mode) == 0 then
+            local ch = io.read(1)
+            if not ch then return "q" end
+            if ch == "\n" or ch == "\r" then return "ENTER" end
+            return ch
+        end
+
+        timeout_ms = timeout_ms or 50
+        local elapsed = 0
+        while elapsed < timeout_ms do
+            if ffi.C._kbhit() ~= 0 then
+                local c0 = ffi.C._getch()
+                if c0 == 0 or c0 == 224 then
+                    local c1 = ffi.C._getch()
+                    if c1 == 72 then return "UP"
+                    elseif c1 == 80 then return "DOWN"
+                    elseif c1 == 75 then return "LEFT"
+                    elseif c1 == 77 then return "RIGHT"
+                    elseif c1 == 73 then return "PAGE_UP"
+                    elseif c1 == 81 then return "PAGE_DOWN"
+                    elseif c1 == 71 then return "HOME"
+                    elseif c1 == 79 then return "END"
+                    end
+                elseif c0 == 27 then
+                    return "ESC"
+                elseif c0 == 9 then
+                    return "TAB"
+                elseif c0 == 13 or c0 == 10 then
+                    return "ENTER"
+                elseif c0 == 32 then
+                    return "SPACE"
+                elseif c0 == 8 or c0 == 127 then
+                    return "BACKSPACE"
+                else
+                    return string.char(c0)
+                end
+            end
+            kernel32.Sleep(10)
+            elapsed = elapsed + 10
+        end
+        return nil
+    end
+else
+    ffi.cdef[[
+        struct winsize {
+            unsigned short ws_row;
+            unsigned short ws_col;
+            unsigned short ws_xpixel;
+            unsigned short ws_ypixel;
+        };
+        int ioctl(int fd, unsigned long request, void *argp);
+        int isatty(int fd);
+
+        typedef unsigned char cc_t;
+        typedef unsigned int  speed_t;
+        typedef unsigned int  tcflag_t;
+
+        struct termios {
+            tcflag_t c_iflag;
+            tcflag_t c_oflag;
+            tcflag_t c_cflag;
+            tcflag_t c_lflag;
+            cc_t     c_line;
+            cc_t     c_cc[32];
+            speed_t  c_ispeed;
+            speed_t  c_ospeed;
+        };
+
+        int tcgetattr(int fd, struct termios *termios_p);
+        int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
+
+        struct pollfd {
+            int   fd;
+            short events;
+            short revents;
+        };
+        int poll(struct pollfd *fds, unsigned long nfds, int timeout);
+        long read(int fd, void *buf, size_t count);
+
+        typedef struct DIR DIR;
+        struct dirent {
+            unsigned long  d_ino;
+            long           d_off;
+            unsigned short d_reclen;
+            unsigned char  d_type;
+            char           d_name[256];
+        };
+        DIR *opendir(const char *name);
+        struct dirent *readdir(DIR *dirp);
+        int closedir(DIR *dirp);
+
+        typedef long time_t;
+        struct stat {
+            unsigned long  st_dev;
+            unsigned long  st_ino;
+            unsigned long  st_nlink;
+            unsigned int   st_mode;
+            unsigned int   st_uid;
+            unsigned int   st_gid;
+            unsigned long  st_rdev;
+            long           st_size;
+            long           st_blksize;
+            long           st_blocks;
+            time_t         st_atime;
+            unsigned long  st_atime_nsec;
+            time_t         st_mtime;
+            unsigned long  st_mtime_nsec;
+            time_t         st_ctime;
+            unsigned long  st_ctime_nsec;
+            long           __unused[3];
+        };
+        int stat(const char *pathname, struct stat *statbuf);
+
+        char *realpath(const char *path, char *resolved_path);
+    ]]
+
+    local TIOCGWINSZ   = 0x5413
+    local STDIN_FILENO = 0
+    local TCSANOW      = 0
+    local ICANON       = 2
+    local ECHO         = 8
+    local POLLIN       = 1
+
+    local orig_termios = ffi.new("struct termios")
+    local raw_termios  = ffi.new("struct termios")
+
+    enable_raw_mode = function()
+        if ffi.C.isatty(STDIN_FILENO) ~= 1 then return false end
+        ffi.C.tcgetattr(STDIN_FILENO, orig_termios)
+        ffi.C.tcgetattr(STDIN_FILENO, raw_termios)
+        raw_termios.c_lflag = bit.band(raw_termios.c_lflag, bit.bnot(bit.bor(ICANON, ECHO)))
+        ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
+        in_raw_mode = true
+
+        -- Switch to alternate screen buffer, hide cursor
+        io.write("\27[?1049h\27[?25l")
+        io.flush()
+        return true
+    end
+
+    disable_raw_mode = function()
+        if in_raw_mode then
+            io.write("\27[?1049l\27[?25h\27[0m")
+            io.flush()
+            ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
+            in_raw_mode = false
+        end
+    end
+
+    get_terminal_size = function()
+        local ws = ffi.new("struct winsize")
+        if ffi.C.ioctl(1, TIOCGWINSZ, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
+            return tonumber(ws.ws_col), tonumber(ws.ws_row)
+        end
+        return 100, 30
+    end
+
+    local pfd = ffi.new("struct pollfd", { fd = STDIN_FILENO, events = POLLIN, revents = 0 })
+    local key_buf = ffi.new("char[32]")
+
+    read_key = function(timeout_ms)
+        if ffi.C.isatty(STDIN_FILENO) ~= 1 then
+            local ch = io.read(1)
+            if not ch then return "q" end
+            if ch == "\n" or ch == "\r" then return "ENTER" end
+            return ch
+        end
+
+        timeout_ms = timeout_ms or 50
+        local ret = ffi.C.poll(pfd, 1, timeout_ms)
+        if ret > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
+            local n = ffi.C.read(STDIN_FILENO, key_buf, 32)
+            if n > 0 then
+                local c0 = key_buf[0]
+                if c0 == 27 then
+                    if n >= 3 and key_buf[1] == 91 then
+                        local c2 = key_buf[2]
+                        if c2 == 65 then return "UP" end
+                        if c2 == 66 then return "DOWN" end
+                        if c2 == 67 then return "RIGHT" end
+                        if c2 == 68 then return "LEFT" end
+                        if c2 == 53 and n >= 4 and key_buf[3] == 126 then return "PAGE_UP" end
+                        if c2 == 54 and n >= 4 and key_buf[3] == 126 then return "PAGE_DOWN" end
+                        if c2 == 72 then return "HOME" end
+                        if c2 == 70 then return "END" end
+                    end
+                    return "ESC"
+                elseif c0 == 10 or c0 == 13 then
+                    return "ENTER"
+                elseif c0 == 127 or c0 == 8 then
+                    return "BACKSPACE"
+                elseif c0 == 32 then
+                    return "SPACE"
+                else
+                    return string.char(c0)
+                end
+            end
+        end
+        return nil
+    end
 end
 
 -- =========================================================================
@@ -284,75 +432,171 @@ local function get_file_type_info(entry)
     end
 end
 
-local function read_dir_entries(dir_path, show_hidden)
-    dir_path = dir_path or "."
-    local d = ffi.C.opendir(dir_path)
-    if d == nil then return {} end
+if is_windows then
+    read_dir_entries = function(dir_path, show_hidden)
+        dir_path = dir_path or "."
+        local pattern = dir_path
+        if not pattern:match("[/\\]$") then
+            pattern = pattern .. "\\*"
+        else
+            pattern = pattern .. "*"
+        end
 
-    local entries = {}
-    local st = ffi.new("struct stat")
+        local fd = ffi.new("WIN32_FIND_DATAA")
+        local hFind = kernel32.FindFirstFileA(pattern, fd)
+        if hFind == ffi.cast("void*", -1) or hFind == nil then return {} end
 
-    while true do
-        local ent = ffi.C.readdir(d)
-        if ent == nil then break end
-        local name = ffi.string(ent.d_name)
+        local entries = {}
+        repeat
+            local name = ffi.string(fd.cFileName)
+            if name ~= "." and name ~= ".." and (show_hidden or name:sub(1, 1) ~= ".") then
+                local full_path
+                if dir_path:match("[/\\]$") then
+                    full_path = dir_path .. name
+                else
+                    full_path = dir_path .. "\\" .. name
+                end
 
-        if name ~= "." and name ~= ".." and (show_hidden or name:sub(1, 1) ~= ".") then
-            local full_path = (dir_path == "/" and ("/" .. name) or (dir_path .. "/" .. name))
-            local size = 0
-            local is_dir = false
-            local is_exec = false
-            local is_symlink = (ent.d_type == 10) -- DT_LNK
+                local is_dir = (bit.band(fd.dwFileAttributes, 0x10) ~= 0)
+                local is_symlink = (bit.band(fd.dwFileAttributes, 0x400) ~= 0)
+                local size = tonumber(fd.nFileSizeHigh) * 4294967296 + tonumber(fd.nFileSizeLow)
 
-            if ffi.C.stat(full_path, st) == 0 then
-                local mode = tonumber(st.st_mode)
-                is_dir = (bit.band(mode, 0xF000) == 0x4000) -- S_ISDIR
-                is_exec = (bit.band(mode, 0x49) ~= 0)        -- S_IXUSR / S_IXGRP / S_IXOTH
-                size = tonumber(st.st_size)
+                local ext = name:match("%.([^.]+)$")
+                ext = ext and ext:lower() or ""
+                local is_exec = (ext == "exe" or ext == "bat" or ext == "cmd" or ext == "ps1")
+
+                table.insert(entries, {
+                    name = name,
+                    path = full_path,
+                    ext = ext,
+                    size = size,
+                    size_str = format_bytes(size),
+                    is_dir = is_dir,
+                    is_exec = is_exec,
+                    is_symlink = is_symlink,
+                })
             end
+        until kernel32.FindNextFileA(hFind, fd) == 0
+        kernel32.FindClose(hFind)
 
-            local ext = name:match("%.([^.]+)$")
-            ext = ext and ext:lower() or ""
+        table.sort(entries, function(a, b)
+            if a.is_dir ~= b.is_dir then
+                return a.is_dir
+            end
+            return a.name:lower() < b.name:lower()
+        end)
 
-            table.insert(entries, {
-                name = name,
-                path = full_path,
-                ext = ext,
-                size = size,
-                size_str = format_bytes(size),
-                is_dir = is_dir,
-                is_exec = is_exec,
-                is_symlink = is_symlink,
-            })
-        end
+        return entries
     end
-    ffi.C.closedir(d)
 
-    -- Sort: Directories first, then alphabetical case-insensitive
-    table.sort(entries, function(a, b)
-        if a.is_dir ~= b.is_dir then
-            return a.is_dir
+    resolve_canonical_path = function(path)
+        local buf = ffi.new("char[4096]")
+        if ffi.C._fullpath(buf, path, 4096) ~= nil then
+            return ffi.string(buf)
         end
-        return a.name:lower() < b.name:lower()
-    end)
+        return path
+    end
 
-    return entries
+    get_parent_dir = function(path)
+        path = resolve_canonical_path(path)
+        if path:match("^[a-zA-Z]:[/\\]?$") or path == "/" or path == "\\" then
+            return path
+        end
+        local parent = path:match("^(.*)[/\\][^/\\]+$")
+        if not parent or parent == "" then
+            if path:match("^[a-zA-Z]:") then
+                return path:sub(1, 2) .. "\\"
+            end
+            return "\\"
+        end
+        if parent:match("^[a-zA-Z]:$") then
+            return parent .. "\\"
+        end
+        return parent
+    end
+else
+    read_dir_entries = function(dir_path, show_hidden)
+        dir_path = dir_path or "."
+        local d = ffi.C.opendir(dir_path)
+        if d == nil then return {} end
+
+        local entries = {}
+        local st = ffi.new("struct stat")
+
+        while true do
+            local ent = ffi.C.readdir(d)
+            if ent == nil then break end
+            local name = ffi.string(ent.d_name)
+
+            if name ~= "." and name ~= ".." and (show_hidden or name:sub(1, 1) ~= ".") then
+                local full_path = (dir_path == "/" and ("/" .. name) or (dir_path .. "/" .. name))
+                local size = 0
+                local is_dir = false
+                local is_exec = false
+                local is_symlink = (ent.d_type == 10) -- DT_LNK
+
+                if ffi.C.stat(full_path, st) == 0 then
+                    local mode = tonumber(st.st_mode)
+                    is_dir = (bit.band(mode, 0xF000) == 0x4000) -- S_ISDIR
+                    is_exec = (bit.band(mode, 0x49) ~= 0)        -- S_IXUSR / S_IXGRP / S_IXOTH
+                    size = tonumber(st.st_size)
+                end
+
+                local ext = name:match("%.([^.]+)$")
+                ext = ext and ext:lower() or ""
+
+                table.insert(entries, {
+                    name = name,
+                    path = full_path,
+                    ext = ext,
+                    size = size,
+                    size_str = format_bytes(size),
+                    is_dir = is_dir,
+                    is_exec = is_exec,
+                    is_symlink = is_symlink,
+                })
+            end
+        end
+        ffi.C.closedir(d)
+
+        table.sort(entries, function(a, b)
+            if a.is_dir ~= b.is_dir then
+                return a.is_dir
+            end
+            return a.name:lower() < b.name:lower()
+        end)
+
+        return entries
+    end
+
+    resolve_canonical_path = function(path)
+        local buf = ffi.new("char[4096]")
+        if ffi.C.realpath(path, buf) ~= nil then
+            return ffi.string(buf)
+        end
+        return path
+    end
+
+    get_parent_dir = function(path)
+        path = resolve_canonical_path(path)
+        if path == "/" then return "/" end
+        local parent = path:match("^(.*)/[^/]+$")
+        if not parent or parent == "" then return "/" end
+        return parent
+    end
 end
 
-local function resolve_canonical_path(path)
-    local buf = ffi.new("char[4096]")
-    if ffi.C.realpath(path, buf) ~= nil then
-        return ffi.string(buf)
-    end
-    return path
+local function is_root_dir(p)
+    if not p then return true end
+    if p == "/" or p == "\\" then return true end
+    if is_windows and p:match("^[a-zA-Z]:[/\\]?$") then return true end
+    return false
 end
 
-local function get_parent_dir(path)
-    path = resolve_canonical_path(path)
-    if path == "/" then return "/" end
-    local parent = path:match("^(.*)/[^/]+$")
-    if not parent or parent == "" then return "/" end
-    return parent
+local function get_dir_display_name(p)
+    if not p or is_root_dir(p) then return p or "/" end
+    local name = p:match("([^/\\]+)[/\\]?$")
+    return (name and #name > 0) and name or p
 end
 
 -- =========================================================================
@@ -411,7 +655,7 @@ local function generate_dir_preview(dirpath, max_lines, show_hidden)
     local entries = read_dir_entries(dirpath, show_hidden)
     local lines = {}
 
-    table.insert(lines, string.format("%s📂 Directory: %s (%d items)%s", C.syn_header, dirpath:match("([^/]+)$") or dirpath, #entries, C.reset))
+    table.insert(lines, string.format("%s📂 Directory: %s (%d items)%s", C.syn_header, get_dir_display_name(dirpath), #entries, C.reset))
     table.insert(lines, C.dim .. string.rep("─", 36) .. C.reset)
 
     for i = 1, math.min(#entries, max_lines - 2) do
@@ -462,32 +706,68 @@ local function generate_hex_preview(filepath, max_lines)
 end
 
 local function generate_image_preview(filepath, max_w, max_h)
-    -- Fast Truecolor thumbnail preview using convert or ffmpeg to PPM
-    local cmd = string.format("magick %q -resize %dx%d! ppm:- 2>/dev/null || convert %q -resize %dx%d! ppm:- 2>/dev/null",
-        filepath, max_w, max_h * 2, filepath, max_w, max_h * 2)
-    local pipe = io.popen(cmd, "r")
-    if not pipe then return { C.dim .. "(ImageMagick required for image previews)" .. C.reset } end
-
-    local magic = pipe:read("*l")
-    if magic ~= "P6" then
+    local cmd
+    if is_windows then
+        cmd = string.format('magick %q -resize %dx%d! ppm:- 2>%s', filepath, max_w, max_h * 2, devnull)
+    else
+        cmd = string.format('magick %q -resize %dx%d! ppm:- 2>%s || convert %q -resize %dx%d! ppm:- 2>%s',
+            filepath, max_w, max_h * 2, devnull, filepath, max_w, max_h * 2, devnull)
+    end
+    local pipe = io.popen(cmd, popen_rb)
+    local img_data = nil
+    if pipe then
+        img_data = pipe:read("*a")
         pipe:close()
-        return { C.dim .. "Image file: " .. filepath:match("([^/]+)$") .. C.reset, C.dim .. "(Install ImageMagick 'convert' for live rendering)" .. C.reset }
     end
 
-    local dim_line = pipe:read("*l")
-    while dim_line and dim_line:sub(1, 1) == "#" do dim_line = pipe:read("*l") end
-    if not dim_line then pipe:close() return {} end
+    if not img_data or #img_data == 0 then
+        local ffmpeg_cmd = string.format('ffmpeg -v error -i %q -vf scale=%d:%d -f image2pipe -vcodec ppm - 2>%s',
+            filepath, max_w, max_h * 2, devnull)
+        local fpipe = io.popen(ffmpeg_cmd, popen_rb)
+        if fpipe then
+            img_data = fpipe:read("*a")
+            fpipe:close()
+        end
+    end
 
-    local w, h = dim_line:match("(%d+)%s+(%d+)")
-    w = tonumber(w)
-    h = tonumber(h)
-    local maxval = pipe:read("*l")
+    if not img_data or #img_data == 0 then
+        return { C.dim .. "Image file: " .. (filepath:match("([^/\\]+)$") or filepath) .. C.reset, C.dim .. "(Install ffmpeg or ImageMagick for graphics preview)" .. C.reset }
+    end
 
-    if not w or not h or w <= 0 or h <= 0 then pipe:close() return {} end
+    local pos = 1
+    local function next_token()
+        while pos <= #img_data do
+            local ch = img_data:sub(pos, pos)
+            pos = pos + 1
+            if ch == '#' then
+                while pos <= #img_data and img_data:sub(pos, pos) ~= '\n' do pos = pos + 1 end
+                pos = pos + 1
+            elseif not ch:match("%s") then
+                local s = pos - 1
+                while pos <= #img_data and not img_data:sub(pos, pos):match("%s") do
+                    pos = pos + 1
+                end
+                local tok = img_data:sub(s, pos - 1)
+                if pos <= #img_data and img_data:sub(pos, pos):match("%s") then
+                    pos = pos + 1
+                end
+                return tok
+            end
+        end
+        return nil
+    end
 
-    local raw = pipe:read(w * h * 3)
-    pipe:close()
-    if not raw or #raw < w * h * 3 then return {} end
+    local magic = next_token()
+    if magic ~= "P6" then
+        return { C.dim .. "Image file: " .. (filepath:match("([^/\\]+)$") or filepath) .. C.reset }
+    end
+    local w = tonumber(next_token())
+    local h = tonumber(next_token())
+    local maxval = tonumber(next_token())
+    if not w or not h or w <= 0 or h <= 0 then return {} end
+
+    local raw = img_data:sub(pos, pos + w * h * 3 - 1)
+    if #raw < w * h * 3 then return {} end
 
     local lines = {}
     for y = 0, h - 2, 2 do
@@ -565,7 +845,7 @@ local function main()
             current_entries = filtered
         end
         parent_dir = get_parent_dir(current_dir)
-        parent_entries = (current_dir == "/") and {} or read_dir_entries(parent_dir, show_hidden)
+        parent_entries = is_root_dir(current_dir) and {} or read_dir_entries(parent_dir, show_hidden)
         sel_index = math.max(1, math.min(sel_index, math.max(1, #current_entries)))
         needs_redraw = true
     end
@@ -601,7 +881,7 @@ local function main()
             local start_y = 2
 
             -- Column 1: Parent Directory
-            local parent_title = parent_dir:match("([^/]+)$") or "/"
+            local parent_title = is_root_dir(current_dir) and "" or get_dir_display_name(parent_dir)
             draw_pane(out, col1_x, start_y, col1_w, usable_h, parent_title, false)
             local visible_rows = usable_h - 2
             for i = 1, visible_rows do
@@ -621,7 +901,7 @@ local function main()
             end
 
             -- Column 2: Current Directory (Active Cursor)
-            local cur_title = current_dir:match("([^/]+)$") or "/"
+            local cur_title = get_dir_display_name(current_dir)
             draw_pane(out, col2_x, start_y, col2_w, usable_h, cur_title, true)
 
             -- Scroll offset for current directory
@@ -743,13 +1023,13 @@ local function main()
                 sel_index = math.max(1, #current_entries)
             elseif k == "LEFT" or k == "h" or k == "BACKSPACE" then
                 -- Move to parent directory
-                if current_dir ~= "/" then
+                if not is_root_dir(current_dir) then
                     local prev_dir = current_dir
                     current_dir = get_parent_dir(current_dir)
                     filter_query = ""
                     current_entries = read_dir_entries(current_dir, show_hidden)
                     parent_dir = get_parent_dir(current_dir)
-                    parent_entries = (current_dir == "/") and {} or read_dir_entries(parent_dir, show_hidden)
+                    parent_entries = is_root_dir(current_dir) and {} or read_dir_entries(parent_dir, show_hidden)
 
                     -- Retain cursor on the directory we just left
                     sel_index = 1
