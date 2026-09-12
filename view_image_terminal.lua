@@ -12,33 +12,66 @@
 ]]
 
 local ffi = require("ffi")
+local is_windows = (ffi.os == "Windows")
+local kernel32
 
 -- 1. C Declarations for Terminal Dimensions & Buffer
 ffi.cdef[[
-    struct winsize {
-        unsigned short ws_row;
-        unsigned short ws_col;
-        unsigned short ws_xpixel;
-        unsigned short ws_ypixel;
-    };
-    int ioctl(int fd, unsigned long request, void *argp);
-
     typedef struct { uint8_t r, g, b; } ImgPixelRGB;
 ]]
 
-local TIOCGWINSZ = 0x5413 -- Linux ioctl code for terminal window size
+if is_windows then
+    kernel32 = ffi.load("kernel32")
+    ffi.cdef[[
+        typedef void *HANDLE;
+        typedef struct _COORD { short X; short Y; } COORD;
+        typedef struct _SMALL_RECT { short Left; short Top; short Right; short Bottom; } SMALL_RECT;
+        typedef struct _CONSOLE_SCREEN_BUFFER_INFO {
+            COORD      dwSize;
+            COORD      dwCursorPosition;
+            uint16_t   wAttributes;
+            SMALL_RECT srWindow;
+            COORD      dwMaximumWindowSize;
+        } CONSOLE_SCREEN_BUFFER_INFO;
+        HANDLE GetStdHandle(uint32_t nStdHandle);
+        int GetConsoleScreenBufferInfo(HANDLE hConsoleOutput, CONSOLE_SCREEN_BUFFER_INFO *lpConsoleScreenBufferInfo);
+    ]]
+else
+    ffi.cdef[[
+        struct winsize {
+            unsigned short ws_row;
+            unsigned short ws_col;
+            unsigned short ws_xpixel;
+            unsigned short ws_ypixel;
+        };
+        int ioctl(int fd, unsigned long request, void *argp);
+    ]]
+end
 
 local function get_terminal_size()
-    local ws = ffi.new("struct winsize")
-    -- fd 1 is stdout
-    if ffi.C.ioctl(1, TIOCGWINSZ, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
-        return tonumber(ws.ws_col), tonumber(ws.ws_row)
+    if is_windows then
+        local hOut = kernel32.GetStdHandle(0xFFFFFFF5) -- STD_OUTPUT_HANDLE = -11
+        local csbi = ffi.new("CONSOLE_SCREEN_BUFFER_INFO")
+        if kernel32.GetConsoleScreenBufferInfo(hOut, csbi) ~= 0 then
+            local w = csbi.srWindow.Right - csbi.srWindow.Left + 1
+            local h = csbi.srWindow.Bottom - csbi.srWindow.Top + 1
+            if w > 0 and h > 0 then return tonumber(w), tonumber(h) end
+        end
+        return 80, 24
+    else
+        local ws = ffi.new("struct winsize")
+        local TIOCGWINSZ = 0x5413
+        -- fd 1 is stdout
+        if ffi.C.ioctl(1, TIOCGWINSZ, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
+            return tonumber(ws.ws_col), tonumber(ws.ws_row)
+        end
+        return 80, 24 -- standard fallback
     end
-    return 80, 24 -- standard fallback
 end
 
 -- 2. Parsing PPM Data from a File Handle or Pipe
 local function parse_ppm_stream(f)
+    local last_ws = nil
     -- Helper to read next non-comment whitespace-delimited token
     local function next_token()
         while true do
@@ -50,7 +83,10 @@ local function parse_ppm_stream(f)
                 local token = { ch }
                 while true do
                     local c = f:read(1)
-                    if not c or c:match("%s") then break end
+                    if not c or c:match("%s") then
+                        last_ws = c
+                        break
+                    end
                     table.insert(token, c)
                 end
                 return table.concat(token)
@@ -74,15 +110,12 @@ local function parse_ppm_stream(f)
     local pixels = ffi.new("ImgPixelRGB[?]", width * height)
 
     if magic == "P6" then
-        -- Binary PPM: exactly one whitespace/newline character separates max_val from binary data
-        -- (next_token already stopped immediately after reading digits of max_val)
-        local single_ws = f:read(1)
-        if single_ws and single_ws == "\r" then
-            -- Handle potential CRLF line ending after header
+        -- Binary PPM: single whitespace separates max_val from binary data
+        -- (next_token already consumed the whitespace character into last_ws)
+        if last_ws == "\r" then
             local lf = f:read(1)
             if lf and lf ~= "\n" then
-                -- if not \n, it was already binary data
-                -- fallback: seek back or handle, but standard PPM uses single whitespace
+                -- if not \n, rare single carriage return
             end
         end
         local total_bytes = width * height * 3
@@ -132,8 +165,15 @@ local function load_image(filepath)
     end
 
     -- For PNG, JPG, WEBP, GIF, BMP: Stream decode via ImageMagick (magick/convert) or ffmpeg
-    local cmd = string.format("magick %q ppm:- 2>/dev/null || convert %q ppm:- 2>/dev/null", filepath, filepath)
-    local pipe = io.popen(cmd, "r")
+    local devnull = is_windows and "nul" or "/dev/null"
+    local popen_rb = is_windows and "rb" or "r"
+    local cmd
+    if is_windows then
+        cmd = string.format('magick %q ppm:- 2>%s', filepath, devnull)
+    else
+        cmd = string.format('magick %q ppm:- 2>%s || convert %q ppm:- 2>%s', filepath, devnull, filepath, devnull)
+    end
+    local pipe = io.popen(cmd, popen_rb)
     if pipe then
         local img = parse_ppm_stream(pipe)
         pipe:close()
@@ -141,8 +181,8 @@ local function load_image(filepath)
     end
 
     -- Fallback to ffmpeg if ImageMagick is not found
-    local ffmpeg_cmd = string.format("ffmpeg -v error -i %q -f image2pipe -vcodec ppm - 2>/dev/null", filepath)
-    local ffmpeg_pipe = io.popen(ffmpeg_cmd, "r")
+    local ffmpeg_cmd = string.format('ffmpeg -v error -i %q -f image2pipe -vcodec ppm - 2>%s', filepath, devnull)
+    local ffmpeg_pipe = io.popen(ffmpeg_cmd, popen_rb)
     if ffmpeg_pipe then
         local img = parse_ppm_stream(ffmpeg_pipe)
         ffmpeg_pipe:close()
