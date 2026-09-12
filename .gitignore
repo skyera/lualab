@@ -10,3 +10,4 @@ portraits/portrait_*_lady.*
 *.dylib
 *.ppm
 *.bmp
+.russian_block_score

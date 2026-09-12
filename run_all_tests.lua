@@ -14,6 +14,7 @@ local test_suites = {
     { file = "test_ffi_image_filter_studio.lua", description = "FFI Image Filter & Convolution Studio" },
     { file = "test_todo_tui.lua", description = "LuaJIT FFI Todo TUI Application Suite" },
     { file = "test_ffi_system_info.lua", description = "FFI System Diagnostics & Hardware Suite" },
+    { file = "test_ffi_russian_block.lua", description = "LuaJIT FFI Russian Block (Tetris) Suite" },
 }
 
 local luajit_bin = "luajit"
