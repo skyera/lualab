@@ -15,6 +15,7 @@ local test_suites = {
     { file = "test_todo_tui.lua", description = "LuaJIT FFI Todo TUI Application Suite" },
     { file = "test_ffi_system_info.lua", description = "FFI System Diagnostics & Hardware Suite" },
     { file = "test_ffi_russian_block.lua", description = "LuaJIT FFI Russian Block (Tetris) Suite" },
+    { file = "test_ffi_chinese_chess.lua", description = "LuaJIT FFI Chinese Chess (Xiangqi) Engine & Rules Suite" },
 }
 
 local luajit_bin = "luajit"
