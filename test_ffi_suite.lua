@@ -137,8 +137,17 @@ TestRunner.describe("2. FFI Standard C Library Functions", function()
 end)
 
 TestRunner.describe("3. Dynamic Library FFI (libsqlite3 integration)", function()
+    local function load_sqlite3()
+        local candidates = { "sqlite3", "libsqlite3.so.0", "libsqlite3.so", "sqlite3.dll" }
+        for _, name in ipairs(candidates) do
+            local ok, lib = pcall(ffi.load, name)
+            if ok and lib then return lib end
+        end
+        return nil
+    end
+
     TestRunner.it("should load libsqlite3 successfully via ffi.load", function()
-        local sqlite = ffi.load("sqlite3")
+        local sqlite = load_sqlite3()
         assert_true(sqlite ~= nil, "libsqlite3 should load")
     end)
 
@@ -148,7 +157,8 @@ TestRunner.describe("3. Dynamic Library FFI (libsqlite3 integration)", function(
             int sqlite3_open(const char *filename, sqlite3_test **ppDb);
             int sqlite3_close(sqlite3_test *db);
         ]]
-        local sqlite = ffi.load("sqlite3")
+        local sqlite = load_sqlite3()
+        assert_true(sqlite ~= nil, "libsqlite3 should load")
         local db = ffi.new("sqlite3_test*[1]")
 
         local rc_open = sqlite.sqlite3_open(":memory:", db)
