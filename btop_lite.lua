@@ -24,146 +24,253 @@
 
 local ffi = require("ffi")
 
+local is_windows = (ffi.os == "Windows")
+
+local enable_raw_mode, disable_raw_mode, get_terminal_size, read_key
+local read_cpu_stats, read_memory_stats, read_loadavg, read_process_table
+local terminate_process, kill_process
+local in_raw_mode = false
+
 -- =========================================================================
--- 1. FFI POSIX Definitions: Terminal, Polling, Dirent, and Signals
+-- 1. FFI & OS Terminal Management (Windows Win32 Console API & POSIX)
 -- =========================================================================
-ffi.cdef[[
-    struct winsize {
-        unsigned short ws_row;
-        unsigned short ws_col;
-        unsigned short ws_xpixel;
-        unsigned short ws_ypixel;
-    };
-    int ioctl(int fd, unsigned long request, void *argp);
-    int isatty(int fd);
+if is_windows then
+    local kernel32 = ffi.load("kernel32")
 
-    typedef unsigned char cc_t;
-    typedef unsigned int  speed_t;
-    typedef unsigned int  tcflag_t;
+    ffi.cdef[[
+        typedef void *HANDLE;
+        typedef struct _COORD { short X; short Y; } COORD;
+        typedef struct _SMALL_RECT { short Left; short Top; short Right; short Bottom; } SMALL_RECT;
+        typedef struct _CONSOLE_SCREEN_BUFFER_INFO {
+            COORD      dwSize;
+            COORD      dwCursorPosition;
+            uint16_t   wAttributes;
+            SMALL_RECT srWindow;
+            COORD      dwMaximumWindowSize;
+        } CONSOLE_SCREEN_BUFFER_INFO;
 
-    struct termios {
-        tcflag_t c_iflag;
-        tcflag_t c_oflag;
-        tcflag_t c_cflag;
-        tcflag_t c_lflag;
-        cc_t     c_line;
-        cc_t     c_cc[32];
-        speed_t  c_ispeed;
-        speed_t  c_ospeed;
-    };
+        HANDLE GetStdHandle(uint32_t nStdHandle);
+        int GetConsoleScreenBufferInfo(HANDLE hConsoleOutput, CONSOLE_SCREEN_BUFFER_INFO *lpConsoleScreenBufferInfo);
+        int GetConsoleMode(HANDLE hConsoleHandle, uint32_t *lpMode);
+        int SetConsoleMode(HANDLE hConsoleHandle, uint32_t dwMode);
+        int SetConsoleOutputCP(uint32_t wCodePageID);
+        void Sleep(uint32_t dwMilliseconds);
+        int _kbhit(void);
+        int _getch(void);
+    ]]
 
-    int tcgetattr(int fd, struct termios *termios_p);
-    int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
+    local orig_in_mode = ffi.new("uint32_t[1]")
+    local orig_out_mode = ffi.new("uint32_t[1]")
 
-    struct pollfd {
-        int   fd;
-        short events;
-        short revents;
-    };
-    int poll(struct pollfd *fds, unsigned long nfds, int timeout);
-    long read(int fd, void *buf, size_t count);
-
-    typedef struct DIR DIR;
-    struct dirent {
-        unsigned long  d_ino;
-        long           d_off;
-        unsigned short d_reclen;
-        unsigned char  d_type;
-        char           d_name[256];
-    };
-    DIR *opendir(const char *name);
-    struct dirent *readdir(DIR *dirp);
-    int closedir(DIR *dirp);
-
-    int kill(int pid, int sig);
-    long sysconf(int name);
-]]
-
-local TIOCGWINSZ   = 0x5413
-local STDIN_FILENO = 0
-local TCSANOW      = 0
-local ICANON       = 2
-local ECHO         = 8
-local POLLIN       = 1
-local SC_CLK_TCK   = 2
-
-local clk_tck = 100
-pcall(function()
-    local t = ffi.C.sysconf(SC_CLK_TCK)
-    if t > 0 then clk_tck = tonumber(t) end
-end)
-
-local orig_termios = ffi.new("struct termios")
-local raw_termios  = ffi.new("struct termios")
-local in_raw_mode  = false
-
-local function enable_raw_mode()
-    if ffi.C.isatty(STDIN_FILENO) ~= 1 then return false end
-    ffi.C.tcgetattr(STDIN_FILENO, orig_termios)
-    ffi.C.tcgetattr(STDIN_FILENO, raw_termios)
-    raw_termios.c_lflag = bit.band(raw_termios.c_lflag, bit.bnot(bit.bor(ICANON, ECHO)))
-    ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
-    in_raw_mode = true
-
-    -- Switch to alternate screen buffer, hide cursor
-    io.write("\27[?1049h\27[?25l")
-    io.flush()
-    return true
-end
-
-local function disable_raw_mode()
-    if in_raw_mode then
-        -- Return to main screen buffer, restore cursor, reset color
-        io.write("\27[?1049l\27[?25h\27[0m")
+    enable_raw_mode = function()
+        local hIn = kernel32.GetStdHandle(0xFFFFFFF6) -- STD_INPUT_HANDLE = -10
+        local hOut = kernel32.GetStdHandle(0xFFFFFFF5) -- STD_OUTPUT_HANDLE = -11
+        if kernel32.GetConsoleMode(hIn, orig_in_mode) == 0 then
+            io.write("\27[?1049h\27[?25l")
+            io.flush()
+            in_raw_mode = true
+            return false
+        end
+        kernel32.GetConsoleMode(hOut, orig_out_mode)
+        kernel32.SetConsoleOutputCP(65001)
+        kernel32.SetConsoleMode(hOut, bit.bor(orig_out_mode[0], 0x0004))
+        local raw_mode = bit.band(orig_in_mode[0], bit.bnot(0x0001 + 0x0002 + 0x0004))
+        raw_mode = bit.bor(raw_mode, 0x0200)
+        kernel32.SetConsoleMode(hIn, raw_mode)
+        in_raw_mode = true
+        io.write("\27[?1049h\27[?25l")
         io.flush()
-        ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
-        in_raw_mode = false
+        return true
     end
-end
 
-local function get_terminal_size()
-    local ws = ffi.new("struct winsize")
-    if ffi.C.ioctl(1, TIOCGWINSZ, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
-        return tonumber(ws.ws_col), tonumber(ws.ws_row)
-    end
-    return 100, 30
-end
-
-local pfd = ffi.new("struct pollfd", { fd = STDIN_FILENO, events = POLLIN, revents = 0 })
-local key_buf = ffi.new("char[32]")
-
-local function read_key(timeout_ms)
-    timeout_ms = timeout_ms or 50
-    local ret = ffi.C.poll(pfd, 1, timeout_ms)
-    if ret > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
-        local n = ffi.C.read(STDIN_FILENO, key_buf, 32)
-        if n > 0 then
-            local c0 = key_buf[0]
-            if c0 == 27 then
-                if n >= 3 and key_buf[1] == 91 then
-                    local c2 = key_buf[2]
-                    if c2 == 65 then return "UP" end
-                    if c2 == 66 then return "DOWN" end
-                    if c2 == 67 then return "RIGHT" end
-                    if c2 == 68 then return "LEFT" end
-                    if c2 == 53 and n >= 4 and key_buf[3] == 126 then return "PAGE_UP" end
-                    if c2 == 54 and n >= 4 and key_buf[3] == 126 then return "PAGE_DOWN" end
-                    if c2 == 72 then return "HOME" end
-                    if c2 == 70 then return "END" end
-                end
-                return "ESC"
-            elseif c0 == 10 or c0 == 13 then
-                return "ENTER"
-            elseif c0 == 127 or c0 == 8 then
-                return "BACKSPACE"
-            elseif c0 == 32 then
-                return "SPACE"
-            else
-                return string.char(c0)
+    disable_raw_mode = function()
+        if in_raw_mode then
+            io.write("\27[?1049l\27[?25h\27[0m")
+            io.flush()
+            local hIn = kernel32.GetStdHandle(0xFFFFFFF6)
+            local hOut = kernel32.GetStdHandle(0xFFFFFFF5)
+            if orig_in_mode[0] ~= 0 then
+                kernel32.SetConsoleMode(hIn, orig_in_mode[0])
             end
+            if orig_out_mode[0] ~= 0 then
+                kernel32.SetConsoleMode(hOut, orig_out_mode[0])
+            end
+            in_raw_mode = false
         end
     end
-    return nil
+
+    get_terminal_size = function()
+        local csbi = ffi.new("CONSOLE_SCREEN_BUFFER_INFO")
+        local hOut = kernel32.GetStdHandle(0xFFFFFFF5)
+        if kernel32.GetConsoleScreenBufferInfo(hOut, csbi) ~= 0 then
+            local w = csbi.srWindow.Right - csbi.srWindow.Left + 1
+            local h = csbi.srWindow.Bottom - csbi.srWindow.Top + 1
+            if w > 0 and h > 0 then return tonumber(w), tonumber(h) end
+        end
+        return 100, 30
+    end
+
+    read_key = function(timeout_ms)
+        timeout_ms = timeout_ms or 50
+        local hIn = kernel32.GetStdHandle(0xFFFFFFF6)
+        local mode = ffi.new("uint32_t[1]")
+        if kernel32.GetConsoleMode(hIn, mode) == 0 then
+            local ch = io.read(1)
+            if not ch or ch == "" then return nil end
+            if ch == "\27" then return "ESC"
+            elseif ch == "\n" or ch == "\r" then return "ENTER"
+            elseif ch == " " then return "SPACE"
+            else return ch end
+        end
+
+        local elapsed = 0
+        while elapsed < timeout_ms do
+            if ffi.C._kbhit() ~= 0 then
+                local ch = ffi.C._getch()
+                if ch == 224 or ch == 0 then
+                    local ch2 = ffi.C._getch()
+                    if ch2 == 72 then return "UP"
+                    elseif ch2 == 80 then return "DOWN"
+                    elseif ch2 == 75 then return "LEFT"
+                    elseif ch2 == 77 then return "RIGHT"
+                    elseif ch2 == 73 then return "PAGE_UP"
+                    elseif ch2 == 81 then return "PAGE_DOWN"
+                    elseif ch2 == 71 then return "HOME"
+                    elseif ch2 == 79 then return "END"
+                    end
+                elseif ch == 27 then
+                    return "ESC"
+                elseif ch == 13 or ch == 10 then
+                    return "ENTER"
+                elseif ch == 8 then
+                    return "BACKSPACE"
+                elseif ch == 32 then
+                    return "SPACE"
+                else
+                    return string.char(ch)
+                end
+            end
+            kernel32.Sleep(10)
+            elapsed = elapsed + 10
+        end
+        return nil
+    end
+else
+    ffi.cdef[[
+        struct winsize {
+            unsigned short ws_row;
+            unsigned short ws_col;
+            unsigned short ws_xpixel;
+            unsigned short ws_ypixel;
+        };
+        int ioctl(int fd, unsigned long request, void *argp);
+        int isatty(int fd);
+
+        typedef unsigned char cc_t;
+        typedef unsigned int  speed_t;
+        typedef unsigned int  tcflag_t;
+
+        struct termios {
+            tcflag_t c_iflag;
+            tcflag_t c_oflag;
+            tcflag_t c_cflag;
+            tcflag_t c_lflag;
+            cc_t     c_line;
+            cc_t     c_cc[32];
+            speed_t  c_ispeed;
+            speed_t  c_ospeed;
+        };
+
+        int tcgetattr(int fd, struct termios *termios_p);
+        int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
+
+        struct pollfd {
+            int   fd;
+            short events;
+            short revents;
+        };
+        int poll(struct pollfd *fds, unsigned long nfds, int timeout);
+        long read(int fd, void *buf, size_t count);
+    ]]
+
+    local TIOCGWINSZ   = 0x5413
+    local STDIN_FILENO = 0
+    local TCSANOW      = 0
+    local ICANON       = 2
+    local ECHO         = 8
+    local POLLIN       = 1
+
+    local orig_termios = ffi.new("struct termios")
+    local raw_termios  = ffi.new("struct termios")
+
+    enable_raw_mode = function()
+        if ffi.C.isatty(STDIN_FILENO) ~= 1 then return false end
+        ffi.C.tcgetattr(STDIN_FILENO, orig_termios)
+        ffi.C.tcgetattr(STDIN_FILENO, raw_termios)
+        raw_termios.c_lflag = bit.band(raw_termios.c_lflag, bit.bnot(bit.bor(ICANON, ECHO)))
+        ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
+        in_raw_mode = true
+
+        -- Switch to alternate screen buffer, hide cursor
+        io.write("\27[?1049h\27[?25l")
+        io.flush()
+        return true
+    end
+
+    disable_raw_mode = function()
+        if in_raw_mode then
+            -- Return to main screen buffer, restore cursor, reset color
+            io.write("\27[?1049l\27[?25h\27[0m")
+            io.flush()
+            ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
+            in_raw_mode = false
+        end
+    end
+
+    get_terminal_size = function()
+        local ws = ffi.new("struct winsize")
+        if ffi.C.ioctl(1, TIOCGWINSZ, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
+            return tonumber(ws.ws_col), tonumber(ws.ws_row)
+        end
+        return 100, 30
+    end
+
+    local pfd = ffi.new("struct pollfd", { fd = STDIN_FILENO, events = POLLIN, revents = 0 })
+    local key_buf = ffi.new("char[32]")
+
+    read_key = function(timeout_ms)
+        timeout_ms = timeout_ms or 50
+        local ret = ffi.C.poll(pfd, 1, timeout_ms)
+        if ret > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
+            local n = ffi.C.read(STDIN_FILENO, key_buf, 32)
+            if n > 0 then
+                local c0 = key_buf[0]
+                if c0 == 27 then
+                    if n >= 3 and key_buf[1] == 91 then
+                        local c2 = key_buf[2]
+                        if c2 == 65 then return "UP" end
+                        if c2 == 66 then return "DOWN" end
+                        if c2 == 67 then return "RIGHT" end
+                        if c2 == 68 then return "LEFT" end
+                        if c2 == 53 and n >= 4 and key_buf[3] == 126 then return "PAGE_UP" end
+                        if c2 == 54 and n >= 4 and key_buf[3] == 126 then return "PAGE_DOWN" end
+                        if c2 == 72 then return "HOME" end
+                        if c2 == 70 then return "END" end
+                    end
+                    return "ESC"
+                elseif c0 == 10 or c0 == 13 then
+                    return "ENTER"
+                elseif c0 == 127 or c0 == 8 then
+                    return "BACKSPACE"
+                elseif c0 == 32 then
+                    return "SPACE"
+                else
+                    return string.char(c0)
+                end
+            end
+        end
+        return nil
+    end
 end
 
 -- =========================================================================
@@ -247,185 +354,449 @@ local function make_meter_bar(pct, width)
 end
 
 -- =========================================================================
--- 4. Fast Linux /proc Reader Engine
+-- 4. Cross-Platform Metrics Engine (Win32 API & POSIX /proc)
 -- =========================================================================
-local prev_cpu_totals = {}
-local prev_proc_times = {}
+if is_windows then
+    local kernel32 = ffi.load("kernel32")
+    local psapi = ffi.load("psapi")
 
-local function read_cpu_stats()
-    local f = io.open("/proc/stat", "r")
-    if not f then return {}, 0 end
+    ffi.cdef[[
+        typedef struct _FILETIME { uint32_t dwLowDateTime; uint32_t dwHighDateTime; } FILETIME;
+        int GetSystemTimes(FILETIME *lpIdleTime, FILETIME *lpKernelTime, FILETIME *lpUserTime);
 
-    local cores = {}
-    local overall_pct = 0
+        typedef struct _SYSTEM_INFO {
+            union {
+                uint32_t dwOemId;
+                struct { uint16_t wProcessorArchitecture; uint16_t wReserved; };
+            };
+            uint32_t dwPageSize;
+            void *lpMinimumApplicationAddress;
+            void *lpMaximumApplicationAddress;
+            uintptr_t dwActiveProcessorMask;
+            uint32_t dwNumberOfProcessors;
+            uint32_t dwProcessorType;
+            uint32_t dwAllocationGranularity;
+            uint16_t wProcessorLevel;
+            uint16_t wProcessorRevision;
+        } SYSTEM_INFO;
+        void GetSystemInfo(SYSTEM_INFO *lpSystemInfo);
 
-    while true do
-        local line = f:read("*l")
-        if not line or not line:find("^cpu") then break end
+        typedef struct _MEMORYSTATUSEX {
+            uint32_t dwLength;
+            uint32_t dwMemoryLoad;
+            uint64_t ullTotalPhys;
+            uint64_t ullAvailPhys;
+            uint64_t ullTotalPageFile;
+            uint64_t ullAvailPageFile;
+            uint64_t ullTotalVirtual;
+            uint64_t ullAvailVirtual;
+            uint64_t ullAvailExtendedVirtual;
+        } MEMORYSTATUSEX;
+        int GlobalMemoryStatusEx(MEMORYSTATUSEX *lpBuffer);
 
-        local name, user, nice, sys, idle, iowait, irq, softirq =
-            line:match("^(cpu%w*)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)")
+        typedef struct tagPROCESSENTRY32 {
+            uint32_t dwSize;
+            uint32_t cntUsage;
+            uint32_t th32ProcessID;
+            uintptr_t th32DefaultHeapID;
+            uint32_t th32ModuleID;
+            uint32_t cntThreads;
+            uint32_t th32ParentProcessID;
+            long pcPriClassBase;
+            uint32_t dwFlags;
+            char szExeFile[260];
+        } PROCESSENTRY32;
+        HANDLE CreateToolhelp32Snapshot(uint32_t dwFlags, uint32_t th32ProcessID);
+        int Process32First(HANDLE hSnapshot, PROCESSENTRY32 *lppe);
+        int Process32Next(HANDLE hSnapshot, PROCESSENTRY32 *lppe);
+        int CloseHandle(HANDLE hObject);
 
-        if name then
-            user = tonumber(user) or 0
-            nice = tonumber(nice) or 0
-            sys  = tonumber(sys) or 0
-            idle = tonumber(idle) or 0
-            iowait = tonumber(iowait) or 0
-            irq = tonumber(irq) or 0
-            softirq = tonumber(softirq) or 0
+        HANDLE OpenProcess(uint32_t dwDesiredAccess, int bInheritHandle, uint32_t dwProcessId);
+        int TerminateProcess(HANDLE hProcess, uint32_t uExitCode);
+        int GetProcessTimes(HANDLE hProcess, FILETIME *lpCreationTime, FILETIME *lpExitTime, FILETIME *lpKernelTime, FILETIME *lpUserTime);
 
-            local busy = user + nice + sys + irq + softirq
-            local total = busy + idle + iowait
+        typedef struct _PROCESS_MEMORY_COUNTERS {
+            uint32_t cb;
+            uint32_t PageFaultCount;
+            size_t PeakWorkingSetSize;
+            size_t WorkingSetSize;
+            size_t QuotaPeakPagedPoolUsage;
+            size_t QuotaPagedPoolUsage;
+            size_t QuotaPeakNonPagedPoolUsage;
+            size_t QuotaNonPagedPoolUsage;
+            size_t PagefileUsage;
+            size_t PeakPagefileUsage;
+        } PROCESS_MEMORY_COUNTERS;
+        int GetProcessMemoryInfo(HANDLE hProcess, PROCESS_MEMORY_COUNTERS *ppmc, uint32_t cb);
+    ]]
 
-            local prev = prev_cpu_totals[name]
-            local pct = 0
-            if prev then
-                local d_total = total - prev.total
-                local d_busy  = busy - prev.busy
-                if d_total > 0 then
-                    pct = math.min(100.0, math.max(0.0, (d_busy / d_total) * 100.0))
+    local function filetime_to_num(ft)
+        return tonumber(ft.dwHighDateTime) * 4294967296 + tonumber(ft.dwLowDateTime)
+    end
+
+    local sys_info = ffi.new("SYSTEM_INFO")
+    kernel32.GetSystemInfo(sys_info)
+    local num_cores = math.max(1, tonumber(sys_info.dwNumberOfProcessors))
+
+    local prev_idle_t = 0
+    local prev_kern_t = 0
+    local prev_user_t = 0
+
+    read_cpu_stats = function()
+        local idle_ft = ffi.new("FILETIME")
+        local kern_ft = ffi.new("FILETIME")
+        local user_ft = ffi.new("FILETIME")
+        if kernel32.GetSystemTimes(idle_ft, kern_ft, user_ft) == 0 then
+            return {}, 0
+        end
+        local idle_t = filetime_to_num(idle_ft)
+        local kern_t = filetime_to_num(kern_ft)
+        local user_t = filetime_to_num(user_ft)
+
+        local overall_pct = 0
+        if prev_kern_t > 0 then
+            local d_idle = idle_t - prev_idle_t
+            local d_kern = kern_t - prev_kern_t
+            local d_user = user_t - prev_user_t
+            local total_sys = d_kern + d_user
+            local busy = (d_kern - d_idle) + d_user
+            if total_sys > 0 then
+                overall_pct = math.min(100.0, math.max(0.0, (busy / total_sys) * 100.0))
+            end
+        end
+        prev_idle_t = idle_t
+        prev_kern_t = kern_t
+        prev_user_t = user_t
+
+        local cores = {}
+        for i = 1, num_cores do
+            table.insert(cores, { name = "cpu" .. (i - 1), pct = overall_pct })
+        end
+        return cores, overall_pct
+    end
+
+    read_memory_stats = function()
+        local mem_status = ffi.new("MEMORYSTATUSEX")
+        mem_status.dwLength = ffi.sizeof(mem_status)
+        if kernel32.GlobalMemoryStatusEx(mem_status) == 0 then
+            return {
+                total_kb = 1, used_kb = 0, avail_kb = 1, buffers_kb = 0, cached_kb = 0,
+                used_pct = 0, swap_total_kb = 0, swap_used_kb = 0, swap_pct = 0
+            }
+        end
+        local total_kb = tonumber(mem_status.ullTotalPhys / 1024)
+        local avail_kb = tonumber(mem_status.ullAvailPhys / 1024)
+        local used_kb  = math.max(0, total_kb - avail_kb)
+        local used_pct = (total_kb > 0) and ((used_kb / total_kb) * 100.0) or 0
+
+        local pagefile_total_kb = tonumber(mem_status.ullTotalPageFile / 1024)
+        local pagefile_avail_kb = tonumber(mem_status.ullAvailPageFile / 1024)
+        local swap_total_kb = math.max(0, pagefile_total_kb - total_kb)
+        local swap_used_kb  = math.max(0, (pagefile_total_kb - pagefile_avail_kb) - used_kb)
+        local swap_pct = (swap_total_kb > 0) and ((swap_used_kb / swap_total_kb) * 100.0) or 0
+
+        return {
+            total_kb = total_kb,
+            used_kb = used_kb,
+            avail_kb = avail_kb,
+            buffers_kb = 0,
+            cached_kb = 0,
+            used_pct = used_pct,
+            swap_total_kb = swap_total_kb,
+            swap_used_kb = swap_used_kb,
+            swap_pct = swap_pct,
+        }
+    end
+
+    read_loadavg = function(overall_cpu, num_procs)
+        local approx_load = (overall_cpu or 0) / 100 * num_cores
+        return string.format("%.2f", approx_load), string.format("%d procs", num_procs or 0)
+    end
+
+    local prev_win_proc_times = {}
+
+    read_process_table = function(mem_total_kb, uptime_sec)
+        local snap = kernel32.CreateToolhelp32Snapshot(0x02, 0)
+        if snap == ffi.cast("void*", -1) or snap == nil then return {} end
+
+        local pe = ffi.new("PROCESSENTRY32")
+        pe.dwSize = ffi.sizeof(pe)
+        local pmc = ffi.new("PROCESS_MEMORY_COUNTERS")
+        pmc.cb = ffi.sizeof(pmc)
+        local c_ft, e_ft, k_ft, u_ft = ffi.new("FILETIME"), ffi.new("FILETIME"), ffi.new("FILETIME"), ffi.new("FILETIME")
+
+        local procs = {}
+        local ok = kernel32.Process32First(snap, pe)
+        local now_clock = os.clock()
+
+        while ok ~= 0 do
+            local pid = pe.th32ProcessID
+            local exe = ffi.string(pe.szExeFile)
+            local res_kb = 0
+            local cpu_pct = 0
+
+            if pid ~= 0 then
+                local h = kernel32.OpenProcess(0x1000, 0, pid)
+                if h ~= nil then
+                    if psapi.GetProcessMemoryInfo(h, pmc, pmc.cb) ~= 0 then
+                        res_kb = tonumber(pmc.WorkingSetSize / 1024)
+                    end
+                    if kernel32.GetProcessTimes(h, c_ft, e_ft, k_ft, u_ft) ~= 0 then
+                        local total_t = filetime_to_num(k_ft) + filetime_to_num(u_ft)
+                        local prev = prev_win_proc_times[pid]
+                        if prev and prev.clock > 0 then
+                            local d_t = total_t - prev.time
+                            local d_clock = now_clock - prev.clock
+                            if d_clock > 0 and d_t >= 0 then
+                                cpu_pct = math.min(100.0, math.max(0.0, (d_t / 1e7 / d_clock) * 100.0 / num_cores))
+                            end
+                        end
+                        prev_win_proc_times[pid] = { time = total_t, clock = now_clock }
+                    end
+                    kernel32.CloseHandle(h)
                 end
             end
-            prev_cpu_totals[name] = { total = total, busy = busy }
 
-            if name == "cpu" then
-                overall_pct = pct
-            else
-                table.insert(cores, { name = name, pct = pct })
+            local mem_pct = (mem_total_kb > 0) and ((res_kb / mem_total_kb) * 100.0) or 0
+            table.insert(procs, {
+                pid = pid,
+                comm = exe,
+                cmdline = exe,
+                state = "R",
+                cpu_pct = cpu_pct,
+                mem_pct = mem_pct,
+                res_kb = res_kb,
+            })
+
+            ok = kernel32.Process32Next(snap, pe)
+        end
+        kernel32.CloseHandle(snap)
+        return procs
+    end
+
+    terminate_process = function(pid)
+        local h = kernel32.OpenProcess(0x0001, 0, pid)
+        if h ~= nil then
+            kernel32.TerminateProcess(h, 1)
+            kernel32.CloseHandle(h)
+        end
+    end
+
+    kill_process = function(pid)
+        local h = kernel32.OpenProcess(0x0001, 0, pid)
+        if h ~= nil then
+            kernel32.TerminateProcess(h, 9)
+            kernel32.CloseHandle(h)
+        end
+    end
+else
+    ffi.cdef[[
+        typedef struct DIR DIR;
+        struct dirent {
+            unsigned long  d_ino;
+            long           d_off;
+            unsigned short d_reclen;
+            unsigned char  d_type;
+            char           d_name[256];
+        };
+        DIR *opendir(const char *name);
+        struct dirent *readdir(DIR *dirp);
+        int closedir(DIR *dirp);
+
+        int kill(int pid, int sig);
+        long sysconf(int name);
+    ]]
+
+    local SC_CLK_TCK = 2
+    local clk_tck = 100
+    pcall(function()
+        local t = ffi.C.sysconf(SC_CLK_TCK)
+        if t > 0 then clk_tck = tonumber(t) end
+    end)
+
+    local prev_cpu_totals = {}
+    local prev_proc_times = {}
+
+    read_cpu_stats = function()
+        local f = io.open("/proc/stat", "r")
+        if not f then return {}, 0 end
+
+        local cores = {}
+        local overall_pct = 0
+
+        while true do
+            local line = f:read("*l")
+            if not line or not line:find("^cpu") then break end
+
+            local name, user, nice, sys, idle, iowait, irq, softirq =
+                line:match("^(cpu%w*)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)")
+
+            if name then
+                user = tonumber(user) or 0
+                nice = tonumber(nice) or 0
+                sys  = tonumber(sys) or 0
+                idle = tonumber(idle) or 0
+                iowait = tonumber(iowait) or 0
+                irq = tonumber(irq) or 0
+                softirq = tonumber(softirq) or 0
+
+                local busy = user + nice + sys + irq + softirq
+                local total = busy + idle + iowait
+
+                local prev = prev_cpu_totals[name]
+                local pct = 0
+                if prev then
+                    local d_total = total - prev.total
+                    local d_busy  = busy - prev.busy
+                    if d_total > 0 then
+                        pct = math.min(100.0, math.max(0.0, (d_busy / d_total) * 100.0))
+                    end
+                end
+                prev_cpu_totals[name] = { total = total, busy = busy }
+
+                if name == "cpu" then
+                    overall_pct = pct
+                else
+                    table.insert(cores, { name = name, pct = pct })
+                end
             end
         end
+        f:close()
+        return cores, overall_pct
     end
-    f:close()
-    return cores, overall_pct
-end
 
-local function read_memory_stats()
-    local f = io.open("/proc/meminfo", "r")
-    if not f then return {} end
+    read_memory_stats = function()
+        local f = io.open("/proc/meminfo", "r")
+        if not f then return {} end
 
-    local mem = {}
-    while true do
-        local line = f:read("*l")
-        if not line then break end
-        local k, v = line:match("([^:]+):%s+(%d+)")
-        if k and v then
-            mem[k] = tonumber(v)
+        local mem = {}
+        while true do
+            local line = f:read("*l")
+            if not line then break end
+            local k, v = line:match("([^:]+):%s+(%d+)")
+            if k and v then
+                mem[k] = tonumber(v)
+            end
         end
+        f:close()
+
+        local total = mem["MemTotal"] or 1
+        local free = mem["MemFree"] or 0
+        local avail = mem["MemAvailable"] or free
+        local buffers = mem["Buffers"] or 0
+        local cached = mem["Cached"] or 0
+        local used = total - avail
+
+        local swap_total = mem["SwapTotal"] or 0
+        local swap_free = mem["SwapFree"] or 0
+        local swap_used = swap_total - swap_free
+
+        return {
+            total_kb = total,
+            used_kb = used,
+            avail_kb = avail,
+            buffers_kb = buffers,
+            cached_kb = cached,
+            used_pct = (used / total) * 100.0,
+            swap_total_kb = swap_total,
+            swap_used_kb = swap_used,
+            swap_pct = (swap_total > 0) and ((swap_used / swap_total) * 100.0) or 0,
+        }
     end
-    f:close()
 
-    local total = mem["MemTotal"] or 1
-    local free = mem["MemFree"] or 0
-    local avail = mem["MemAvailable"] or free
-    local buffers = mem["Buffers"] or 0
-    local cached = mem["Cached"] or 0
-    local used = total - avail
+    read_loadavg = function(overall_cpu, num_procs)
+        local f = io.open("/proc/loadavg", "r")
+        if not f then return "0.00 0.00 0.00", "0/0" end
+        local content = f:read("*l") or ""
+        f:close()
+        local l1, l5, l15, tasks = content:match("^(%S+)%s+(%S+)%s+(%S+)%s+(%S+)")
+        return string.format("%s %s %s", l1 or "0.0", l5 or "0.0", l15 or "0.0"), tasks or ""
+    end
 
-    local swap_total = mem["SwapTotal"] or 0
-    local swap_free = mem["SwapFree"] or 0
-    local swap_used = swap_total - swap_free
+    read_process_table = function(mem_total_kb, uptime_sec)
+        local d = ffi.C.opendir("/proc")
+        if d == nil then return {} end
 
-    return {
-        total_kb = total,
-        used_kb = used,
-        avail_kb = avail,
-        buffers_kb = buffers,
-        cached_kb = cached,
-        used_pct = (used / total) * 100.0,
-        swap_total_kb = swap_total,
-        swap_used_kb = swap_used,
-        swap_pct = (swap_total > 0) and ((swap_used / swap_total) * 100.0) or 0,
-    }
-end
+        local procs = {}
 
-local function read_loadavg()
-    local f = io.open("/proc/loadavg", "r")
-    if not f then return "0.00 0.00 0.00", "0/0" end
-    local content = f:read("*l") or ""
-    f:close()
-    local l1, l5, l15, tasks = content:match("^(%S+)%s+(%S+)%s+(%S+)%s+(%S+)")
-    return string.format("%s %s %s", l1 or "0.0", l5 or "0.0", l15 or "0.0"), tasks or ""
-end
+        while true do
+            local ent = ffi.C.readdir(d)
+            if ent == nil then break end
+            local name = ffi.string(ent.d_name)
 
--- Read process table directly via /proc dirent
-local function read_process_table(mem_total_kb, uptime_sec)
-    local d = ffi.C.opendir("/proc")
-    if d == nil then return {} end
+            if name:match("^%d+$") then
+                local pid = tonumber(name)
+                local stat_f = io.open("/proc/" .. name .. "/stat", "r")
+                if stat_f then
+                    local stat_line = stat_f:read("*l")
+                    stat_f:close()
 
-    local procs = {}
-
-    while true do
-        local ent = ffi.C.readdir(d)
-        if ent == nil then break end
-        local name = ffi.string(ent.d_name)
-
-        if name:match("^%d+$") then
-            local pid = tonumber(name)
-            local stat_f = io.open("/proc/" .. name .. "/stat", "r")
-            if stat_f then
-                local stat_line = stat_f:read("*l")
-                stat_f:close()
-
-                if stat_line then
-                    -- Format: pid (comm) state ppid pgrp session tty_nr tpgid flags minflt cminflt majflt cmajflt utime stime ...
-                    local comm = stat_line:match("%((.-)%)") or ""
-                    local rest = stat_line:match("%).-(%S+.*)")
-                    if rest then
-                        local parts = {}
-                        for p in rest:gmatch("%S+") do
-                            table.insert(parts, p)
-                            if #parts >= 22 then break end
-                        end
-
-                        local state  = parts[1] or "R"
-                        local utime  = tonumber(parts[12]) or 0
-                        local stime  = tonumber(parts[13]) or 0
-                        local start_time = tonumber(parts[20]) or 0
-                        local rss_pages  = tonumber(parts[22]) or 0
-
-                        local total_time = utime + stime
-                        local prev = prev_proc_times[pid]
-                        local cpu_pct = 0
-                        if prev then
-                            local d_proc = total_time - prev.time
-                            if d_proc > 0 then
-                                cpu_pct = math.min(100.0, (d_proc / clk_tck) * 100.0)
+                    if stat_line then
+                        local comm = stat_line:match("%((.-)%)") or ""
+                        local rest = stat_line:match("%).-(%S+.*)")
+                        if rest then
+                            local parts = {}
+                            for p in rest:gmatch("%S+") do
+                                table.insert(parts, p)
+                                if #parts >= 22 then break end
                             end
-                        end
-                        prev_proc_times[pid] = { time = total_time }
 
-                        local res_kb = rss_pages * 4
-                        local mem_pct = (res_kb / mem_total_kb) * 100.0
+                            local state  = parts[1] or "R"
+                            local utime  = tonumber(parts[12]) or 0
+                            local stime  = tonumber(parts[13]) or 0
+                            local start_time = tonumber(parts[20]) or 0
+                            local rss_pages  = tonumber(parts[22]) or 0
 
-                        -- Get commandline
-                        local cmdline = comm
-                        local cmd_f = io.open("/proc/" .. name .. "/cmdline", "r")
-                        if cmd_f then
-                            local raw_cmd = cmd_f:read(128) or ""
-                            cmd_f:close()
-                            if #raw_cmd > 0 then
-                                cmdline = raw_cmd:gsub("%z", " "):gsub("%s+$", "")
+                            local total_time = utime + stime
+                            local prev = prev_proc_times[pid]
+                            local cpu_pct = 0
+                            if prev then
+                                local d_proc = total_time - prev.time
+                                if d_proc > 0 then
+                                    cpu_pct = math.min(100.0, (d_proc / clk_tck) * 100.0)
+                                end
                             end
-                        end
+                            prev_proc_times[pid] = { time = total_time }
 
-                        table.insert(procs, {
-                            pid = pid,
-                            comm = comm,
-                            cmdline = cmdline,
-                            state = state,
-                            cpu_pct = cpu_pct,
-                            mem_pct = mem_pct,
-                            res_kb = res_kb,
-                        })
+                            local res_kb = rss_pages * 4
+                            local mem_pct = (res_kb / mem_total_kb) * 100.0
+
+                            local cmdline = comm
+                            local cmd_f = io.open("/proc/" .. name .. "/cmdline", "r")
+                            if cmd_f then
+                                local raw_cmd = cmd_f:read(128) or ""
+                                cmd_f:close()
+                                if #raw_cmd > 0 then
+                                    cmdline = raw_cmd:gsub("%z", " "):gsub("%s+$", "")
+                                end
+                            end
+
+                            table.insert(procs, {
+                                pid = pid,
+                                comm = comm,
+                                cmdline = cmdline,
+                                state = state,
+                                cpu_pct = cpu_pct,
+                                mem_pct = mem_pct,
+                                res_kb = res_kb,
+                            })
+                        end
                     end
                 end
             end
         end
-    end
-    ffi.C.closedir(d)
+        ffi.C.closedir(d)
 
-    return procs
+        return procs
+    end
+
+    terminate_process = function(pid)
+        ffi.C.kill(pid, 15) -- SIGTERM
+    end
+
+    kill_process = function(pid)
+        ffi.C.kill(pid, 9) -- SIGKILL
+    end
 end
 
 -- =========================================================================
@@ -541,19 +912,17 @@ local function main()
         if (curr_clock >= next_refresh_time and not is_paused) or needs_redraw then
             next_refresh_time = curr_clock + (refresh_interval_ms / 1000.0)
 
-            -- Read system metrics via /proc
+            -- Read system metrics
             local cores, overall_cpu = read_cpu_stats()
             local mem = read_memory_stats()
-            local load_str, task_str = read_loadavg()
+            local procs = read_process_table(mem.total_kb or 1, now)
+            local load_str, task_str = read_loadavg(overall_cpu, #procs)
 
             -- Maintain CPU sparkline history
             table.insert(cpu_history, overall_cpu)
             if #cpu_history > max_history then
                 table.remove(cpu_history, 1)
             end
-
-            -- Read and sort processes
-            local procs = read_process_table(mem.total_kb or 1, now)
 
             -- Filter
             if #filter_query > 0 then
@@ -587,9 +956,9 @@ local function main()
 
             -- Kill action on selected process if requested
             if k == "k" and procs[sel_proc] then
-                ffi.C.kill(procs[sel_proc].pid, 9) -- SIGKILL
+                kill_process(procs[sel_proc].pid)
             elseif k == "t" and procs[sel_proc] then
-                ffi.C.kill(procs[sel_proc].pid, 15) -- SIGTERM
+                terminate_process(procs[sel_proc].pid)
             end
 
             -- =================================================================
