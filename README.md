@@ -51,7 +51,7 @@ make
 
 - **Run FFI Examples (requires LuaJIT):**
   ```bash
-  ./LuaJIT/src/luajit ffi_system_info.lua
+  ./LuaJIT/src/luajit ffi_system_info.lua   # Rich POSIX system diagnostics, hardware specs & memory benchmark (--compact, --json, --bench)
   ./LuaJIT/src/luajit ffi_advanced_demo.lua
   ./LuaJIT/src/luajit ffi_sqlite_demo.lua   # In-memory SQLite3 FFI engine & benchmark
   ./LuaJIT/src/luajit ffi_game_snake.lua    # Real-time terminal Snake game via POSIX FFI
