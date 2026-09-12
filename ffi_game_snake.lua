@@ -12,108 +12,208 @@
 
 local ffi = require("ffi")
 
--- 1. C Declarations for POSIX Terminal, Polling, and High-Resolution Clock
-ffi.cdef[[
-    // Terminal manipulation
-    typedef unsigned char cc_t;
-    typedef unsigned int  speed_t;
-    typedef unsigned int  tcflag_t;
+-- 1. C Declarations for Windows / POSIX Terminal, Polling, and High-Resolution Clock
+local is_windows = (ffi.os == "Windows")
 
-    struct termios {
-        tcflag_t c_iflag;
-        tcflag_t c_oflag;
-        tcflag_t c_cflag;
-        tcflag_t c_lflag;
-        cc_t     c_line;
-        cc_t     c_cc[32];
-        speed_t  c_ispeed;
-        speed_t  c_ospeed;
-    };
+local enable_raw_mode
+local disable_raw_mode
+local read_key
+local get_time_ms
+local sleep_ms
 
-    int tcgetattr(int fd, struct termios *termios_p);
-    int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
+if is_windows then
+    ffi.cdef[[
+        typedef struct { short X; short Y; } COORD;
+        typedef struct { short Left; short Top; short Right; short Bottom; } SMALL_RECT;
+        typedef struct {
+            COORD      dwSize;
+            COORD      dwCursorPosition;
+            uint16_t   wAttributes;
+            SMALL_RECT srWindow;
+            COORD      dwMaximumWindowSize;
+        } CONSOLE_SCREEN_BUFFER_INFO;
 
-    // Non-blocking poll & I/O
-    struct pollfd {
-        int   fd;
-        short events;
-        short revents;
-    };
+        void* __stdcall GetStdHandle(uint32_t nStdHandle);
+        int   __stdcall GetConsoleMode(void* hConsoleHandle, uint32_t* lpMode);
+        int   __stdcall SetConsoleMode(void* hConsoleHandle, uint32_t dwMode);
+        int   __stdcall SetConsoleOutputCP(uint32_t wCodePageID);
+        void  __stdcall Sleep(uint32_t dwMilliseconds);
 
-    int poll(struct pollfd *fds, unsigned long nfds, int timeout);
-    long read(int fd, void *buf, size_t count);
+        int _kbhit(void);
+        int _getch(void);
+    ]]
 
-    // Timing
-    typedef struct { long tv_sec; long tv_nsec; } timespec_t;
-    int clock_gettime(int clk_id, timespec_t *tp);
-    int usleep(unsigned int usec);
-]]
+    local STD_INPUT_HANDLE  = 0xFFFFFFF6
+    local STD_OUTPUT_HANDLE = 0xFFFFFFF5
 
--- Constants
-local STDIN_FILENO = 0
-local TCSANOW = 0
-local ICANON = 2
-local ECHO = 8
-local POLLIN = 1
-local CLOCK_MONOTONIC = 1
+    local orig_in_mode = ffi.new("uint32_t[1]")
+    local has_raw_mode = false
 
--- 2. Terminal Raw Mode Management via FFI
-local orig_termios = ffi.new("struct termios")
-local raw_termios = ffi.new("struct termios")
-local has_raw_mode = false
+    pcall(function()
+        local hOut = ffi.C.GetStdHandle(STD_OUTPUT_HANDLE)
+        ffi.C.SetConsoleOutputCP(65001) -- UTF-8
+        local out_mode = ffi.new("uint32_t[1]")
+        if ffi.C.GetConsoleMode(hOut, out_mode) ~= 0 then
+            local ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+            ffi.C.SetConsoleMode(hOut, bit.bor(out_mode[0], ENABLE_VIRTUAL_TERMINAL_PROCESSING))
+        end
+    end)
 
-local function enable_raw_mode()
-    ffi.C.tcgetattr(STDIN_FILENO, orig_termios)
-    ffi.C.tcgetattr(STDIN_FILENO, raw_termios)
+    enable_raw_mode = function()
+        local hIn = ffi.C.GetStdHandle(STD_INPUT_HANDLE)
+        if ffi.C.GetConsoleMode(hIn, orig_in_mode) == 0 then return false end
 
-    -- Disable canonical mode (line buffering) and echo
-    raw_termios.c_lflag = bit.band(raw_termios.c_lflag, bit.bnot(bit.bor(ICANON, ECHO)))
-    ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
-    has_raw_mode = true
+        local ENABLE_LINE_INPUT = 0x0002
+        local ENABLE_ECHO_INPUT = 0x0004
+        local new_mode = bit.band(orig_in_mode[0], bit.bnot(bit.bor(ENABLE_LINE_INPUT, ENABLE_ECHO_INPUT)))
+        ffi.C.SetConsoleMode(hIn, new_mode)
+        has_raw_mode = true
 
-    -- Hide cursor and clear screen
-    io.write("\27[?25l\27[2J")
-    io.flush()
-end
-
-local function disable_raw_mode()
-    if has_raw_mode then
-        -- Restore cursor, reset colors, restore terminal
-        io.write("\27[?25h\27[0m\n")
+        io.write("\27[?25l\27[2J")
         io.flush()
-        ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
-        has_raw_mode = false
+        return true
     end
-end
 
--- 3. Non-blocking Key Reading via poll()
-local pfd = ffi.new("struct pollfd", { fd = STDIN_FILENO, events = POLLIN, revents = 0 })
-local input_buf = ffi.new("char[16]")
-
-local function read_key()
-    local ret = ffi.C.poll(pfd, 1, 0)
-    if ret > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
-        local n = ffi.C.read(STDIN_FILENO, input_buf, 16)
-        if n > 0 then
-            local ch = string.char(input_buf[0])
-            -- Handle arrow keys: ESC [ A/B/C/D
-            if ch == "\27" and n >= 3 and input_buf[1] == 91 then -- 91 is '['
-                local code = input_buf[2]
-                if code == 65 then return "UP" end
-                if code == 66 then return "DOWN" end
-                if code == 67 then return "RIGHT" end
-                if code == 68 then return "LEFT" end
-            end
-            return ch:lower()
+    disable_raw_mode = function()
+        if has_raw_mode then
+            io.write("\27[?25h\27[0m\n")
+            io.flush()
+            local hIn = ffi.C.GetStdHandle(STD_INPUT_HANDLE)
+            ffi.C.SetConsoleMode(hIn, orig_in_mode[0])
+            has_raw_mode = false
         end
     end
-    return nil
-end
 
-local function get_time_ms()
-    local ts = ffi.new("timespec_t")
-    ffi.C.clock_gettime(CLOCK_MONOTONIC, ts)
-    return tonumber(ts.tv_sec) * 1000 + tonumber(ts.tv_nsec) / 1e6
+    read_key = function()
+        local hIn = ffi.C.GetStdHandle(STD_INPUT_HANDLE)
+        local mode = ffi.new("uint32_t[1]")
+        if ffi.C.GetConsoleMode(hIn, mode) == 0 then
+            local ch = io.read(1)
+            if not ch or ch == "" then return nil end
+            return ch:lower()
+        end
+        if ffi.C._kbhit() ~= 0 then
+            local ch = ffi.C._getch()
+            if ch == 0 or ch == 224 then
+                local code = ffi.C._getch()
+                if code == 72 then return "UP"
+                elseif code == 80 then return "DOWN"
+                elseif code == 75 then return "LEFT"
+                elseif code == 77 then return "RIGHT"
+                end
+            elseif ch == 27 then
+                return "q"
+            else
+                return string.char(ch):lower()
+            end
+        end
+        return nil
+    end
+
+    get_time_ms = function()
+        return os.clock() * 1000.0
+    end
+
+    sleep_ms = function(ms)
+        ffi.C.Sleep(ms)
+    end
+else
+    ffi.cdef[[
+        typedef unsigned char cc_t;
+        typedef unsigned int  speed_t;
+        typedef unsigned int  tcflag_t;
+
+        struct termios {
+            tcflag_t c_iflag;
+            tcflag_t c_oflag;
+            tcflag_t c_cflag;
+            tcflag_t c_lflag;
+            cc_t     c_line;
+            cc_t     c_cc[32];
+            speed_t  c_ispeed;
+            speed_t  c_ospeed;
+        };
+
+        int tcgetattr(int fd, struct termios *termios_p);
+        int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
+
+        struct pollfd {
+            int   fd;
+            short events;
+            short revents;
+        };
+
+        int poll(struct pollfd *fds, unsigned long nfds, int timeout);
+        long read(int fd, void *buf, size_t count);
+
+        typedef struct { long tv_sec; long tv_nsec; } timespec_t;
+        int clock_gettime(int clk_id, timespec_t *tp);
+        int usleep(unsigned int usec);
+    ]]
+
+    local STDIN_FILENO = 0
+    local TCSANOW = 0
+    local ICANON = 2
+    local ECHO = 8
+    local POLLIN = 1
+    local CLOCK_MONOTONIC = 1
+
+    local orig_termios = ffi.new("struct termios")
+    local raw_termios = ffi.new("struct termios")
+    local has_raw_mode = false
+
+    enable_raw_mode = function()
+        ffi.C.tcgetattr(STDIN_FILENO, orig_termios)
+        ffi.C.tcgetattr(STDIN_FILENO, raw_termios)
+
+        raw_termios.c_lflag = bit.band(raw_termios.c_lflag, bit.bnot(bit.bor(ICANON, ECHO)))
+        ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
+        has_raw_mode = true
+
+        io.write("\27[?25l\27[2J")
+        io.flush()
+    end
+
+    disable_raw_mode = function()
+        if has_raw_mode then
+            io.write("\27[?25h\27[0m\n")
+            io.flush()
+            ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
+            has_raw_mode = false
+        end
+    end
+
+    local pfd = ffi.new("struct pollfd", { fd = STDIN_FILENO, events = POLLIN, revents = 0 })
+    local input_buf = ffi.new("char[16]")
+
+    read_key = function()
+        local ret = ffi.C.poll(pfd, 1, 0)
+        if ret > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
+            local n = ffi.C.read(STDIN_FILENO, input_buf, 16)
+            if n > 0 then
+                local ch = string.char(input_buf[0])
+                if ch == "\27" and n >= 3 and input_buf[1] == 91 then
+                    local code = input_buf[2]
+                    if code == 65 then return "UP" end
+                    if code == 66 then return "DOWN" end
+                    if code == 67 then return "RIGHT" end
+                    if code == 68 then return "LEFT" end
+                end
+                return ch:lower()
+            end
+        end
+        return nil
+    end
+
+    get_time_ms = function()
+        local ts = ffi.new("timespec_t")
+        ffi.C.clock_gettime(CLOCK_MONOTONIC, ts)
+        return tonumber(ts.tv_sec) * 1000 + tonumber(ts.tv_nsec) / 1e6
+    end
+
+    sleep_ms = function(ms)
+        ffi.C.usleep(ms * 1000)
+    end
 end
 
 -- 4. Game Configuration and Board
@@ -276,7 +376,7 @@ local function run_game()
             end
         end
 
-        ffi.C.usleep(4000) -- ~4ms frame polling to avoid CPU busy-waiting
+        sleep_ms(4) -- ~4ms frame polling to avoid CPU busy-waiting
     end
 
     disable_raw_mode()
