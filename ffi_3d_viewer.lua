@@ -536,12 +536,97 @@ local function create_cylinder(segs)
     return {name = "Cylinder Prism", verts = verts, tris = tris, scale = 0.9}
 end
 
+local function create_milky_way_galaxy()
+    local verts = {}
+    local star_colors = {}
+    local num_stars = 850
+    local arms = 2
+    local arm_spread = 0.45
+
+    -- 1. Galactic Core / Bulge (Dense, glowing warm yellow-white stars)
+    for _ = 1, 200 do
+        local r = (math.random() ^ 1.8) * 0.55
+        local theta = math.random() * 2 * math.pi
+        local z = (math.random() - 0.5) * 0.35 * (1.0 - r / 0.6)
+        local x = r * math.cos(theta)
+        local y = r * math.sin(theta)
+
+        table.insert(verts, vec3(x, z, y)) -- Lay flat on X-Z plane, Y is thickness
+        local brightness = math.floor(200 + math.random() * 55)
+        table.insert(star_colors, {
+            r = brightness,
+            g = math.floor(brightness * 0.92),
+            b = math.floor(brightness * 0.65)
+        })
+    end
+
+    -- 2. Spiral Arms (Milky Way logarithmic spiral with bluish-white & magenta star-forming nebulae)
+    for arm = 0, arms - 1 do
+        local arm_offset = arm * math.pi
+        for _ = 1, math.floor(num_stars * 0.38) do
+            local dist = 0.3 + math.random() * 1.55
+            local spiral_angle = arm_offset + dist * 2.6 + (math.random() - 0.5) * arm_spread
+            local spread_dist = (math.random() - 0.5) * (0.15 + dist * 0.12)
+
+            local x = (dist + spread_dist) * math.cos(spiral_angle)
+            local y = (dist + spread_dist) * math.sin(spiral_angle)
+            local z = (math.random() - 0.5) * 0.16 * math.max(0.2, 1.4 - dist * 0.6)
+
+            table.insert(verts, vec3(x, z, y))
+
+            -- Star colors: young hot blue stars in outer arms, pink/violet HII regions, white stars
+            local star_type = math.random()
+            if star_type < 0.55 then
+                -- Hot blue/cyan stars
+                table.insert(star_colors, {
+                    r = math.random(110, 190),
+                    g = math.random(170, 230),
+                    b = 255
+                })
+            elseif star_type < 0.80 then
+                -- Pure brilliant white stars
+                local b = math.random(220, 255)
+                table.insert(star_colors, { r = b, g = b, b = b })
+            else
+                -- Magenta / violet nebula star clusters
+                table.insert(star_colors, {
+                    r = math.random(220, 255),
+                    g = math.random(90, 160),
+                    b = math.random(210, 255)
+                })
+            end
+        end
+    end
+
+    -- 3. Galactic Halo (Faint outer globular cluster stars)
+    for _ = 1, 60 do
+        local u = math.random() * 2 * math.pi
+        local v = (math.random() - 0.5) * math.pi
+        local rad = 0.8 + math.random() * 1.0
+        local x = rad * math.cos(v) * math.cos(u)
+        local y = rad * math.cos(v) * math.sin(u) * 0.5
+        local z = rad * math.sin(v) * 0.4
+        table.insert(verts, vec3(x, z, y))
+        table.insert(star_colors, { r = 180, g = 190, b = 220 })
+    end
+
+    return {
+        name = "Milky Way Galaxy",
+        is_particle_system = true,
+        verts = verts,
+        star_colors = star_colors,
+        tris = {},
+        scale = 1.0
+    }
+end
+
 local MESHES = {
     create_cube(),
     create_torus(1.2, 0.45, 18, 10),
     create_pyramid(),
     create_octahedron(),
-    create_cylinder(14)
+    create_cylinder(14),
+    create_milky_way_galaxy()
 }
 
 -- =========================================================================
@@ -652,6 +737,42 @@ function Framebuffer:draw_line(x0, y0, z0, x1, y1, z1, r, g, b)
     end
 end
 
+-- Star Point / Particle Drawing with Depth Test and Additive Glow
+function Framebuffer:draw_point(x, y, z, r, g, b, is_core)
+    local w, h = self.width, self.height
+    local ix, iy = math.floor(x), math.floor(y)
+
+    if ix >= 0 and ix < w and iy >= 0 and iy < h then
+        local idx = iy * w + ix
+        if z < self.zbuffer[idx] then
+            self.zbuffer[idx] = z
+            self.pixels[idx].r = r
+            self.pixels[idx].g = g
+            self.pixels[idx].b = b
+        end
+    end
+
+    -- Soft bloom/glow halo for galactic core stars
+    if is_core then
+        local neighbors = {
+            {dx = 1, dy = 0}, {dx = -1, dy = 0},
+            {dx = 0, dy = 1}, {dx = 0, dy = -1}
+        }
+        for _, nb in ipairs(neighbors) do
+            local nx, ny = ix + nb.dx, iy + nb.dy
+            if nx >= 0 and nx < w and ny >= 0 and ny < h then
+                local nidx = ny * w + nx
+                if z < self.zbuffer[nidx] + 0.1 then
+                    -- Soft additive blend
+                    self.pixels[nidx].r = math.min(255, self.pixels[nidx].r + math.floor(r * 0.25))
+                    self.pixels[nidx].g = math.min(255, self.pixels[nidx].g + math.floor(g * 0.25))
+                    self.pixels[nidx].b = math.min(255, self.pixels[nidx].b + math.floor(b * 0.25))
+                end
+            end
+        end
+    end
+end
+
 -- Renders the framebuffer into ANSI Truecolor half-block text
 function Framebuffer:render_ansi_screen(title_str, stat_str, term_w)
     local out = {}
@@ -711,13 +832,14 @@ local function main()
         elseif a == "-h" or a == "--help" then
             print("\27[1;36mTerminal 3D Mesh Renderer (LuaJIT FFI Truecolor)\27[0m")
             print("Usage:")
-            print("  ./LuaJIT/src/luajit ffi_3d_viewer.lua [model 1-5] [options]")
+            print("  ./LuaJIT/src/luajit ffi_3d_viewer.lua [model 1-6] [options]")
             print("\nModels:")
             print("  1: Cube")
             print("  2: Torus (3D Donut)")
             print("  3: Pyramid")
             print("  4: Octahedron Gem")
             print("  5: Cylinder Prism")
+            print("  6: Milky Way Galaxy (Particle Spiral)")
             print("\nOptions:")
             print("  --wireframe, -w   Render in vector wireframe mode")
             print("  --no-rotate       Start in manual rotation mode")
@@ -844,41 +966,56 @@ local function main()
             })
         end
 
-        -- 2. Render Triangles with Depth-buffering and Lighting
+        -- 2. Render Mesh Triangles or Galaxy Particle Stars
         local tris_drawn = 0
-        for _, tri in ipairs(mesh.tris) do
-            local p0 = proj_verts[tri.v[1]]
-            local p1 = proj_verts[tri.v[2]]
-            local p2 = proj_verts[tri.v[3]]
+        local stars_drawn = 0
 
-            -- Backface culling: calculate screen-space cross product
-            local cross_z = (p1.x - p0.x) * (p2.y - p0.y) - (p1.y - p0.y) * (p2.x - p0.x)
+        if mesh.is_particle_system then
+            -- Render Milky Way Particle Stars
+            for i, p in ipairs(proj_verts) do
+                if p.z > 0.1 then -- in front of camera
+                    local col = mesh.star_colors[i]
+                    -- Core stars (first 200) get extra bloom glow
+                    local is_core = (i <= 200)
+                    fb:draw_point(p.x, p.y, p.z, col.r, col.g, col.b, is_core)
+                    stars_drawn = stars_drawn + 1
+                end
+            end
+        else
+            for _, tri in ipairs(mesh.tris) do
+                local p0 = proj_verts[tri.v[1]]
+                local p1 = proj_verts[tri.v[2]]
+                local p2 = proj_verts[tri.v[3]]
 
-            if cross_z < 0 then -- Facing camera
-                tris_drawn = tris_drawn + 1
+                -- Backface culling: calculate screen-space cross product
+                local cross_z = (p1.x - p0.x) * (p2.y - p0.y) - (p1.y - p0.y) * (p2.x - p0.x)
 
-                -- Compute 3D surface normal
-                local e1 = vec3_sub(p1.world, p0.world)
-                local e2 = vec3_sub(p2.world, p0.world)
-                local normal = vec3_normalize(vec3_cross(e1, e2))
+                if cross_z < 0 then -- Facing camera
+                    tris_drawn = tris_drawn + 1
 
-                -- Directional diffuse lighting: max(0, N · L)
-                local diff = math.max(0, vec3_dot(normal, light_dir))
-                local ambient = 0.22
-                local light_intensity = math.min(1.0, ambient + diff * 0.78)
+                    -- Compute 3D surface normal
+                    local e1 = vec3_sub(p1.world, p0.world)
+                    local e2 = vec3_sub(p2.world, p0.world)
+                    local normal = vec3_normalize(vec3_cross(e1, e2))
 
-                -- Compute final pixel RGB
-                local base_c = tri.color
-                local r = math.min(255, math.floor(base_c.r * light_intensity))
-                local g = math.min(255, math.floor(base_c.g * light_intensity))
-                local b = math.min(255, math.floor(base_c.b * light_intensity))
+                    -- Directional diffuse lighting: max(0, N · L)
+                    local diff = math.max(0, vec3_dot(normal, light_dir))
+                    local ambient = 0.22
+                    local light_intensity = math.min(1.0, ambient + diff * 0.78)
 
-                if wireframe_mode then
-                    fb:draw_line(math.floor(p0.x), math.floor(p0.y), p0.z, math.floor(p1.x), math.floor(p1.y), p1.z, 50, 240, 255)
-                    fb:draw_line(math.floor(p1.x), math.floor(p1.y), p1.z, math.floor(p2.x), math.floor(p2.y), p2.z, 50, 240, 255)
-                    fb:draw_line(math.floor(p2.x), math.floor(p2.y), p2.z, math.floor(p0.x), math.floor(p0.y), p0.z, 50, 240, 255)
-                else
-                    fb:draw_triangle(p0, p1, p2, r, g, b)
+                    -- Compute final pixel RGB
+                    local base_c = tri.color
+                    local r = math.min(255, math.floor(base_c.r * light_intensity))
+                    local g = math.min(255, math.floor(base_c.g * light_intensity))
+                    local b = math.min(255, math.floor(base_c.b * light_intensity))
+
+                    if wireframe_mode then
+                        fb:draw_line(math.floor(p0.x), math.floor(p0.y), p0.z, math.floor(p1.x), math.floor(p1.y), p1.z, 50, 240, 255)
+                        fb:draw_line(math.floor(p1.x), math.floor(p1.y), p1.z, math.floor(p2.x), math.floor(p2.y), p2.z, 50, 240, 255)
+                        fb:draw_line(math.floor(p2.x), math.floor(p2.y), p2.z, math.floor(p0.x), math.floor(p0.y), p0.z, 50, 240, 255)
+                    else
+                        fb:draw_triangle(p0, p1, p2, r, g, b)
+                    end
                 end
             end
         end
@@ -893,15 +1030,20 @@ local function main()
 
         -- Top Header Banner
         local bar = string.rep("═", math.min(term_w - 2, 78))
+        local render_mode_label = mesh.is_particle_system and "Particle Stars" or (wireframe_mode and "Wireframe" or "Shaded Z-Buffer")
         local title_str = string.format(
-            "\27[1;35m%s\27[0m\n  \27[1;37m3D TERMINAL GRAPHICS ENGINE\27[0m  \27[90m| Model: \27[1;93m[%d] %s\27[0m  \27[90m| Mode: \27[96m%s\27[0m\n  \27[90mControls: [1-5] Model  [Space] Pause  [←/→/↑/↓] Rotate  [W] Wireframe  [Q] Quit\27[0m\n\27[90m%s\27[0m",
-            bar, mesh_idx, mesh.name, wireframe_mode and "Wireframe" or "Shaded Z-Buffer", bar
+            "\27[1;35m%s\27[0m\n  \27[1;37m3D TERMINAL GRAPHICS ENGINE\27[0m  \27[90m| Model: \27[1;93m[%d] %s\27[0m  \27[90m| Mode: \27[96m%s\27[0m\n  \27[90mControls: [1-6] Model  [Space] Pause  [←/→/↑/↓] Rotate  [W] Wireframe  [Q] Quit\27[0m\n\27[90m%s\27[0m",
+            bar, mesh_idx, mesh.name, render_mode_label, bar
         )
 
         -- Bottom Stat Line
+        local element_info = mesh.is_particle_system
+            and string.format("Visible Stars: \27[33m%d/%d\27[0m", stars_drawn, #mesh.verts)
+            or string.format("Visible Faces: \27[32m%d/%d\27[0m", tris_drawn, #mesh.tris)
+
         local stat_str = string.format(
-            "  \27[90mResolution: \27[37m%dx%d px\27[0m | \27[90mVisible Faces: \27[32m%d/%d\27[0m | \27[90mFramerate: \27[1;33m%.1f FPS\27[0m | \27[90mZoom: \27[36m%.1f\27[0m\n",
-            buf_w, buf_h, tris_drawn, #mesh.tris, fps, cam_dist
+            "  \27[90mResolution: \27[37m%dx%d px\27[0m | \27[90m%s | \27[90mFramerate: \27[1;33m%.1f FPS\27[0m | \27[90mZoom: \27[36m%.1f\27[0m\n",
+            buf_w, buf_h, element_info, fps, cam_dist
         )
 
         fb:render_ansi_screen(title_str, stat_str, term_w)
