@@ -16,12 +16,15 @@ local test_suites = {
     { file = "test_ffi_system_info.lua", description = "FFI System Diagnostics & Hardware Suite" },
 }
 
-local luajit_bin = "./LuaJIT/src/luajit"
-local f_check = io.open(luajit_bin, "rb")
-if f_check then
-    f_check:close()
+local luajit_bin = "luajit"
+if arg and arg[-1] and #arg[-1] > 0 then
+    luajit_bin = arg[-1]
 else
-    luajit_bin = "luajit"
+    local f_check = io.open("./LuaJIT/src/luajit", "rb")
+    if f_check then
+        f_check:close()
+        luajit_bin = "./LuaJIT/src/luajit"
+    end
 end
 
 print("=================================================================")
@@ -37,23 +40,25 @@ local t_start_total = os.clock()
 for idx, suite in ipairs(test_suites) do
     io.write(string.format("[%d/%d] Running %-32s (%s)...\n", idx, total_suites, suite.file, suite.description))
     local t_start = os.clock()
-    local cmd = string.format("%s %s", luajit_bin, suite.file)
-    local p = io.popen(cmd .. " 2>&1", "r")
-    local output = p and p:read("*a") or ""
-    local success, exit_status, code = false, nil, 1
-    if p then
-        success, exit_status, code = p:close()
-    end
+    local tmpfile = "_test_suite_" .. idx .. ".tmp"
+    local cmd = string.format('"%s" %s > %s 2>&1', luajit_bin, suite.file, tmpfile)
+    local ret = os.execute(cmd)
+
+    local f = io.open(tmpfile, "r")
+    local output = f and f:read("*a") or ""
+    if f then f:close() end
+    os.remove(tmpfile)
 
     local elapsed = os.clock() - t_start
-    local is_ok = (code == 0 or (code == nil and success == true))
+    local is_ok = (ret == 0 or ret == true)
 
     if is_ok then
         passed_suites = passed_suites + 1
         print(string.format("      \27[32m✔ SUITE PASSED\27[0m (%.2fs)\n", elapsed))
     else
+        local exit_code = (type(ret) == "number") and ret or 1
         table.insert(failed_suites, { file = suite.file, output = output })
-        print(string.format("      \27[31m✘ SUITE FAILED\27[0m (exit code: %s, %.2fs)\n", tostring(code), elapsed))
+        print(string.format("      \27[31m✘ SUITE FAILED\27[0m (exit code: %s, %.2fs)\n", tostring(exit_code), elapsed))
         print("      --- Failure Output ---")
         for line in output:gmatch("[^\r\n]+") do
             print("      " .. line)
