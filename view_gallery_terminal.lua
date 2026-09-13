@@ -1,22 +1,27 @@
 --[[
     view_gallery_terminal.lua
-    Interactive Terminal Directory Image Viewer written in LuaJIT FFI.
+    Professional Interactive Terminal Directory Image Viewer written in LuaJIT FFI.
 
     Features:
     1. Directory Scanning:
        - Scans current working directory ('.') by default, or an input directory provided via argument / prompt.
-       - Level 1 scanning only (does not search subdirectories).
+       - Level 1 scanning default, or recursive scanning via -r / --recursive.
        - Supports standard image formats: PNG, JPG/JPEG, PPM, WEBP, GIF, BMP.
-    2. Interactive File Selector:
-       - Displays sorted list of image files with index numbers, filenames, file sizes, and modification dates.
-       - Supports arrow keys (↑ / ↓), direct number entry, Enter/Space to view, 'q' to quit.
+    2. Interactive File Selector & TUI:
+       - Uses Terminal Alternate Screen Buffer (\27[?1049h) for clean enter and exit.
+       - Live interactive substring search / filter with [/] and [Esc].
+       - Sort cycle with [s] (Name -> Date -> Size) and reverse sort with [r].
+       - Displays sorted list of image files with index numbers, filenames, file sizes, formats, and dates.
+       - Supports arrow keys (↑ / ↓ / k / j), direct number entry, Enter/Space to view, 'q' to quit.
+       - Interactive Help popup modal with [?].
        - CLI direct selection flag: --select <n> or -s <n>.
        - Non-interactive / pipe friendly fallback.
     3. Dual Graphics Rendering Engine:
        - Kitty Graphics Protocol: Auto-detected (Kitty, Ghostty, WezTerm). Renders native pixel-perfect images.
+       - iTerm2 Inline Image Protocol: Auto-detected for WezTerm / iTerm2 with tmux passthrough.
        - ANSI Truecolor Half-Block: Clean fallback using 24-bit ANSI '▄' (2 vertical pixels per cell).
        - Auto-detects terminal width & height via POSIX ioctl(TIOCGWINSZ) and scales image to fit cleanly.
-       - Command-line overrides: --kitty (force Kitty protocol), --half-block (force ANSI half-block).
+       - Command-line overrides: --kitty (force Kitty protocol), --iterm, --half-block (force ANSI half-block).
        - In view mode: allows browsing previous/next images with ← / → / [P] / [N] or returning to menu with [Enter] / [B].
 ]]
 
@@ -56,6 +61,12 @@ local function format_file_size(bytes)
     else
         return string.format("%.2f MB", bytes / (1024 * 1024))
     end
+end
+
+local function format_date(timestamp)
+    if not timestamp or timestamp <= 0 then return "-" end
+    local ok, res = pcall(os.date, "%Y-%m-%d", timestamp)
+    return ok and res or "-"
 end
 
 if is_windows then
@@ -152,14 +163,14 @@ if is_windows then
         ffi.C.SetConsoleMode(hIn, new_mode)
         raw_mode_enabled = true
 
-        io.write("\27[?25l") -- Hide cursor
+        io.write("\27[?1049h\27[?25l") -- Alternate screen buffer + Hide cursor
         io.flush()
         return true
     end
 
     disable_raw_mode = function()
         if raw_mode_enabled then
-            io.write("\27[?25h\27[0m\n")
+            io.write("\27[?1049l\27[?25h\27[0m") -- Restore main screen + show cursor
             io.flush()
             local hIn = ffi.C.GetStdHandle(STD_INPUT_HANDLE)
             ffi.C.SetConsoleMode(hIn, orig_in_mode[0])
@@ -191,8 +202,10 @@ if is_windows then
                     return "SPACE"
                 elseif ch == 8 then
                     return "BACKSPACE"
+                elseif ch == 3 then
+                    return "CTRL_C"
                 else
-                    return string.char(ch):lower()
+                    return string.char(ch)
                 end
             end
             if timeout_ms >= 0 then
@@ -205,47 +218,54 @@ if is_windows then
         return nil
     end
 
-    scan_directory_images = function(dir_path)
-        dir_path = dir_path or "."
-        -- Normalize path separators
-        dir_path = dir_path:gsub("[/\\]+$", "")
-        if dir_path == "" then dir_path = "." end
-
+    local function scan_win_dir(dir_path, images, recursive)
         local search_pattern = (dir_path == ".") and "*.*" or (dir_path .. "\\*.*")
         local find_data = ffi.new("WIN32_FIND_DATAA")
         local hFind = ffi.C.FindFirstFileA(search_pattern, find_data)
 
         if hFind == INVALID_HANDLE_VALUE then
-            return nil, "Could not open directory: " .. dir_path
+            return
         end
 
-        local images = {}
         repeat
             local fname = ffi.string(find_data.cFileName)
             local is_dir = bit.band(find_data.dwFileAttributes, FILE_ATTRIBUTE_DIRECTORY) ~= 0
 
-            if not is_dir and fname ~= "." and fname ~= ".." and not fname:match("^%.") then
-                local ext = fname:match("%.([^.]+)$")
-                if ext and SUPPORTED_EXTENSIONS[ext:lower()] then
-                    local full_path = (dir_path == ".") and fname or (dir_path .. "/" .. fname)
-                    local size = tonumber(find_data.nFileSizeHigh) * 4294967296 + tonumber(find_data.nFileSizeLow)
-                    -- Windows FILETIME to Unix timestamp (100-nanosecond intervals since Jan 1, 1601 to Jan 1, 1970)
-                    local ft = tonumber(find_data.ftLastWriteTime.dwHighDateTime) * 4294967296 + tonumber(find_data.ftLastWriteTime.dwLowDateTime)
-                    local mtime = math.floor((ft - 116444736000000000) / 10000000)
+            if fname ~= "." and fname ~= ".." and not fname:match("^%.") then
+                local full_path = (dir_path == ".") and fname or (dir_path .. "/" .. fname)
+                if is_dir and recursive then
+                    scan_win_dir(full_path, images, true)
+                elseif not is_dir then
+                    local ext = fname:match("%.([^.]+)$")
+                    if ext and SUPPORTED_EXTENSIONS[ext:lower()] then
+                        local size = tonumber(find_data.nFileSizeHigh) * 4294967296 + tonumber(find_data.nFileSizeLow)
+                        local ft = tonumber(find_data.ftLastWriteTime.dwHighDateTime) * 4294967296 + tonumber(find_data.ftLastWriteTime.dwLowDateTime)
+                        local mtime = math.floor((ft - 116444736000000000) / 10000000)
 
-                    table.insert(images, {
-                        filename = fname,
-                        filepath = full_path,
-                        extension = ext:upper(),
-                        size = size,
-                        size_str = format_file_size(size),
-                        mtime = mtime,
-                    })
+                        table.insert(images, {
+                            filename = fname,
+                            filepath = full_path,
+                            extension = ext:upper(),
+                            size = size,
+                            size_str = format_file_size(size),
+                            mtime = mtime,
+                            date_str = format_date(mtime),
+                        })
+                    end
                 end
             end
         until ffi.C.FindNextFileA(hFind, find_data) == 0
 
         ffi.C.FindClose(hFind)
+    end
+
+    scan_directory_images = function(dir_path, recursive)
+        dir_path = dir_path or "."
+        dir_path = dir_path:gsub("[/\\]+$", "")
+        if dir_path == "" then dir_path = "." end
+
+        local images = {}
+        scan_win_dir(dir_path, images, recursive)
 
         table.sort(images, function(a, b)
             return a.filename:lower() < b.filename:lower()
@@ -358,14 +378,14 @@ else
         ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
         raw_mode_enabled = true
 
-        io.write("\27[?25l")
+        io.write("\27[?1049h\27[?25l") -- Alternate screen buffer + Hide cursor
         io.flush()
         return true
     end
 
     disable_raw_mode = function()
         if raw_mode_enabled then
-            io.write("\27[?25h\27[0m\n")
+            io.write("\27[?1049l\27[?25h\27[0m") -- Restore main screen + show cursor
             io.flush()
             ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
             raw_mode_enabled = false
@@ -391,6 +411,8 @@ else
                         if c2 == 68 then return "LEFT" end
                         if c2 == 53 and n >= 4 and key_buf[3] == 126 then return "PAGE_UP" end
                         if c2 == 54 and n >= 4 and key_buf[3] == 126 then return "PAGE_DOWN" end
+                        if c2 == 72 then return "HOME" end
+                        if c2 == 70 then return "END" end
                     end
                     return "ESC"
                 elseif c0 == 10 or c0 == 13 then
@@ -399,45 +421,40 @@ else
                     return "SPACE"
                 elseif c0 == 127 or c0 == 8 then
                     return "BACKSPACE"
+                elseif c0 == 3 then
+                    return "CTRL_C"
                 else
-                    return string.char(c0):lower()
+                    return string.char(c0)
                 end
             end
         end
         return nil
     end
 
-    scan_directory_images = function(dir_path)
-        dir_path = dir_path or "."
-        if #dir_path > 1 and dir_path:sub(-1) == "/" then
-            dir_path = dir_path:sub(1, -2)
-        end
-
+    local function scan_posix_dir(dir_path, images, recursive)
         local d = ffi.C.opendir(dir_path)
-        if d == nil then
-            return nil, "Could not open directory: " .. dir_path
-        end
+        if d == nil then return end
 
-        local images = {}
         local st = ffi.new("struct stat")
-
         while true do
             local ent = ffi.C.readdir(d)
             if ent == nil then break end
             local fname = ffi.string(ent.d_name)
 
             if fname ~= "." and fname ~= ".." and not fname:match("^%.") then
-                local ext = fname:match("%.([^.]+)$")
-                if ext and SUPPORTED_EXTENSIONS[ext:lower()] then
-                    local full_path = (dir_path == ".") and fname or (dir_path .. "/" .. fname)
-                    local size = 0
-                    local mtime = 0
-                    if ffi.C.stat(full_path, st) == 0 then
-                        local mode = tonumber(st.st_mode)
-                        local is_reg = (bit.band(mode, 0xF000) == 0x8000)
-                        if is_reg then
-                            size = tonumber(st.st_size)
-                            mtime = tonumber(st.st_mtime)
+                local full_path = (dir_path == ".") and fname or (dir_path .. "/" .. fname)
+                if ffi.C.stat(full_path, st) == 0 then
+                    local mode = tonumber(st.st_mode)
+                    local is_dir = (bit.band(mode, 0xF000) == 0x4000)
+                    local is_reg = (bit.band(mode, 0xF000) == 0x8000)
+
+                    if is_dir and recursive then
+                        scan_posix_dir(full_path, images, true)
+                    elseif is_reg then
+                        local ext = fname:match("%.([^.]+)$")
+                        if ext and SUPPORTED_EXTENSIONS[ext:lower()] then
+                            local size = tonumber(st.st_size)
+                            local mtime = tonumber(st.st_mtime)
                             table.insert(images, {
                                 filename = fname,
                                 filepath = full_path,
@@ -445,6 +462,7 @@ else
                                 size = size,
                                 size_str = format_file_size(size),
                                 mtime = mtime,
+                                date_str = format_date(mtime),
                             })
                         end
                     end
@@ -452,6 +470,16 @@ else
             end
         end
         ffi.C.closedir(d)
+    end
+
+    scan_directory_images = function(dir_path, recursive)
+        dir_path = dir_path or "."
+        if #dir_path > 1 and dir_path:sub(-1) == "/" then
+            dir_path = dir_path:sub(1, -2)
+        end
+
+        local images = {}
+        scan_posix_dir(dir_path, images, recursive)
 
         table.sort(images, function(a, b)
             return a.filename:lower() < b.filename:lower()
@@ -850,16 +878,84 @@ end
 -- =========================================================================
 -- 6. File List Selector Screen
 -- =========================================================================
-local function render_file_list(dir_path, images, selected_idx, page_offset, msg)
+-- =========================================================================
+-- 6. File List Selector Screen & Help Popup
+-- =========================================================================
+local function render_help_modal(term_w, term_h)
+    local lines = {
+        "┌─────────────────────────────────────────────────────────────┐",
+        "│                   KEYBOARD SHORTCUTS                        │",
+        "├─────────────────────────────────────────────────────────────┤",
+        "│  List Navigation:                                           │",
+        "│    ↑ / k, ↓ / j        Move selection up / down             │",
+        "│    PgUp / PgDn         Scroll list one page up / down       │",
+        "│    Home / End          Jump to first / last image           │",
+        "│    Enter / Space       Open and view selected image         │",
+        "│    1 - 9               Quick select image by index number   │",
+        "│                                                             │",
+        "│  Viewer Controls:                                           │",
+        "│    ← / p, → / n        Browse previous / next image         │",
+        "│    PgUp / PgDn         Browse previous / next image         │",
+        "│    Enter / b / Backsp  Return to file list                  │",
+        "│                                                             │",
+        "│  Search & Sorting:                                          │",
+        "│    /                   Start live search / filter query     │",
+        "│    Esc                 Clear active search / exit search    │",
+        "│    s                   Cycle sort (Name -> Date -> Size)    │",
+        "│    r                   Reverse sort direction (Asc / Desc)  │",
+        "│                                                             │",
+        "│  General:                                                   │",
+        "│    ?                   Toggle this help window              │",
+        "│    q / Ctrl+C          Quit application cleanly             │",
+        "└─────────────────────────────────────────────────────────────┘",
+        "                 Press any key to close help                   ",
+    }
+
+    local modal_w = 63
+    local modal_h = #lines
+    local start_row = math.max(1, math.floor((term_h - modal_h) / 2))
+    local pad_left = math.max(0, math.floor((term_w - modal_w) / 2))
+    local margin = string.rep(" ", pad_left)
+
+    io.write("\27[H\27[2J") -- Clear screen
+    io.write(string.rep("\n", start_row))
+    for idx, l in ipairs(lines) do
+        if idx == 1 or idx == 3 or idx == 23 then
+            io.write(margin .. "\27[1;36m" .. l .. "\27[0m\n")
+        elseif idx == 2 then
+            io.write(margin .. "\27[1;97;44m" .. l .. "\27[0m\n")
+        elseif idx == #lines then
+            io.write(margin .. "\27[1;93m" .. l .. "\27[0m\n")
+        else
+            io.write(margin .. "\27[37m" .. l .. "\27[0m\n")
+        end
+    end
+    io.flush()
+end
+
+local function render_file_list(dir_path, images, total_unfiltered, selected_idx, page_offset, msg, search_mode, search_query, sort_mode, sort_desc, recursive)
     local term_w, term_h = get_terminal_size()
     local out = {}
     table.insert(out, "\27[H\27[2J") -- Clear screen & home
 
-    local bar_len = math.min(term_w - 2, 80)
+    local bar_len = math.min(term_w - 2, 90)
     table.insert(out, "\27[1;34m" .. string.rep("═", bar_len) .. "\27[0m\n")
-    table.insert(out, string.format("  \27[1;37mTERMINAL DIRECTORY IMAGE VIEWER\27[0m \27[90m(LuaJIT FFI Truecolor)\27[0m\n"))
-    table.insert(out, string.format("  \27[90mDirectory:\27[0m \27[1;33m%s\27[0m \27[90m(Found %d image files, Level 1)\27[0m\n", dir_path, #images))
-    table.insert(out, string.format("  \27[93m[↑/↓/K/J]\27[0m Move   \27[93m[PgUp/PgDn]\27[0m Page Scroll   \27[1;92m[Enter/Space]\27[0m View   \27[93m[1-9]\27[0m Pick   \27[91m[Q]\27[0m Quit\n"))
+    
+    local sort_label = sort_mode:upper() .. (sort_desc and " (Desc)" or " (Asc)")
+    local title_left = "  \27[1;37mTERMINAL DIRECTORY IMAGE VIEWER\27[0m \27[90m(LuaJIT FFI)\27[0m"
+    local title_right = string.format("\27[90mSort: \27[1;93m%s\27[90m [s/r]\27[0m", sort_label)
+    table.insert(out, string.format("%s   %s\n", title_left, title_right))
+
+    local scan_type = recursive and "Recursive" or "Level 1"
+    table.insert(out, string.format("  \27[90mDir:\27[0m \27[1;33m%s\27[0m \27[90m(%d total, %s)\27[0m\n", dir_path, total_unfiltered, scan_type))
+
+    if search_mode then
+        table.insert(out, string.format("  \27[1;97;44m SEARCH: \27[0m \27[1;93m%s_\27[0m \27[90m(Type to filter, Enter to select, Esc to cancel)\27[0m\n", search_query))
+    elseif #search_query > 0 then
+        table.insert(out, string.format("  \27[90mFilter: \27[1;93m'%s'\27[0m \27[90m(%d matches) [Esc/ / to clear]\27[0m   \27[93m[?]\27[0m Help   \27[91m[Q]\27[0m Quit\n", search_query, #images))
+    else
+        table.insert(out, string.format("  \27[93m[↑/↓/k/j]\27[0m Move   \27[93m[PgUp/PgDn]\27[0m Page   \27[1;92m[Enter]\27[0m View   \27[93m[/]\27[0m Filter   \27[93m[?]\27[0m Help   \27[91m[Q]\27[0m Quit\n"))
+    end
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
     if msg and #msg > 0 then
@@ -869,27 +965,34 @@ local function render_file_list(dir_path, images, selected_idx, page_offset, msg
     end
 
     if #images == 0 then
-        table.insert(out, string.format("  \27[1;31mNo supported image files found in %s\27[0m\n", dir_path))
-        table.insert(out, "  Supported formats: PNG, JPG/JPEG, PPM, WEBP, GIF, BMP\n\n")
+        if #search_query > 0 then
+            table.insert(out, string.format("  \27[1;33mNo image files match query '%s'\27[0m\n", search_query))
+            table.insert(out, "  Press [Esc] to clear search filter.\n\n")
+        else
+            table.insert(out, string.format("  \27[1;31mNo supported image files found in %s\27[0m\n", dir_path))
+            table.insert(out, "  Supported formats: PNG, JPG/JPEG, PPM, WEBP, GIF, BMP\n\n")
+        end
         io.write(table.concat(out))
         io.flush()
         return
     end
 
     -- Pagination
-    local header_rows = 8
+    local header_rows = 9
     local max_items_per_page = math.max(4, term_h - header_rows - 3)
     local page_start = page_offset or 1
     local page_end = math.min(#images, page_start + max_items_per_page - 1)
 
-    -- Table Header
-    local col1_w = 6  -- Index
-    local col2_w = math.max(20, math.min(36, term_w - 38)) -- Filename
-    local col3_w = 8  -- Format
-    local col4_w = 12 -- Size
+    -- Dynamic Columns
+    local col1_w = 6   -- Index
+    local col3_w = 8   -- Format
+    local col4_w = 12  -- Size
+    local col5_w = 12  -- Date
+    local col2_w = math.max(20, term_w - (col1_w + col3_w + col4_w + col5_w + 10))
 
-    table.insert(out, string.format("  \27[1;37m%-6s %-" .. col2_w .. "s %-8s %-12s\27[0m\n", "INDEX", "FILENAME", "FORMAT", "SIZE"))
-    table.insert(out, "  \27[90m" .. string.rep("─", 6 + col2_w + 8 + 12 + 3) .. "\27[0m\n")
+    table.insert(out, string.format("  \27[1;37m%-6s %-" .. col2_w .. "s %-8s %-12s %-12s\27[0m\n",
+        "INDEX", "FILENAME", "FORMAT", "SIZE", "DATE"))
+    table.insert(out, "  \27[90m" .. string.rep("─", math.min(bar_len - 2, col1_w + col2_w + col3_w + col4_w + col5_w + 4)) .. "\27[0m\n")
 
     for i = page_start, page_end do
         local img = images[i]
@@ -899,23 +1002,24 @@ local function render_file_list(dir_path, images, selected_idx, page_offset, msg
             fn = fn:sub(1, col2_w - 3) .. "..."
         end
 
-        local line_str = string.format("%-6s %-" .. col2_w .. "s %-8s %-12s",
+        local line_str = string.format("%-6s %-" .. col2_w .. "s %-8s %-12s %-12s",
             string.format("[%d]", i),
             fn,
             img.extension,
-            img.size_str
+            img.size_str,
+            img.date_str or "-"
         )
 
         if is_sel then
-            table.insert(out, string.format(" \27[1;93m▶ \27[1;97;44m %s \27[0m\n", line_str))
+            table.insert(out, string.format("\27[1;93m▶ \27[1;97;44m%s\27[0m\n", line_str))
         else
-            table.insert(out, string.format("   \27[37m%s\27[0m\n", line_str))
+            table.insert(out, string.format("  \27[37m%s\27[0m\n", line_str))
         end
     end
 
     table.insert(out, "\n")
     if #images > max_items_per_page then
-        table.insert(out, string.format("  \27[90mShowing %d-%d of %d images. Use ↑ / ↓ or PgUp / PgDn to scroll.\27[0m\n",
+        table.insert(out, string.format("  \27[90mShowing %d-%d of %d matches. Use ↑ / ↓ or PgUp / PgDn to scroll.\27[0m\n",
             page_start, page_end, #images))
     end
 
@@ -926,6 +1030,41 @@ end
 -- =========================================================================
 -- 7. Main Interactive Loop & CLI Controller
 -- =========================================================================
+local function sort_images(images, mode, desc)
+    table.sort(images, function(a, b)
+        local val_a, val_b
+        if mode == "date" then
+            val_a, val_b = a.mtime or 0, b.mtime or 0
+        elseif mode == "size" then
+            val_a, val_b = a.size or 0, b.size or 0
+        else -- name
+            val_a, val_b = a.filename:lower(), b.filename:lower()
+        end
+
+        if desc then
+            return val_a > val_b
+        else
+            return val_a < val_b
+        end
+    end)
+end
+
+local function filter_images(all_images, query)
+    if not query or #query == 0 then
+        local copy = {}
+        for _, img in ipairs(all_images) do table.insert(copy, img) end
+        return copy
+    end
+    local q = query:lower()
+    local res = {}
+    for _, img in ipairs(all_images) do
+        if img.filename:lower():find(q, 1, true) or img.filepath:lower():find(q, 1, true) then
+            table.insert(res, img)
+        end
+    end
+    return res
+end
+
 local function main()
     local args = {}
     local positional = {}
@@ -935,6 +1074,9 @@ local function main()
         if a == "--select" or a == "-s" then
             i = i + 1
             args["--select"] = arg[i]
+        elseif a == "--sort" then
+            i = i + 1
+            args["--sort"] = arg[i]
         elseif a:sub(1, 2) == "--" or a:sub(1, 1) == "-" then
             args[a] = true
         else
@@ -949,7 +1091,9 @@ local function main()
         print("  ./LuaJIT/src/luajit view_gallery_terminal.lua [directory] [options]")
         print("\nOptions:")
         print("  [directory]           Directory to scan (default: current directory '.')")
+        print("  -r, --recursive       Recursively scan subdirectories for images")
         print("  --select, -s <id>     Directly select and display image #id")
+        print("  --sort <name|date|size> Initial sort order (default: name)")
         print("  --kitty               Force Kitty Graphics Protocol (high-res pixel rendering)")
         print("  --iterm               Force iTerm2 / WezTerm inline image protocol")
         print("  --half-block          Force ANSI Truecolor Half-Block fallback renderer")
@@ -970,117 +1114,220 @@ local function main()
         force_protocol = "halfblock"
     end
 
-    -- 1. Determine target directory: positional arg or default '.'
+    local recursive = args["-r"] or args["--recursive"]
     local target_dir = positional[1] or "."
     local cli_select = tonumber(args["--select"])
     local non_interactive = args["--no-interactive"] or (not is_stdin_tty())
 
+    -- Initial sort mode
+    local sort_mode = "name"
+    if args["--sort"] and (args["--sort"] == "date" or args["--sort"] == "size" or args["--sort"] == "name") then
+        sort_mode = args["--sort"]
+    end
+    local sort_desc = (sort_mode == "date" or sort_mode == "size")
+
     -- 2. Scan Directory for Images
-    local images, err = scan_directory_images(target_dir)
-    if not images then
+    local raw_images, err = scan_directory_images(target_dir, recursive)
+    if not raw_images then
         io.stderr:write(string.format("\27[1;31mError: %s\27[0m\n", tostring(err)))
         os.exit(1)
     end
 
-    if #images == 0 then
-        print(string.format("\27[1;33m[!] No supported images found in '%s' (Level 1 scan).\27[0m", target_dir))
+    if #raw_images == 0 then
+        print(string.format("\27[1;33m[!] No supported images found in '%s' (%s scan).\27[0m", target_dir, recursive and "recursive" or "Level 1"))
         print("Supported formats: PNG, JPG/JPEG, PPM, WEBP, GIF, BMP")
         os.exit(0)
     end
 
+    sort_images(raw_images, sort_mode, sort_desc)
+
     -- 3. If direct CLI selection is specified
-    if cli_select and cli_select >= 1 and cli_select <= #images then
-        render_image_screen(images[cli_select], cli_select, #images, force_protocol)
+    if cli_select and cli_select >= 1 and cli_select <= #raw_images then
+        render_image_screen(raw_images[cli_select], cli_select, #raw_images, force_protocol)
         return
     end
 
     -- 4. Non-interactive fallback (e.g., pipes or redirect)
     if non_interactive then
-        render_file_list(target_dir, images, 1, 1)
-        io.write(string.format("\n\27[1;32mEnter image number [1-%d] to view, or 'q' to quit: \27[0m", #images))
+        render_file_list(target_dir, raw_images, #raw_images, 1, 1, nil, false, "", sort_mode, sort_desc, recursive)
+        io.write(string.format("\n\27[1;32mEnter image number [1-%d] to view, or 'q' to quit: \27[0m", #raw_images))
         io.flush()
         local line = io.read("*l")
         if line and line ~= "q" and line ~= "Q" then
             local sel = tonumber(line:match("%d+"))
-            if sel and sel >= 1 and sel <= #images then
-                render_image_screen(images[sel], sel, #images, force_protocol)
+            if sel and sel >= 1 and sel <= #raw_images then
+                render_image_screen(raw_images[sel], sel, #raw_images, force_protocol)
             end
         end
         return
     end
 
-    -- 5. Interactive Mode (POSIX raw mode with arrow keys)
+    -- 5. Interactive Mode with Alternate Screen Buffer & pcall Safety
     enable_raw_mode()
 
+    local search_mode = false
+    local search_query = ""
+    local filtered_images = filter_images(raw_images, search_query)
     local selected_idx = 1
     local page_offset = 1
     local in_viewer = false
+    local in_help = false
     local current_msg = nil
 
     local function update_page_window()
         local _, term_h = get_terminal_size()
-        local max_items = math.max(4, term_h - 11)
+        local max_items = math.max(4, term_h - 12)
         if selected_idx < page_offset then
             page_offset = selected_idx
         elseif selected_idx > page_offset + max_items - 1 then
-            page_offset = selected_idx - max_items + 1
+            page_offset = math.max(1, selected_idx - max_items + 1)
         end
     end
 
-    while true do
-        if in_viewer then
-            local ok, view_err = render_image_screen(images[selected_idx], selected_idx, #images, force_protocol)
-            if not ok then
-                in_viewer = false
-                current_msg = "Failed to load image: " .. tostring(view_err)
-            else
+    local loop_status, loop_err = pcall(function()
+        while true do
+            if in_help then
+                local term_w, term_h = get_terminal_size()
+                render_help_modal(term_w, term_h)
                 local k = read_key()
-                if k == "q" or k == "ESC" then
-                    break
-                elseif k == "ENTER" or k == "b" or k == "BACKSPACE" then
-                    kitty_clear_screen()
+                if k then
+                    in_help = false
+                end
+            elseif in_viewer then
+                local cur_img = filtered_images[selected_idx]
+                if not cur_img then
                     in_viewer = false
-                elseif k == "RIGHT" or k == "n" or k == "SPACE" or k == "PAGE_DOWN" then
-                    kitty_clear_screen()
-                    selected_idx = (selected_idx % #images) + 1
-                    update_page_window()
-                elseif k == "LEFT" or k == "p" or k == "PAGE_UP" then
-                    kitty_clear_screen()
-                    selected_idx = (selected_idx - 2 + #images) % #images + 1
-                    update_page_window()
+                else
+                    local ok, view_err = render_image_screen(cur_img, selected_idx, #filtered_images, force_protocol)
+                    if not ok then
+                        in_viewer = false
+                        current_msg = "Failed to load image: " .. tostring(view_err)
+                    else
+                        local k = read_key()
+                        if k == "q" or k == "ESC" or k == "CTRL_C" then
+                            break
+                        elseif k == "ENTER" or k == "b" or k == "BACKSPACE" then
+                            kitty_clear_screen()
+                            in_viewer = false
+                        elseif k == "RIGHT" or k == "n" or k == "SPACE" or k == "PAGE_DOWN" then
+                            kitty_clear_screen()
+                            selected_idx = (selected_idx % #filtered_images) + 1
+                            update_page_window()
+                        elseif k == "LEFT" or k == "p" or k == "PAGE_UP" then
+                            kitty_clear_screen()
+                            selected_idx = (selected_idx - 2 + #filtered_images) % #filtered_images + 1
+                            update_page_window()
+                        elseif k == "?" then
+                            in_help = true
+                        end
+                    end
+                end
+            else
+                update_page_window()
+                render_file_list(target_dir, filtered_images, #raw_images, selected_idx, page_offset, current_msg, search_mode, search_query, sort_mode, sort_desc, recursive)
+                current_msg = nil
+
+                local k = read_key()
+                local _, term_h = get_terminal_size()
+                local page_step = math.max(4, term_h - 12)
+
+                if search_mode then
+                    if k == "ESC" or k == "CTRL_C" then
+                        search_mode = false
+                        search_query = ""
+                        filtered_images = filter_images(raw_images, search_query)
+                        selected_idx = 1
+                        page_offset = 1
+                    elseif k == "ENTER" then
+                        search_mode = false
+                        if #filtered_images > 0 then
+                            in_viewer = true
+                        end
+                    elseif k == "BACKSPACE" then
+                        if #search_query > 0 then
+                            search_query = search_query:sub(1, -2)
+                            filtered_images = filter_images(raw_images, search_query)
+                            selected_idx = 1
+                            page_offset = 1
+                        else
+                            search_mode = false
+                        end
+                    elseif k == "UP" then
+                        if selected_idx > 1 then selected_idx = selected_idx - 1 end
+                    elseif k == "DOWN" then
+                        if selected_idx < #filtered_images then selected_idx = selected_idx + 1 end
+                    elseif k and #k == 1 and k:byte() >= 32 and k:byte() <= 126 then
+                        search_query = search_query .. k
+                        filtered_images = filter_images(raw_images, search_query)
+                        selected_idx = 1
+                        page_offset = 1
+                    end
+                else
+                    if not k or k == "q" or k == "CTRL_C" then
+                        break
+                    elseif k == "ESC" then
+                        if #search_query > 0 then
+                            search_query = ""
+                            filtered_images = filter_images(raw_images, search_query)
+                            selected_idx = 1
+                            page_offset = 1
+                        else
+                            break
+                        end
+                    elseif k == "/" then
+                        search_mode = true
+                    elseif k == "?" then
+                        in_help = true
+                    elseif k == "s" then
+                        if sort_mode == "name" then
+                            sort_mode = "date"
+                            sort_desc = true
+                        elseif sort_mode == "date" then
+                            sort_mode = "size"
+                            sort_desc = true
+                        else
+                            sort_mode = "name"
+                            sort_desc = false
+                        end
+                        sort_images(raw_images, sort_mode, sort_desc)
+                        filtered_images = filter_images(raw_images, search_query)
+                        selected_idx = 1
+                        page_offset = 1
+                    elseif k == "r" then
+                        sort_desc = not sort_desc
+                        sort_images(raw_images, sort_mode, sort_desc)
+                        filtered_images = filter_images(raw_images, search_query)
+                    elseif k == "UP" or k == "k" then
+                        if selected_idx > 1 then selected_idx = selected_idx - 1 end
+                    elseif k == "DOWN" or k == "j" then
+                        if selected_idx < #filtered_images then selected_idx = selected_idx + 1 end
+                    elseif k == "PAGE_DOWN" then
+                        selected_idx = math.min(#filtered_images, selected_idx + page_step)
+                    elseif k == "PAGE_UP" then
+                        selected_idx = math.max(1, selected_idx - page_step)
+                    elseif k == "HOME" then
+                        selected_idx = 1
+                    elseif k == "END" then
+                        selected_idx = math.max(1, #filtered_images)
+                    elseif k == "ENTER" or k == "SPACE" then
+                        if #filtered_images > 0 then
+                            in_viewer = true
+                        end
+                    elseif tonumber(k) and tonumber(k) >= 1 and tonumber(k) <= math.min(9, #filtered_images) then
+                        selected_idx = tonumber(k)
+                        in_viewer = true
+                    end
                 end
             end
-        else
-            update_page_window()
-            render_file_list(target_dir, images, selected_idx, page_offset, current_msg)
-            current_msg = nil
-
-            local k = read_key()
-            local _, term_h = get_terminal_size()
-            local page_step = math.max(4, term_h - 11)
-
-            if not k or k == "q" or k == "ESC" then
-                break
-            elseif k == "UP" or k == "k" then
-                if selected_idx > 1 then selected_idx = selected_idx - 1 end
-            elseif k == "DOWN" or k == "j" then
-                if selected_idx < #images then selected_idx = selected_idx + 1 end
-            elseif k == "PAGE_DOWN" then
-                selected_idx = math.min(#images, selected_idx + page_step)
-            elseif k == "PAGE_UP" then
-                selected_idx = math.max(1, selected_idx - page_step)
-            elseif k == "ENTER" or k == "SPACE" then
-                in_viewer = true
-            elseif tonumber(k) and tonumber(k) >= 1 and tonumber(k) <= math.min(9, #images) then
-                selected_idx = tonumber(k)
-                in_viewer = true
-            end
         end
-    end
+    end)
 
     kitty_clear_screen()
     disable_raw_mode()
-    print("\n\27[1;36mExited Terminal Image Viewer. Goodbye!\27[0m")
+
+    if not loop_status and loop_err then
+        io.stderr:write(string.format("\n\27[1;31mViewer interrupted with error: %s\27[0m\n", tostring(loop_err)))
+    end
 end
 
 main()
