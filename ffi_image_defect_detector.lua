@@ -221,7 +221,7 @@ else
     local in_raw_mode  = false
 
     is_stdin_tty = function()
-        return ffi.C.isatty(STDIN_FILENO) == 1
+        return ffi.C.isatty(STDIN_FILENO) == 1 and ffi.C.isatty(1) == 1
     end
 
     get_terminal_size = function()
@@ -631,7 +631,7 @@ function PCBGenerator.generate_golden_pcb(width, height)
     return img
 end
 
--- Inject parameterized defects into a sample image
+-- Inject parameterized or randomized defects into a sample image
 function PCBGenerator.inject_defects(golden_img, options)
     options = options or {}
     local sample = golden_img:clone()
@@ -640,10 +640,49 @@ function PCBGenerator.inject_defects(golden_img, options)
 
     local defects_info = {}
 
-    -- Defect 1: Missing SMD Component (R2 on right side: bare solder pad left, body missing)
+    -- Support randomized dynamic injection when options.randomize is true
+    if options.randomize then
+        -- Randomize seed variations
+        local num_scratches = math.random(0, 2)
+        for s = 1, num_scratches do
+            local sx0 = math.random(15, w - 30)
+            local sy0 = math.random(10, h - 25)
+            local sx1 = sx0 + math.random(-25, 25)
+            local sy1 = sy0 + math.random(-15, 15)
+            sample:draw_line(sx0, sy0, sx1, sy1, 235, 238, 245, math.random(1, 2))
+            table.insert(defects_info, { type = "Surface Scratch", severity = "MODERATE" })
+        end
+
+        local num_bridges = math.random(0, 2)
+        for b = 1, num_bridges do
+            local bx = math.random(math.floor(w * 0.35), math.floor(w * 0.65))
+            local by = math.random(math.floor(h * 0.35), math.floor(h * 0.65))
+            sample:draw_circle(bx, by, math.random(2, 3), 215, 220, 225, true)
+            table.insert(defects_info, { type = "Solder Bridge", severity = "CRITICAL" })
+        end
+
+        local num_dust = math.random(1, 4)
+        for d = 1, num_dust do
+            local dx = math.random(10, w - 10)
+            local dy = math.random(10, h - 10)
+            sample:draw_circle(dx, dy, math.random(1, 2), 15, 15, 20, true)
+            table.insert(defects_info, { type = "Dust Contaminant", severity = "MINOR" })
+        end
+
+        if math.random() > 0.3 then
+            -- Randomly pop either left or right SMD component
+            local mx = (math.random() > 0.5) and 18 or (w - 29)
+            local my = (math.random() > 0.5) and 36 or 52
+            sample:fill_rect(mx + 2, my, 7, 7, 16, 75, 35)
+            table.insert(defects_info, { type = "Missing Element", severity = "CRITICAL" })
+        end
+
+        return sample, defects_info
+    end
+
+    -- Deterministic Defect 1: Missing SMD Component
     if options.missing_component ~= false then
         local mx, my = w - 29, 36
-        -- Paint solder mask color over component body to simulate unpopulated board
         local mask_r, mask_g, mask_b = 16, 75, 35
         sample:fill_rect(mx + 2, my, 7, 7, mask_r, mask_g, mask_b)
         table.insert(defects_info, {
@@ -653,11 +692,10 @@ function PCBGenerator.inject_defects(golden_img, options)
         })
     end
 
-    -- Defect 2: Linear Surface Scratch (abrasion through solder mask and copper trace)
+    -- Deterministic Defect 2: Linear Surface Scratch
     if options.scratch ~= false then
         local sx0, sy0 = math.floor(w * 0.62), math.floor(h * 0.16)
         local sx1, sy1 = math.floor(w * 0.78), math.floor(h * 0.32)
-        -- High contrast whitish/metallic scratched gouge
         sample:draw_line(sx0, sy0, sx1, sy1, 230, 235, 240, 2)
         table.insert(defects_info, {
             type = "Surface Scratch",
@@ -666,7 +704,7 @@ function PCBGenerator.inject_defects(golden_img, options)
         })
     end
 
-    -- Defect 3: Solder Bridge / Short Circuit (tin blob shorting two IC pins)
+    -- Deterministic Defect 3: Solder Bridge / Short Circuit
     if options.solder_bridge ~= false then
         local chip_cx = math.floor(w * 0.5)
         local chip_cy = math.floor(h * 0.5)
@@ -674,7 +712,6 @@ function PCBGenerator.inject_defects(golden_img, options)
         local chip_h  = 26
         local bx = chip_cx - math.floor(chip_w / 2) + 12
         local by = chip_cy + math.floor(chip_h / 2) + 3
-        -- Solder blob bridging pins
         sample:draw_circle(bx, by, 3, 215, 220, 225, true)
         table.insert(defects_info, {
             type = "Solder Bridge",
@@ -683,7 +720,7 @@ function PCBGenerator.inject_defects(golden_img, options)
         })
     end
 
-    -- Defect 4: Contaminant / Dust Specks
+    -- Deterministic Defect 4: Contaminant / Dust Specks
     if options.dust ~= false then
         local dx, dy = math.floor(w * 0.28), math.floor(h * 0.72)
         sample:draw_circle(dx, dy, 2, 15, 15, 20, true)
@@ -1093,7 +1130,11 @@ function TerminalUI.render_dashboard(golden_img, sample_img, diff_res, annotated
                 b.id, sev_str, bbox_str, b.area, b.max_delta, b.classification)
         end
     end
-    emit("  ───────────────────────────────────────────────────────────────────────────────\n")
+    emit("  ───────────────────────────────────────────────────────────────────────────────")
+    emit("  %s[Controls]%s  %sG%s: Generate New Dynamic PCB Sample  |  %s+/-%s: Adjust ΔE Tolerance (%d)",
+        c_gray, c_reset, c_accent, c_reset, c_accent, c_reset, diff_res.tolerance or 28)
+    emit("              %sS%s: Save PPM Images  |  %sR%s: Clean Baseline (0 Defects)  |  %sQ / ESC%s: Quit\n",
+        c_accent, c_reset, c_accent, c_reset, c_accent, c_reset)
 
     return table.concat(lines, "\n")
 end
@@ -1289,13 +1330,19 @@ local function main()
         end
     end
 
-    -- Run Optical Differencing & Defect Extraction Engine
-    local t0 = get_time_ms()
     local detector = DefectDetector.new({ tolerance = tolerance, min_blob_area = min_area })
-    local diff_res = detector:compute_diff(golden_img, sample_img)
-    local blobs = detector:extract_blobs(diff_res)
-    local annotated_img = detector:render_annotated_overlay(sample_img, blobs)
-    local elapsed_ms = get_time_ms() - t0
+    local diff_res, blobs, annotated_img, elapsed_ms
+
+    local function run_inspection()
+        local t0 = get_time_ms()
+        diff_res = detector:compute_diff(golden_img, sample_img)
+        diff_res.tolerance = detector.tolerance
+        blobs = detector:extract_blobs(diff_res)
+        annotated_img = detector:render_annotated_overlay(sample_img, blobs)
+        elapsed_ms = get_time_ms() - t0
+    end
+
+    run_inspection()
 
     -- Save PPM files if requested
     if save_ppm then
@@ -1327,14 +1374,75 @@ local function main()
   "defects": [
 %s
   ]
-}]], (#blobs == 0) and "PASS" or "FAIL", #blobs, diff_res.defect_pixel_count, elapsed_ms, tolerance, min_area, table.concat(defect_entries, ",\n"))
+}]], (#blobs == 0) and "PASS" or "FAIL", #blobs, diff_res.defect_pixel_count, elapsed_ms, detector.tolerance, min_area, table.concat(defect_entries, ",\n"))
         print(json_str)
         return
     end
 
-    -- Terminal Dashboard Mode
-    local dashboard = TerminalUI.render_dashboard(golden_img, sample_img, diff_res, annotated_img, blobs, elapsed_ms, use_ascii)
-    print(dashboard)
+    if snapshot or not is_stdin_tty() then
+        local dashboard = TerminalUI.render_dashboard(golden_img, sample_img, diff_res, annotated_img, blobs, elapsed_ms, use_ascii)
+        print(dashboard)
+        return
+    end
+
+    -- Interactive TUI Loop with Dynamic Generation Key ('G')
+    enable_raw_mode()
+    io.write("[2J[H")
+    io.flush()
+
+    local running = true
+    local needs_redraw = true
+
+    local ok, err = pcall(function()
+        while running do
+            if needs_redraw then
+                local dashboard = TerminalUI.render_dashboard(golden_img, sample_img, diff_res, annotated_img, blobs, elapsed_ms, use_ascii)
+                io.write("[H" .. dashboard)
+                io.flush()
+                needs_redraw = false
+            end
+
+            local key = read_key_nonblocking()
+            if key then
+                if key == "CTRL_C" or key == "q" or key == "ESC" then
+                    running = false
+                elseif key == "g" or key == "SPACE" then
+                    -- Generate new dynamic sample with fresh randomized defects
+                    sample_img = PCBGenerator.inject_defects(golden_img, { randomize = true })
+                    run_inspection()
+                    needs_redraw = true
+                elseif key == "r" then
+                    -- Reset to clean pristine golden sample (0 defects)
+                    sample_img = golden_img:clone()
+                    run_inspection()
+                    needs_redraw = true
+                elseif key == "+" or key == "=" then
+                    detector.tolerance = math.min(200, detector.tolerance + 2)
+                    run_inspection()
+                    needs_redraw = true
+                elseif key == "-" or key == "_" then
+                    detector.tolerance = math.max(5, detector.tolerance - 2)
+                    run_inspection()
+                    needs_redraw = true
+                elseif key == "s" then
+                    golden_img:save_ppm("pcb_golden_reference.ppm")
+                    sample_img:save_ppm("pcb_sample_defective.ppm")
+                    annotated_img:save_ppm("pcb_annotated_result.ppm")
+                    needs_redraw = true
+                end
+            end
+
+            sleep_ms(15)
+        end
+    end)
+
+    disable_raw_mode()
+    io.write("\n\27[0mExited Optical Defect Inspector.\n")
+    io.flush()
+
+    if not ok and err then
+        io.stderr:write("Error: " .. tostring(err) .. "\n")
+    end
 end
 
 -- Export module or execute main
