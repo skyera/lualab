@@ -26,6 +26,7 @@
 ]]
 
 local ffi = require("ffi")
+local posix_stat
 
 -- =========================================================================
 -- 1. C Declarations for Windows / POSIX, Terminal Window, Input, & Directory
@@ -381,11 +382,12 @@ else
         struct stat {
             unsigned long  st_dev;
             unsigned long  st_ino;
-            unsigned long  st_nlink;
             unsigned int   st_mode;
+            unsigned int   st_nlink;
             unsigned int   st_uid;
             unsigned int   st_gid;
             unsigned long  st_rdev;
+            unsigned long  __pad1;
             long           st_size;
             long           st_blksize;
             long           st_blocks;
@@ -398,7 +400,20 @@ else
             long           __unused[3];
         };
         int stat(const char *pathname, struct stat *statbuf);
+        int __xstat(int ver, const char *pathname, struct stat *statbuf);
     ]]
+
+    if pcall(function() return ffi.C.stat end) then
+        posix_stat = function(path, st) return ffi.C.stat(path, st) end
+    elseif pcall(function() return ffi.C.__xstat end) then
+        posix_stat = function(path, st)
+            local res = ffi.C.__xstat(3, path, st)
+            if res ~= 0 then res = ffi.C.__xstat(1, path, st) end
+            return res
+        end
+    else
+        posix_stat = function(path, st) return -1 end
+    end
 
     local TIOCGWINSZ = 0x5413
     local STDIN_FILENO = 0
@@ -497,7 +512,7 @@ else
 
             if fname ~= "." and fname ~= ".." and not fname:match("^%.") then
                 local full_path = (dir_path == ".") and fname or (dir_path .. "/" .. fname)
-                if ffi.C.stat(full_path, st) == 0 then
+                if posix_stat(full_path, st) == 0 then
                     local mode = tonumber(st.st_mode)
                     local is_dir = (bit.band(mode, 0xF000) == 0x4000)
                     local is_reg = (bit.band(mode, 0xF000) == 0x8000)

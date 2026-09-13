@@ -21,6 +21,7 @@ local bit = require("bit")
 -- 1. C Declarations via ffi.cdef
 -- =========================================================================
 local is_windows = (ffi.os == "Windows")
+local posix_stat
 
 ffi.cdef[[
     // Common File I/O & Memory Functions
@@ -257,12 +258,12 @@ else
         struct stat {
             unsigned long  st_dev;
             unsigned long  st_ino;
-            unsigned long  st_nlink;
             unsigned int   st_mode;
+            unsigned int   st_nlink;
             unsigned int   st_uid;
             unsigned int   st_gid;
-            unsigned int   __pad0;
             unsigned long  st_rdev;
+            unsigned long  __pad1;
             long           st_size;
             long           st_blksize;
             long           st_blocks;
@@ -272,7 +273,22 @@ else
             long           __glibc_reserved[3];
         };
         int stat(const char *pathname, struct stat *statbuf);
+        int __xstat(int ver, const char *pathname, struct stat *statbuf);
+    ]]
 
+    if pcall(function() return ffi.C.stat end) then
+        posix_stat = function(path, st) return ffi.C.stat(path, st) end
+    elseif pcall(function() return ffi.C.__xstat end) then
+        posix_stat = function(path, st)
+            local res = ffi.C.__xstat(3, path, st)
+            if res ~= 0 then res = ffi.C.__xstat(1, path, st) end
+            return res
+        end
+    else
+        posix_stat = function(path, st) return -1 end
+    end
+
+    ffi.cdef[[
         // 4. Clocks
         int clock_gettime(int clk_id, struct timespec *tp);
 
@@ -937,7 +953,7 @@ function SysInfo.get_file_stat(filepath)
     end
 
     local st = ffi.new("struct stat")
-    if ffi.C.stat(filepath, st) ~= 0 then
+    if posix_stat(filepath, st) ~= 0 then
         return nil, "File not found or inaccessible: " .. filepath
     end
 

@@ -35,6 +35,7 @@ local ffi = require("ffi")
 -- 1. FFI Definitions: Terminal, Polling, Dirent, and Stat
 -- =========================================================================
 local is_windows = (ffi.os == "Windows")
+local posix_stat
 local devnull = is_windows and "nul" or "/dev/null"
 local popen_rb = is_windows and "rb" or "r"
 
@@ -229,11 +230,12 @@ else
         struct stat {
             unsigned long  st_dev;
             unsigned long  st_ino;
-            unsigned long  st_nlink;
             unsigned int   st_mode;
+            unsigned int   st_nlink;
             unsigned int   st_uid;
             unsigned int   st_gid;
             unsigned long  st_rdev;
+            unsigned long  __pad1;
             long           st_size;
             long           st_blksize;
             long           st_blocks;
@@ -246,9 +248,22 @@ else
             long           __unused[3];
         };
         int stat(const char *pathname, struct stat *statbuf);
+        int __xstat(int ver, const char *pathname, struct stat *statbuf);
 
         char *realpath(const char *path, char *resolved_path);
     ]]
+
+    if pcall(function() return ffi.C.stat end) then
+        posix_stat = function(path, st) return ffi.C.stat(path, st) end
+    elseif pcall(function() return ffi.C.__xstat end) then
+        posix_stat = function(path, st)
+            local res = ffi.C.__xstat(3, path, st)
+            if res ~= 0 then res = ffi.C.__xstat(1, path, st) end
+            return res
+        end
+    else
+        posix_stat = function(path, st) return -1 end
+    end
 
     local TIOCGWINSZ   = 0x5413
     local STDIN_FILENO = 0
@@ -535,7 +550,7 @@ else
                 local is_exec = false
                 local is_symlink = (ent.d_type == 10) -- DT_LNK
 
-                if ffi.C.stat(full_path, st) == 0 then
+                if posix_stat(full_path, st) == 0 then
                     local mode = tonumber(st.st_mode)
                     is_dir = (bit.band(mode, 0xF000) == 0x4000) -- S_ISDIR
                     is_exec = (bit.band(mode, 0x49) ~= 0)        -- S_IXUSR / S_IXGRP / S_IXOTH
