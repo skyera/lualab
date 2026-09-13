@@ -382,12 +382,12 @@ else
         struct stat {
             unsigned long  st_dev;
             unsigned long  st_ino;
+            unsigned long  st_nlink;
             unsigned int   st_mode;
-            unsigned int   st_nlink;
             unsigned int   st_uid;
             unsigned int   st_gid;
+            unsigned int   __pad0;
             unsigned long  st_rdev;
-            unsigned long  __pad1;
             long           st_size;
             long           st_blksize;
             long           st_blocks;
@@ -403,13 +403,13 @@ else
         int __xstat(int ver, const char *pathname, struct stat *statbuf);
     ]]
 
-    if pcall(function() return ffi.C.stat end) then
-        posix_stat = function(path, st) return ffi.C.stat(path, st) end
-    elseif pcall(function() return ffi.C.__xstat end) then
+    if pcall(function() return ffi.C.__xstat end) then
         posix_stat = function(path, st)
-            local res = ffi.C.__xstat(3, path, st)
-            if res ~= 0 then res = ffi.C.__xstat(1, path, st) end
-            return res
+            return ffi.C.__xstat(1, path, st)
+        end
+    elseif pcall(function() return ffi.C.stat end) then
+        posix_stat = function(path, st)
+            return ffi.C.stat(path, st)
         end
     else
         posix_stat = function(path, st) return -1 end
@@ -1270,14 +1270,25 @@ local function main()
 
     -- 4. Non-interactive fallback (e.g., pipes or redirect)
     if non_interactive then
-        render_file_list(target_dir, raw_images, #raw_images, 1, 1, nil, false, "", sort_mode, sort_desc, recursive, icon_mode)
-        io.write(string.format("\n\27[1;32mEnter image number [1-%d] to view, or 'q' to quit: \27[0m", #raw_images))
-        io.flush()
-        local line = io.read("*l")
-        if line and line ~= "q" and line ~= "Q" then
+        while true do
+            render_file_list(target_dir, raw_images, #raw_images, 1, 1, nil, false, "", sort_mode, sort_desc, recursive, icon_mode)
+            io.write(string.format("\n\27[1;32mEnter item number [1-%d] to open/view, or 'q' to quit: \27[0m", #raw_images))
+            io.flush()
+            local line = io.read("*l")
+            if not line or line == "q" or line == "Q" then
+                break
+            end
             local sel = tonumber(line:match("%d+"))
             if sel and sel >= 1 and sel <= #raw_images then
-                render_image_screen(raw_images[sel], sel, #raw_images, force_protocol)
+                local item = raw_images[sel]
+                if item.is_dir then
+                    target_dir = item.filepath
+                    raw_images = scan_directory_images(target_dir, recursive) or {}
+                    sort_images(raw_images, sort_mode, sort_desc)
+                else
+                    render_image_screen(item, sel, #raw_images, force_protocol)
+                    break
+                end
             end
         end
         return
