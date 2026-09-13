@@ -53,6 +53,33 @@ local SUPPORTED_EXTENSIONS = {
     bmp  = true,
 }
 
+local EXTENSION_ICONS = {
+    unicode = {
+        PNG  = "🖼 ",
+        JPG  = "📷",
+        JPEG = "📷",
+        PPM  = "▦ ",
+        WEBP = "🌐",
+        GIF  = "🎞 ",
+        BMP  = "🎨",
+    },
+    nerd = {
+        PNG  = "\238\176\169 ", -- 󰋩
+        JPG  = "\238\176\132 ", -- 󰄄
+        JPEG = "\238\176\132 ", -- 󰄄
+        PPM  = "\238\176\174 ", -- 󰈮
+        WEBP = "\238\176\159 ", -- 󰖟
+        GIF  = "\238\181\184 ", -- 󰵸
+        BMP  = "\238\175\152 ", -- 󰏘
+    }
+}
+
+local function get_file_icon(ext, icon_mode)
+    if icon_mode == "none" then return "" end
+    local group = EXTENSION_ICONS[icon_mode] or EXTENSION_ICONS.unicode
+    return group[ext:upper()] or "📄"
+end
+
 local function format_file_size(bytes)
     if bytes < 1024 then
         return string.format("%d B", bytes)
@@ -903,6 +930,7 @@ local function render_help_modal(term_w, term_h)
         "│    Esc                 Clear active search / exit search    │",
         "│    s                   Cycle sort (Name -> Date -> Size)    │",
         "│    r                   Reverse sort direction (Asc / Desc)  │",
+        "│    i                   Cycle icon mode (Unicode / Nerd / Off)│",
         "│                                                             │",
         "│  General:                                                   │",
         "│    ?                   Toggle this help window              │",
@@ -920,7 +948,7 @@ local function render_help_modal(term_w, term_h)
     io.write("\27[H\27[2J") -- Clear screen
     io.write(string.rep("\n", start_row))
     for idx, l in ipairs(lines) do
-        if idx == 1 or idx == 3 or idx == 23 then
+        if idx == 1 or idx == 3 or idx == (#lines - 1) then
             io.write(margin .. "\27[1;36m" .. l .. "\27[0m\n")
         elseif idx == 2 then
             io.write(margin .. "\27[1;97;44m" .. l .. "\27[0m\n")
@@ -933,7 +961,7 @@ local function render_help_modal(term_w, term_h)
     io.flush()
 end
 
-local function render_file_list(dir_path, images, total_unfiltered, selected_idx, page_offset, msg, search_mode, search_query, sort_mode, sort_desc, recursive)
+local function render_file_list(dir_path, images, total_unfiltered, selected_idx, page_offset, msg, search_mode, search_query, sort_mode, sort_desc, recursive, icon_mode)
     local term_w, term_h = get_terminal_size()
     local out = {}
     table.insert(out, "\27[H\27[2J") -- Clear screen & home
@@ -954,7 +982,7 @@ local function render_file_list(dir_path, images, total_unfiltered, selected_idx
     elseif #search_query > 0 then
         table.insert(out, string.format("  \27[90mFilter: \27[1;93m'%s'\27[0m \27[90m(%d matches) [Esc/ / to clear]\27[0m   \27[93m[?]\27[0m Help   \27[91m[Q]\27[0m Quit\n", search_query, #images))
     else
-        table.insert(out, string.format("  \27[93m[↑/↓/k/j]\27[0m Move   \27[93m[PgUp/PgDn]\27[0m Page   \27[1;92m[Enter]\27[0m View   \27[93m[/]\27[0m Filter   \27[93m[?]\27[0m Help   \27[91m[Q]\27[0m Quit\n"))
+        table.insert(out, string.format("  \27[93m[↑/↓/k/j]\27[0m Move   \27[93m[PgUp/PgDn]\27[0m Page   \27[1;92m[Enter]\27[0m View   \27[93m[/]\27[0m Filter   \27[93m[i]\27[0m Icon   \27[93m[?]\27[0m Help   \27[91m[Q]\27[0m Quit\n"))
     end
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
@@ -997,14 +1025,21 @@ local function render_file_list(dir_path, images, total_unfiltered, selected_idx
     for i = page_start, page_end do
         local img = images[i]
         local is_sel = (i == selected_idx)
+        local icon = get_file_icon(img.extension, icon_mode)
+        local icon_prefix = (icon ~= "") and (icon .. " ") or ""
+        local max_fn_w = (icon ~= "") and (col2_w - 3) or col2_w
         local fn = img.filename
-        if #fn > col2_w then
-            fn = fn:sub(1, col2_w - 3) .. "..."
+        if #fn > max_fn_w then
+            fn = fn:sub(1, max_fn_w - 3) .. "..."
         end
 
-        local line_str = string.format("%-6s %-" .. col2_w .. "s %-8s %-12s %-12s",
+        local display_fn = icon_prefix .. fn
+        local pad_len = math.max(0, col2_w - (fn:len() + ((icon ~= "") and 3 or 0)))
+        local padded_col2 = display_fn .. string.rep(" ", pad_len)
+
+        local line_str = string.format("%-6s %s %-8s %-12s %-12s",
             string.format("[%d]", i),
-            fn,
+            padded_col2,
             img.extension,
             img.size_str,
             img.date_str or "-"
@@ -1094,6 +1129,8 @@ local function main()
         print("  -r, --recursive       Recursively scan subdirectories for images")
         print("  --select, -s <id>     Directly select and display image #id")
         print("  --sort <name|date|size> Initial sort order (default: name)")
+        print("  --nerd-icons          Use Nerd Font glyphs instead of standard Unicode")
+        print("  --no-icons            Disable file icons")
         print("  --kitty               Force Kitty Graphics Protocol (high-res pixel rendering)")
         print("  --iterm               Force iTerm2 / WezTerm inline image protocol")
         print("  --half-block          Force ANSI Truecolor Half-Block fallback renderer")
@@ -1112,6 +1149,14 @@ local function main()
         force_protocol = "iterm"
     elseif args["--half-block"] or args["--halfblock"] then
         force_protocol = "halfblock"
+    end
+
+    -- Icon mode
+    local icon_mode = "unicode"
+    if args["--no-icons"] or args["--no-icon"] then
+        icon_mode = "none"
+    elseif args["--nerd-icons"] or args["--nerd-icon"] or args["--nerd"] then
+        icon_mode = "nerd"
     end
 
     local recursive = args["-r"] or args["--recursive"]
@@ -1149,7 +1194,7 @@ local function main()
 
     -- 4. Non-interactive fallback (e.g., pipes or redirect)
     if non_interactive then
-        render_file_list(target_dir, raw_images, #raw_images, 1, 1, nil, false, "", sort_mode, sort_desc, recursive)
+        render_file_list(target_dir, raw_images, #raw_images, 1, 1, nil, false, "", sort_mode, sort_desc, recursive, icon_mode)
         io.write(string.format("\n\27[1;32mEnter image number [1-%d] to view, or 'q' to quit: \27[0m", #raw_images))
         io.flush()
         local line = io.read("*l")
@@ -1224,7 +1269,7 @@ local function main()
                 end
             else
                 update_page_window()
-                render_file_list(target_dir, filtered_images, #raw_images, selected_idx, page_offset, current_msg, search_mode, search_query, sort_mode, sort_desc, recursive)
+                render_file_list(target_dir, filtered_images, #raw_images, selected_idx, page_offset, current_msg, search_mode, search_query, sort_mode, sort_desc, recursive, icon_mode)
                 current_msg = nil
 
                 local k = read_key()
@@ -1278,6 +1323,17 @@ local function main()
                         search_mode = true
                     elseif k == "?" then
                         in_help = true
+                    elseif k == "i" then
+                        if icon_mode == "unicode" then
+                            icon_mode = "nerd"
+                            current_msg = "Icons: Nerd Font"
+                        elseif icon_mode == "nerd" then
+                            icon_mode = "none"
+                            current_msg = "Icons: Disabled"
+                        else
+                            icon_mode = "unicode"
+                            current_msg = "Icons: Standard Unicode"
+                        end
                     elseif k == "s" then
                         if sort_mode == "name" then
                             sort_mode = "date"
