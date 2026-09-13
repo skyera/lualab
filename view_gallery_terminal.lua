@@ -55,6 +55,7 @@ local SUPPORTED_EXTENSIONS = {
 
 local EXTENSION_ICONS = {
     unicode = {
+        DIR  = "📁 ",
         PNG  = "🖼 ",
         JPG  = "📷",
         JPEG = "📷",
@@ -64,6 +65,7 @@ local EXTENSION_ICONS = {
         BMP  = "🎨",
     },
     nerd = {
+        DIR  = "\238\151\191 ", -- 
         PNG  = "\238\176\169 ", -- 󰋩
         JPG  = "\238\176\132 ", -- 󰄄
         JPEG = "\238\176\132 ", -- 󰄄
@@ -77,7 +79,7 @@ local EXTENSION_ICONS = {
 local function get_file_icon(ext, icon_mode)
     if icon_mode == "none" then return "" end
     local group = EXTENSION_ICONS[icon_mode] or EXTENSION_ICONS.unicode
-    return group[ext:upper()] or "📄"
+    return group[ext:upper()] or (ext:upper() == "DIR" and "📁 " or "📄")
 end
 
 local function format_file_size(bytes)
@@ -245,7 +247,7 @@ if is_windows then
         return nil
     end
 
-    local function scan_win_dir(dir_path, images, recursive)
+    local function scan_win_dir(dir_path, entries, recursive)
         local search_pattern = (dir_path == ".") and "*.*" or (dir_path .. "\\*.*")
         local find_data = ffi.new("WIN32_FIND_DATAA")
         local hFind = ffi.C.FindFirstFileA(search_pattern, find_data)
@@ -260,18 +262,32 @@ if is_windows then
 
             if fname ~= "." and fname ~= ".." and not fname:match("^%.") then
                 local full_path = (dir_path == ".") and fname or (dir_path .. "/" .. fname)
-                if is_dir and recursive then
-                    scan_win_dir(full_path, images, true)
-                elseif not is_dir then
+                local ft = tonumber(find_data.ftLastWriteTime.dwHighDateTime) * 4294967296 + tonumber(find_data.ftLastWriteTime.dwLowDateTime)
+                local mtime = math.floor((ft - 116444736000000000) / 10000000)
+
+                if is_dir then
+                    if recursive then
+                        scan_win_dir(full_path, entries, true)
+                    else
+                        table.insert(entries, {
+                            filename = fname,
+                            filepath = full_path,
+                            is_dir = true,
+                            extension = "DIR",
+                            size = 0,
+                            size_str = "<DIR>",
+                            mtime = mtime,
+                            date_str = format_date(mtime),
+                        })
+                    end
+                else
                     local ext = fname:match("%.([^.]+)$")
                     if ext and SUPPORTED_EXTENSIONS[ext:lower()] then
                         local size = tonumber(find_data.nFileSizeHigh) * 4294967296 + tonumber(find_data.nFileSizeLow)
-                        local ft = tonumber(find_data.ftLastWriteTime.dwHighDateTime) * 4294967296 + tonumber(find_data.ftLastWriteTime.dwLowDateTime)
-                        local mtime = math.floor((ft - 116444736000000000) / 10000000)
-
-                        table.insert(images, {
+                        table.insert(entries, {
                             filename = fname,
                             filepath = full_path,
+                            is_dir = false,
                             extension = ext:upper(),
                             size = size,
                             size_str = format_file_size(size),
@@ -291,14 +307,25 @@ if is_windows then
         dir_path = dir_path:gsub("[/\\]+$", "")
         if dir_path == "" then dir_path = "." end
 
-        local images = {}
-        scan_win_dir(dir_path, images, recursive)
+        local entries = {}
+        if not recursive and dir_path ~= "." and not dir_path:match("^[A-Za-z]:[/\\]?$") and dir_path ~= "/" then
+            local parent_path = dir_path:match("^(.*)[/\\][^/\\]+$") or "."
+            if parent_path == "" then parent_path = "." end
+            table.insert(entries, {
+                filename = "..",
+                filepath = parent_path,
+                is_dir = true,
+                is_parent = true,
+                extension = "DIR",
+                size = 0,
+                size_str = "<DIR>",
+                mtime = 0,
+                date_str = "-",
+            })
+        end
 
-        table.sort(images, function(a, b)
-            return a.filename:lower() < b.filename:lower()
-        end)
-
-        return images
+        scan_win_dir(dir_path, entries, recursive)
+        return entries
     end
 else
     -- POSIX / Linux / macOS
@@ -458,7 +485,7 @@ else
         return nil
     end
 
-    local function scan_posix_dir(dir_path, images, recursive)
+    local function scan_posix_dir(dir_path, entries, recursive)
         local d = ffi.C.opendir(dir_path)
         if d == nil then return end
 
@@ -474,17 +501,31 @@ else
                     local mode = tonumber(st.st_mode)
                     local is_dir = (bit.band(mode, 0xF000) == 0x4000)
                     local is_reg = (bit.band(mode, 0xF000) == 0x8000)
+                    local mtime = tonumber(st.st_mtime)
 
-                    if is_dir and recursive then
-                        scan_posix_dir(full_path, images, true)
+                    if is_dir then
+                        if recursive then
+                            scan_posix_dir(full_path, entries, true)
+                        else
+                            table.insert(entries, {
+                                filename = fname,
+                                filepath = full_path,
+                                is_dir = true,
+                                extension = "DIR",
+                                size = 0,
+                                size_str = "<DIR>",
+                                mtime = mtime,
+                                date_str = format_date(mtime),
+                            })
+                        end
                     elseif is_reg then
                         local ext = fname:match("%.([^.]+)$")
                         if ext and SUPPORTED_EXTENSIONS[ext:lower()] then
                             local size = tonumber(st.st_size)
-                            local mtime = tonumber(st.st_mtime)
-                            table.insert(images, {
+                            table.insert(entries, {
                                 filename = fname,
                                 filepath = full_path,
+                                is_dir = false,
                                 extension = ext:upper(),
                                 size = size,
                                 size_str = format_file_size(size),
@@ -505,14 +546,25 @@ else
             dir_path = dir_path:sub(1, -2)
         end
 
-        local images = {}
-        scan_posix_dir(dir_path, images, recursive)
+        local entries = {}
+        if not recursive and dir_path ~= "." and dir_path ~= "/" then
+            local parent_path = dir_path:match("^(.*)/[^/]+$") or "."
+            if parent_path == "" then parent_path = "/" end
+            table.insert(entries, {
+                filename = "..",
+                filepath = parent_path,
+                is_dir = true,
+                is_parent = true,
+                extension = "DIR",
+                size = 0,
+                size_str = "<DIR>",
+                mtime = 0,
+                date_str = "-",
+            })
+        end
 
-        table.sort(images, function(a, b)
-            return a.filename:lower() < b.filename:lower()
-        end)
-
-        return images
+        scan_posix_dir(dir_path, entries, recursive)
+        return entries
     end
 end
 
@@ -913,17 +965,18 @@ local function render_help_modal(term_w, term_h)
         "┌─────────────────────────────────────────────────────────────┐",
         "│                   KEYBOARD SHORTCUTS                        │",
         "├─────────────────────────────────────────────────────────────┤",
-        "│  List Navigation:                                           │",
+        "│  File & Folder Navigation:                                  │",
         "│    ↑ / k, ↓ / j        Move selection up / down             │",
         "│    PgUp / PgDn         Scroll list one page up / down       │",
-        "│    Home / End          Jump to first / last image           │",
-        "│    Enter / Space       Open and view selected image         │",
-        "│    1 - 9               Quick select image by index number   │",
+        "│    Home / End          Jump to first / last item            │",
+        "│    Enter / Space / l   Open folder or view selected image   │",
+        "│    h / Backspace       Navigate to parent folder (..)       │",
+        "│    1 - 9               Quick select item by index number    │",
         "│                                                             │",
         "│  Viewer Controls:                                           │",
         "│    ← / p, → / n        Browse previous / next image         │",
         "│    PgUp / PgDn         Browse previous / next image         │",
-        "│    Enter / b / Backsp  Return to file list                  │",
+        "│    Enter / b / Backsp  Return to file/folder list           │",
         "│                                                             │",
         "│  Search & Sorting:                                          │",
         "│    /                   Start live search / filter query     │",
@@ -982,7 +1035,7 @@ local function render_file_list(dir_path, images, total_unfiltered, selected_idx
     elseif #search_query > 0 then
         table.insert(out, string.format("  \27[90mFilter: \27[1;93m'%s'\27[0m \27[90m(%d matches) [Esc/ / to clear]\27[0m   \27[93m[?]\27[0m Help   \27[91m[Q]\27[0m Quit\n", search_query, #images))
     else
-        table.insert(out, string.format("  \27[93m[↑/↓/k/j]\27[0m Move   \27[93m[PgUp/PgDn]\27[0m Page   \27[1;92m[Enter]\27[0m View   \27[93m[/]\27[0m Filter   \27[93m[i]\27[0m Icon   \27[93m[?]\27[0m Help   \27[91m[Q]\27[0m Quit\n"))
+        table.insert(out, string.format("  \27[93m[↑/↓/k/j]\27[0m Move   \27[1;92m[Enter/l]\27[0m Open/View   \27[93m[h/Backsp]\27[0m Up   \27[93m[/]\27[0m Filter   \27[93m[i]\27[0m Icon   \27[93m[?]\27[0m Help   \27[91m[Q]\27[0m Quit\n"))
     end
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
@@ -1067,6 +1120,15 @@ end
 -- =========================================================================
 local function sort_images(images, mode, desc)
     table.sort(images, function(a, b)
+        -- '..' parent entry is always at the very top
+        if a.is_parent then return true end
+        if b.is_parent then return false end
+
+        -- Directories come before regular files
+        if a.is_dir ~= b.is_dir then
+            return a.is_dir == true
+        end
+
         local val_a, val_b
         if mode == "date" then
             val_a, val_b = a.mtime or 0, b.mtime or 0
@@ -1171,16 +1233,15 @@ local function main()
     end
     local sort_desc = (sort_mode == "date" or sort_mode == "size")
 
-    -- 2. Scan Directory for Images
+    -- 2. Scan Directory for Images & Folders
     local raw_images, err = scan_directory_images(target_dir, recursive)
     if not raw_images then
         io.stderr:write(string.format("\27[1;31mError: %s\27[0m\n", tostring(err)))
         os.exit(1)
     end
 
-    if #raw_images == 0 then
-        print(string.format("\27[1;33m[!] No supported images found in '%s' (%s scan).\27[0m", target_dir, recursive and "recursive" or "Level 1"))
-        print("Supported formats: PNG, JPG/JPEG, PPM, WEBP, GIF, BMP")
+    if #raw_images == 0 and non_interactive then
+        print(string.format("\27[1;33m[!] No files or directories found in '%s'.\27[0m", target_dir))
         os.exit(0)
     end
 
@@ -1219,6 +1280,43 @@ local function main()
     local in_help = false
     local current_msg = nil
 
+    local function reload_directory(new_dir)
+        target_dir = new_dir or target_dir
+        -- Normalize path
+        target_dir = target_dir:gsub("/%./", "/"):gsub("/+$", "")
+        if target_dir == "" then target_dir = "/" end
+
+        local new_items, scan_err = scan_directory_images(target_dir, recursive)
+        if not new_items then
+            current_msg = "Cannot open directory: " .. tostring(scan_err)
+            return false
+        end
+
+        raw_images = new_items
+        sort_images(raw_images, sort_mode, sort_desc)
+        search_query = ""
+        search_mode = false
+        filtered_images = filter_images(raw_images, search_query)
+        selected_idx = 1
+        page_offset = 1
+        return true
+    end
+
+    local function navigate_to_parent()
+        local parent_path
+        if target_dir == "." or target_dir == "" then
+            parent_path = ".."
+        elseif target_dir == ".." or target_dir:match("^%.%.[/\\]") then
+            parent_path = target_dir .. "/.."
+        elseif target_dir == "/" then
+            return -- already root
+        else
+            parent_path = target_dir:match("^(.*)[/\\][^/\\]+$") or "."
+            if parent_path == "" then parent_path = "/" end
+        end
+        reload_directory(parent_path)
+    end
+
     local function update_page_window()
         local _, term_h = get_terminal_size()
         local max_items = math.max(4, term_h - 12)
@@ -1227,6 +1325,17 @@ local function main()
         elseif selected_idx > page_offset + max_items - 1 then
             page_offset = math.max(1, selected_idx - max_items + 1)
         end
+    end
+
+    -- Build a list of indices that correspond to actual image files (excluding directories)
+    local function get_image_indices()
+        local indices = {}
+        for idx, item in ipairs(filtered_images) do
+            if not item.is_dir then
+                table.insert(indices, idx)
+            end
+        end
+        return indices
     end
 
     local loop_status, loop_err = pcall(function()
@@ -1240,10 +1349,19 @@ local function main()
                 end
             elseif in_viewer then
                 local cur_img = filtered_images[selected_idx]
-                if not cur_img then
+                if not cur_img or cur_img.is_dir then
                     in_viewer = false
                 else
-                    local ok, view_err = render_image_screen(cur_img, selected_idx, #filtered_images, force_protocol)
+                    local img_indices = get_image_indices()
+                    local img_pos = 1
+                    for p, idx in ipairs(img_indices) do
+                        if idx == selected_idx then
+                            img_pos = p
+                            break
+                        end
+                    end
+
+                    local ok, view_err = render_image_screen(cur_img, img_pos, #img_indices, force_protocol)
                     if not ok then
                         in_viewer = false
                         current_msg = "Failed to load image: " .. tostring(view_err)
@@ -1251,17 +1369,23 @@ local function main()
                         local k = read_key()
                         if k == "q" or k == "ESC" or k == "CTRL_C" then
                             break
-                        elseif k == "ENTER" or k == "b" or k == "BACKSPACE" then
+                        elseif k == "ENTER" or k == "b" or k == "BACKSPACE" or k == "h" then
                             kitty_clear_screen()
                             in_viewer = false
-                        elseif k == "RIGHT" or k == "n" or k == "SPACE" or k == "PAGE_DOWN" then
+                        elseif k == "RIGHT" or k == "n" or k == "SPACE" or k == "PAGE_DOWN" or k == "l" then
                             kitty_clear_screen()
-                            selected_idx = (selected_idx % #filtered_images) + 1
-                            update_page_window()
+                            if #img_indices > 1 then
+                                img_pos = (img_pos % #img_indices) + 1
+                                selected_idx = img_indices[img_pos]
+                                update_page_window()
+                            end
                         elseif k == "LEFT" or k == "p" or k == "PAGE_UP" then
                             kitty_clear_screen()
-                            selected_idx = (selected_idx - 2 + #filtered_images) % #filtered_images + 1
-                            update_page_window()
+                            if #img_indices > 1 then
+                                img_pos = (img_pos - 2 + #img_indices) % #img_indices + 1
+                                selected_idx = img_indices[img_pos]
+                                update_page_window()
+                            end
                         elseif k == "?" then
                             in_help = true
                         end
@@ -1285,8 +1409,13 @@ local function main()
                         page_offset = 1
                     elseif k == "ENTER" then
                         search_mode = false
-                        if #filtered_images > 0 then
-                            in_viewer = true
+                        local item = filtered_images[selected_idx]
+                        if item then
+                            if item.is_dir then
+                                reload_directory(item.filepath)
+                            else
+                                in_viewer = true
+                            end
                         end
                     elseif k == "BACKSPACE" then
                         if #search_query > 0 then
@@ -1365,13 +1494,27 @@ local function main()
                         selected_idx = 1
                     elseif k == "END" then
                         selected_idx = math.max(1, #filtered_images)
-                    elseif k == "ENTER" or k == "SPACE" then
-                        if #filtered_images > 0 then
-                            in_viewer = true
+                    elseif k == "BACKSPACE" or k == "h" or k == "LEFT" then
+                        navigate_to_parent()
+                    elseif k == "ENTER" or k == "SPACE" or k == "l" or k == "RIGHT" then
+                        local item = filtered_images[selected_idx]
+                        if item then
+                            if item.is_dir then
+                                reload_directory(item.filepath)
+                            else
+                                in_viewer = true
+                            end
                         end
                     elseif tonumber(k) and tonumber(k) >= 1 and tonumber(k) <= math.min(9, #filtered_images) then
-                        selected_idx = tonumber(k)
-                        in_viewer = true
+                        local item = filtered_images[tonumber(k)]
+                        if item then
+                            selected_idx = tonumber(k)
+                            if item.is_dir then
+                                reload_directory(item.filepath)
+                            else
+                                in_viewer = true
+                            end
+                        end
                     end
                 end
             end
