@@ -642,8 +642,317 @@ local function parse_ppm_stream(f)
     return {
         width = width,
         height = height,
-        pixels = pixels
+        pixels = pixels,
+        engine = "FFI (Netpbm PPM)"
     }
+end
+
+-- =========================================================================
+-- 4b. Zero-Dependency & Dynamic FFI Image Decoders (BMP, PNG, JPEG, WebP)
+-- =========================================================================
+local function load_first_lib(names)
+    for _, name in ipairs(names) do
+        local ok, lib = pcall(ffi.load, name)
+        if ok and lib then return lib end
+    end
+    return nil
+end
+
+-- 1. Pure LuaJIT FFI Windows Bitmap (BMP) Decoder (Zero external dependencies)
+local function decode_bmp_ffi(filepath)
+    local f = io.open(filepath, "rb")
+    if not f then return nil, "Cannot open file: " .. filepath end
+
+    local header = f:read(54)
+    if not header or #header < 54 then
+        f:close()
+        return nil, "File too small for BMP header"
+    end
+    if header:sub(1, 2) ~= "BM" then
+        f:close()
+        return nil, "Not a valid BMP header"
+    end
+
+    local function r16(pos)
+        local b1, b2 = header:byte(pos, pos + 1)
+        return b1 + b2 * 256
+    end
+    local function r32(pos)
+        local b1, b2, b3, b4 = header:byte(pos, pos + 3)
+        return b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
+    end
+    local function r32s(pos)
+        local u = r32(pos)
+        return (u >= 0x80000000) and (u - 0x100000000) or u
+    end
+
+    local off_bits = r32(11) -- byte offset 10 in 0-indexed
+    local dib_size = r32(15)
+    local w = r32s(19)
+    local h = r32s(23)
+    local planes = r16(27)
+    local bpp = r16(29)
+    local comp = r32(31)
+
+    if w <= 0 or h == 0 or planes ~= 1 then
+        f:close()
+        return nil, "Invalid BMP dimensions or planes"
+    end
+    if comp ~= 0 and comp ~= 3 then
+        f:close()
+        return nil, "Compressed BMP not supported"
+    end
+    if bpp ~= 24 and bpp ~= 32 and bpp ~= 8 then
+        f:close()
+        return nil, "Unsupported BMP bit depth: " .. tostring(bpp)
+    end
+
+    local top_down = (h < 0)
+    local abs_h = math.abs(h)
+    local palette = nil
+    if bpp == 8 then
+        f:seek("set", 14 + dib_size)
+        local pal_data = f:read(256 * 4)
+        if pal_data and #pal_data >= 1024 then
+            palette = {}
+            for i = 0, 255 do
+                local b, g, r = pal_data:byte(i * 4 + 1, i * 4 + 3)
+                palette[i] = { r = r or 0, g = g or 0, b = b or 0 }
+            end
+        end
+    end
+
+    f:seek("set", off_bits)
+    local bytes_per_pixel = bpp / 8
+    local row_stride = math.floor((w * bytes_per_pixel + 3) / 4) * 4
+    local all_rows = f:read(row_stride * abs_h)
+    f:close()
+
+    if not all_rows or #all_rows < row_stride * abs_h then
+        return nil, "Incomplete BMP pixel data"
+    end
+
+    local pixels = ffi.new("PixelRGB[?]", w * abs_h)
+    local raw_ptr = ffi.cast("const uint8_t*", all_rows)
+
+    for y = 0, abs_h - 1 do
+        local src_y = top_down and y or (abs_h - 1 - y)
+        local row_offset = src_y * row_stride
+        local dst_row_offset = y * w
+
+        if bpp == 24 then
+            for x = 0, w - 1 do
+                local p = row_offset + x * 3
+                local d = dst_row_offset + x
+                pixels[d].b = raw_ptr[p]
+                pixels[d].g = raw_ptr[p + 1]
+                pixels[d].r = raw_ptr[p + 2]
+            end
+        elseif bpp == 32 then
+            for x = 0, w - 1 do
+                local p = row_offset + x * 4
+                local d = dst_row_offset + x
+                pixels[d].b = raw_ptr[p]
+                pixels[d].g = raw_ptr[p + 1]
+                pixels[d].r = raw_ptr[p + 2]
+            end
+        elseif bpp == 8 and palette then
+            for x = 0, w - 1 do
+                local idx = raw_ptr[row_offset + x]
+                local d = dst_row_offset + x
+                local entry = palette[idx] or { r = 0, g = 0, b = 0 }
+                pixels[d].r = entry.r
+                pixels[d].g = entry.g
+                pixels[d].b = entry.b
+            end
+        end
+    end
+
+    return { width = w, height = abs_h, pixels = pixels, engine = "FFI (Native BMP)" }
+end
+
+-- 2. FFI PNG Decoder via libpng Simplified API
+local libpng_instance = nil
+local libpng_attempted = false
+
+local function get_libpng()
+    if libpng_attempted then return libpng_instance end
+    libpng_attempted = true
+
+    pcall(ffi.cdef, [[
+        typedef struct png_color { uint8_t red, green, blue; } png_color;
+        typedef struct png_image {
+            void*        opaque;
+            uint32_t     version;
+            uint32_t     width;
+            uint32_t     height;
+            uint32_t     format;
+            uint32_t     flags;
+            uint32_t     colormap_entries;
+            uint32_t     warning_or_error;
+            char         message[64];
+        } png_image, *png_imagep;
+
+        int png_image_begin_read_from_file(png_imagep image, const char *file_name);
+        int png_image_finish_read(png_imagep image, const png_color *background, void *buffer, int32_t row_stride, void *colormap);
+        void png_image_free(png_imagep image);
+    ]])
+
+    libpng_instance = load_first_lib({
+        "png", "libpng16", "libpng16.so.16", "libpng16.so", "libpng.so",
+        "libpng16.dylib", "libpng.dylib", "libpng16.dll", "png.dll"
+    })
+    return libpng_instance
+end
+
+local function decode_png_ffi(filepath)
+    local png = get_libpng()
+    if not png then return nil, "libpng not found" end
+
+    local ok, res = pcall(function()
+        local img = ffi.new("png_image")
+        img.version = 1 -- PNG_IMAGE_VERSION
+        if png.png_image_begin_read_from_file(img, filepath) == 0 then
+            local msg = ffi.string(img.message)
+            png.png_image_free(img)
+            return nil, msg
+        end
+
+        local PNG_FORMAT_RGB = 2
+        img.format = PNG_FORMAT_RGB
+        local w = tonumber(img.width)
+        local h = tonumber(img.height)
+        local pixels = ffi.new("PixelRGB[?]", w * h)
+
+        local finish_ret = png.png_image_finish_read(img, nil, pixels, 0, nil)
+        png.png_image_free(img)
+
+        if finish_ret == 0 then
+            return nil, "Failed to read PNG scanlines"
+        end
+
+        return { width = w, height = h, pixels = pixels, engine = "FFI (libpng)" }
+    end)
+
+    if ok and res then return res end
+    return nil, tostring(res or "PNG decoding error")
+end
+
+-- 3. FFI JPEG Decoder via libturbojpeg / libjpeg
+local libturbojpeg_instance = nil
+local libturbojpeg_attempted = false
+
+local function get_libturbojpeg()
+    if libturbojpeg_attempted then return libturbojpeg_instance end
+    libturbojpeg_attempted = true
+
+    pcall(ffi.cdef, [[
+        void* tjInitDecompress(void);
+        int tjDecompressHeader3(void* handle, const unsigned char* jpegBuf, unsigned long jpegSize, int* width, int* height, int* jpegSubsamp, int* jpegColorspace);
+        int tjDecompress2(void* handle, const unsigned char* jpegBuf, unsigned long jpegSize, unsigned char* dstBuf, int width, int pitch, int height, int pixelFormat, int flags);
+        int tjDestroy(void* handle);
+    ]])
+
+    libturbojpeg_instance = load_first_lib({
+        "turbojpeg", "libturbojpeg.so.0", "libturbojpeg.so", "turbojpeg.dylib", "turbojpeg.dll"
+    })
+    return libturbojpeg_instance
+end
+
+local function decode_jpeg_ffi(filepath)
+    local tj = get_libturbojpeg()
+    if not tj then return nil, "libturbojpeg not found" end
+
+    local ok, res = pcall(function()
+        local f = io.open(filepath, "rb")
+        if not f then return nil, "Cannot open JPEG file" end
+        local data = f:read("*a")
+        f:close()
+
+        if not data or #data < 4 then return nil, "Corrupt JPEG data" end
+
+        local handle = tj.tjInitDecompress()
+        if handle == nil then return nil, "Failed to initialize TurboJPEG decompressor" end
+
+        local w = ffi.new("int[1]")
+        local h = ffi.new("int[1]")
+        local subsamp = ffi.new("int[1]")
+        local cs = ffi.new("int[1]")
+
+        local ret_hdr = tj.tjDecompressHeader3(handle, data, #data, w, h, subsamp, cs)
+        if ret_hdr ~= 0 then
+            tj.tjDestroy(handle)
+            return nil, "Invalid JPEG header"
+        end
+
+        local width = w[0]
+        local height = h[0]
+        local TJPF_RGB = 0
+        local pixels = ffi.new("PixelRGB[?]", width * height)
+
+        local ret_dec = tj.tjDecompress2(handle, data, #data, ffi.cast("unsigned char*", pixels), width, 0, height, TJPF_RGB, 0)
+        tj.tjDestroy(handle)
+
+        if ret_dec ~= 0 then
+            return nil, "Failed to decompress JPEG image"
+        end
+
+        return { width = width, height = height, pixels = pixels, engine = "FFI (TurboJPEG)" }
+    end)
+
+    if ok and res then return res end
+    return nil, tostring(res or "JPEG decoding error")
+end
+
+-- 4. FFI WebP Decoder via libwebp
+local libwebp_instance = nil
+local libwebp_attempted = false
+
+local function get_libwebp()
+    if libwebp_attempted then return libwebp_instance end
+    libwebp_attempted = true
+
+    pcall(ffi.cdef, [[
+        uint8_t* WebPDecodeRGB(const uint8_t* data, size_t data_size, int* width, int* height);
+        void WebPFree(void* ptr);
+    ]])
+
+    libwebp_instance = load_first_lib({
+        "webp", "libwebp.so.7", "libwebp.so", "libwebp.dylib", "libwebp.dll"
+    })
+    return libwebp_instance
+end
+
+local function decode_webp_ffi(filepath)
+    local webp = get_libwebp()
+    if not webp then return nil, "libwebp not found" end
+
+    local ok, res = pcall(function()
+        local f = io.open(filepath, "rb")
+        if not f then return nil, "Cannot open WebP file" end
+        local data = f:read("*a")
+        f:close()
+
+        if not data or #data < 12 then return nil, "Corrupt WebP data" end
+
+        local w = ffi.new("int[1]")
+        local h = ffi.new("int[1]")
+        local raw_rgb = webp.WebPDecodeRGB(data, #data, w, h)
+        if raw_rgb == nil then
+            return nil, "Failed to decode WebP image"
+        end
+
+        local width = w[0]
+        local height = h[0]
+        local pixels = ffi.new("PixelRGB[?]", width * height)
+        ffi.copy(pixels, raw_rgb, width * height * 3)
+        webp.WebPFree(raw_rgb)
+
+        return { width = width, height = height, pixels = pixels, engine = "FFI (libwebp)" }
+    end)
+
+    if ok and res then return res end
+    return nil, tostring(res or "WebP decoding error")
 end
 
 local function load_image(filepath)
@@ -651,16 +960,42 @@ local function load_image(filepath)
     if not test_f then
         return nil, "Cannot open file: " .. filepath
     end
-    local header = test_f:read(2)
+    local header = test_f:read(16) or ""
     test_f:close()
 
-    if header == "P6" or header == "P3" then
+    -- 1. Built-in PPM decoder
+    if header:sub(1, 2) == "P6" or header:sub(1, 2) == "P3" then
         local f = io.open(filepath, "rb")
         local img, err = parse_ppm_stream(f)
         f:close()
-        return img, err
+        if img then return img end
     end
 
+    -- 2. Pure LuaJIT FFI Windows Bitmap (BMP)
+    if header:sub(1, 2) == "BM" then
+        local img, _ = decode_bmp_ffi(filepath)
+        if img then return img end
+    end
+
+    -- 3. FFI PNG decoder
+    if header:sub(1, 8) == "\137PNG\r\n\26\n" then
+        local img, _ = decode_png_ffi(filepath)
+        if img then return img end
+    end
+
+    -- 4. FFI JPEG decoder
+    if header:sub(1, 2) == "\255\216" then
+        local img, _ = decode_jpeg_ffi(filepath)
+        if img then return img end
+    end
+
+    -- 5. FFI WebP decoder
+    if header:sub(1, 4) == "RIFF" and header:sub(9, 12) == "WEBP" then
+        local img, _ = decode_webp_ffi(filepath)
+        if img then return img end
+    end
+
+    -- 6. Secondary fallback: CLI tools (ImageMagick / ffmpeg) if available
     local devnull = is_windows and "nul" or "/dev/null"
     local cmd
     if is_windows then
@@ -672,18 +1007,21 @@ local function load_image(filepath)
     if pipe then
         local img = parse_ppm_stream(pipe)
         pipe:close()
-        if img then return img end
+        if img then
+            img.engine = "CLI (magick/convert/ffmpeg)"
+            return img
+        end
     end
 
-    return nil, "Failed to decode image. Ensure ImageMagick ('magick'/'convert') or 'ffmpeg' is installed."
+    return nil, "Failed to decode image. Ensure image is valid (PNG, JPG, BMP, WEBP, PPM) and FFI libraries (libpng, libturbojpeg, libwebp) or ImageMagick/ffmpeg are available."
 end
 
 -- =========================================================================
 -- 5. Kitty Graphics Protocol & Fallback Truecolor Renderer
 -- =========================================================================
 local b64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-local function base64_encode(data)
-    local len = #data
+local function base64_encode(data, len)
+    len = len or #data
     local t = {}
     local n = 0
     for i = 1, len, 3 do
@@ -763,9 +1101,10 @@ end
 
 -- Render image using Kitty Graphics Protocol
 local function render_image_kitty(img_entry, current_idx, total_count, term_w, term_h)
-    -- Check if image format is direct PNG, otherwise convert to PNG via ImageMagick/ffmpeg
     local ext = img_entry.extension:lower()
     local png_data = nil
+    local raw_rgb_data = nil
+    local rgb_w, rgb_h = 0, 0
 
     if ext == "png" then
         local f = io.open(img_entry.filepath, "rb")
@@ -775,7 +1114,18 @@ local function render_image_kitty(img_entry, current_idx, total_count, term_w, t
         end
     end
 
+    -- If not direct PNG, first try decoding with in-process FFI decoders for raw RGB transmission
     if not png_data then
+        local ffi_img = load_image(img_entry.filepath)
+        if ffi_img and ffi_img.pixels then
+            raw_rgb_data = ffi.string(ffi_img.pixels, ffi_img.width * ffi_img.height * 3)
+            rgb_w = ffi_img.width
+            rgb_h = ffi_img.height
+        end
+    end
+
+    -- Fallback to ImageMagick / ffmpeg conversion if FFI raw decode didn't succeed
+    if not png_data and not raw_rgb_data then
         local devnull = is_windows and "nul" or "/dev/null"
         local cmd
         if is_windows then
@@ -790,11 +1140,18 @@ local function render_image_kitty(img_entry, current_idx, total_count, term_w, t
         end
     end
 
-    if not png_data or #png_data == 0 then
-        return false, "Could not convert image to PNG for Kitty protocol"
+    if (not png_data or #png_data == 0) and not raw_rgb_data then
+        return false, "Could not decode or convert image for Kitty protocol"
     end
 
-    local b64 = base64_encode(png_data)
+    local b64
+    local is_direct_png = (png_data and #png_data > 0)
+    if is_direct_png then
+        b64 = base64_encode(png_data)
+    else
+        b64 = base64_encode(raw_rgb_data)
+    end
+
     local reserved_header_rows = 7
     local max_rows = math.max(6, term_h - reserved_header_rows - 1)
     local max_cols = math.max(10, term_w - 4)
@@ -823,8 +1180,13 @@ local function render_image_kitty(img_entry, current_idx, total_count, term_w, t
         local has_more = (pos <= total_len) and 1 or 0
 
         if pos - chunk_size == 1 then
-            -- First chunk: specify f=100 (PNG), a=T (transmit & display), c=cols, r=rows
-            write_raw_terminal_seq(string.format("\27_Gf=100,a=T,c=%d,r=%d,m=%d;%s\27\\", max_cols, max_rows, has_more, chunk))
+            if is_direct_png then
+                -- PNG transmission (f=100)
+                write_raw_terminal_seq(string.format("\27_Gf=100,a=T,c=%d,r=%d,m=%d;%s\27\\", max_cols, max_rows, has_more, chunk))
+            else
+                -- Raw 24-bit RGB transmission (f=24)
+                write_raw_terminal_seq(string.format("\27_Gf=24,s=%d,v=%d,a=T,c=%d,r=%d,m=%d;%s\27\\", rgb_w, rgb_h, max_cols, max_rows, has_more, chunk))
+            end
         else
             write_raw_terminal_seq(string.format("\27_Gm=%d;%s\27\\", has_more, chunk))
         end
@@ -850,8 +1212,9 @@ local function render_image_halfblock(img_entry, current_idx, total_count, term_
     table.insert(out, "\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
     table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m \27[90m(ANSI Truecolor Half-Block)\27[0m\n",
         current_idx, total_count, img_entry.filename))
-    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d pixels | Path: %s\27[0m\n",
-        img_entry.size_str, img.width, img.height, img_entry.filepath))
+    local engine_info = img.engine and (" | Engine: " .. img.engine) or ""
+    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d pixels%s | Path: %s\27[0m\n",
+        img_entry.size_str, img.width, img.height, engine_info, img_entry.filepath))
     table.insert(out, string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;92m[Enter/B]\27[0m Back to File List   \27[91m[Q]\27[0m Quit\n"))
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n\n")
 
@@ -1065,7 +1428,7 @@ local function render_file_list(dir_path, images, total_unfiltered, selected_idx
             table.insert(out, string.format("  \27[1;33mNo image files match query '%s'\27[0m\n", search_query))
             table.insert(out, "  Press [Esc] to clear search filter.\n\n")
         else
-            table.insert(out, string.format("  \27[1;31mNo supported image files found in %s\27[0m\n", dir_path))
+            table.insert(out, string.format("  \27[1;31mNo supported images found in %s\27[0m\n", dir_path))
             table.insert(out, "  Supported formats: PNG, JPG/JPEG, PPM, WEBP, GIF, BMP\n\n")
         end
         io.write(table.concat(out))
@@ -1248,11 +1611,47 @@ local function main()
     end
     local sort_desc = (sort_mode == "date" or sort_mode == "size")
 
-    -- 2. Scan Directory for Images & Folders
-    local raw_images, err = scan_directory_images(target_dir, recursive)
+    -- 2. Scan Directory for Images & Folders (or support direct single image file)
+    local raw_images = nil
+    local direct_file = io.open(target_dir, "rb")
+    if direct_file then
+        local file_len = direct_file:seek("end") or 0
+        direct_file:close()
+        local fname = target_dir:match("([^/\\]+)$") or target_dir
+        local ext = fname:match("%.([^.]+)$")
+        if ext and SUPPORTED_EXTENSIONS[ext:lower()] then
+            local is_a_dir = false
+            if not is_windows and posix_stat then
+                local st = ffi.new("struct stat")
+                if posix_stat(target_dir, st) == 0 then
+                    is_a_dir = (bit.band(tonumber(st.st_mode), 0xF000) == 0x4000)
+                end
+            end
+            if not is_a_dir then
+                raw_images = {
+                    {
+                        filename = fname,
+                        filepath = target_dir,
+                        is_dir = false,
+                        extension = ext:upper(),
+                        size = file_len,
+                        size_str = format_file_size(file_len),
+                        mtime = 0,
+                        date_str = "-",
+                    }
+                }
+                cli_select = cli_select or 1
+            end
+        end
+    end
+
     if not raw_images then
-        io.stderr:write(string.format("\27[1;31mError: %s\27[0m\n", tostring(err)))
-        os.exit(1)
+        local err
+        raw_images, err = scan_directory_images(target_dir, recursive)
+        if not raw_images then
+            io.stderr:write(string.format("\27[1;31mError: %s\27[0m\n", tostring(err)))
+            os.exit(1)
+        end
     end
 
     if #raw_images == 0 and non_interactive then
@@ -1262,10 +1661,29 @@ local function main()
 
     sort_images(raw_images, sort_mode, sort_desc)
 
+    -- Extract images list excluding directories for direct selection and validation
+    local only_images = {}
+    for _, item in ipairs(raw_images) do
+        if not item.is_dir then
+            table.insert(only_images, item)
+        end
+    end
+
     -- 3. If direct CLI selection is specified
-    if cli_select and cli_select >= 1 and cli_select <= #raw_images then
-        render_image_screen(raw_images[cli_select], cli_select, #raw_images, force_protocol)
-        return
+    if cli_select then
+        if #only_images > 0 and cli_select >= 1 and cli_select <= #only_images then
+            render_image_screen(only_images[cli_select], cli_select, #only_images, force_protocol)
+            return
+        elseif cli_select >= 1 and cli_select <= #raw_images then
+            render_image_screen(raw_images[cli_select], cli_select, #raw_images, force_protocol)
+            return
+        end
+    end
+
+    -- If no image files found at all, print message and exit cleanly
+    if #only_images == 0 then
+        render_file_list(target_dir, {}, 0, 1, 1, nil, false, "", sort_mode, sort_desc, recursive, icon_mode)
+        os.exit(0)
     end
 
     -- 4. Non-interactive fallback (e.g., pipes or redirect)
