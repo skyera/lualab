@@ -1302,7 +1302,360 @@ local function load_image(filepath)
 end
 
 -- =========================================================================
--- 5. Kitty Graphics Protocol & Fallback Truecolor Renderer
+-- 5. timg-style UnicodeBlockCanvas — Native LuaJIT Port
+--    Implements timg's half-block and quarter-block rendering algorithms:
+--      * framebuffer.h  → LinearColor (γ≈x²/sqrt), avd()
+--      * unicode-block-canvas.cc → FindBestGlyph<1> (half), FindBestGlyph<2> (quarter)
+--      * image-source.cc → CalcScaleToFitDisplay
+--    Area-averaging (box filter) downscale in linear space = libswscale equivalent.
+-- =========================================================================
+
+-- ---------------------------------------------------------------------------
+-- 5a.  Linear-light colour helpers  (timg: LinearColor in framebuffer.h)
+--      Approximates γ=2.2 with γ=2  (v² linearize, sqrt de-gamma).
+-- ---------------------------------------------------------------------------
+local function lin(v)   return v * v   end          -- uint8 → linear float
+local function degamma(l)
+    local g = math.sqrt(l)
+    return (g > 255) and 255 or math.max(0, math.floor(g + 0.5))
+end
+-- Squared Euclidean distance in linear space  (LinearColor::dist)
+local function lin_dist2(a, b)
+    local dr = a[1]-b[1]; local dg = a[2]-b[2]; local db = a[3]-b[3]
+    return dr*dr + dg*dg + db*db
+end
+-- Average N linear-colour triples; return avg triple + sum-of-distances  (avd())
+local function lin_avd(colours)
+    local n = #colours
+    local r, g, b = 0, 0, 0
+    for i = 1, n do r=r+colours[i][1]; g=g+colours[i][2]; b=b+colours[i][3] end
+    local avg = { r/n, g/n, b/n }
+    local d = 0
+    for i = 1, n do d = d + lin_dist2(avg, colours[i]) end
+    return avg, d
+end
+-- Convert a linear-float triple back to an {r,g,b} uint8 table  (repack())
+local function repack(lc)
+    return { r=degamma(lc[1]), g=degamma(lc[2]), b=degamma(lc[3]) }
+end
+-- Linearise a PixelRGB cdata pixel to a triple  [r², g², b²]
+local function px_to_lin(p)
+    return { lin(p.r), lin(p.g), lin(p.b) }
+end
+
+-- ---------------------------------------------------------------------------
+-- 5b.  Area-averaging (box-filter) downscale in linear space
+--      timg uses libswscale with SWS_AREA / SWS_BILINEAR. We implement a
+--      pixel-exact box-filter: for each output pixel, average all source
+--      pixels whose projection overlaps the output pixel area.
+-- ---------------------------------------------------------------------------
+local function area_average_scale(img, out_w, out_h)
+    local iw, ih = img.width, img.height
+    local px     = img.pixels
+    local xs = iw / out_w       -- x scale factor (src pixels per output pixel)
+    local ys = ih / out_h       -- y scale factor
+
+    -- Pre-linearise the whole source image into a flat array (avoids repeat sqrt)
+    local lin_src = {}
+    for i = 0, iw*ih - 1 do
+        local p = px[i]
+        lin_src[i] = { lin(p.r), lin(p.g), lin(p.b) }
+    end
+
+    local out = {}
+    for oy = 0, out_h - 1 do
+        local y0 = oy * ys;         local y1 = y0 + ys
+        local iy0 = math.floor(y0); local iy1 = math.min(ih-1, math.ceil(y1)-1)
+        for ox = 0, out_w - 1 do
+            local x0 = ox * xs;         local x1 = x0 + xs
+            local ix0 = math.floor(x0); local ix1 = math.min(iw-1, math.ceil(x1)-1)
+            -- Accumulate linear values weighted by overlap area
+            local wr, wg, wb, wa = 0, 0, 0, 0
+            for sy = iy0, iy1 do
+                -- Vertical overlap fraction
+                local fy0 = math.max(y0, sy);   local fy1 = math.min(y1, sy+1)
+                local yw = fy1 - fy0
+                for sx = ix0, ix1 do
+                    local fx0 = math.max(x0, sx); local fx1 = math.min(x1, sx+1)
+                    local w = yw * (fx1 - fx0)
+                    local lp = lin_src[sy*iw + sx]
+                    wr = wr + lp[1]*w; wg = wg + lp[2]*w; wb = wb + lp[3]*w
+                    wa = wa + w
+                end
+            end
+            if wa < 1e-9 then wa = 1 end
+            out[oy * out_w + ox] = { wr/wa, wg/wa, wb/wa }
+        end
+    end
+    return out  -- linear-float triples, indexed [oy*out_w + ox]  (0-based)
+end
+
+-- ---------------------------------------------------------------------------
+-- 5c.  CalcScaleToFitDisplay  (timg: ImageSource::CalcScaleToFitDisplay)
+--      Returns out_w, out_h in PIXELS (not character-cells).
+--      For half-block:    cell_x=1, cell_y=2   → 1 pixel/col, 2 pixels/row
+--      For quarter-block: cell_x=2, cell_y=2   → 2 pixels/col, 2 pixels/row
+-- ---------------------------------------------------------------------------
+local function calc_scale_to_fit(img_w, img_h, term_cols, term_rows, cell_x, cell_y)
+    cell_x = cell_x or 1;  cell_y = cell_y or 2
+    local disp_w = term_cols * cell_x   -- pixel-width of display canvas
+    local disp_h = term_rows * cell_y   -- pixel-height of display canvas
+    -- fit-in-both: use the more restrictive scale (timg default = no upscale)
+    local scale = math.min(disp_w / img_w, disp_h / img_h)
+    if scale > 1.0 then scale = 1.0 end
+    -- Align to cell boundaries (floor to nearest cell multiple)
+    local out_w = math.max(cell_x, math.floor(img_w * scale / cell_x) * cell_x)
+    local out_h = math.max(cell_y, math.floor(img_h * scale / cell_y) * cell_y)
+    return out_w, out_h
+end
+
+-- ---------------------------------------------------------------------------
+-- 5d.  Unicode block glyph table  (timg: kBlockGlyphs[], BlockChoice enum)
+--
+--      Half-block (N=1): one pixel wide, two pixels tall per cell.
+--        FG = bottom pixel colour  (foreground = ▄ lower half)
+--        BG = top    pixel colour  (background = upper half)
+--        Glyph: ▄ U+2584 (default)  or  ▀ U+2580 (TIMG_USE_UPPER_BLOCK)
+--
+--      Quarter-block (N=2): two pixels wide, two pixels tall per cell.
+--        16 possible glyphs.  Each glyph is described by a 4-bit FG mask:
+--          bit0=TL  bit1=TR  bit2=BL  bit3=BR   (1 = filled by FG colour)
+-- ---------------------------------------------------------------------------
+local GLYPH_LOWER = "\xE2\x96\x84"   -- ▄  U+2584  lower half block   (timg default)
+local GLYPH_UPPER = "\xE2\x96\x80"   -- ▀  U+2580  upper half block
+
+-- Quarter glyphs: { utf8_string, fg_mask }
+-- (matches timg's BlockChoice enum + kBlockGlyphs array exactly)
+local QUARTER_GLYPHS = {
+    -- fg_mask  glyph  codepoint  name
+    { "\xE2\x96\x88", 0xF },  -- █ U+2588  full block     (all FG)
+    { "\xE2\x96\x84", 0xC },  -- ▄ U+2584  bottom half    (BL+BR)
+    { "\xE2\x96\x80", 0x3 },  -- ▀ U+2580  top half       (TL+TR)
+    { "\xE2\x96\x8C", 0x5 },  -- ▌ U+258C  left half      (TL+BL)
+    { "\xE2\x96\x90", 0xA },  -- ▐ U+2590  right half     (TR+BR)
+    { "\xE2\x96\x9A", 0x6 },  -- ▚ U+259A  TL+BR diagonal
+    { "\xE2\x96\x9E", 0x9 },  -- ▞ U+259E  TR+BL diagonal
+    { "\xE2\x96\x98", 0x1 },  -- ▘ U+2598  TL only
+    { "\xE2\x96\x9D", 0x2 },  -- ▝ U+259D  TR only
+    { "\xE2\x96\x96", 0x4 },  -- ▖ U+2596  BL only
+    { "\xE2\x96\x97", 0x8 },  -- ▗ U+2597  BR only
+    { "\xE2\x96\x9B", 0x7 },  -- ▛ U+259B  TL+TR+BL
+    { "\xE2\x96\x9C", 0xB },  -- ▜ U+259C  TL+TR+BR
+    { "\xE2\x96\x99", 0xD },  -- ▙ U+2599  TL+BL+BR
+    { "\xE2\x96\x9F", 0xE },  -- ▟ U+259F  TR+BL+BR
+    { " ",            0x0 },  -- space     all BG          (kBackground)
+}
+
+-- ---------------------------------------------------------------------------
+-- 5e.  FindBestGlyph<1>  — half-block  (timg: FindBestGlyph<1>)
+--      top_lin, bot_lin: linear-float triples.
+--      Returns: fg_lin, bg_lin, glyph_string  (nil glyph = emit space)
+-- ---------------------------------------------------------------------------
+local function find_best_glyph_half(top_lin, bot_lin)
+    -- If top == bottom (same colour): emit space — only BG colour needed.
+    -- timg: if (*top == *bottom) return {*top, *bottom, kBackground}
+    if lin_dist2(top_lin, bot_lin) < 4 then   -- small epsilon for float noise
+        return bot_lin, bot_lin, nil           -- nil → space
+    end
+    -- Default: ▄  FG=bottom  BG=top  (timg: return {*bottom, *top, kLowerBlock})
+    return bot_lin, top_lin, GLYPH_LOWER
+end
+
+-- ---------------------------------------------------------------------------
+-- 5f.  FindBestGlyph<2>  — quarter-block  (timg: FindBestGlyph<2>)
+--      Tries every glyph, picks the one that minimises the total sum of
+--      squared perceptual distances from each quadrant pixel to its
+--      assigned fg/bg average colour.  (timg: avd() minimisation loop)
+--      tl, tr, bl, br: linear-float triples for the four quadrant pixels.
+-- ---------------------------------------------------------------------------
+local bit_at = { 0x1, 0x2, 0x4, 0x8 }   -- bit mask for TL, TR, BL, BR
+
+local function find_best_glyph_quarter(tl, tr, bl, br)
+    local quads = { tl, tr, bl, br }   -- TL=1, TR=2, BL=3, BR=4
+    local best_dist  = math.huge
+    local best_fg, best_bg, best_glyph = tl, br, GLYPH_LOWER
+
+    for _, entry in ipairs(QUARTER_GLYPHS) do
+        local glyph, fg_mask = entry[1], entry[2]
+        -- Partition the four quadrant pixels into fg-set and bg-set
+        local fg_set, bg_set = {}, {}
+        for q = 1, 4 do
+            if bit.band(fg_mask, bit_at[q]) ~= 0 then
+                fg_set[#fg_set+1] = quads[q]
+            else
+                bg_set[#bg_set+1] = quads[q]
+            end
+        end
+        -- Degenerate: all pixels on same side → copy to the other side
+        if #fg_set == 0 then fg_set = bg_set end
+        if #bg_set == 0 then bg_set = fg_set end
+
+        local fg_avg, d_fg = lin_avd(fg_set)
+        local bg_avg, d_bg = lin_avd(bg_set)
+        local total = d_fg + d_bg
+
+        if total < best_dist then
+            best_dist  = total
+            best_fg    = fg_avg
+            best_bg    = bg_avg
+            best_glyph = glyph
+            if total < 1 then break end   -- essentially zero → stop early
+        end
+    end
+    return best_fg, best_bg, best_glyph
+end
+
+-- ---------------------------------------------------------------------------
+-- 5g.  render_image_unicode_block  — unified timg-style renderer
+--      use_quarter=false → half-block  (timg -p h)
+--      use_quarter=true  → quarter-block (timg -p q)
+-- ---------------------------------------------------------------------------
+local function render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, use_quarter)
+    local img, err = load_image(img_entry.filepath)
+    if not img then return false, err end
+
+    use_quarter = use_quarter or false
+    local cell_x = use_quarter and 2 or 1   -- pixels per character column
+    local cell_y = 2                         -- pixels per character row (always 2)
+
+    -- Reserve rows for header banner (5 lines)
+    local header_rows = 5
+    local max_char_h = math.max(4, term_h - header_rows)
+    local max_char_w = math.max(4, term_w - 2)
+
+    -- CalcScaleToFitDisplay → pixel canvas dimensions
+    local out_w, out_h = calc_scale_to_fit(
+        img.width, img.height, max_char_w, max_char_h, cell_x, cell_y)
+
+    -- Area-average downscale to out_w × out_h pixel canvas (linear space)
+    local scaled = area_average_scale(img, out_w, out_h)
+
+    -- Character-cell dimensions
+    local char_w = out_w / cell_x
+    local char_h = out_h / cell_y
+
+    -- 2D centring
+    local pad_left = math.max(0, math.floor((term_w - char_w) / 2))
+    local pad_top  = math.max(0, math.floor((max_char_h - char_h) / 2))
+    local pad      = string.rep(" ", pad_left)
+
+    -- Build output buffer
+    local out  = {}
+    local blen = math.max(20, term_w - 4)
+    table.insert(out, "\27[H\27[2J")
+    table.insert(out, "\27[1;36m" .. string.rep("═", blen) .. "\27[0m\n")
+    table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
+        current_idx, total_count, img_entry.filename))
+    local dpath = img_entry.filepath
+    if #dpath > math.max(20, term_w - 35) then dpath = "..." .. dpath:sub(#dpath-(term_w-38)) end
+    local eng = use_quarter
+        and "\27[1;93mtimg Quarter-Block ▛▜▙▟ (Native LuaJIT)\27[90m"
+        or  "\27[1;92mtimg Half-Block ▄ (Native LuaJIT)\27[90m"
+    table.insert(out, string.format(
+        "  \27[90mSize: %s | Original: %dx%d | Engine: %s | Path: %s\27[0m\n",
+        img_entry.size_str, img.width, img.height, eng, dpath))
+    table.insert(out, string.format(
+        "  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next" ..
+        "  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"))
+    table.insert(out, "\27[90m" .. string.rep("─", blen) .. "\27[0m\n")
+
+    if pad_top > 0 then table.insert(out, string.rep("\n", pad_top)) end
+
+    -- -----------------------------------------------------------------------
+    -- Main rendering loop  (timg: AppendDoubleRow)
+    -- Process two pixel rows at once → one character row.
+    -- Track last fg/bg colour to avoid redundant escape sequences.
+    -- (timg: last_foreground, last_bg_unknown tracking in AppendDoubleRow)
+    -- -----------------------------------------------------------------------
+    local last_fg = nil    -- last emitted fg colour {r,g,b} or nil
+    local last_bg = nil    -- last emitted bg colour {r,g,b} or nil
+
+    for cy = 0, char_h - 1 do
+        local py_top = cy * cell_y          -- top pixel row index in scaled
+        local py_bot = py_top + 1           -- bottom pixel row index
+
+        local line = { pad }
+
+        if use_quarter then
+            -- ---------------------------------------------------------------
+            -- Quarter-block mode: 2×2 pixels → 1 character cell
+            -- (timg: AppendDoubleRow<N=2, colorbits=24>)
+            -- ---------------------------------------------------------------
+            for cx = 0, char_w - 1 do
+                local px_l = cx * cell_x          -- left pixel column
+                local px_r = px_l + 1             -- right pixel column
+
+                local tl = scaled[py_top*out_w + px_l] or {0,0,0}
+                local tr = scaled[py_top*out_w + px_r] or {0,0,0}
+                local bl = scaled[py_bot*out_w + px_l] or {0,0,0}
+                local br = scaled[py_bot*out_w + px_r] or {0,0,0}
+
+                local fg_lin, bg_lin, glyph = find_best_glyph_quarter(tl, tr, bl, br)
+                local fg = repack(fg_lin)
+                local bg = repack(bg_lin)
+
+                -- FG: emit only if changed (timg: last_fg_unknown || pick.fg != last_foreground)
+                if glyph ~= " " then
+                    if not last_fg or last_fg.r~=fg.r or last_fg.g~=fg.g or last_fg.b~=fg.b then
+                        table.insert(line, string.format("\27[38;2;%d;%d;%dm", fg.r, fg.g, fg.b))
+                        last_fg = fg
+                    end
+                end
+                -- BG: emit only if changed
+                if not last_bg or last_bg.r~=bg.r or last_bg.g~=bg.g or last_bg.b~=bg.b then
+                    table.insert(line, string.format("\27[48;2;%d;%d;%dm", bg.r, bg.g, bg.b))
+                    last_bg = bg
+                end
+                table.insert(line, glyph)
+            end
+        else
+            -- ---------------------------------------------------------------
+            -- Half-block mode  (timg: AppendDoubleRow<N=1, colorbits=24>)
+            -- FG = bottom pixel (▄ lower half), BG = top pixel (upper half).
+            -- ---------------------------------------------------------------
+            for cx = 0, char_w - 1 do
+                local top_lin = scaled[py_top*out_w + cx] or {0,0,0}
+                local bot_lin = scaled[py_bot*out_w + cx] or {0,0,0}
+
+                local fg_lin, bg_lin, glyph = find_best_glyph_half(top_lin, bot_lin)
+                local fg = repack(fg_lin)
+                local bg = repack(bg_lin)
+
+                -- BG always emitted first (timg: background check before foreground)
+                if not last_bg or last_bg.r~=bg.r or last_bg.g~=bg.g or last_bg.b~=bg.b then
+                    table.insert(line, string.format("\27[48;2;%d;%d;%dm", bg.r, bg.g, bg.b))
+                    last_bg = bg
+                end
+                if glyph then
+                    -- Actual glyph (▄): emit FG only if changed
+                    if not last_fg or last_fg.r~=fg.r or last_fg.g~=fg.g or last_fg.b~=fg.b then
+                        table.insert(line, string.format("\27[38;2;%d;%d;%dm", fg.r, fg.g, fg.b))
+                        last_fg = fg
+                    end
+                    table.insert(line, GLYPH_LOWER)
+                else
+                    -- Same-colour optimisation (timg: kBackground → emit ' ')
+                    -- Both halves the same colour → just background + space.
+                    table.insert(line, " ")
+                    last_fg = nil    -- fg state unknown after kBackground
+                end
+            end
+        end
+
+        -- End of line: reset all attributes  (timg: SCREEN_END_OF_LINE = "\033[0m\n")
+        table.insert(line, "\27[0m\n")
+        last_fg, last_bg = nil, nil    -- reset colour state each row (timg also resets)
+
+        table.insert(out, table.concat(line))
+    end
+
+    io.write(table.concat(out))
+    io.flush()
+    return true
+end
+
+-- =========================================================================
+-- 6. Kitty Graphics Protocol & Fallback Truecolor Renderer
 -- =========================================================================
 local b64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 local function base64_encode(data, len)
@@ -1675,20 +2028,27 @@ local function render_image_iterm2(img_entry, current_idx, total_count, term_w, 
     return true
 end
 
--- Unified image renderer: Dispatches to specified protocol, defaults to Half-Block
+-- Unified image renderer: Dispatches to the selected protocol.
+-- Supported protocols: "halfblock" | "quarter" | "kitty" | "iterm"
 local function render_image_screen(img_entry, current_idx, total_count, protocol)
     local term_w, term_h = get_terminal_size()
     protocol = protocol or "halfblock"
 
     if protocol == "kitty" then
-        local ok, err = render_image_kitty(img_entry, current_idx, total_count, term_w, term_h)
+        local ok = render_image_kitty(img_entry, current_idx, total_count, term_w, term_h)
         if ok then return true end
     elseif protocol == "iterm" then
-        local ok, err = render_image_iterm2(img_entry, current_idx, total_count, term_w, term_h)
+        local ok = render_image_iterm2(img_entry, current_idx, total_count, term_w, term_h)
         if ok then return true end
+    elseif protocol == "quarter" then
+        -- timg -p q  (quarter-block, 2×2 pixels per cell, linear-space avd minimisation)
+        local ok, err = render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, true)
+        if ok then return true end
+        -- fallthrough to halfblock on error
     end
 
-    return render_image_halfblock(img_entry, current_idx, total_count, term_w, term_h)
+    -- Default / fallback: timg -p h  (half-block, linear-space area-average)
+    return render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, false)
 end
 
 -- =========================================================================
@@ -1713,7 +2073,7 @@ local function render_help_modal(term_w, term_h)
         "│  Viewer Controls:                                           │",
         "│    ← / p, → / n        Browse previous / next image         │",
         "│    PgUp / PgDn         Browse previous / next image         │",
-        "│    t                   Cycle engine (HalfBlock/Kitty/iTerm) │",
+        "│    t                   Cycle engine (Half/Quarter/Kitty/iTerm)│",
         "│    Enter / b / Backsp  Return to file/folder list           │",
         "│                                                             │",
         "│  Search & Sorting:                                          │",
@@ -1934,7 +2294,8 @@ local function main()
         print("  --no-icons            Disable file icons")
         print("  --kitty               Force Kitty Graphics Protocol (high-res pixel rendering)")
         print("  --iterm               Force iTerm2 / WezTerm inline image protocol")
-        print("  --half-block          Force ANSI Truecolor Half-Block fallback renderer")
+        print("  --half-block          timg -p h: Half-block ▄ (linear γ, area-avg, colour diff)")
+        print("  --quarter-block       timg -p q: Quarter-block ▛▜▙▟ (linear avd minimisation)")
         print("  --no-interactive      Non-interactive script/batch mode")
         print("  -h, --help            Show this help information")
         print("\nSupported formats:")
@@ -1942,12 +2303,14 @@ local function main()
         os.exit(0)
     end
 
-    -- Graphics protocol: ANSI 24-bit Truecolor Half-Block is primary default
+    -- Graphics protocol: timg-style half-block is the default
     local active_protocol = "halfblock"
     if args["--kitty"] then
         active_protocol = "kitty"
     elseif args["--iterm"] or args["--iterm2"] then
         active_protocol = "iterm"
+    elseif args["--quarter-block"] or args["--quarter"] then
+        active_protocol = "quarter"
     elseif args["--half-block"] or args["--halfblock"] then
         active_protocol = "halfblock"
     end
@@ -2187,7 +2550,10 @@ local function main()
                             end
                         elseif k == "t" or k == "T" then
                             kitty_clear_screen()
+                            -- Engine cycle: halfblock → quarter → kitty → iterm → halfblock
                             if active_protocol == "halfblock" then
+                                active_protocol = "quarter"
+                            elseif active_protocol == "quarter" then
                                 active_protocol = "kitty"
                             elseif active_protocol == "kitty" then
                                 active_protocol = "iterm"
