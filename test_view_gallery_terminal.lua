@@ -21,22 +21,27 @@ local tests = {
     {
         name = "Default current directory listing",
         cmd = "echo q| " .. luajit .. " view_gallery_terminal.lua --no-interactive",
-        expect = "portrait.png"
+        expect = "pillars_of_creation.jpg"
     },
     {
-        name = "Custom input directory listing (portraits)",
-        cmd = "echo q| " .. luajit .. " view_gallery_terminal.lua portraits --no-interactive",
-        expect = "01_traditional_hanfu_lady.png"
+        name = "Direct image view via --truecolor flag",
+        cmd = luajit .. " view_gallery_terminal.lua pillars_of_creation.jpg --truecolor --select 1",
+        expect = "ANSI 24-bit Truecolor Half-Block"
     },
     {
-        name = "Direct image view via --select flag",
-        cmd = luajit .. " view_gallery_terminal.lua portraits --select 1",
-        expect = "IMAGE VIEWER [1/"
+        name = "Direct image view via --timg-half flag",
+        cmd = luajit .. " view_gallery_terminal.lua pillars_of_creation.jpg --timg-half --select 1",
+        expect = "timg Half-Block"
     },
     {
-        name = "Empty directory graceful notification",
-        cmd = luajit .. " view_gallery_terminal.lua LuaBridge",
-        expect = "No supported images found"
+        name = "Direct image view via --timg-quarter flag",
+        cmd = luajit .. " view_gallery_terminal.lua pillars_of_creation.jpg --timg-quarter --select 1",
+        expect = "timg Quarter-Block"
+    },
+    {
+        name = "Non-interactive directory navigation",
+        cmd = "echo q| " .. luajit .. " view_gallery_terminal.lua LuaBridge/Source --no-interactive",
+        expect = "TERMINAL DIRECTORY IMAGE VIEWER"
     }
 }
 

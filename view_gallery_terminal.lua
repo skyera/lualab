@@ -1398,14 +1398,19 @@ end
 -- ---------------------------------------------------------------------------
 local function calc_scale_to_fit(img_w, img_h, term_cols, term_rows, cell_x, cell_y)
     cell_x = cell_x or 1;  cell_y = cell_y or 2
-    local disp_w = term_cols * cell_x   -- pixel-width of display canvas
-    local disp_h = term_rows * cell_y   -- pixel-height of display canvas
-    -- fit-in-both: use the more restrictive scale (timg default = no upscale)
+    -- In quarter-block mode (2x2 subpixels in an ~8x16 char cell), each subpixel is 4x8 px (1:2 aspect).
+    -- Match timg's width_stretch = 2.0 to compensate and preserve true image aspect ratio.
+    local width_stretch = (cell_x == 2) and 2.0 or 1.0
+    local disp_w = (term_cols * cell_x) / width_stretch
+    local disp_h = term_rows * cell_y
+    -- fit-in-both: use the more restrictive scale (no upscale)
     local scale = math.min(disp_w / img_w, disp_h / img_h)
     if scale > 1.0 then scale = 1.0 end
+    local out_w = math.max(1, math.floor(img_w * scale * width_stretch))
+    local out_h = math.max(1, math.floor(img_h * scale))
     -- Align to cell boundaries (floor to nearest cell multiple)
-    local out_w = math.max(cell_x, math.floor(img_w * scale / cell_x) * cell_x)
-    local out_h = math.max(cell_y, math.floor(img_h * scale / cell_y) * cell_y)
+    out_w = math.max(cell_x, math.floor(out_w / cell_x) * cell_x)
+    out_h = math.max(cell_y, math.floor(out_h / cell_y) * cell_y)
     return out_w, out_h
 end
 
@@ -2029,10 +2034,10 @@ local function render_image_iterm2(img_entry, current_idx, total_count, term_w, 
 end
 
 -- Unified image renderer: Dispatches to the selected protocol.
--- Supported protocols: "halfblock" | "quarter" | "kitty" | "iterm"
+-- Supported protocols: "truecolor" | "timg-half" | "timg-quarter" | "kitty" | "iterm"
 local function render_image_screen(img_entry, current_idx, total_count, protocol)
     local term_w, term_h = get_terminal_size()
-    protocol = protocol or "halfblock"
+    protocol = protocol or "truecolor"
 
     if protocol == "kitty" then
         local ok = render_image_kitty(img_entry, current_idx, total_count, term_w, term_h)
@@ -2040,15 +2045,18 @@ local function render_image_screen(img_entry, current_idx, total_count, protocol
     elseif protocol == "iterm" then
         local ok = render_image_iterm2(img_entry, current_idx, total_count, term_w, term_h)
         if ok then return true end
-    elseif protocol == "quarter" then
-        -- timg -p q  (quarter-block, 2×2 pixels per cell, linear-space avd minimisation)
+    elseif protocol == "timg-quarter" or protocol == "quarter" then
+        -- timg -p q  (quarter-block, 2x2 pixels per cell, linear-space avd minimisation, aspect-corrected)
         local ok, err = render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, true)
         if ok then return true end
-        -- fallthrough to halfblock on error
+    elseif protocol == "timg-half" then
+        -- timg -p h  (half-block, linear-space area-average)
+        local ok, err = render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, false)
+        if ok then return true end
     end
 
-    -- Default / fallback: timg -p h  (half-block, linear-space area-average)
-    return render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, false)
+    -- Default: Original ANSI 24-bit Truecolor Half-Block (▄) renderer
+    return render_image_halfblock(img_entry, current_idx, total_count, term_w, term_h)
 end
 
 -- =========================================================================
@@ -2073,7 +2081,7 @@ local function render_help_modal(term_w, term_h)
         "│  Viewer Controls:                                           │",
         "│    ← / p, → / n        Browse previous / next image         │",
         "│    PgUp / PgDn         Browse previous / next image         │",
-        "│    t                   Cycle engine (Half/Quarter/Kitty/iTerm)│",
+        "│    t                   Cycle render engine (5 modes)        │",
         "│    Enter / b / Backsp  Return to file/folder list           │",
         "│                                                             │",
         "│  Search & Sorting:                                          │",
@@ -2294,8 +2302,11 @@ local function main()
         print("  --no-icons            Disable file icons")
         print("  --kitty               Force Kitty Graphics Protocol (high-res pixel rendering)")
         print("  --iterm               Force iTerm2 / WezTerm inline image protocol")
-        print("  --half-block          timg -p h: Half-block ▄ (linear γ, area-avg, colour diff)")
-        print("  --quarter-block       timg -p q: Quarter-block ▛▜▙▟ (linear avd minimisation)")
+        print("  --truecolor           ANSI 24-bit Truecolor Half-Block (Original Renderer)")
+        print("  --timg-half           timg -p h: Half-block ▄ (linear γ, area-avg, colour diff)")
+        print("  --timg-quarter        timg -p q: Quarter-block ▛▜▙▟ (aspect-corrected)")
+        print("  --half-block          Alias for --truecolor")
+        print("  --quarter-block       Alias for --timg-quarter")
         print("  --no-interactive      Non-interactive script/batch mode")
         print("  -h, --help            Show this help information")
         print("\nSupported formats:")
@@ -2303,16 +2314,18 @@ local function main()
         os.exit(0)
     end
 
-    -- Graphics protocol: timg-style half-block is the default
-    local active_protocol = "halfblock"
+    -- Graphics protocol: ANSI Truecolor (original) is the primary default
+    local active_protocol = "truecolor"
     if args["--kitty"] then
         active_protocol = "kitty"
     elseif args["--iterm"] or args["--iterm2"] then
         active_protocol = "iterm"
-    elseif args["--quarter-block"] or args["--quarter"] then
-        active_protocol = "quarter"
-    elseif args["--half-block"] or args["--halfblock"] then
-        active_protocol = "halfblock"
+    elseif args["--timg-quarter"] or args["--quarter-block"] or args["--quarter"] then
+        active_protocol = "timg-quarter"
+    elseif args["--timg-half"] or args["--timg"] then
+        active_protocol = "timg-half"
+    elseif args["--truecolor"] or args["--half-block"] or args["--halfblock"] then
+        active_protocol = "truecolor"
     end
 
     -- Icon mode
@@ -2550,15 +2563,17 @@ local function main()
                             end
                         elseif k == "t" or k == "T" then
                             kitty_clear_screen()
-                            -- Engine cycle: halfblock → quarter → kitty → iterm → halfblock
-                            if active_protocol == "halfblock" then
-                                active_protocol = "quarter"
-                            elseif active_protocol == "quarter" then
+                            -- Engine cycle: truecolor -> timg-half -> timg-quarter -> kitty -> iterm -> truecolor
+                            if active_protocol == "truecolor" or active_protocol == "halfblock" then
+                                active_protocol = "timg-half"
+                            elseif active_protocol == "timg-half" then
+                                active_protocol = "timg-quarter"
+                            elseif active_protocol == "timg-quarter" or active_protocol == "quarter" then
                                 active_protocol = "kitty"
                             elseif active_protocol == "kitty" then
                                 active_protocol = "iterm"
                             else
-                                active_protocol = "halfblock"
+                                active_protocol = "truecolor"
                             end
                         elseif k == "?" then
                             in_help = true
