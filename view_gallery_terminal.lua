@@ -100,6 +100,8 @@ local function format_date(timestamp)
 end
 
 if is_windows then
+    local kernel32 = ffi.load("kernel32")
+
     ffi.cdef[[
         typedef struct { short X; short Y; } COORD;
         typedef struct { short Left; short Top; short Right; short Bottom; } SMALL_RECT;
@@ -154,25 +156,25 @@ if is_windows then
 
     -- Initialize Windows UTF-8 console output and ANSI Virtual Terminal Processing
     pcall(function()
-        local hOut = ffi.C.GetStdHandle(STD_OUTPUT_HANDLE)
-        ffi.C.SetConsoleOutputCP(65001) -- UTF-8
+        local hOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        kernel32.SetConsoleOutputCP(65001) -- UTF-8
         local out_mode = ffi.new("uint32_t[1]")
-        if ffi.C.GetConsoleMode(hOut, out_mode) ~= 0 then
+        if kernel32.GetConsoleMode(hOut, out_mode) ~= 0 then
             local ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
-            ffi.C.SetConsoleMode(hOut, bit.bor(out_mode[0], ENABLE_VIRTUAL_TERMINAL_PROCESSING))
+            kernel32.SetConsoleMode(hOut, bit.bor(out_mode[0], ENABLE_VIRTUAL_TERMINAL_PROCESSING))
         end
     end)
 
     is_stdin_tty = function()
-        local hIn = ffi.C.GetStdHandle(STD_INPUT_HANDLE)
+        local hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
         local mode = ffi.new("uint32_t[1]")
-        return ffi.C.GetConsoleMode(hIn, mode) ~= 0
+        return kernel32.GetConsoleMode(hIn, mode) ~= 0
     end
 
     get_terminal_size = function()
-        local hOut = ffi.C.GetStdHandle(STD_OUTPUT_HANDLE)
+        local hOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
         local csbi = ffi.new("CONSOLE_SCREEN_BUFFER_INFO")
-        if ffi.C.GetConsoleScreenBufferInfo(hOut, csbi) ~= 0 then
+        if kernel32.GetConsoleScreenBufferInfo(hOut, csbi) ~= 0 then
             local w = csbi.srWindow.Right - csbi.srWindow.Left + 1
             local h = csbi.srWindow.Bottom - csbi.srWindow.Top + 1
             if w > 0 and h > 0 then
@@ -184,13 +186,13 @@ if is_windows then
 
     enable_raw_mode = function()
         if not is_stdin_tty() then return false end
-        local hIn = ffi.C.GetStdHandle(STD_INPUT_HANDLE)
-        if ffi.C.GetConsoleMode(hIn, orig_in_mode) == 0 then return false end
+        local hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+        if kernel32.GetConsoleMode(hIn, orig_in_mode) == 0 then return false end
 
         local ENABLE_LINE_INPUT = 0x0002
         local ENABLE_ECHO_INPUT = 0x0004
         local new_mode = bit.band(orig_in_mode[0], bit.bnot(bit.bor(ENABLE_LINE_INPUT, ENABLE_ECHO_INPUT)))
-        ffi.C.SetConsoleMode(hIn, new_mode)
+        kernel32.SetConsoleMode(hIn, new_mode)
         raw_mode_enabled = true
 
         io.write("\27[?1049h\27[?25l") -- Alternate screen buffer + Hide cursor
@@ -202,8 +204,8 @@ if is_windows then
         if raw_mode_enabled then
             io.write("\27[?1049l\27[?25h\27[0m") -- Restore main screen + show cursor
             io.flush()
-            local hIn = ffi.C.GetStdHandle(STD_INPUT_HANDLE)
-            ffi.C.SetConsoleMode(hIn, orig_in_mode[0])
+            local hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+            kernel32.SetConsoleMode(hIn, orig_in_mode[0])
             raw_mode_enabled = false
         end
     end
@@ -239,21 +241,23 @@ if is_windows then
                 end
             end
             if timeout_ms >= 0 then
-                ffi.C.Sleep(20)
+                kernel32.Sleep(20)
                 elapsed = elapsed + 20
             else
-                ffi.C.Sleep(10)
+                kernel32.Sleep(10)
             end
         end
         return nil
     end
 
     local function scan_win_dir(dir_path, entries, recursive)
-        local search_pattern = (dir_path == ".") and "*.*" or (dir_path .. "\\*.*")
+        local norm_dir = dir_path:gsub("/", "\\"):gsub("\\+$", "")
+        if norm_dir == "" then norm_dir = "." end
+        local search_pattern = (norm_dir == ".") and ".\\*" or (norm_dir .. "\\*")
         local find_data = ffi.new("WIN32_FIND_DATAA")
-        local hFind = ffi.C.FindFirstFileA(search_pattern, find_data)
+        local hFind = kernel32.FindFirstFileA(search_pattern, find_data)
 
-        if hFind == INVALID_HANDLE_VALUE then
+        if hFind == INVALID_HANDLE_VALUE or hFind == nil or hFind == ffi.cast("void*", 0) then
             return
         end
 
@@ -262,7 +266,7 @@ if is_windows then
             local is_dir = bit.band(find_data.dwFileAttributes, FILE_ATTRIBUTE_DIRECTORY) ~= 0
 
             if fname ~= "." and fname ~= ".." and not fname:match("^%.") then
-                local full_path = (dir_path == ".") and fname or (dir_path .. "/" .. fname)
+                local full_path = (norm_dir == ".") and fname or (norm_dir .. "\\" .. fname)
                 local ft = tonumber(find_data.ftLastWriteTime.dwHighDateTime) * 4294967296 + tonumber(find_data.ftLastWriteTime.dwLowDateTime)
                 local mtime = math.floor((ft - 116444736000000000) / 10000000)
 
@@ -298,9 +302,9 @@ if is_windows then
                     end
                 end
             end
-        until ffi.C.FindNextFileA(hFind, find_data) == 0
+        until kernel32.FindNextFileA(hFind, find_data) == 0
 
-        ffi.C.FindClose(hFind)
+        kernel32.FindClose(hFind)
     end
 
     scan_directory_images = function(dir_path, recursive)
@@ -309,7 +313,7 @@ if is_windows then
         if dir_path == "" then dir_path = "." end
 
         local entries = {}
-        if not recursive and dir_path ~= "." and not dir_path:match("^[A-Za-z]:[/\\]?$") and dir_path ~= "/" then
+        if not recursive and dir_path ~= "." and not dir_path:match("^[A-Za-z]:[/\\]?$") and dir_path ~= "/" and dir_path ~= "\\" then
             local parent_path = dir_path:match("^(.*)[/\\][^/\\]+$") or "."
             if parent_path == "" then parent_path = "." end
             table.insert(entries, {
@@ -326,6 +330,47 @@ if is_windows then
         end
 
         scan_win_dir(dir_path, entries, recursive)
+
+        -- Fallback if FindFirstFileA discovered no entries (e.g. permission or shell path quirk)
+        local has_content = false
+        for _, e in ipairs(entries) do
+            if not e.is_parent then has_content = true; break end
+        end
+
+        if not has_content then
+            local win_path = dir_path:gsub("/", "\\")
+            local cmd = string.format("dir /b /a %q 2>nul", (win_path == ".") and "." or win_path)
+            local p = io.popen(cmd, "r")
+            if p then
+                for line in p:lines() do
+                    local fname = line:gsub("[\r\n]+$", "")
+                    if fname ~= "" and fname ~= "." and fname ~= ".." and not fname:match("^%.") then
+                        local full_path = (dir_path == ".") and fname or (dir_path .. "\\" .. fname)
+                        local ext = fname:match("%.([^.]+)$")
+                        if ext and SUPPORTED_EXTENSIONS[ext:lower()] then
+                            local f = io.open(full_path, "rb")
+                            local sz = 0
+                            if f then
+                                sz = f:seek("end") or 0
+                                f:close()
+                            end
+                            table.insert(entries, {
+                                filename = fname,
+                                filepath = full_path,
+                                is_dir = false,
+                                extension = ext:upper(),
+                                size = sz,
+                                size_str = format_file_size(sz),
+                                mtime = 0,
+                                date_str = "-",
+                            })
+                        end
+                    end
+                end
+                p:close()
+            end
+        end
+
         return entries
     end
 else
@@ -1064,6 +1109,127 @@ local function decode_gdk_pixbuf_ffi(filepath)
     return nil, tostring(res or "GdkPixbuf error")
 end
 
+-- 6. Windows GDI+ Native Image Decoder (PNG, JPEG, BMP, GIF, TIFF)
+local gdiplus_instance = nil
+local gdiplus_attempted = false
+
+local function get_gdiplus()
+    if gdiplus_attempted then return gdiplus_instance end
+    gdiplus_attempted = true
+    if not is_windows then return nil end
+
+    local ok, lib = pcall(ffi.load, "gdiplus")
+    if not (ok and lib) then return nil end
+
+    pcall(ffi.cdef, [[
+        typedef struct {
+            uint32_t GdiplusVersion;
+            void*    DebugEventCallback;
+            int      SuppressBackgroundThread;
+            int      SuppressExternalCodecs;
+        } GdiplusStartupInput;
+
+        typedef struct {
+            uint32_t Width;
+            uint32_t Height;
+            int32_t  Stride;
+            int32_t  PixelFormat;
+            void*    Scan0;
+            uintptr_t Reserved;
+        } GdiplusBitmapData;
+
+        typedef struct {
+            int X;
+            int Y;
+            int Width;
+            int Height;
+        } GpRect;
+
+        int __stdcall GdiplusStartup(void** token, const GdiplusStartupInput* input, void* output);
+        void __stdcall GdiplusShutdown(void* token);
+        int __stdcall GdipCreateBitmapFromFile(const wchar_t* filename, void** bitmap);
+        int __stdcall GdipGetImageWidth(void* image, uint32_t* width);
+        int __stdcall GdipGetImageHeight(void* image, uint32_t* height);
+        int __stdcall GdipBitmapLockBits(void* bitmap, const GpRect* rect, uint32_t flags, int32_t format, GdiplusBitmapData* lockedBitmapData);
+        int __stdcall GdipBitmapUnlockBits(void* bitmap, GdiplusBitmapData* lockedBitmapData);
+        int __stdcall GdipDisposeImage(void* image);
+        int __stdcall MultiByteToWideChar(uint32_t CodePage, uint32_t dwFlags, const char* lpMultiByteStr, int cbMultiByte, wchar_t* lpWideCharStr, int cchWideChar);
+    ]])
+
+    local input = ffi.new("GdiplusStartupInput", { GdiplusVersion = 1 })
+    local token = ffi.new("void*[1]")
+    if lib.GdiplusStartup(token, input, nil) == 0 then
+        gdiplus_instance = lib
+        return lib
+    end
+    return nil
+end
+
+local function decode_gdiplus_ffi(filepath)
+    local gdi = get_gdiplus()
+    if not gdi then return nil, "GDI+ not available" end
+
+    local ok, res = pcall(function()
+        local kernel32 = ffi.load("kernel32")
+        local len = kernel32.MultiByteToWideChar(65001, 0, filepath, #filepath, nil, 0)
+        if len <= 0 then return nil, "Path conversion error" end
+        local wpath = ffi.new("wchar_t[?]", len + 1)
+        kernel32.MultiByteToWideChar(65001, 0, filepath, #filepath, wpath, len)
+        wpath[len] = 0
+
+        local bmp_ptr = ffi.new("void*[1]")
+        if gdi.GdipCreateBitmapFromFile(wpath, bmp_ptr) ~= 0 or bmp_ptr[0] == nil then
+            return nil, "GDI+ failed to load image file"
+        end
+        local bmp = bmp_ptr[0]
+
+        local w = ffi.new("uint32_t[1]")
+        local h = ffi.new("uint32_t[1]")
+        gdi.GdipGetImageWidth(bmp, w)
+        gdi.GdipGetImageHeight(bmp, h)
+        local width = tonumber(w[0])
+        local height = tonumber(h[0])
+
+        if width <= 0 or height <= 0 then
+            gdi.GdipDisposeImage(bmp)
+            return nil, "Invalid GDI+ image dimensions"
+        end
+
+        local rect = ffi.new("GpRect", { X = 0, Y = 0, Width = width, Height = height })
+        local bdata = ffi.new("GdiplusBitmapData")
+        local PixelFormat24bppRGB = 0x21808
+        local ImageLockModeRead = 1
+
+        if gdi.GdipBitmapLockBits(bmp, rect, ImageLockModeRead, PixelFormat24bppRGB, bdata) ~= 0 then
+            gdi.GdipDisposeImage(bmp)
+            return nil, "GDI+ failed to lock bits"
+        end
+
+        local pixels = ffi.new("PixelRGB[?]", width * height)
+        local raw_ptr = ffi.cast("const uint8_t*", bdata.Scan0)
+        local stride = bdata.Stride
+
+        for y = 0, height - 1 do
+            local src_row = raw_ptr + y * stride
+            local dst_offset = y * width
+            for x = 0, width - 1 do
+                local p = src_row + x * 3
+                local d = dst_offset + x
+                pixels[d].b = p[0]
+                pixels[d].g = p[1]
+                pixels[d].r = p[2]
+            end
+        end
+
+        gdi.GdipBitmapUnlockBits(bmp, bdata)
+        gdi.GdipDisposeImage(bmp)
+        return { width = width, height = height, pixels = pixels, engine = "FFI (Windows GDI+)" }
+    end)
+
+    if ok and res then return res end
+    return nil, tostring(res or "GDI+ decode error")
+end
+
 local function load_image(filepath)
     local test_f = io.open(filepath, "rb")
     if not test_f then
@@ -1072,7 +1238,13 @@ local function load_image(filepath)
     local header = test_f:read(16) or ""
     test_f:close()
 
-    -- 0. Universal GdkPixbuf loader if available (PNG, JPG, WEBP, GIF, BMP, PPM)
+    -- 0. Universal GDI+ loader on Windows (built-in, zero dependencies: PNG, JPG, BMP, GIF)
+    if is_windows then
+        local gdi_img, _ = decode_gdiplus_ffi(filepath)
+        if gdi_img then return gdi_img end
+    end
+
+    -- 0b. Universal GdkPixbuf loader if available (PNG, JPG, WEBP, GIF, BMP, PPM)
     local gdk_img, _ = decode_gdk_pixbuf_ffi(filepath)
     if gdk_img then return gdk_img end
 
