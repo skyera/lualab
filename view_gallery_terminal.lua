@@ -1491,13 +1491,13 @@ local function render_image_kitty(img_entry, current_idx, total_count, term_w, t
     kitty_clear_screen()
 
     io.write("\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
-    io.write(string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m \27[1;95m(Kitty Graphics Protocol)\27[0m\n",
+    io.write(string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
         current_idx, total_count, img_entry.filename))
     local disp_path = img_entry.filepath
     if #disp_path > math.max(20, term_w - 35) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 38)) end
-    io.write(string.format("  \27[90mSize: %s | Display: %dx%d cells (Centered) | Path: %s\27[0m\n",
-        img_entry.size_str, fit_cols, fit_rows, disp_path))
-    io.write(string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;92m[Enter/B]\27[0m Back to File List   \27[91m[Q]\27[0m Quit\n"))
+    io.write(string.format("  \27[90mSize: %s | Original: %dx%d | Engine: \27[1;95mKitty Graphics Protocol\27[90m | Path: %s\27[0m\n",
+        img_entry.size_str, iw, ih, disp_path))
+    io.write(string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"))
     io.write("\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
     if pad_top > 0 then io.write(string.rep("\n", pad_top)) end
 
@@ -1542,14 +1542,13 @@ local function render_image_halfblock(img_entry, current_idx, total_count, term_
     -- Top header bar
     local bar_len = math.max(20, term_w - 4)
     table.insert(out, "\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
-    table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m \27[90m(ANSI Truecolor Half-Block)\27[0m\n",
+    table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
         current_idx, total_count, img_entry.filename))
-    local engine_info = img.engine and (" | Engine: " .. img.engine) or ""
     local disp_path = img_entry.filepath
     if #disp_path > math.max(20, term_w - 35) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 38)) end
-    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d pixels%s | Path: %s\27[0m\n",
-        img_entry.size_str, img.width, img.height, engine_info, disp_path))
-    table.insert(out, string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;92m[Enter/B]\27[0m Back to File List   \27[91m[Q]\27[0m Quit\n"))
+    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Engine: \27[1;92mANSI 24-bit Truecolor Half-Block (▄)\27[90m | Path: %s\27[0m\n",
+        img_entry.size_str, img.width, img.height, disp_path))
+    table.insert(out, string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"))
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
     -- Calculate render scale to fit window while preserving original aspect ratio.
@@ -1659,13 +1658,13 @@ local function render_image_iterm2(img_entry, current_idx, total_count, term_w, 
     kitty_clear_screen()
 
     io.write("\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
-    io.write(string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m \27[1;95m(Pixel Graphics - WezTerm/iTerm2/Kitty)\27[0m\n",
+    io.write(string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
         current_idx, total_count, img_entry.filename))
     local disp_path = img_entry.filepath
     if #disp_path > math.max(20, term_w - 35) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 38)) end
-    io.write(string.format("  \27[90mSize: %s | Display: %dx%d cells (Centered) | Path: %s\27[0m\n",
-        img_entry.size_str, fit_cols, fit_rows, disp_path))
-    io.write(string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;92m[Enter/B]\27[0m Back to File List   \27[91m[Q]\27[0m Quit\n"))
+    io.write(string.format("  \27[90mSize: %s | Original: %dx%d | Engine: \27[1;94miTerm2 Inline Protocol\27[90m | Path: %s\27[0m\n",
+        img_entry.size_str, iw, ih, disp_path))
+    io.write(string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"))
     io.write("\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
     if pad_top > 0 then io.write(string.rep("\n", pad_top)) end
 
@@ -1676,24 +1675,17 @@ local function render_image_iterm2(img_entry, current_idx, total_count, term_w, 
     return true
 end
 
--- Unified image renderer: Dispatches to high-res pixel protocol (Kitty or iTerm2) if supported, falls back to Half-Block
-local function render_image_screen(img_entry, current_idx, total_count, force_protocol)
+-- Unified image renderer: Dispatches to specified protocol, defaults to Half-Block
+local function render_image_screen(img_entry, current_idx, total_count, protocol)
     local term_w, term_h = get_terminal_size()
-    local proto = detect_terminal_graphics(force_protocol)
+    protocol = protocol or "halfblock"
 
-    if proto == "kitty" then
-        local ok, _ = render_image_kitty(img_entry, current_idx, total_count, term_w, term_h)
+    if protocol == "kitty" then
+        local ok, err = render_image_kitty(img_entry, current_idx, total_count, term_w, term_h)
         if ok then return true end
-    elseif proto == "iterm" then
-        local ok, _ = render_image_iterm2(img_entry, current_idx, total_count, term_w, term_h)
+    elseif protocol == "iterm" then
+        local ok, err = render_image_iterm2(img_entry, current_idx, total_count, term_w, term_h)
         if ok then return true end
-    elseif proto == "wezterm" then
-        -- For WezTerm, try iTerm2 first, then Kitty
-        local ok_iterm, _ = render_image_iterm2(img_entry, current_idx, total_count, term_w, term_h)
-        if ok_iterm then return true end
-
-        local ok_kitty, _ = render_image_kitty(img_entry, current_idx, total_count, term_w, term_h)
-        if ok_kitty then return true end
     end
 
     return render_image_halfblock(img_entry, current_idx, total_count, term_w, term_h)
@@ -1721,6 +1713,7 @@ local function render_help_modal(term_w, term_h)
         "│  Viewer Controls:                                           │",
         "│    ← / p, → / n        Browse previous / next image         │",
         "│    PgUp / PgDn         Browse previous / next image         │",
+        "│    t                   Cycle engine (HalfBlock/Kitty/iTerm) │",
         "│    Enter / b / Backsp  Return to file/folder list           │",
         "│                                                             │",
         "│  Search & Sorting:                                          │",
@@ -1949,14 +1942,14 @@ local function main()
         os.exit(0)
     end
 
-    -- Force mode flag: --kitty, --iterm, or --half-block
-    local force_protocol = nil
+    -- Graphics protocol: ANSI 24-bit Truecolor Half-Block is primary default
+    local active_protocol = "halfblock"
     if args["--kitty"] then
-        force_protocol = "kitty"
+        active_protocol = "kitty"
     elseif args["--iterm"] or args["--iterm2"] then
-        force_protocol = "iterm"
+        active_protocol = "iterm"
     elseif args["--half-block"] or args["--halfblock"] then
-        force_protocol = "halfblock"
+        active_protocol = "halfblock"
     end
 
     -- Icon mode
@@ -2040,10 +2033,10 @@ local function main()
     -- 3. If direct CLI selection is specified
     if cli_select then
         if #only_images > 0 and cli_select >= 1 and cli_select <= #only_images then
-            render_image_screen(only_images[cli_select], cli_select, #only_images, force_protocol)
+            render_image_screen(only_images[cli_select], cli_select, #only_images, active_protocol)
             return
         elseif cli_select >= 1 and cli_select <= #raw_images then
-            render_image_screen(raw_images[cli_select], cli_select, #raw_images, force_protocol)
+            render_image_screen(raw_images[cli_select], cli_select, #raw_images, active_protocol)
             return
         end
     end
@@ -2066,7 +2059,7 @@ local function main()
                     raw_images = scan_directory_images(target_dir, recursive) or {}
                     sort_images(raw_images, sort_mode, sort_desc)
                 else
-                    render_image_screen(item, sel, #raw_images, force_protocol)
+                    render_image_screen(item, sel, #raw_images, active_protocol)
                     break
                 end
             end
@@ -2167,7 +2160,7 @@ local function main()
                         end
                     end
 
-                    local ok, view_err = render_image_screen(cur_img, img_pos, #img_indices, force_protocol)
+                    local ok, view_err = render_image_screen(cur_img, img_pos, #img_indices, active_protocol)
                     if not ok then
                         in_viewer = false
                         current_msg = "Failed to load image: " .. tostring(view_err)
@@ -2191,6 +2184,15 @@ local function main()
                                 img_pos = (img_pos - 2 + #img_indices) % #img_indices + 1
                                 selected_idx = img_indices[img_pos]
                                 update_page_window()
+                            end
+                        elseif k == "t" or k == "T" then
+                            kitty_clear_screen()
+                            if active_protocol == "halfblock" then
+                                active_protocol = "kitty"
+                            elseif active_protocol == "kitty" then
+                                active_protocol = "iterm"
+                            else
+                                active_protocol = "halfblock"
                             end
                         elseif k == "?" then
                             in_help = true
