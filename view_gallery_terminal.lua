@@ -1454,22 +1454,52 @@ local function render_image_kitty(img_entry, current_idx, total_count, term_w, t
         b64 = base64_encode(raw_rgb_data)
     end
 
+    -- Quick image dimension detection for Kitty
+    local img_w, img_h = rgb_w, rgb_h
+    if is_direct_png and #png_data >= 24 and png_data:sub(1, 8) == "\137PNG\r\n\026\n" then
+        img_w = png_data:byte(17)*16777216 + png_data:byte(18)*65536 + png_data:byte(19)*256 + png_data:byte(20)
+        img_h = png_data:byte(21)*16777216 + png_data:byte(22)*65536 + png_data:byte(23)*256 + png_data:byte(24)
+    end
+    if img_w <= 0 or img_h <= 0 then
+        local fi = load_image(img_entry.filepath)
+        if fi then img_w, img_h = fi.width, fi.height end
+    end
+    local iw = (img_w > 0) and img_w or 800
+    local ih = (img_h > 0) and img_h or 600
+
     local reserved_header_rows = 7
-    local max_rows = math.max(6, term_h - reserved_header_rows - 1)
+    local max_rows = math.max(4, term_h - reserved_header_rows - 1)
     local max_cols = math.max(10, term_w - 4)
 
+    -- Calculate aspect-preserving dimensions that fit within the window
+    local optical_aspect = (iw / ih) * 2.0
+    local fit_rows = max_rows
+    local fit_cols = math.max(2, math.floor(fit_rows * optical_aspect))
+    if fit_cols > max_cols then
+        fit_cols = max_cols
+        fit_rows = math.max(2, math.floor(fit_cols / optical_aspect))
+    end
+
+    -- 2D Centering (Horizontal and Vertical)
+    local pad_left = math.max(0, math.floor((term_w - fit_cols) / 2))
+    local pad_top = math.max(0, math.floor((max_rows - fit_rows) / 2))
+    local pad = string.rep(" ", pad_left)
+
     -- Header
-    local bar_len = math.min(term_w - 2, 80)
+    local bar_len = math.max(20, term_w - 4)
     io.write("\27[H\27[2J") -- Clear screen & home cursor
     kitty_clear_screen()
 
     io.write("\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
     io.write(string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m \27[1;95m(Kitty Graphics Protocol)\27[0m\n",
         current_idx, total_count, img_entry.filename))
-    io.write(string.format("  \27[90mSize: %s | Max display area: %dx%d cells | Path: %s\27[0m\n",
-        img_entry.size_str, max_cols, max_rows, img_entry.filepath))
+    local disp_path = img_entry.filepath
+    if #disp_path > math.max(20, term_w - 35) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 38)) end
+    io.write(string.format("  \27[90mSize: %s | Display: %dx%d cells (Centered) | Path: %s\27[0m\n",
+        img_entry.size_str, fit_cols, fit_rows, disp_path))
     io.write(string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;92m[Enter/B]\27[0m Back to File List   \27[91m[Q]\27[0m Quit\n"))
-    io.write("\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n\n")
+    io.write("\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
+    if pad_top > 0 then io.write(string.rep("\n", pad_top)) end
 
     -- Stream chunks (4096 bytes per chunk as recommended by Kitty spec)
     local chunk_size = 4096
@@ -1484,10 +1514,10 @@ local function render_image_kitty(img_entry, current_idx, total_count, term_w, t
         if pos - chunk_size == 1 then
             if is_direct_png then
                 -- PNG transmission (f=100)
-                write_raw_terminal_seq(string.format("\27_Gf=100,a=T,c=%d,r=%d,m=%d;%s\27\\", max_cols, max_rows, has_more, chunk))
+                write_raw_terminal_seq(pad .. string.format("\27_Gf=100,a=T,c=%d,r=%d,m=%d;%s\27\\", fit_cols, fit_rows, has_more, chunk))
             else
                 -- Raw 24-bit RGB transmission (f=24)
-                write_raw_terminal_seq(string.format("\27_Gf=24,s=%d,v=%d,a=T,c=%d,r=%d,m=%d;%s\27\\", rgb_w, rgb_h, max_cols, max_rows, has_more, chunk))
+                write_raw_terminal_seq(pad .. string.format("\27_Gf=24,s=%d,v=%d,a=T,c=%d,r=%d,m=%d;%s\27\\", rgb_w, rgb_h, fit_cols, fit_rows, has_more, chunk))
             end
         else
             write_raw_terminal_seq(string.format("\27_Gm=%d;%s\27\\", has_more, chunk))
@@ -1510,42 +1540,55 @@ local function render_image_halfblock(img_entry, current_idx, total_count, term_
     table.insert(out, "\27[H\27[2J") -- Clear screen & home cursor
 
     -- Top header bar
-    local bar_len = math.min(term_w - 2, 80)
+    local bar_len = math.max(20, term_w - 4)
     table.insert(out, "\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
     table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m \27[90m(ANSI Truecolor Half-Block)\27[0m\n",
         current_idx, total_count, img_entry.filename))
     local engine_info = img.engine and (" | Engine: " .. img.engine) or ""
+    local disp_path = img_entry.filepath
+    if #disp_path > math.max(20, term_w - 35) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 38)) end
     table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d pixels%s | Path: %s\27[0m\n",
-        img_entry.size_str, img.width, img.height, engine_info, img_entry.filepath))
+        img_entry.size_str, img.width, img.height, engine_info, disp_path))
     table.insert(out, string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;92m[Enter/B]\27[0m Back to File List   \27[91m[Q]\27[0m Quit\n"))
-    table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n\n")
+    table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
-    -- Calculate render scale to fit remaining terminal height while preserving original aspect ratio.
-    -- Note: A terminal character cell is roughly twice as tall as it is wide (approx 1:2 ratio).
-    -- Since each character cell row contains 2 vertical pixels ('▄' top & bottom),
-    -- one character column horizontally corresponds to 1 character cell vertically (2 half-block pixels).
+    -- Calculate render scale to fit window while preserving original aspect ratio.
     local reserved_header_rows = 7
-    local max_char_h = math.max(6, term_h - reserved_header_rows)
+    local max_char_h = math.max(4, term_h - reserved_header_rows)
     local target_w = math.max(10, term_w - 4)
     local target_h = max_char_h * 2 -- 2 vertical pixels per text row
 
     -- Character cell aspect ratio correction: terminal font height/width ~ 2.0
-    -- So in half-block space, 1 column = 1 pixel width, but represents ~2 vertical half-block pixels of optical height.
-    -- To keep the physical image aspect ratio (img.width / img.height):
-    local optical_aspect = (img.width / img.height) * 2.0 -- scale horizontal columns
-    local scale_by_height = target_h / img.height
-    local out_h = math.max(2, math.floor(img.height * scale_by_height))
-    local out_w = math.max(2, math.floor((out_h / 2) * optical_aspect))
-
-    if out_w > target_w then
-        out_w = target_w
-        out_h = math.max(2, math.floor((out_w / optical_aspect) * 2))
+    local optical_aspect = (img.width / img.height) * 2.0
+    local out_h, out_w
+    if img.height > target_h or math.floor((img.height / 2) * optical_aspect) > target_w then
+        out_h = target_h
+        out_w = math.max(2, math.floor((out_h / 2) * optical_aspect))
+        if out_w > target_w then
+            out_w = target_w
+            out_h = math.max(2, math.floor((out_w / optical_aspect) * 2))
+        end
+    else
+        out_h = img.height
+        out_w = math.max(2, math.floor((out_h / 2) * optical_aspect))
+        if out_w > target_w then
+            out_w = target_w
+            out_h = math.max(2, math.floor((out_w / optical_aspect) * 2))
+        end
     end
 
-    if out_h % 2 ~= 0 then out_h = out_h + 1 end
+    if out_h > target_h then out_h = target_h end
+    if out_h % 2 ~= 0 then out_h = out_h - 1 end
+    if out_h < 2 then out_h = 2 end
 
-    local margin_left = math.max(0, math.floor((term_w - out_w) / 2))
-    local pad = string.rep(" ", margin_left)
+    -- 2D Centering
+    local pad_left = math.max(0, math.floor((term_w - out_w) / 2))
+    local pad = string.rep(" ", pad_left)
+    local pad_top = math.max(0, math.floor((max_char_h - math.floor(out_h / 2)) / 2))
+
+    if pad_top > 0 then
+        table.insert(out, string.rep("\n", pad_top))
+    end
 
     local px = img.pixels
     local iw = img.width
@@ -1583,27 +1626,52 @@ local function render_image_iterm2(img_entry, current_idx, total_count, term_w, 
 
     local b64 = base64_encode(raw_data)
     local reserved_header_rows = 7
-    local max_rows = math.max(6, term_h - reserved_header_rows - 1)
+    local max_rows = math.max(4, term_h - reserved_header_rows - 1)
     local max_cols = math.max(10, term_w - 4)
 
-    local bar_len = math.min(term_w - 2, 80)
+    -- Quick image dimension detection
+    local img_w, img_h = 0, 0
+    if raw_data and #raw_data >= 24 and raw_data:sub(1, 8) == "\137PNG\r\n\026\n" then
+        img_w = raw_data:byte(17)*16777216 + raw_data:byte(18)*65536 + raw_data:byte(19)*256 + raw_data:byte(20)
+        img_h = raw_data:byte(21)*16777216 + raw_data:byte(22)*65536 + raw_data:byte(23)*256 + raw_data:byte(24)
+    end
+    if img_w <= 0 or img_h <= 0 then
+        local fi = load_image(img_entry.filepath)
+        if fi then img_w, img_h = fi.width, fi.height end
+    end
+    local iw = (img_w > 0) and img_w or 800
+    local ih = (img_h > 0) and img_h or 600
+
+    local optical_aspect = (iw / ih) * 2.0
+    local fit_rows = max_rows
+    local fit_cols = math.max(2, math.floor(fit_rows * optical_aspect))
+    if fit_cols > max_cols then
+        fit_cols = max_cols
+        fit_rows = math.max(2, math.floor(fit_cols / optical_aspect))
+    end
+
+    local pad_left = math.max(0, math.floor((term_w - fit_cols) / 2))
+    local pad_top = math.max(0, math.floor((max_rows - fit_rows) / 2))
+    local pad = string.rep(" ", pad_left)
+
+    local bar_len = math.max(20, term_w - 4)
     io.write("\27[H\27[2J") -- Clear screen & home cursor
     kitty_clear_screen()
 
     io.write("\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
     io.write(string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m \27[1;95m(Pixel Graphics - WezTerm/iTerm2/Kitty)\27[0m\n",
         current_idx, total_count, img_entry.filename))
-    io.write(string.format("  \27[90mSize: %s | Max display area: %dx%d cells | Path: %s\27[0m\n",
-        img_entry.size_str, max_cols, max_rows, img_entry.filepath))
+    local disp_path = img_entry.filepath
+    if #disp_path > math.max(20, term_w - 35) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 38)) end
+    io.write(string.format("  \27[90mSize: %s | Display: %dx%d cells (Centered) | Path: %s\27[0m\n",
+        img_entry.size_str, fit_cols, fit_rows, disp_path))
     io.write(string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;92m[Enter/B]\27[0m Back to File List   \27[91m[Q]\27[0m Quit\n"))
-    io.write("\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n\n")
+    io.write("\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
+    if pad_top > 0 then io.write(string.rep("\n", pad_top)) end
 
-    -- iTerm2 OSC 1337 escape sequence:
-    -- In iTerm2/WezTerm specification: setting height=<rows> and width=auto with preserveAspectRatio=1
-    -- fits the image within the screen height while strictly preserving its original aspect ratio!
-    local iterm_seq = string.format("\27]1337;File=inline=1;height=%d;width=auto;preserveAspectRatio=1:%s\007\n",
-        max_rows, b64)
-    write_raw_terminal_seq(iterm_seq)
+    local iterm_seq = string.format("\27]1337;File=inline=1;width=%d;height=%d;preserveAspectRatio=1:%s\007\n",
+        fit_cols, fit_rows, b64)
+    write_raw_terminal_seq(pad .. iterm_seq)
     io.flush()
     return true
 end
