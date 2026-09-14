@@ -1980,12 +1980,6 @@ local function main()
         end
     end
 
-    -- If no image files found at all, print message and exit cleanly
-    if #only_images == 0 then
-        render_file_list(target_dir, {}, 0, 1, 1, nil, false, "", sort_mode, sort_desc, recursive, icon_mode)
-        os.exit(0)
-    end
-
     -- 4. Non-interactive fallback (e.g., pipes or redirect)
     if non_interactive then
         while true do
