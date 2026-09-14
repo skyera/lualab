@@ -403,13 +403,15 @@ else
         int __xstat(int ver, const char *pathname, struct stat *statbuf);
     ]]
 
-    if pcall(function() return ffi.C.__xstat end) then
-        posix_stat = function(path, st)
-            return ffi.C.__xstat(1, path, st)
-        end
-    elseif pcall(function() return ffi.C.stat end) then
+    if pcall(function() return ffi.C.stat end) then
         posix_stat = function(path, st)
             return ffi.C.stat(path, st)
+        end
+    elseif pcall(function() return ffi.C.__xstat end) then
+        posix_stat = function(path, st)
+            local res = ffi.C.__xstat(3, path, st)
+            if res ~= 0 then res = ffi.C.__xstat(1, path, st) end
+            return res
         end
     else
         posix_stat = function(path, st) return -1 end
@@ -512,42 +514,63 @@ else
 
             if fname ~= "." and fname ~= ".." and not fname:match("^%.") then
                 local full_path = (dir_path == ".") and fname or (dir_path .. "/" .. fname)
+                local d_type = ent.d_type
+                local is_dir = (d_type == 4)
+                local is_reg = (d_type == 8)
+                local size = 0
+                local mtime = 0
+
                 if posix_stat(full_path, st) == 0 then
                     local mode = tonumber(st.st_mode)
-                    local is_dir = (bit.band(mode, 0xF000) == 0x4000)
-                    local is_reg = (bit.band(mode, 0xF000) == 0x8000)
-                    local mtime = tonumber(st.st_mtime)
-
-                    if is_dir then
-                        if recursive then
-                            scan_posix_dir(full_path, entries, true)
-                        else
-                            table.insert(entries, {
-                                filename = fname,
-                                filepath = full_path,
-                                is_dir = true,
-                                extension = "DIR",
-                                size = 0,
-                                size_str = "<DIR>",
-                                mtime = mtime,
-                                date_str = format_date(mtime),
-                            })
+                    if bit.band(mode, 0xF000) == 0x4000 then is_dir = true end
+                    if bit.band(mode, 0xF000) == 0x8000 then is_reg = true end
+                    size = tonumber(st.st_size)
+                    mtime = tonumber(st.st_mtime)
+                else
+                    if not is_dir and not is_reg then
+                        local tf = io.open(full_path, "rb")
+                        if tf then
+                            is_reg = true
+                            size = tf:seek("end") or 0
+                            tf:close()
                         end
                     elseif is_reg then
-                        local ext = fname:match("%.([^.]+)$")
-                        if ext and SUPPORTED_EXTENSIONS[ext:lower()] then
-                            local size = tonumber(st.st_size)
-                            table.insert(entries, {
-                                filename = fname,
-                                filepath = full_path,
-                                is_dir = false,
-                                extension = ext:upper(),
-                                size = size,
-                                size_str = format_file_size(size),
-                                mtime = mtime,
-                                date_str = format_date(mtime),
-                            })
+                        local tf = io.open(full_path, "rb")
+                        if tf then
+                            size = tf:seek("end") or 0
+                            tf:close()
                         end
+                    end
+                end
+
+                if is_dir then
+                    if recursive then
+                        scan_posix_dir(full_path, entries, true)
+                    else
+                        table.insert(entries, {
+                            filename = fname,
+                            filepath = full_path,
+                            is_dir = true,
+                            extension = "DIR",
+                            size = 0,
+                            size_str = "<DIR>",
+                            mtime = mtime,
+                            date_str = format_date(mtime),
+                        })
+                    end
+                elseif is_reg then
+                    local ext = fname:match("%.([^.]+)$")
+                    if ext and SUPPORTED_EXTENSIONS[ext:lower()] then
+                        table.insert(entries, {
+                            filename = fname,
+                            filepath = full_path,
+                            is_dir = false,
+                            extension = ext:upper(),
+                            size = size,
+                            size_str = format_file_size(size),
+                            mtime = mtime,
+                            date_str = format_date(mtime),
+                        })
                     end
                 end
             end
@@ -955,6 +978,92 @@ local function decode_webp_ffi(filepath)
     return nil, tostring(res or "WebP decoding error")
 end
 
+-- 5. Universal FFI Image Decoder via GdkPixbuf (JPEG, PNG, WEBP, GIF, BMP, PPM, etc.)
+local libgdk_pixbuf_instance = nil
+local libgdk_pixbuf_attempted = false
+
+local function get_libgdk_pixbuf()
+    if libgdk_pixbuf_attempted then return libgdk_pixbuf_instance end
+    libgdk_pixbuf_attempted = true
+
+    pcall(ffi.cdef, [[
+        typedef struct _GdkPixbuf GdkPixbuf;
+        GdkPixbuf *gdk_pixbuf_new_from_file(const char *filename, void **error);
+        int gdk_pixbuf_get_width(const GdkPixbuf *pixbuf);
+        int gdk_pixbuf_get_height(const GdkPixbuf *pixbuf);
+        int gdk_pixbuf_get_n_channels(const GdkPixbuf *pixbuf);
+        int gdk_pixbuf_get_rowstride(const GdkPixbuf *pixbuf);
+        const unsigned char *gdk_pixbuf_get_pixels(const GdkPixbuf *pixbuf);
+        void g_object_unref(void *object);
+    ]])
+
+    libgdk_pixbuf_instance = load_first_lib({
+        "gdk_pixbuf-2.0", "libgdk_pixbuf-2.0.so.0", "libgdk_pixbuf-2.0.so",
+        "gdk_pixbuf-2.0.dylib", "libgdk_pixbuf-2.0-0.dll"
+    })
+    return libgdk_pixbuf_instance
+end
+
+local function decode_gdk_pixbuf_ffi(filepath)
+    local pixbuf_lib = get_libgdk_pixbuf()
+    if not pixbuf_lib then return nil, "gdk_pixbuf library not available" end
+
+    local ok, res = pcall(function()
+        local err_ptr = ffi.new("void*[1]")
+        local pb = pixbuf_lib.gdk_pixbuf_new_from_file(filepath, err_ptr)
+        if pb == nil then
+            return nil, "GdkPixbuf failed to load file"
+        end
+
+        local w = pixbuf_lib.gdk_pixbuf_get_width(pb)
+        local h = pixbuf_lib.gdk_pixbuf_get_height(pb)
+        local channels = pixbuf_lib.gdk_pixbuf_get_n_channels(pb)
+        local stride = pixbuf_lib.gdk_pixbuf_get_rowstride(pb)
+        local raw_ptr = pixbuf_lib.gdk_pixbuf_get_pixels(pb)
+
+        if w <= 0 or h <= 0 or raw_ptr == nil then
+            pixbuf_lib.g_object_unref(pb)
+            return nil, "Invalid GdkPixbuf dimensions or pixel data"
+        end
+
+        local pixels = ffi.new("PixelRGB[?]", w * h)
+        for y = 0, h - 1 do
+            local src_row = raw_ptr + y * stride
+            local dst_offset = y * w
+            if channels == 3 then
+                for x = 0, w - 1 do
+                    local p = src_row + x * 3
+                    local d = dst_offset + x
+                    pixels[d].r = p[0]
+                    pixels[d].g = p[1]
+                    pixels[d].b = p[2]
+                end
+            elseif channels == 4 then
+                for x = 0, w - 1 do
+                    local p = src_row + x * 4
+                    local d = dst_offset + x
+                    pixels[d].r = p[0]
+                    pixels[d].g = p[1]
+                    pixels[d].b = p[2]
+                end
+            else
+                for x = 0, w - 1 do
+                    local d = dst_offset + x
+                    pixels[d].r = src_row[x]
+                    pixels[d].g = src_row[x]
+                    pixels[d].b = src_row[x]
+                end
+            end
+        end
+
+        pixbuf_lib.g_object_unref(pb)
+        return { width = w, height = h, pixels = pixels, engine = "FFI (GdkPixbuf)" }
+    end)
+
+    if ok and res then return res end
+    return nil, tostring(res or "GdkPixbuf error")
+end
+
 local function load_image(filepath)
     local test_f = io.open(filepath, "rb")
     if not test_f then
@@ -962,6 +1071,10 @@ local function load_image(filepath)
     end
     local header = test_f:read(16) or ""
     test_f:close()
+
+    -- 0. Universal GdkPixbuf loader if available (PNG, JPG, WEBP, GIF, BMP, PPM)
+    local gdk_img, _ = decode_gdk_pixbuf_ffi(filepath)
+    if gdk_img then return gdk_img end
 
     -- 1. Built-in PPM decoder
     if header:sub(1, 2) == "P6" or header:sub(1, 2) == "P3" then
@@ -1013,7 +1126,7 @@ local function load_image(filepath)
         end
     end
 
-    return nil, "Failed to decode image. Ensure image is valid (PNG, JPG, BMP, WEBP, PPM) and FFI libraries (libpng, libturbojpeg, libwebp) or ImageMagick/ffmpeg are available."
+    return nil, "Failed to decode image. Ensure image is valid (PNG, JPG, BMP, WEBP, PPM) and FFI libraries (gdk_pixbuf, libpng, libturbojpeg, libwebp) or ImageMagick/ffmpeg are available."
 end
 
 -- =========================================================================
@@ -1058,39 +1171,56 @@ local function write_raw_terminal_seq(seq)
     end
 end
 
--- Detect if Kitty graphics protocol is supported
-local function detect_kitty_support(force_mode)
-    if force_mode == "kitty" then return true end
-    if force_mode == "halfblock" then return false end
+-- Detect terminal graphics protocol support: "kitty", "iterm", "wezterm", or "halfblock"
+local function detect_terminal_graphics(force_mode)
+    if force_mode == "kitty" then return "kitty" end
+    if force_mode == "iterm" then return "iterm" end
+    if force_mode == "halfblock" then return "halfblock" end
 
     -- Direct environment variable checks
-    local term = os.getenv("TERM") or ""
-    local term_prog = os.getenv("TERM_PROGRAM") or ""
+    local term = (os.getenv("TERM") or ""):lower()
+    local term_prog = (os.getenv("TERM_PROGRAM") or ""):lower()
     local kitty_pid = os.getenv("KITTY_PID")
     local ghostty_res = os.getenv("GHOSTTY_RESOURCES_DIR")
     local wezterm_pane = os.getenv("WEZTERM_PANE")
 
-    if kitty_pid or ghostty_res or wezterm_pane then
-        return true
+    -- Kitty and Ghostty strictly support Kitty graphics protocol (NOT iTerm2 inline image protocol).
+    if kitty_pid or term:find("kitty") or ghostty_res or term_prog:find("ghostty") then
+        return "kitty"
     end
-    if term:lower():find("kitty") or term_prog:lower():find("ghostty") or term_prog:lower():find("wezterm") then
-        return true
+
+    -- WezTerm supports both Kitty protocol and iTerm2 protocol
+    if wezterm_pane or term_prog:find("wezterm") then
+        return "wezterm"
+    end
+
+    -- iTerm2 native inline protocol
+    if term_prog:find("iterm") then
+        return "iterm"
     end
 
     -- If inside tmux, query the outer terminal client type
     if is_inside_tmux() then
         local p = io.popen("tmux display-message -p '#{client_termname} #{client_termtype}' 2>/dev/null", "r")
         if p then
-            local client_info = p:read("*a") or ""
+            local client_info = (p:read("*a") or ""):lower()
             p:close()
-            local cl = client_info:lower()
-            if cl:find("wezterm") or cl:find("kitty") or cl:find("ghostty") then
-                return true
+            if client_info:find("kitty") or client_info:find("ghostty") then
+                return "kitty"
+            elseif client_info:find("wezterm") then
+                return "wezterm"
+            elseif client_info:find("iterm") then
+                return "iterm"
             end
         end
     end
 
-    return false
+    return "halfblock"
+end
+
+local function detect_kitty_support(force_mode)
+    local g = detect_terminal_graphics(force_mode)
+    return g == "kitty" or g == "wezterm"
 end
 
 -- Clear any Kitty graphics rendered on screen
@@ -1307,26 +1437,23 @@ local function render_image_iterm2(img_entry, current_idx, total_count, term_w, 
 end
 
 -- Unified image renderer: Dispatches to high-res pixel protocol (Kitty or iTerm2) if supported, falls back to Half-Block
--- Unified image renderer: Dispatches to high-res pixel protocol (iTerm2 or Kitty) if supported, falls back to Half-Block
 local function render_image_screen(img_entry, current_idx, total_count, force_protocol)
     local term_w, term_h = get_terminal_size()
+    local proto = detect_terminal_graphics(force_protocol)
 
-    if force_protocol == "kitty" then
-        local ok, err = render_image_kitty(img_entry, current_idx, total_count, term_w, term_h)
+    if proto == "kitty" then
+        local ok, _ = render_image_kitty(img_entry, current_idx, total_count, term_w, term_h)
         if ok then return true end
-    elseif force_protocol == "iterm" then
-        local ok, err = render_image_iterm2(img_entry, current_idx, total_count, term_w, term_h)
+    elseif proto == "iterm" then
+        local ok, _ = render_image_iterm2(img_entry, current_idx, total_count, term_w, term_h)
         if ok then return true end
-    elseif force_protocol ~= "halfblock" then
-        local use_pixel = detect_kitty_support(nil)
-        if use_pixel then
-            -- For WezTerm (especially through tmux), iTerm2 protocol is exceptionally reliable:
-            local ok_iterm, _ = render_image_iterm2(img_entry, current_idx, total_count, term_w, term_h)
-            if ok_iterm then return true end
+    elseif proto == "wezterm" then
+        -- For WezTerm, try iTerm2 first, then Kitty
+        local ok_iterm, _ = render_image_iterm2(img_entry, current_idx, total_count, term_w, term_h)
+        if ok_iterm then return true end
 
-            local ok_kitty, _ = render_image_kitty(img_entry, current_idx, total_count, term_w, term_h)
-            if ok_kitty then return true end
-        end
+        local ok_kitty, _ = render_image_kitty(img_entry, current_idx, total_count, term_w, term_h)
+        if ok_kitty then return true end
     end
 
     return render_image_halfblock(img_entry, current_idx, total_count, term_w, term_h)
@@ -1449,8 +1576,9 @@ local function render_file_list(dir_path, images, total_unfiltered, selected_idx
     local col5_w = 12  -- Date
     local col2_w = math.max(20, term_w - (col1_w + col3_w + col4_w + col5_w + 10))
 
-    table.insert(out, string.format("  \27[1;37m%-6s %-" .. col2_w .. "s %-8s %-12s %-12s\27[0m\n",
-        "INDEX", "FILENAME", "FORMAT", "SIZE", "DATE"))
+    local filename_hdr = "FILENAME" .. string.rep(" ", math.max(0, col2_w - 8))
+    table.insert(out, string.format("  \27[1;37m%-6s %s %-8s %-12s %-12s\27[0m\n",
+        "INDEX", filename_hdr, "FORMAT", "SIZE", "DATE"))
     table.insert(out, "  \27[90m" .. string.rep("─", math.min(bar_len - 2, col1_w + col2_w + col3_w + col4_w + col5_w + 4)) .. "\27[0m\n")
 
     for i = page_start, page_end do
