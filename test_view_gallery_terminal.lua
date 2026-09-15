@@ -99,6 +99,21 @@ local tests = {
         name = "Filesystem timestamp fallback in viewer header",
         cmd = luajit .. " view_gallery_terminal.lua pillars_of_creation.jpg --timg-half --select 1",
         expect = "(File)"
+    },
+    {
+        name = "Render engine detection list in --help",
+        cmd = luajit .. " view_gallery_terminal.lua --help",
+        expect = "Render Engines (Detected on this system):"
+    },
+    {
+        name = "Viewer header engine position indicator [cur/total]",
+        cmd = luajit .. " view_gallery_terminal.lua pillars_of_creation.jpg --select 1 --truecolor",
+        expect = "Engine: ["
+    },
+    {
+        name = "Viewer header engine available count in cycle hint",
+        cmd = luajit .. " view_gallery_terminal.lua pillars_of_creation.jpg --select 1 --truecolor",
+        expect = "available)"
     }
 }
 

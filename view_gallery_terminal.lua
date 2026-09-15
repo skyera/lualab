@@ -1832,7 +1832,7 @@ end
 --      use_quarter=false → half-block  (timg -p h)
 --      use_quarter=true  → quarter-block (timg -p q)
 -- ---------------------------------------------------------------------------
-local function render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, use_quarter)
+local function render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, use_quarter, cur_e, total_e)
     local img, err = load_image(img_entry.filepath)
     if not img then return false, err end
 
@@ -1872,15 +1872,16 @@ local function render_image_unicode_block(img_entry, current_idx, total_count, t
     local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
     local dpath = img_entry.filepath
     if #dpath > math.max(15, term_w - 60) then dpath = "..." .. dpath:sub(#dpath-(term_w-63)) end
+    local eng_prefix = (cur_e and total_e) and string.format("[%d/%d] ", cur_e, total_e) or ""
     local eng = use_quarter
-        and "\27[1;93mtimg Quarter-Block ▛▜▙▟ (Native LuaJIT)\27[90m"
-        or  "\27[1;92mtimg Half-Block ▄ (Native LuaJIT)\27[90m"
+        and (eng_prefix .. "\27[1;93mtimg Quarter-Block ▛▜▙▟ (Native LuaJIT)\27[90m")
+        or  (eng_prefix .. "\27[1;92mtimg Half-Block ▄ (Native LuaJIT)\27[90m")
     table.insert(out, string.format(
         "  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s | Path: %s\27[0m\n",
         img_entry.size_str, img.width, img.height, date_info, eng, dpath))
-    table.insert(out, string.format(
-        "  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next" ..
-        "  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"))
+    local cycle_hint = total_e and string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine (%d available)  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n", total_e)
+        or "  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"
+    table.insert(out, cycle_hint)
     table.insert(out, "\27[90m" .. string.rep("─", blen) .. "\27[0m\n")
 
     if pad_top > 0 then table.insert(out, string.rep("\n", pad_top)) end
@@ -2127,7 +2128,7 @@ local function render_image_native_braille(img, fit_cols, fit_rows)
 end
 
 -- Unified Chafa renderer (dispatches Tier 1 FFI -> Tier 2 CLI -> Tier 3 Pure Lua)
-local function render_image_chafa(img_entry, current_idx, total_count, term_w, term_h, symbol_mode)
+local function render_image_chafa(img_entry, current_idx, total_count, term_w, term_h, symbol_mode, cur_e, total_e)
     local img, err = load_image(img_entry.filepath)
     if not img then return false, err end
 
@@ -2235,9 +2236,15 @@ local function render_image_chafa(img_entry, current_idx, total_count, term_w, t
     local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
     local disp_path = img_entry.filepath
     if #disp_path > math.max(15, term_w - 60) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 63)) end
+    local eng_label = engine_label or "Chafa"
+    if cur_e and total_e then
+        eng_label = string.format("[%d/%d] %s", cur_e, total_e, eng_label)
+    end
     table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s | Path: %s\27[0m\n",
-        img_entry.size_str, img.width, img.height, date_info, engine_label or "Chafa", disp_path))
-    table.insert(out, string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"))
+        img_entry.size_str, img.width, img.height, date_info, eng_label, disp_path))
+    local cycle_hint = total_e and string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine (%d available)  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n", total_e)
+        or "  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"
+    table.insert(out, cycle_hint)
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
     if pad_top > 0 then
@@ -2276,7 +2283,7 @@ local function get_has_chafa_cli_direct()
     return has_chafa_cli_direct
 end
 
-local function render_image_timg_cli(img_entry, current_idx, total_count, term_w, term_h)
+local function render_image_timg_cli(img_entry, current_idx, total_count, term_w, term_h, cur_e, total_e)
     local img, err = load_image(img_entry.filepath)
     if not img then return false, err end
 
@@ -2330,9 +2337,12 @@ local function render_image_timg_cli(img_entry, current_idx, total_count, term_w
     local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
     local disp_path = img_entry.filepath
     if #disp_path > math.max(15, term_w - 60) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 63)) end
-    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: \27[1;96mtimg (External CLI)\27[90m | Path: %s\27[0m\n",
-        img_entry.size_str, img.width, img.height, date_info, disp_path))
-    table.insert(out, string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"))
+    local eng_prefix = (cur_e and total_e) and string.format("[%d/%d] ", cur_e, total_e) or ""
+    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s\27[1;96mtimg (External CLI)\27[90m | Path: %s\27[0m\n",
+        img_entry.size_str, img.width, img.height, date_info, eng_prefix, disp_path))
+    local cycle_hint = total_e and string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine (%d available)  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n", total_e)
+        or "  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"
+    table.insert(out, cycle_hint)
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
     if pad_top > 0 then table.insert(out, string.rep("\n", pad_top)) end
@@ -2345,7 +2355,7 @@ local function render_image_timg_cli(img_entry, current_idx, total_count, term_w
     return true
 end
 
-local function render_image_chafa_cli_direct(img_entry, current_idx, total_count, term_w, term_h)
+local function render_image_chafa_cli_direct(img_entry, current_idx, total_count, term_w, term_h, cur_e, total_e)
     local img, err = load_image(img_entry.filepath)
     if not img then return false, err end
 
@@ -2392,9 +2402,13 @@ local function render_image_chafa_cli_direct(img_entry, current_idx, total_count
     local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
     local disp_path = img_entry.filepath
     if #disp_path > math.max(15, term_w - 60) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 63)) end
-    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: \27[1;95mChafa (External CLI)\27[90m | Path: %s\27[0m\n",
-        img_entry.size_str, img.width, img.height, date_info, disp_path))
-    table.insert(out, string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"))
+    local eng_prefix = (cur_e and total_e) and string.format("[%d/%d] ", cur_e, total_e) or ""
+    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s\27[1;95mChafa (External CLI)\27[90m | Path: %s\27[0m\n",
+        img_entry.size_str, img.width, img.height, date_info, eng_prefix, disp_path))
+    local cycle_hint = total_e and string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine (%d available)  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n", total_e)
+        or "  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"
+    table.insert(out, cycle_hint)
+    table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
     if pad_top > 0 then table.insert(out, string.rep("\n", pad_top)) end
@@ -2508,7 +2522,7 @@ local function kitty_clear_screen()
 end
 
 -- Render image using Kitty Graphics Protocol
-local function render_image_kitty(img_entry, current_idx, total_count, term_w, term_h)
+local function render_image_kitty(img_entry, current_idx, total_count, term_w, term_h, cur_e, total_e)
     local ext = img_entry.extension:lower()
     local png_data = nil
     local raw_rgb_data = nil
@@ -2603,9 +2617,12 @@ local function render_image_kitty(img_entry, current_idx, total_count, term_w, t
     local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
     local disp_path = img_entry.filepath
     if #disp_path > math.max(15, term_w - 60) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 63)) end
-    io.write(string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: \27[1;95mKitty Graphics Protocol\27[90m | Path: %s\27[0m\n",
-        img_entry.size_str, iw, ih, date_info, disp_path))
-    io.write(string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"))
+    local eng_prefix = (cur_e and total_e) and string.format("[%d/%d] ", cur_e, total_e) or ""
+    io.write(string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s\27[1;95mKitty Graphics Protocol\27[90m | Path: %s\27[0m\n",
+        img_entry.size_str, iw, ih, date_info, eng_prefix, disp_path))
+    local cycle_hint = total_e and string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine (%d available)   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n", total_e)
+        or "  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"
+    io.write(cycle_hint)
     io.write("\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
     if pad_top > 0 then io.write(string.rep("\n", pad_top)) end
 
@@ -2638,7 +2655,7 @@ local function render_image_kitty(img_entry, current_idx, total_count, term_w, t
 end
 
 -- Render image using ANSI Truecolor Half-Block (▄)
-local function render_image_halfblock(img_entry, current_idx, total_count, term_w, term_h)
+local function render_image_halfblock(img_entry, current_idx, total_count, term_w, term_h, cur_e, total_e)
     local img, err = load_image(img_entry.filepath)
     if not img then
         return false, err
@@ -2656,9 +2673,12 @@ local function render_image_halfblock(img_entry, current_idx, total_count, term_
     local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
     local disp_path = img_entry.filepath
     if #disp_path > math.max(15, term_w - 60) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 63)) end
-    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: \27[1;92mANSI 24-bit Truecolor Half-Block (▄)\27[90m | Path: %s\27[0m\n",
-        img_entry.size_str, img.width, img.height, date_info, disp_path))
-    table.insert(out, string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"))
+    local eng_prefix = (cur_e and total_e) and string.format("[%d/%d] ", cur_e, total_e) or ""
+    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s\27[1;92mANSI 24-bit Truecolor Half-Block (▄)\27[90m | Path: %s\27[0m\n",
+        img_entry.size_str, img.width, img.height, date_info, eng_prefix, disp_path))
+    local cycle_hint = total_e and string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine (%d available)   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n", total_e)
+        or "  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"
+    table.insert(out, cycle_hint)
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
     -- Calculate render scale to fit window while preserving original aspect ratio.
@@ -2736,7 +2756,7 @@ local function render_image_halfblock(img_entry, current_idx, total_count, term_
 end
 
 -- Render image using iTerm2 Graphics Protocol (widely supported by WezTerm, iTerm2, and tmux)
-local function render_image_iterm2(img_entry, current_idx, total_count, term_w, term_h)
+local function render_image_iterm2(img_entry, current_idx, total_count, term_w, term_h, cur_e, total_e)
     local f = io.open(img_entry.filepath, "rb")
     if not f then return false, "Cannot open image file" end
     local raw_data = f:read("*all")
@@ -2783,9 +2803,12 @@ local function render_image_iterm2(img_entry, current_idx, total_count, term_w, 
     local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
     local disp_path = img_entry.filepath
     if #disp_path > math.max(15, term_w - 60) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 63)) end
-    io.write(string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: \27[1;94miTerm2 Inline Protocol\27[90m | Path: %s\27[0m\n",
-        img_entry.size_str, iw, ih, date_info, disp_path))
-    io.write(string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"))
+    local eng_prefix = (cur_e and total_e) and string.format("[%d/%d] ", cur_e, total_e) or ""
+    io.write(string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s\27[1;94miTerm2 Inline Protocol\27[90m | Path: %s\27[0m\n",
+        img_entry.size_str, iw, ih, date_info, eng_prefix, disp_path))
+    local cycle_hint = total_e and string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine (%d available)   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n", total_e)
+        or "  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"
+    io.write(cycle_hint)
     io.write("\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
     if pad_top > 0 then io.write(string.rep("\n", pad_top)) end
 
@@ -2796,61 +2819,156 @@ local function render_image_iterm2(img_entry, current_idx, total_count, term_w, 
     return true
 end
 
+-- Available Render Engines Definition & Dynamic Detection
+local RENDER_ENGINES = {
+    { id = "truecolor",     name = "ANSI 24-bit Truecolor Half-Block", short_name = "Truecolor",     is_available = function() return true end },
+    { id = "timg-half",     name = "timg Half-Block",                  short_name = "timg Half",     is_available = function() return true end },
+    { id = "timg-quarter",  name = "timg Quarter-Block",               short_name = "timg Quarter",  is_available = function() return true end },
+    { id = "timg-cli",      name = "timg CLI Engine",                  short_name = "timg CLI",      is_available = function() return get_has_timg_cli() end },
+    { id = "chafa",         name = "Chafa Symbols",                    short_name = "Chafa Symbol",  is_available = function() return true end },
+    { id = "chafa-braille", name = "Chafa Braille",                    short_name = "Chafa Braille", is_available = function() return true end },
+    { id = "chafa-cli",     name = "Chafa CLI Engine",                 short_name = "Chafa CLI",     is_available = function() return get_has_chafa_cli_direct() end },
+    { id = "kitty",         name = "Kitty Protocol",                   short_name = "Kitty Proto",   is_available = function() return detect_kitty_support() end },
+    { id = "iterm",         name = "iTerm2 Protocol",                  short_name = "iTerm2 Proto",  is_available = function()
+        local g = detect_terminal_graphics()
+        return g == "iterm" or g == "wezterm"
+    end },
+}
+
+local function normalize_protocol(protocol)
+    protocol = protocol or "truecolor"
+    if protocol == "halfblock" then return "truecolor" end
+    if protocol == "quarter" then return "timg-quarter" end
+    if protocol == "chafa-symbols" then return "chafa" end
+    if protocol == "braille" then return "chafa-braille" end
+    if protocol == "iterm2" then return "iterm" end
+    return protocol
+end
+
+local function get_available_engines()
+    local available = {}
+    for _, eng in ipairs(RENDER_ENGINES) do
+        if eng.is_available() then
+            table.insert(available, eng)
+        end
+    end
+    return available
+end
+
+local function get_engine_position(protocol)
+    protocol = normalize_protocol(protocol)
+    local avail = get_available_engines()
+    for idx, eng in ipairs(avail) do
+        if eng.id == protocol then
+            return idx, #avail
+        end
+    end
+    return 1, #avail
+end
+
+local function cycle_next_engine(current_protocol)
+    local avail = get_available_engines()
+    if #avail == 0 then return "truecolor" end
+    current_protocol = normalize_protocol(current_protocol)
+
+    local cur_idx = nil
+    for idx, eng in ipairs(avail) do
+        if eng.id == current_protocol then
+            cur_idx = idx
+            break
+        end
+    end
+
+    if not cur_idx then
+        return avail[1].id
+    end
+
+    local next_idx = (cur_idx % #avail) + 1
+    return avail[next_idx].id
+end
+
 -- Unified image renderer: Dispatches to the selected protocol.
 -- Supported protocols: "truecolor" | "timg-half" | "timg-quarter" | "timg-cli" | "chafa" | "chafa-braille" | "chafa-cli" | "kitty" | "iterm"
 local function render_image_screen(img_entry, current_idx, total_count, protocol)
     local term_w, term_h = get_terminal_size()
     protocol = protocol or "truecolor"
+    local cur_e, total_e = get_engine_position(protocol)
 
     if protocol == "kitty" then
-        local ok = render_image_kitty(img_entry, current_idx, total_count, term_w, term_h)
+        local ok = render_image_kitty(img_entry, current_idx, total_count, term_w, term_h, cur_e, total_e)
         if ok then return true end
     elseif protocol == "iterm" then
-        local ok = render_image_iterm2(img_entry, current_idx, total_count, term_w, term_h)
+        local ok = render_image_iterm2(img_entry, current_idx, total_count, term_w, term_h, cur_e, total_e)
         if ok then return true end
     elseif protocol == "timg-cli" then
         if get_has_timg_cli() then
-            local ok = render_image_timg_cli(img_entry, current_idx, total_count, term_w, term_h)
+            local ok = render_image_timg_cli(img_entry, current_idx, total_count, term_w, term_h, cur_e, total_e)
             if ok then return true end
         end
         -- fallback to native timg
-        local ok = render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, false)
+        local ok = render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, false, cur_e, total_e)
         if ok then return true end
     elseif protocol == "chafa-cli" then
         if get_has_chafa_cli_direct() then
-            local ok = render_image_chafa_cli_direct(img_entry, current_idx, total_count, term_w, term_h)
+            local ok = render_image_chafa_cli_direct(img_entry, current_idx, total_count, term_w, term_h, cur_e, total_e)
             if ok then return true end
         end
         -- fallback to chafa symbols / braille
-        local ok = render_image_chafa(img_entry, current_idx, total_count, term_w, term_h, "symbols")
+        local ok = render_image_chafa(img_entry, current_idx, total_count, term_w, term_h, "symbols", cur_e, total_e)
         if ok then return true end
     elseif protocol == "chafa-braille" or protocol == "braille" then
-        local ok = render_image_chafa(img_entry, current_idx, total_count, term_w, term_h, "braille")
+        local ok = render_image_chafa(img_entry, current_idx, total_count, term_w, term_h, "braille", cur_e, total_e)
         if ok then return true end
     elseif protocol == "chafa" or protocol == "chafa-symbols" then
-        local ok = render_image_chafa(img_entry, current_idx, total_count, term_w, term_h, "symbols")
+        local ok = render_image_chafa(img_entry, current_idx, total_count, term_w, term_h, "symbols", cur_e, total_e)
         if ok then return true end
     elseif protocol == "timg-quarter" or protocol == "quarter" then
         -- timg -p q  (quarter-block, 2x2 pixels per cell, linear-space avd minimisation, aspect-corrected)
-        local ok, err = render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, true)
+        local ok, err = render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, true, cur_e, total_e)
         if ok then return true end
     elseif protocol == "timg-half" then
         -- timg -p h  (half-block, linear-space area-average)
-        local ok, err = render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, false)
+        local ok, err = render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, false, cur_e, total_e)
         if ok then return true end
     end
 
     -- Default: Original ANSI 24-bit Truecolor Half-Block (▄) renderer
-    return render_image_halfblock(img_entry, current_idx, total_count, term_w, term_h)
+    return render_image_halfblock(img_entry, current_idx, total_count, term_w, term_h, cur_e, total_e)
 end
 
 -- =========================================================================
--- 6. File List Selector Screen
--- =========================================================================
--- =========================================================================
 -- 6. File List Selector Screen & Help Popup
 -- =========================================================================
-local function render_help_modal(term_w, term_h)
+local function render_help_modal(term_w, term_h, active_protocol)
+    local avail = get_available_engines()
+    local cur_p = normalize_protocol(active_protocol)
+
+    local function get_mark(eng)
+        if eng.id == cur_p then
+            return "[*] "
+        elseif eng.is_available() then
+            return "[+] "
+        else
+            return "[-] "
+        end
+    end
+
+    local e1 = get_mark(RENDER_ENGINES[1]) .. RENDER_ENGINES[1].short_name
+    local e2 = get_mark(RENDER_ENGINES[2]) .. RENDER_ENGINES[2].short_name
+    local e3 = get_mark(RENDER_ENGINES[3]) .. RENDER_ENGINES[3].short_name
+    local e4 = get_mark(RENDER_ENGINES[4]) .. RENDER_ENGINES[4].short_name
+    local e5 = get_mark(RENDER_ENGINES[5]) .. RENDER_ENGINES[5].short_name
+    local e6 = get_mark(RENDER_ENGINES[6]) .. RENDER_ENGINES[6].short_name
+    local e7 = get_mark(RENDER_ENGINES[7]) .. RENDER_ENGINES[7].short_name
+    local e8 = get_mark(RENDER_ENGINES[8]) .. RENDER_ENGINES[8].short_name
+    local e9 = get_mark(RENDER_ENGINES[9]) .. RENDER_ENGINES[9].short_name
+
+    local eng_header = string.format("│  %-59s│", string.format("Detected Engines: [*] Active  [+] Ready  [-] N/A (%d Avail)", #avail))
+    local eng_row1   = string.format("│    %-18s%-19s%-20s│", e1, e2, e3)
+    local eng_row2   = string.format("│    %-18s%-19s%-20s│", e4, e5, e6)
+    local eng_row3   = string.format("│    %-18s%-19s%-20s│", e7, e8, e9)
+    local cycle_line = string.format("│    t                   Cycle render engine (%d available)     │", #avail)
+
     local lines = {
         "┌─────────────────────────────────────────────────────────────┐",
         "│                   KEYBOARD SHORTCUTS                        │",
@@ -2868,7 +2986,7 @@ local function render_help_modal(term_w, term_h)
         "│    l / j / → / n       Next image                           │",
         "│    h / k / ← / p       Previous image                       │",
         "│    g / G               Jump to first / last image           │",
-        "│    t                   Cycle render engine (7 modes)        │",
+        cycle_line,
         "│    Enter / b / Backsp  Return to file/folder list           │",
         "│                                                             │",
         "│  Search & Sorting:                                          │",
@@ -2877,6 +2995,11 @@ local function render_help_modal(term_w, term_h)
         "│    s                   Cycle sort (Name -> Date -> Size)    │",
         "│    r                   Reverse sort direction (Asc / Desc)  │",
         "│    i                   Cycle icon mode (Unicode / Nerd / Off)│",
+        "│                                                             │",
+        eng_header,
+        eng_row1,
+        eng_row2,
+        eng_row3,
         "│                                                             │",
         "│  General:                                                   │",
         "│    ?                   Toggle this help window              │",
@@ -3095,23 +3218,17 @@ local function main()
         print("  --sort <name|date|size> Initial sort order (default: name)")
         print("  --nerd-icons          Use Nerd Font glyphs instead of standard Unicode")
         print("  --no-icons            Disable file icons")
-        print("  --kitty               Force Kitty Graphics Protocol (high-res pixel rendering)")
-        print("  --iterm               Force iTerm2 / WezTerm inline image protocol")
-        print("  --truecolor           ANSI 24-bit Truecolor Half-Block (Original Renderer)")
-        print("  --timg-half           timg -p h: Half-block ▄ (linear γ, area-avg, colour diff)")
-        print("  --timg-quarter        timg -p q: Quarter-block ▛▜▙▟ (aspect-corrected)")
-        if get_has_timg_cli() then
-            print("  --timg-cli            Official timg CLI engine (installed)")
-        end
-        print("  --chafa               Chafa Symbols (FFI libchafa, CLI, or native Braille)")
-        print("  --chafa-braille       Chafa Braille 2×4 dot matrix (Native LuaJIT or FFI)")
-        if get_has_chafa_cli_direct() then
-            print("  --chafa-cli           Official chafa CLI engine (installed)")
+        print("  --no-interactive      Non-interactive script/batch mode")
+        print("  -h, --help            Show this help information")
+        print("\nRender Engines (Detected on this system):")
+        local avail = get_available_engines()
+        print(string.format("  System Status: %d available engine%s", #avail, #avail == 1 and "" or "s"))
+        for _, eng in ipairs(RENDER_ENGINES) do
+            local status = eng.is_available() and "\27[32m[Available]\27[0m" or "\27[90m[Not Detected]\27[0m"
+            print(string.format("  %-17s %s %s", "--" .. eng.id, status, eng.name))
         end
         print("  --half-block          Alias for --truecolor")
         print("  --quarter-block       Alias for --timg-quarter")
-        print("  --no-interactive      Non-interactive script/batch mode")
-        print("  -h, --help            Show this help information")
         print("\nSupported formats:")
         print("  - PNG, JPG/JPEG, PPM, WEBP, GIF, BMP")
         os.exit(0)
@@ -3332,7 +3449,7 @@ local function main()
         while true do
             if in_help then
                 local term_w, term_h = get_terminal_size()
-                render_help_modal(term_w, term_h)
+                render_help_modal(term_w, term_h, active_protocol)
                 local k = read_key()
                 if k then
                     in_help = false
@@ -3392,27 +3509,7 @@ local function main()
                             end
                         elseif k == "t" or k == "T" then
                             kitty_clear_screen()
-                            -- Dynamic engine cycle:
-                            -- truecolor -> timg-half -> timg-quarter -> [timg-cli] -> chafa -> chafa-braille -> [chafa-cli] -> kitty -> iterm -> truecolor
-                            if active_protocol == "truecolor" or active_protocol == "halfblock" then
-                                active_protocol = "timg-half"
-                            elseif active_protocol == "timg-half" then
-                                active_protocol = "timg-quarter"
-                            elseif active_protocol == "timg-quarter" or active_protocol == "quarter" then
-                                active_protocol = get_has_timg_cli() and "timg-cli" or "chafa"
-                            elseif active_protocol == "timg-cli" then
-                                active_protocol = "chafa"
-                            elseif active_protocol == "chafa" or active_protocol == "chafa-symbols" then
-                                active_protocol = "chafa-braille"
-                            elseif active_protocol == "chafa-braille" or active_protocol == "braille" then
-                                active_protocol = get_has_chafa_cli_direct() and "chafa-cli" or "kitty"
-                            elseif active_protocol == "chafa-cli" then
-                                active_protocol = "kitty"
-                            elseif active_protocol == "kitty" then
-                                active_protocol = "iterm"
-                            else
-                                active_protocol = "truecolor"
-                            end
+                            active_protocol = cycle_next_engine(active_protocol)
                         elseif k == "?" then
                             in_help = true
                         end
