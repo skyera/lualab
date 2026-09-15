@@ -49,6 +49,16 @@ local tests = {
         expect = "Chafa Braille 2×4"
     },
     {
+        name = "Direct image view via --timg-cli flag (if installed)",
+        cmd = luajit .. " view_gallery_terminal.lua pillars_of_creation.jpg --timg-cli --select 1",
+        expect = "timg"
+    },
+    {
+        name = "Direct image view via --chafa-cli flag (if installed)",
+        cmd = luajit .. " view_gallery_terminal.lua pillars_of_creation.jpg --chafa-cli --select 1",
+        expect = "Chafa"
+    },
+    {
         name = "Non-interactive directory navigation",
         cmd = "echo q| " .. luajit .. " view_gallery_terminal.lua LuaBridge/Source --no-interactive",
         expect = "TERMINAL DIRECTORY IMAGE VIEWER"

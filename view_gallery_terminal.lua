@@ -1931,6 +1931,155 @@ local function render_image_chafa(img_entry, current_idx, total_count, term_w, t
 end
 
 -- =========================================================================
+-- 5i. External CLI Render Engines (timg & chafa)
+--     Dynamically available when the respective binaries exist in $PATH.
+-- =========================================================================
+
+local function is_cmd_available(cmd)
+    local devnull = is_windows and "nul" or "/dev/null"
+    local ret = os.execute(cmd .. " --version >" .. devnull .. " 2>&1")
+    return (ret == 0 or ret == true)
+end
+
+local has_timg_cli = nil
+local function get_has_timg_cli()
+    if has_timg_cli == nil then has_timg_cli = is_cmd_available("timg") end
+    return has_timg_cli
+end
+
+local has_chafa_cli_direct = nil
+local function get_has_chafa_cli_direct()
+    if has_chafa_cli_direct == nil then has_chafa_cli_direct = is_cmd_available("chafa") end
+    return has_chafa_cli_direct
+end
+
+local function render_image_timg_cli(img_entry, current_idx, total_count, term_w, term_h)
+    local img, err = load_image(img_entry.filepath)
+    if not img then return false, err end
+
+    local reserved_header_rows = 5
+    local max_char_h = math.max(4, term_h - reserved_header_rows)
+    local max_char_w = math.max(4, term_w - 4)
+
+    local optical_aspect = (img.width / img.height) * 2.0
+    local fit_rows = max_char_h
+    local fit_cols = math.max(2, math.floor(fit_rows * optical_aspect))
+    if fit_cols > max_char_w then
+        fit_cols = max_char_w
+        fit_rows = math.max(2, math.floor(fit_cols / optical_aspect))
+    end
+
+    local devnull = is_windows and "nul" or "/dev/null"
+    local cmd = string.format("timg -g %dx%d --no-tmux-check %q 2>%s", fit_cols, fit_rows, img_entry.filepath, devnull)
+    local p = io.popen(cmd, "r")
+    local text = p and p:read("*a")
+    if p then p:close() end
+
+    if not text or #text == 0 then
+        local cmd2 = string.format("timg -g %dx%d %q 2>%s", fit_cols, fit_rows, img_entry.filepath, devnull)
+        local p2 = io.popen(cmd2, "r")
+        if p2 then
+            text = p2:read("*a")
+            p2:close()
+        end
+    end
+
+    if not text or #text == 0 then
+        return false, "timg CLI produced empty output"
+    end
+
+    local rendered_lines = {}
+    for l in text:gmatch("([^\n]*)\n?") do
+        if #l > 0 then table.insert(rendered_lines, l) end
+    end
+
+    local pad_left = math.max(0, math.floor((term_w - fit_cols) / 2))
+    local pad_top  = math.max(0, math.floor((max_char_h - #rendered_lines) / 2))
+    local pad      = string.rep(" ", pad_left)
+
+    local out = {}
+    local bar_len = math.max(20, term_w - 4)
+    table.insert(out, "\27[H\27[2J")
+    table.insert(out, "\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
+    table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
+        current_idx, total_count, img_entry.filename))
+    local disp_path = img_entry.filepath
+    if #disp_path > math.max(20, term_w - 35) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 38)) end
+    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Engine: \27[1;96mtimg (External CLI)\27[90m | Path: %s\27[0m\n",
+        img_entry.size_str, img.width, img.height, disp_path))
+    table.insert(out, string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"))
+    table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
+
+    if pad_top > 0 then table.insert(out, string.rep("\n", pad_top)) end
+    for _, l in ipairs(rendered_lines) do
+        table.insert(out, pad .. l .. "\27[0m\n")
+    end
+
+    io.write(table.concat(out))
+    io.flush()
+    return true
+end
+
+local function render_image_chafa_cli_direct(img_entry, current_idx, total_count, term_w, term_h)
+    local img, err = load_image(img_entry.filepath)
+    if not img then return false, err end
+
+    local reserved_header_rows = 5
+    local max_char_h = math.max(4, term_h - reserved_header_rows)
+    local max_char_w = math.max(4, term_w - 4)
+
+    local optical_aspect = (img.width / img.height) * 2.0
+    local fit_rows = max_char_h
+    local fit_cols = math.max(2, math.floor(fit_rows * optical_aspect))
+    if fit_cols > max_char_w then
+        fit_cols = max_char_w
+        fit_rows = math.max(2, math.floor(fit_cols / optical_aspect))
+    end
+
+    local devnull = is_windows and "nul" or "/dev/null"
+    local cmd = string.format("chafa -s %dx%d -c full %q 2>%s", fit_cols, fit_rows, img_entry.filepath, devnull)
+    local p = io.popen(cmd, "r")
+    if not p then return false, "Failed to invoke chafa CLI" end
+    local text = p:read("*a")
+    p:close()
+
+    if not text or #text == 0 then
+        return false, "chafa CLI produced empty output"
+    end
+
+    local rendered_lines = {}
+    for l in text:gmatch("([^\n]*)\n?") do
+        if #l > 0 then table.insert(rendered_lines, l) end
+    end
+
+    local pad_left = math.max(0, math.floor((term_w - fit_cols) / 2))
+    local pad_top  = math.max(0, math.floor((max_char_h - #rendered_lines) / 2))
+    local pad      = string.rep(" ", pad_left)
+
+    local out = {}
+    local bar_len = math.max(20, term_w - 4)
+    table.insert(out, "\27[H\27[2J")
+    table.insert(out, "\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
+    table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
+        current_idx, total_count, img_entry.filename))
+    local disp_path = img_entry.filepath
+    if #disp_path > math.max(20, term_w - 35) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 38)) end
+    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Engine: \27[1;95mChafa (External CLI)\27[90m | Path: %s\27[0m\n",
+        img_entry.size_str, img.width, img.height, disp_path))
+    table.insert(out, string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"))
+    table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
+
+    if pad_top > 0 then table.insert(out, string.rep("\n", pad_top)) end
+    for _, l in ipairs(rendered_lines) do
+        table.insert(out, pad .. l .. "\27[0m\n")
+    end
+
+    io.write(table.concat(out))
+    io.flush()
+    return true
+end
+
+-- =========================================================================
 -- 6. Kitty Graphics Protocol & Fallback Truecolor Renderer
 -- =========================================================================
 local b64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -2305,7 +2454,7 @@ local function render_image_iterm2(img_entry, current_idx, total_count, term_w, 
 end
 
 -- Unified image renderer: Dispatches to the selected protocol.
--- Supported protocols: "truecolor" | "timg-half" | "timg-quarter" | "chafa" | "chafa-braille" | "kitty" | "iterm"
+-- Supported protocols: "truecolor" | "timg-half" | "timg-quarter" | "timg-cli" | "chafa" | "chafa-braille" | "chafa-cli" | "kitty" | "iterm"
 local function render_image_screen(img_entry, current_idx, total_count, protocol)
     local term_w, term_h = get_terminal_size()
     protocol = protocol or "truecolor"
@@ -2315,6 +2464,22 @@ local function render_image_screen(img_entry, current_idx, total_count, protocol
         if ok then return true end
     elseif protocol == "iterm" then
         local ok = render_image_iterm2(img_entry, current_idx, total_count, term_w, term_h)
+        if ok then return true end
+    elseif protocol == "timg-cli" then
+        if get_has_timg_cli() then
+            local ok = render_image_timg_cli(img_entry, current_idx, total_count, term_w, term_h)
+            if ok then return true end
+        end
+        -- fallback to native timg
+        local ok = render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, false)
+        if ok then return true end
+    elseif protocol == "chafa-cli" then
+        if get_has_chafa_cli_direct() then
+            local ok = render_image_chafa_cli_direct(img_entry, current_idx, total_count, term_w, term_h)
+            if ok then return true end
+        end
+        -- fallback to chafa symbols / braille
+        local ok = render_image_chafa(img_entry, current_idx, total_count, term_w, term_h, "symbols")
         if ok then return true end
     elseif protocol == "chafa-braille" or protocol == "braille" then
         local ok = render_image_chafa(img_entry, current_idx, total_count, term_w, term_h, "braille")
@@ -2582,8 +2747,14 @@ local function main()
         print("  --truecolor           ANSI 24-bit Truecolor Half-Block (Original Renderer)")
         print("  --timg-half           timg -p h: Half-block ▄ (linear γ, area-avg, colour diff)")
         print("  --timg-quarter        timg -p q: Quarter-block ▛▜▙▟ (aspect-corrected)")
+        if get_has_timg_cli() then
+            print("  --timg-cli            Official timg CLI engine (installed)")
+        end
         print("  --chafa               Chafa Symbols (FFI libchafa, CLI, or native Braille)")
         print("  --chafa-braille       Chafa Braille 2×4 dot matrix (Native LuaJIT or FFI)")
+        if get_has_chafa_cli_direct() then
+            print("  --chafa-cli           Official chafa CLI engine (installed)")
+        end
         print("  --half-block          Alias for --truecolor")
         print("  --quarter-block       Alias for --timg-quarter")
         print("  --no-interactive      Non-interactive script/batch mode")
@@ -2599,6 +2770,10 @@ local function main()
         active_protocol = "kitty"
     elseif args["--iterm"] or args["--iterm2"] then
         active_protocol = "iterm"
+    elseif args["--timg-cli"] or args["--timg-bin"] then
+        active_protocol = "timg-cli"
+    elseif args["--chafa-cli"] or args["--chafa-bin"] then
+        active_protocol = "chafa-cli"
     elseif args["--chafa-braille"] or args["--braille"] then
         active_protocol = "chafa-braille"
     elseif args["--chafa"] or args["--chafa-symbols"] then
@@ -2846,16 +3021,21 @@ local function main()
                             end
                         elseif k == "t" or k == "T" then
                             kitty_clear_screen()
-                            -- Engine cycle: truecolor -> timg-half -> timg-quarter -> chafa -> chafa-braille -> kitty -> iterm -> truecolor
+                            -- Dynamic engine cycle:
+                            -- truecolor -> timg-half -> timg-quarter -> [timg-cli] -> chafa -> chafa-braille -> [chafa-cli] -> kitty -> iterm -> truecolor
                             if active_protocol == "truecolor" or active_protocol == "halfblock" then
                                 active_protocol = "timg-half"
                             elseif active_protocol == "timg-half" then
                                 active_protocol = "timg-quarter"
                             elseif active_protocol == "timg-quarter" or active_protocol == "quarter" then
+                                active_protocol = get_has_timg_cli() and "timg-cli" or "chafa"
+                            elseif active_protocol == "timg-cli" then
                                 active_protocol = "chafa"
                             elseif active_protocol == "chafa" or active_protocol == "chafa-symbols" then
                                 active_protocol = "chafa-braille"
                             elseif active_protocol == "chafa-braille" or active_protocol == "braille" then
+                                active_protocol = get_has_chafa_cli_direct() and "chafa-cli" or "kitty"
+                            elseif active_protocol == "chafa-cli" then
                                 active_protocol = "kitty"
                             elseif active_protocol == "kitty" then
                                 active_protocol = "iterm"
