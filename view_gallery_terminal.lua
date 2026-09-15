@@ -225,6 +225,8 @@ if is_windows then
                     elseif code == 77 then return "RIGHT"
                     elseif code == 73 then return "PAGE_UP"
                     elseif code == 81 then return "PAGE_DOWN"
+                    elseif code == 71 then return "HOME"
+                    elseif code == 79 then return "END"
                     end
                 elseif ch == 27 then
                     return "ESC"
@@ -236,6 +238,18 @@ if is_windows then
                     return "BACKSPACE"
                 elseif ch == 3 then
                     return "CTRL_C"
+                elseif ch == 4 then
+                    return "CTRL_D"
+                elseif ch == 21 then
+                    return "CTRL_U"
+                elseif ch == 6 then
+                    return "CTRL_F"
+                elseif ch == 2 then
+                    return "CTRL_B"
+                elseif ch == 5 then
+                    return "CTRL_E"
+                elseif ch == 25 then
+                    return "CTRL_Y"
                 else
                     return string.char(ch)
                 end
@@ -539,6 +553,18 @@ else
                     return "BACKSPACE"
                 elseif c0 == 3 then
                     return "CTRL_C"
+                elseif c0 == 4 then
+                    return "CTRL_D"
+                elseif c0 == 21 then
+                    return "CTRL_U"
+                elseif c0 == 6 then
+                    return "CTRL_F"
+                elseif c0 == 2 then
+                    return "CTRL_B"
+                elseif c0 == 5 then
+                    return "CTRL_E"
+                elseif c0 == 25 then
+                    return "CTRL_Y"
                 else
                     return string.char(c0)
                 end
@@ -2512,17 +2538,19 @@ local function render_help_modal(term_w, term_h)
         "┌─────────────────────────────────────────────────────────────┐",
         "│                   KEYBOARD SHORTCUTS                        │",
         "├─────────────────────────────────────────────────────────────┤",
-        "│  File & Folder Navigation:                                  │",
+        "│  File Navigation (Vim / Arrows):                            │",
         "│    ↑ / k, ↓ / j        Move selection up / down             │",
-        "│    PgUp / PgDn         Scroll list one page up / down       │",
-        "│    Home / End          Jump to first / last item            │",
-        "│    Enter / Space / l   Open folder or view selected image   │",
-        "│    h / Backspace       Navigate to parent folder (..)       │",
+        "│    h, l / o / Enter    Navigate to parent / Open item       │",
+        "│    g / G               Jump to first / last item            │",
+        "│    Ctrl-D / Ctrl-U     Scroll half page down / up           │",
+        "│    Ctrl-F / Ctrl-B     Scroll full page down / up           │",
+        "│    H / M / L           Jump to top / middle / bottom visible│",
         "│    1 - 9               Quick select item by index number    │",
         "│                                                             │",
         "│  Viewer Controls:                                           │",
-        "│    ← / p, → / n        Browse previous / next image         │",
-        "│    PgUp / PgDn         Browse previous / next image         │",
+        "│    l / j / → / n       Next image                           │",
+        "│    h / k / ← / p       Previous image                       │",
+        "│    g / G               Jump to first / last image           │",
         "│    t                   Cycle render engine (7 modes)        │",
         "│    Enter / b / Backsp  Return to file/folder list           │",
         "│                                                             │",
@@ -3002,20 +3030,34 @@ local function main()
                         local k = read_key()
                         if k == "q" or k == "ESC" or k == "CTRL_C" then
                             break
-                        elseif k == "ENTER" or k == "b" or k == "BACKSPACE" or k == "h" then
+                        elseif k == "ENTER" or k == "b" or k == "BACKSPACE" then
                             kitty_clear_screen()
                             in_viewer = false
-                        elseif k == "RIGHT" or k == "n" or k == "SPACE" or k == "PAGE_DOWN" or k == "l" then
+                        elseif k == "RIGHT" or k == "n" or k == "SPACE" or k == "PAGE_DOWN" or k == "l" or k == "j" or k == "CTRL_D" or k == "CTRL_F" then
                             kitty_clear_screen()
                             if #img_indices > 1 then
                                 img_pos = (img_pos % #img_indices) + 1
                                 selected_idx = img_indices[img_pos]
                                 update_page_window()
                             end
-                        elseif k == "LEFT" or k == "p" or k == "PAGE_UP" then
+                        elseif k == "LEFT" or k == "p" or k == "PAGE_UP" or k == "k" or k == "h" or k == "CTRL_U" or k == "CTRL_B" then
                             kitty_clear_screen()
                             if #img_indices > 1 then
                                 img_pos = (img_pos - 2 + #img_indices) % #img_indices + 1
+                                selected_idx = img_indices[img_pos]
+                                update_page_window()
+                            end
+                        elseif k == "g" or k == "HOME" then
+                            kitty_clear_screen()
+                            if #img_indices > 0 then
+                                img_pos = 1
+                                selected_idx = img_indices[img_pos]
+                                update_page_window()
+                            end
+                        elseif k == "G" or k == "END" then
+                            kitty_clear_screen()
+                            if #img_indices > 0 then
+                                img_pos = #img_indices
                                 selected_idx = img_indices[img_pos]
                                 update_page_window()
                             end
@@ -3138,21 +3180,35 @@ local function main()
                         sort_desc = not sort_desc
                         sort_images(raw_images, sort_mode, sort_desc)
                         filtered_images = filter_images(raw_images, search_query)
-                    elseif k == "UP" or k == "k" then
+                    elseif k == "UP" or k == "k" or k == "CTRL_Y" then
                         if selected_idx > 1 then selected_idx = selected_idx - 1 end
-                    elseif k == "DOWN" or k == "j" then
+                    elseif k == "DOWN" or k == "j" or k == "CTRL_E" then
                         if selected_idx < #filtered_images then selected_idx = selected_idx + 1 end
-                    elseif k == "PAGE_DOWN" then
+                    elseif k == "PAGE_DOWN" or k == "CTRL_F" then
                         selected_idx = math.min(#filtered_images, selected_idx + page_step)
-                    elseif k == "PAGE_UP" then
+                    elseif k == "PAGE_UP" or k == "CTRL_B" then
                         selected_idx = math.max(1, selected_idx - page_step)
-                    elseif k == "HOME" then
+                    elseif k == "CTRL_D" then
+                        local half_step = math.max(1, math.floor(page_step / 2))
+                        selected_idx = math.min(#filtered_images, selected_idx + half_step)
+                    elseif k == "CTRL_U" then
+                        local half_step = math.max(1, math.floor(page_step / 2))
+                        selected_idx = math.max(1, selected_idx - half_step)
+                    elseif k == "g" or k == "HOME" then
                         selected_idx = 1
-                    elseif k == "END" then
+                    elseif k == "G" or k == "END" then
                         selected_idx = math.max(1, #filtered_images)
+                    elseif k == "H" then
+                        selected_idx = page_offset
+                    elseif k == "M" then
+                        local visible_count = math.max(4, term_h - 12)
+                        selected_idx = math.min(#filtered_images, page_offset + math.floor(visible_count / 2))
+                    elseif k == "L" then
+                        local visible_count = math.max(4, term_h - 12)
+                        selected_idx = math.min(#filtered_images, page_offset + visible_count - 1)
                     elseif k == "BACKSPACE" or k == "h" or k == "LEFT" then
                         navigate_to_parent()
-                    elseif k == "ENTER" or k == "SPACE" or k == "l" or k == "RIGHT" then
+                    elseif k == "ENTER" or k == "SPACE" or k == "l" or k == "RIGHT" or k == "o" then
                         local item = filtered_images[selected_idx]
                         if item then
                             if item.is_dir then
