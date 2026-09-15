@@ -1778,7 +1778,7 @@ local function get_video_info(filepath)
         end
     end
 
-    -- Fallback to CLI ffmpeg
+    -- Fallback to the CLI tools
     local devnull = is_windows and "2>nul" or "2>/dev/null"
     local p = io.popen(string.format('ffmpeg -i %q 2>&1', filepath))
     if not p then
@@ -1786,6 +1786,36 @@ local function get_video_info(filepath)
     end
     local info = p:read("*a") or ""
     p:close()
+
+    local function valid_dim(v)
+        return v and v >= 16 and v <= 32768
+    end
+
+    local width, height = 0, 0
+
+    -- Prefer ffprobe: machine-readable, so no banner parsing ambiguity. Missing ffprobe just
+    -- yields empty output (its stderr is discarded), and the banner parse below takes over.
+    local fp = io.popen(string.format('ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 %q %s', filepath, devnull))
+    if fp then
+        local out = fp:read("*a") or ""
+        fp:close()
+        local pw, ph = out:match("(%d+)%s*,%s*(%d+)")
+        pw, ph = tonumber(pw), tonumber(ph)
+        if valid_dim(pw) and valid_dim(ph) then
+            width, height = pw, ph
+        end
+    end
+
+    -- Banner fallback. Real dimensions are `WxH` introduced by a separator, while a hex fourcc
+    -- such as `(avc1 / 0x31637661)` can masquerade as one and yields width 0 - which dropped the
+    -- player onto its fixed default box and distorted the aspect ratio of every MP4/MOV/AVI.
+    if width == 0 then
+        local bw, bh = info:match("Video:.-[,%s](%d%d+)x(%d%d+)")
+        bw, bh = tonumber(bw), tonumber(bh)
+        if valid_dim(bw) and valid_dim(bh) then
+            width, height = bw, bh
+        end
+    end
 
     local dur_str = info:match("Duration:%s*(%d+:%d+:[%d%.]+)")
     local total_sec = 0
@@ -1796,14 +1826,13 @@ local function get_video_info(filepath)
         end
     end
 
-    local w, h = info:match("Video:.-%s(%d+)x(%d+)")
     local fps = info:match("([%d%.]+)%s*fps") or info:match("([%d%.]+)%s*tbr") or 25
 
     return {
         duration = total_sec,
         duration_str = dur_str and dur_str:match("(%d+:%d+:%d+)") or "00:00",
-        width = tonumber(w) or 0,
-        height = tonumber(h) or 0,
+        width = width,
+        height = height,
         fps = tonumber(fps) or 25,
     }
 end

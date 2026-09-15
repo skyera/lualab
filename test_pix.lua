@@ -222,6 +222,25 @@ local tests = {
         expect = "OK_SLEEP_HELPER"
     },
     {
+        name = "CLI fallback reads real video dimensions (hex codec tags cannot match)",
+        cmd = luajit .. [==[ -e '
+local function popen(c) local f = io.popen(c); if not f then return "" end; local s = f:read("*a"); f:close(); return s end
+local s = io.open("pix.lua"):read("*a")
+local marker = [[info:match("Video:]]
+local i = s:find(marker, 1, true)
+assert(i, "banner dimension parse line not found in pix.lua")
+local j = s:find([[")]], i, true)
+local pat = s:sub(i + #marker, j - 1)
+assert(s:find("-show_entries stream=width,height", 1, true), "ffprobe width/height probe missing")
+assert(pat ~= "%s(%d+)x(%d+)", "ambiguous old banner pattern is back")
+local banner = popen("ffmpeg -i ]==] .. video_test_file .. [==[ 2>&1")
+assert(banner:find("0x31637661", 1, true), "fixture banner lacks the hex codec tag that broke the parse")
+local w, h = banner:match(pat)
+assert(w == "64" and h == "64", "parsed " .. tostring(w) .. "x" .. tostring(h) .. " from the banner")
+print("OK_VIDEO_DIMS_PARSE")' ]==],
+        expect = "OK_VIDEO_DIMS_PARSE"
+    },
+    {
         name = "[q] backs out of player/viewer to the file list, [Q]/Ctrl+C quits",
         cmd = luajit .. [==[ -e 'local s = io.open("pix.lua"):read("*a"); assert(s:find([[if k == "Q" or k == "CTRL_C" then]], 1, true)); assert(s:find([[elseif k == "q" or k == "ESC" or k == "b" then]], 1, true)); assert(s:find([[elseif k == "q" or k == "ESC" or k == "ENTER" or k == "b" or k == "BACKSPACE" then]], 1, true)); assert(s:find([[\27[91m[q]\27[0m Back]], 1, true)); assert(s:find("Return to the file list", 1, true)); print("OK_Q_BACK")' ]==],
         expect = "OK_Q_BACK"
