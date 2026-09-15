@@ -158,6 +158,11 @@ local tests = {
         name = "Video player mpv controls implementation (speed, loop, frame-step, seek)",
         cmd = luajit .. " -e 'local f = io.open(\"pix.lua\"); local s = f:read(\"*a\"); f:close(); assert(s:find(\"playback_speed\")); assert(s:find(\"is_loop\")); assert(s:find(\"%%[Space/p%%]\")); print(\"OK_MPV_CONTROLS\")'",
         expect = "OK_MPV_CONTROLS"
+    },
+    {
+        name = "AVFrame struct layout pts offset verification (136 bytes)",
+        cmd = luajit .. " -e 'local ffi = require(\"ffi\"); local s = io.open(\"pix.lua\"):read(\"*a\"); local cdef = s:match(\"typedef struct AVFrame .-}%s*AVFrame;\"); ffi.cdef(\"typedef struct AVRational { int num, den; } AVRational; \" .. cdef); assert(ffi.offsetof(\"AVFrame\", \"pts\") == 136); print(\"OK_PTS_OFFSET_136\")'",
+        expect = "OK_PTS_OFFSET_136"
     }
 }
 

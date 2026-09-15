@@ -605,6 +605,22 @@ else
                         if c2 == 54 and n >= 4 and key_buf[3] == 126 then return "PAGE_DOWN" end
                         if c2 == 72 then return "HOME" end
                         if c2 == 70 then return "END" end
+                        -- Modifier+Arrow: \e[1;{mod}{dir}  (Shift=2, Ctrl=5)
+                        if c2 == 49 and n >= 6 and key_buf[3] == 59 then
+                            local mod = key_buf[4]
+                            local dir = key_buf[5]
+                            if mod == 50 then -- Shift
+                                if dir == 65 then return "SHIFT_UP" end
+                                if dir == 66 then return "SHIFT_DOWN" end
+                                if dir == 67 then return "SHIFT_RIGHT" end
+                                if dir == 68 then return "SHIFT_LEFT" end
+                            elseif mod == 53 then -- Ctrl
+                                if dir == 65 then return "CTRL_UP" end
+                                if dir == 66 then return "CTRL_DOWN" end
+                                if dir == 67 then return "CTRL_RIGHT" end
+                                if dir == 68 then return "CTRL_LEFT" end
+                            end
+                        end
                     end
                     return "ESC"
                 elseif c0 == 10 or c0 == 13 then
@@ -1634,6 +1650,9 @@ local function init_av_ffi()
                 int width, height;
                 int nb_samples;
                 int format;
+                int key_frame;
+                int pict_type;
+                AVRational sample_aspect_ratio;
                 int64_t pts;
                 int64_t pkt_dts;
             } AVFrame;
@@ -1822,8 +1841,8 @@ local function create_video_reader(filepath, out_w, out_h)
                 end
                 local src_data = ffi.cast("const uint8_t *const *", frame.data)
                 lib_swscale.sws_scale(sws, src_data, frame.linesize, 0, frame.height, dst_data, dst_linesize)
-                local pts_sec = 0
-                if frame.pts >= 0 and reader.time_base_den > 0 then
+                local pts_sec = -1
+                if frame.pts ~= nil and frame.pts >= 0 and reader.time_base_den > 0 and reader.time_base_num > 0 then
                     pts_sec = tonumber(frame.pts) * (reader.time_base_num / reader.time_base_den)
                 end
                 return ffi.string(rgb_buf, out_w * out_h * 3), pts_sec
@@ -3480,6 +3499,9 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
     local function open_stream(seek_sec)
         close_stream()
         seek_sec = math.max(0, seek_sec or 0)
+        if v_info.duration > 0 then
+            seek_sec = math.min(v_info.duration, seek_sec)
+        end
         cur_time = seek_sec
         is_eof = false
 
@@ -3500,7 +3522,13 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
         if use_ffi then
             if not stream_reader then return nil end
             local raw, pts = stream_reader:read_frame()
-            if raw and pts > 0 then cur_time = pts end
+            if raw then
+                if pts and pts >= 0 and (v_info.duration <= 0 or pts <= v_info.duration + 5) then
+                    cur_time = pts
+                else
+                    cur_time = cur_time + target_dt
+                end
+            end
             return raw
         else
             if not stream_proc then return nil end
@@ -3612,6 +3640,26 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
                 update_dynamic_header(current_fps)
             elseif k == "DOWN" or k == "j" then
                 cur_time = math.max(0, cur_time - 60)
+                open_stream(cur_time)
+                is_eof = false
+                update_dynamic_header(current_fps)
+            elseif k == "SHIFT_RIGHT" then
+                cur_time = math.min(v_info.duration > 0 and v_info.duration or (cur_time + 1), cur_time + 1)
+                open_stream(cur_time)
+                is_eof = false
+                update_dynamic_header(current_fps)
+            elseif k == "SHIFT_LEFT" then
+                cur_time = math.max(0, cur_time - 1)
+                open_stream(cur_time)
+                is_eof = false
+                update_dynamic_header(current_fps)
+            elseif k == "CTRL_RIGHT" then
+                cur_time = math.min(v_info.duration > 0 and v_info.duration or (cur_time + 10), cur_time + 10)
+                open_stream(cur_time)
+                is_eof = false
+                update_dynamic_header(current_fps)
+            elseif k == "CTRL_LEFT" then
+                cur_time = math.max(0, cur_time - 10)
                 open_stream(cur_time)
                 is_eof = false
                 update_dynamic_header(current_fps)
@@ -3785,7 +3833,10 @@ local function render_help_modal(term_w, term_h, active_protocol)
         "│                                                             │",
         "│  Video Playback (mpv shortcuts):                            │",
         "│    Space / p           Play / Pause playback                │",
-        "│    ← / →, ↓ / ↑        Seek ±5s / ±60s                      │",
+        "│    ← / →               Seek ±5s                             │",
+        "│    Shift+← / Shift+→   Seek ±1s (exact)                     │",
+        "│    Ctrl+← / Ctrl+→     Seek ±10s                            │",
+        "│    ↓ / ↑               Seek ±60s                             │",
         "│    0 - 9               Seek to 0% - 90% of duration         │",
         "│    [ / ]               Speed -10% / +10% (Backspace: 1.0x)  │",
         "│    { / }               Halve / Double playback speed        │",
