@@ -125,11 +125,23 @@ local tests = {
     {
         name = "Video format support listed in --help",
         cmd = luajit .. " pix.lua --help",
-        expect = "Videos: MP4, MKV, WEBM, AVI, MOV, M4V, FLV (via ffmpeg)"
+        expect = "Videos: MP4, MKV, WEBM, AVI, MOV, M4V, FLV (via libavcodec FFI or ffmpeg)"
+    },
+    {
+        name = "Video engine status listed in --help",
+        cmd = luajit .. " pix.lua --help",
+        expect = "Video Engine:"
     },
     {
         name = "Direct video thumbnail decode via --select 1",
         cmd = luajit .. " pix.lua " .. video_test_file .. " --select 1",
+        expect = "IMAGE VIEWER [1/1]"
+    },
+    {
+        name = "LuaJIT FFI video decode without ffmpeg CLI in PATH",
+        cmd = (package.config:sub(1,1) == '\\')
+            and (luajit .. " pix.lua " .. video_test_file .. " --select 1")
+            or ("PATH=/usr/local/sbin:/tmp " .. luajit .. " pix.lua " .. video_test_file .. " --select 1"),
         expect = "IMAGE VIEWER [1/1]"
     },
     {

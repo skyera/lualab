@@ -1545,6 +1545,325 @@ local function decode_gdiplus_ffi(filepath)
     return nil, tostring(res or "GDI+ decode error")
 end
 
+-- =========================================================================
+-- 4c. Native Video Decoding via LuaJIT FFI (libavformat, libavcodec, libswscale)
+-- =========================================================================
+local function format_video_time(sec)
+    sec = math.max(0, math.floor(sec or 0))
+    local m = math.floor(sec / 60)
+    local s = sec % 60
+    local h = math.floor(m / 60)
+    m = m % 60
+    if h > 0 then
+        return string.format("%02d:%02d:%02d", h, m, s)
+    else
+        return string.format("%02d:%02d", m, s)
+    end
+end
+
+local lib_avformat = nil
+local lib_avcodec = nil
+local lib_swscale = nil
+local lib_avutil = nil
+local av_ffi_initialized = false
+
+local function init_av_ffi()
+    if av_ffi_initialized then
+        return (lib_avformat and lib_avcodec and lib_swscale) ~= nil
+    end
+    av_ffi_initialized = true
+
+    pcall(function()
+        ffi.cdef[[
+            typedef struct AVRational { int num; int den; } AVRational;
+            typedef struct AVCodecParameters {
+                int codec_type;
+                int codec_id;
+                uint32_t codec_tag;
+                uint8_t *extradata;
+                int extradata_size;
+                int format;
+                int64_t bit_rate;
+                int bits_per_coded_sample;
+                int bits_per_raw_sample;
+                int profile;
+                int level;
+                int width;
+                int height;
+            } AVCodecParameters;
+
+            typedef struct AVStream {
+                const void *av_class;
+                int index;
+                int id;
+                AVCodecParameters *codecpar;
+                void *priv_data;
+                AVRational time_base;
+                int64_t start_time;
+                int64_t duration;
+                int64_t nb_frames;
+                int disposition;
+                int discard;
+                AVRational sample_aspect_ratio;
+                void *metadata;
+                AVRational avg_frame_rate;
+                AVRational r_frame_rate;
+            } AVStream;
+
+            typedef struct AVFormatContext {
+                void *av_class;
+                void *iformat;
+                void *oformat;
+                void *priv_data;
+                void *pb;
+                int ctx_flags;
+                unsigned int nb_streams;
+                AVStream **streams;
+                char *url;
+                int64_t start_time;
+                int64_t duration;
+                int64_t bit_rate;
+            } AVFormatContext;
+
+            typedef struct AVCodec AVCodec;
+            typedef struct AVCodecContext AVCodecContext;
+            typedef struct AVFrame {
+                uint8_t *data[8];
+                int linesize[8];
+                uint8_t **extended_data;
+                int width, height;
+                int nb_samples;
+                int format;
+                int64_t pts;
+                int64_t pkt_dts;
+            } AVFrame;
+            typedef struct AVPacket {
+                void *buf;
+                int64_t pts;
+                int64_t dts;
+                uint8_t *data;
+                int size;
+                int stream_index;
+            } AVPacket;
+
+            int avformat_open_input(AVFormatContext **ps, const char *url, void *fmt, void *options);
+            void avformat_close_input(AVFormatContext **s);
+            int avformat_find_stream_info(AVFormatContext *ic, void *options);
+            int av_read_frame(AVFormatContext *s, AVPacket *pkt);
+            int av_seek_frame(AVFormatContext *s, int stream_index, int64_t timestamp, int flags);
+            int av_find_best_stream(AVFormatContext *ic, int type, int wanted_stream_nb, int related_stream, const AVCodec **decoder_ret, int flags);
+
+            AVCodec *avcodec_find_decoder(int id);
+            AVCodecContext *avcodec_alloc_context3(const AVCodec *codec);
+            int avcodec_parameters_to_context(AVCodecContext *codec, const AVCodecParameters *par);
+            int avcodec_open2(AVCodecContext *avctx, const AVCodec *codec, void *options);
+            void avcodec_free_context(AVCodecContext **avctx);
+            void avcodec_flush_buffers(AVCodecContext *avctx);
+            int avcodec_send_packet(AVCodecContext *avctx, const AVPacket *avpkt);
+            int avcodec_receive_frame(AVCodecContext *avctx, AVFrame *frame);
+
+            AVFrame *av_frame_alloc(void);
+            void av_frame_free(AVFrame **frame);
+            AVPacket *av_packet_alloc(void);
+            void av_packet_free(AVPacket **pkt);
+            void av_packet_unref(AVPacket *pkt);
+
+            typedef struct SwsContext SwsContext;
+            SwsContext *sws_getContext(int srcW, int srcH, int srcFormat,
+                                       int dstW, int dstH, int dstFormat,
+                                       int flags, void *srcFilter, void *dstFilter, const double *param);
+            void sws_freeContext(SwsContext *swsContext);
+            int sws_scale(SwsContext *c, const uint8_t *const *srcSlice,
+                          const int *srcStride, int srcSliceY, int srcSliceH,
+                          uint8_t *const *dst, const int *dstStride);
+        ]]
+    end)
+
+    lib_avformat = load_first_lib({
+        "avformat", "libavformat.so.61", "libavformat.so.60", "libavformat.so.59", "libavformat.so.58",
+        "avformat-61", "avformat-60", "avformat-59", "avformat-58", "libavformat"
+    })
+    lib_avcodec = load_first_lib({
+        "avcodec", "libavcodec.so.61", "libavcodec.so.60", "libavcodec.so.59", "libavcodec.so.58",
+        "avcodec-61", "avcodec-60", "avcodec-59", "avcodec-58", "libavcodec"
+    })
+    lib_swscale = load_first_lib({
+        "swscale", "libswscale.so.8", "libswscale.so.7", "libswscale.so.6", "libswscale.so.5",
+        "swscale-8", "swscale-7", "swscale-6", "swscale-5", "libswscale"
+    })
+    lib_avutil = load_first_lib({
+        "avutil", "libavutil.so.59", "libavutil.so.58", "libavutil.so.57", "libavutil.so.56",
+        "avutil-59", "avutil-58", "avutil-57", "avutil-56", "libavutil"
+    })
+
+    return (lib_avformat and lib_avcodec and lib_swscale) ~= nil
+end
+
+local function has_ffi_video()
+    return init_av_ffi()
+end
+
+local function get_video_info(filepath)
+    if has_ffi_video() then
+        local ps = ffi.new("AVFormatContext*[1]")
+        if lib_avformat.avformat_open_input(ps, filepath, nil, nil) == 0 then
+            local fmt = ps[0]
+            if lib_avformat.avformat_find_stream_info(fmt, nil) == 0 then
+                local total_sec = (fmt.duration > 0) and (tonumber(fmt.duration) / 1000000.0) or 0
+                local width, height, fps = 0, 0, 25
+                local dec = ffi.new("const AVCodec*[1]")
+                local v_idx = lib_avformat.av_find_best_stream(fmt, 0, -1, -1, dec, 0)
+                if v_idx >= 0 then
+                    local st = fmt.streams[v_idx]
+                    width = st.codecpar.width
+                    height = st.codecpar.height
+                    if st.avg_frame_rate and st.avg_frame_rate.den > 0 and st.avg_frame_rate.num > 0 then
+                        fps = st.avg_frame_rate.num / st.avg_frame_rate.den
+                    elseif st.r_frame_rate and st.r_frame_rate.den > 0 and st.r_frame_rate.num > 0 then
+                        fps = st.r_frame_rate.num / st.r_frame_rate.den
+                    end
+                end
+                lib_avformat.avformat_close_input(ps)
+                return {
+                    duration = total_sec,
+                    duration_str = format_video_time(total_sec),
+                    width = width,
+                    height = height,
+                    fps = (fps > 0 and fps <= 120) and fps or 25,
+                }
+            end
+            lib_avformat.avformat_close_input(ps)
+        end
+    end
+
+    -- Fallback to CLI ffmpeg
+    local devnull = is_windows and "2>nul" or "2>/dev/null"
+    local p = io.popen(string.format('ffmpeg -i %q 2>&1', filepath))
+    if not p then
+        return { duration = 0, duration_str = "00:00", width = 0, height = 0, fps = 25 }
+    end
+    local info = p:read("*a") or ""
+    p:close()
+
+    local dur_str = info:match("Duration:%s*(%d+:%d+:[%d%.]+)")
+    local total_sec = 0
+    if dur_str then
+        local h, m, s = dur_str:match("(%d+):(%d+):([%d%.]+)")
+        if h and m and s then
+            total_sec = tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(s)
+        end
+    end
+
+    local w, h = info:match("Video:.-%s(%d+)x(%d+)")
+    local fps = info:match("([%d%.]+)%s*fps") or info:match("([%d%.]+)%s*tbr") or 25
+
+    return {
+        duration = total_sec,
+        duration_str = dur_str and dur_str:match("(%d+:%d+:%d+)") or "00:00",
+        width = tonumber(w) or 0,
+        height = tonumber(h) or 0,
+        fps = tonumber(fps) or 25,
+    }
+end
+
+local function create_video_reader(filepath, out_w, out_h)
+    if not has_ffi_video() then return nil end
+    local ps = ffi.new("AVFormatContext*[1]")
+    if lib_avformat.avformat_open_input(ps, filepath, nil, nil) ~= 0 then return nil end
+    local fmt = ps[0]
+    if lib_avformat.avformat_find_stream_info(fmt, nil) ~= 0 then
+        lib_avformat.avformat_close_input(ps)
+        return nil
+    end
+
+    local dec = ffi.new("const AVCodec*[1]")
+    local v_idx = lib_avformat.av_find_best_stream(fmt, 0, -1, -1, dec, 0)
+    if v_idx < 0 or dec[0] == nil then
+        lib_avformat.avformat_close_input(ps)
+        return nil
+    end
+
+    local stream = fmt.streams[v_idx]
+    local codec_ctx = lib_avcodec.avcodec_alloc_context3(dec[0])
+    if not codec_ctx or lib_avcodec.avcodec_parameters_to_context(codec_ctx, stream.codecpar) ~= 0 then
+        if codec_ctx then lib_avcodec.avcodec_free_context(ffi.new("AVCodecContext*[1]", { codec_ctx })) end
+        lib_avformat.avformat_close_input(ps)
+        return nil
+    end
+
+    if lib_avcodec.avcodec_open2(codec_ctx, dec[0], nil) ~= 0 then
+        lib_avcodec.avcodec_free_context(ffi.new("AVCodecContext*[1]", { codec_ctx }))
+        lib_avformat.avformat_close_input(ps)
+        return nil
+    end
+
+    local pkt = lib_avcodec.av_packet_alloc()
+    local frame = lib_avcodec.av_frame_alloc()
+    local sws = nil
+    local rgb_buf = ffi.new("uint8_t[?]", out_w * out_h * 3 + 64)
+    local dst_data = ffi.new("uint8_t*[4]", { rgb_buf, nil, nil, nil })
+    local dst_linesize = ffi.new("int[4]", { out_w * 3, 0, 0, 0 })
+    local is_flushing = false
+
+    local reader = {
+        width = stream.codecpar.width,
+        height = stream.codecpar.height,
+        time_base_num = stream.time_base.num,
+        time_base_den = stream.time_base.den,
+    }
+
+    function reader:read_frame()
+        while true do
+            local ret = lib_avcodec.avcodec_receive_frame(codec_ctx, frame)
+            if ret == 0 then
+                if not sws then
+                    sws = lib_swscale.sws_getContext(frame.width, frame.height, frame.format,
+                                                     out_w, out_h, 2, 2, nil, nil, nil)
+                end
+                local src_data = ffi.cast("const uint8_t *const *", frame.data)
+                lib_swscale.sws_scale(sws, src_data, frame.linesize, 0, frame.height, dst_data, dst_linesize)
+                local pts_sec = 0
+                if frame.pts >= 0 and reader.time_base_den > 0 then
+                    pts_sec = tonumber(frame.pts) * (reader.time_base_num / reader.time_base_den)
+                end
+                return ffi.string(rgb_buf, out_w * out_h * 3), pts_sec
+            end
+            if lib_avformat.av_read_frame(fmt, pkt) ~= 0 then
+                if not is_flushing then
+                    is_flushing = true
+                    lib_avcodec.avcodec_send_packet(codec_ctx, nil)
+                else
+                    return nil
+                end
+            else
+                if pkt.stream_index == v_idx then
+                    lib_avcodec.avcodec_send_packet(codec_ctx, pkt)
+                end
+                lib_avcodec.av_packet_unref(pkt)
+            end
+        end
+    end
+
+    function reader:seek(sec)
+        if reader.time_base_den > 0 and reader.time_base_num > 0 then
+            local target_ts = math.floor(sec / (reader.time_base_num / reader.time_base_den))
+            lib_avformat.av_seek_frame(fmt, v_idx, target_ts, 1)
+            lib_avcodec.avcodec_flush_buffers(codec_ctx)
+            is_flushing = false
+        end
+    end
+
+    function reader:close()
+        if sws then lib_swscale.sws_freeContext(sws); sws = nil end
+        if frame then lib_avcodec.av_frame_free(ffi.new("AVFrame*[1]", { frame })) end
+        if pkt then lib_avcodec.av_packet_free(ffi.new("AVPacket*[1]", { pkt })) end
+        if codec_ctx then lib_avcodec.avcodec_free_context(ffi.new("AVCodecContext*[1]", { codec_ctx })) end
+        if ps[0] ~= nil then lib_avformat.avformat_close_input(ps) end
+    end
+
+    return reader
+end
+
 local image_cache = {}
 local image_cache_order = {}
 local MAX_IMAGE_CACHE = 8
@@ -1599,8 +1918,29 @@ local function load_image_uncached(filepath)
         if img then return img end
     end
 
-    -- Video thumbnail extraction via ffmpeg
+    -- Video thumbnail extraction via LuaJIT FFI (libavcodec) or ffmpeg CLI
     if is_video_file(filepath) then
+        if has_ffi_video() then
+            local v_info = get_video_info(filepath)
+            local tw = (v_info and v_info.width > 0) and v_info.width or 640
+            local th = (v_info and v_info.height > 0) and v_info.height or 480
+            local r = create_video_reader(filepath, tw, th)
+            if r then
+                local raw, _ = r:read_frame()
+                r:close()
+                if raw then
+                    local pixels = ffi.new("PixelRGB[?]", tw * th)
+                    ffi.copy(pixels, raw, tw * th * 3)
+                    return {
+                        width = tw,
+                        height = th,
+                        pixels = pixels,
+                        engine = "LuaJIT FFI (libavcodec)",
+                    }
+                end
+            end
+        end
+
         local devnull = is_windows and "2>nul" or "2>/dev/null"
         local cmd = string.format("ffmpeg -nostdin -loglevel quiet -i %q -vframes 1 -f image2pipe -vcodec ppm - %s", filepath, devnull)
         local pipe = io.popen(cmd, "rb")
@@ -3007,51 +3347,8 @@ local function render_image_screen(img_entry, current_idx, total_count, protocol
 end
 
 -- =========================================================================
--- 5j. Video Player Engine (FFmpeg Stream Pipeline)
+-- 5j. Video Player Engine (LuaJIT FFI In-Memory & FFmpeg Stream Pipeline)
 -- =========================================================================
-local function get_video_info(filepath)
-    local devnull = is_windows and "2>nul" or "2>/dev/null"
-    local p = io.popen(string.format('ffmpeg -i %q 2>&1', filepath))
-    if not p then
-        return { duration = 0, duration_str = "00:00", width = 0, height = 0, fps = 25 }
-    end
-    local info = p:read("*a") or ""
-    p:close()
-
-    local dur_str = info:match("Duration:%s*(%d+:%d+:[%d%.]+)")
-    local total_sec = 0
-    if dur_str then
-        local h, m, s = dur_str:match("(%d+):(%d+):([%d%.]+)")
-        if h and m and s then
-            total_sec = tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(s)
-        end
-    end
-
-    local w, h = info:match("Video:.-%s(%d+)x(%d+)")
-    local fps = info:match("([%d%.]+)%s*fps") or info:match("([%d%.]+)%s*tbr") or 25
-
-    return {
-        duration = total_sec,
-        duration_str = dur_str and dur_str:match("(%d+:%d+:%d+)") or "00:00",
-        width = tonumber(w) or 0,
-        height = tonumber(h) or 0,
-        fps = tonumber(fps) or 25,
-    }
-end
-
-local function format_video_time(sec)
-    sec = math.max(0, math.floor(sec or 0))
-    local m = math.floor(sec / 60)
-    local s = sec % 60
-    local h = math.floor(m / 60)
-    m = m % 60
-    if h > 0 then
-        return string.format("%02d:%02d:%02d", h, m, s)
-    else
-        return string.format("%02d:%02d", m, s)
-    end
-end
-
 local function render_video_progress_bar(cur_sec, total_sec, bar_w)
     bar_w = math.max(10, bar_w or 30)
     local frac = (total_sec > 0) and math.min(1.0, math.max(0.0, cur_sec / total_sec)) or 0
@@ -3116,11 +3413,13 @@ local function render_video_frame_halfblock(raw_bytes, frame_w, frame_h, pad, ro
 end
 
 local function play_video_screen(img_entry, current_idx, total_count, protocol)
-    if not get_has_ffmpeg() then
+    local use_ffi = has_ffi_video()
+    if not use_ffi and not get_has_ffmpeg() then
         io.write("\27[H\27[2J")
-        io.write("\n  \27[1;31m⚠ FFmpeg Not Found\27[0m\n\n")
-        io.write("  Video playback requires \27[1;36mffmpeg\27[0m in your system PATH.\n")
-        io.write("  Install with: \27[93mwinget install Gyan.FFmpeg\27[0m or \27[93mchoco install ffmpeg\27[0m\n\n")
+        io.write("\n  \27[1;31m⚠ Video Player Dependencies Not Found\27[0m\n\n")
+        io.write("  Video playback requires \27[1;36mlibavcodec\27[0m FFI libraries\n")
+        io.write("  or \27[1;36mffmpeg\27[0m in your system PATH.\n")
+        io.write("  Install with: \27[93msudo apt install ffmpeg\27[0m or \27[93mwinget install Gyan.FFmpeg\27[0m\n\n")
         io.write("  \27[90mPress any key to return to gallery...\27[0m")
         io.flush()
         read_key()
@@ -3161,17 +3460,54 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
     local cur_time = 0
     local is_paused = false
     local is_eof = false
+    local stream_reader = nil
     local stream_proc = nil
 
+    local function close_stream()
+        if stream_reader then
+            stream_reader:close()
+            stream_reader = nil
+        end
+        if stream_proc then
+            pcall(function() stream_proc:close() end)
+            stream_proc = nil
+        end
+    end
+
     local function open_stream(seek_sec)
-        if stream_proc then pcall(function() stream_proc:close() end) end
+        close_stream()
         seek_sec = math.max(0, seek_sec or 0)
-        local ss_part = (seek_sec > 0) and string.format("-ss %.2f", seek_sec) or ""
-        local cmd = string.format('ffmpeg -nostdin -loglevel quiet %s -i %q -vf "scale=%d:%d:flags=fast_bilinear" -f rawvideo -pix_fmt rgb24 -',
-            ss_part, img_entry.filepath, frame_w, frame_h)
-        stream_proc = io.popen(cmd, "rb")
         cur_time = seek_sec
         is_eof = false
+
+        if use_ffi then
+            stream_reader = create_video_reader(img_entry.filepath, frame_w, frame_h)
+            if stream_reader and seek_sec > 0 then
+                stream_reader:seek(seek_sec)
+            end
+        else
+            local ss_part = (seek_sec > 0) and string.format("-ss %.2f", seek_sec) or ""
+            local cmd = string.format('ffmpeg -nostdin -loglevel quiet %s -i %q -vf "scale=%d:%d:flags=fast_bilinear" -f rawvideo -pix_fmt rgb24 -',
+                ss_part, img_entry.filepath, frame_w, frame_h)
+            stream_proc = io.popen(cmd, "rb")
+        end
+    end
+
+    local function read_next_frame()
+        if use_ffi then
+            if not stream_reader then return nil end
+            local raw, pts = stream_reader:read_frame()
+            if raw and pts > 0 then cur_time = pts end
+            return raw
+        else
+            if not stream_proc then return nil end
+            local raw = stream_proc:read(frame_bytes)
+            if raw and #raw >= frame_bytes then
+                cur_time = cur_time + target_dt
+                return raw
+            end
+            return nil
+        end
     end
 
     local cur_e, total_e = get_engine_position(protocol)
@@ -3204,7 +3540,8 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
         local pbar = render_video_progress_bar(cur_time, v_info.duration, pbar_w)
         local time_str = string.format("%s / %s", format_video_time(cur_time), format_video_time(v_info.duration))
         local fps_str = measured_fps and string.format(" \27[90m(%.1f fps)\27[0m", measured_fps) or ""
-        local eng_str = string.format(" \27[90m| [%d/%d] %s\27[0m", cur_e or 1, total_e or 1, protocol)
+        local eng_name = use_ffi and "LuaJIT FFI (libavcodec)" or "FFmpeg CLI"
+        local eng_str = string.format(" \27[90m| [%d/%d] %s (%s)\27[0m", cur_e or 1, total_e or 1, protocol, eng_name)
 
         io.write(string.format("\27[3;1H  %s \27[1;37m%s\27[0m \27[90m[\27[1;36m%s\27[90m]\27[0m%s%s\27[K",
             status_tag, time_str, pbar, fps_str, eng_str))
@@ -3224,16 +3561,16 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
         local k = is_paused and read_key(80) or read_key(0)
         if k then
             if k == "q" or k == "ESC" or k == "CTRL_C" then
-                if stream_proc then pcall(function() stream_proc:close() end) end
+                close_stream()
                 return "quit", protocol
             elseif k == "ENTER" or k == "b" or k == "BACKSPACE" then
-                if stream_proc then pcall(function() stream_proc:close() end) end
+                close_stream()
                 return "back", protocol
             elseif k == "n" or k == "PAGE_DOWN" then
-                if stream_proc then pcall(function() stream_proc:close() end) end
+                close_stream()
                 return "next", protocol
             elseif k == "p" or k == "PAGE_UP" then
-                if stream_proc then pcall(function() stream_proc:close() end) end
+                close_stream()
                 return "prev", protocol
             elseif k == "SPACE" then
                 if is_eof then
@@ -3278,15 +3615,14 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
             end
         end
 
-        if not is_paused and stream_proc then
-            local raw_frame = stream_proc:read(frame_bytes)
+        if not is_paused and (stream_reader or stream_proc) then
+            local raw_frame = read_next_frame()
             if not raw_frame or #raw_frame < frame_bytes then
                 is_eof = true
                 is_paused = true
                 update_dynamic_header(current_fps)
             else
                 render_video_frame_halfblock(raw_frame, frame_w, frame_h, pad, 6)
-                cur_time = cur_time + target_dt
                 frames_rendered = frames_rendered + 1
 
                 local now = os.clock()
@@ -3612,9 +3948,17 @@ local function main()
         end
         print("  --half-block          Alias for --truecolor")
         print("  --quarter-block       Alias for --timg-quarter")
+        print("\nVideo Engine:")
+        if has_ffi_video() then
+            print("  Backend:              \27[32m[Available]\27[0m LuaJIT FFI (libavformat, libavcodec, libswscale)")
+        elseif get_has_ffmpeg() then
+            print("  Backend:              \27[32m[Available]\27[0m FFmpeg CLI pipeline")
+        else
+            print("  Backend:              \27[90m[Not Detected]\27[0m Neither libavcodec FFI nor ffmpeg found")
+        end
         print("\nSupported formats:")
         print("  - Images: PNG, JPG/JPEG, PPM, WEBP, GIF, BMP")
-        print("  - Videos: MP4, MKV, WEBM, AVI, MOV, M4V, FLV (via ffmpeg)")
+        print("  - Videos: MP4, MKV, WEBM, AVI, MOV, M4V, FLV (via libavcodec FFI or ffmpeg)")
         os.exit(0)
     end
 
