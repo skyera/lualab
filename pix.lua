@@ -23,7 +23,8 @@
        - ANSI Truecolor Half-Block: Clean fallback using 24-bit ANSI '▄' (2 vertical pixels per cell).
        - Auto-detects terminal width & height via POSIX ioctl(TIOCGWINSZ) and scales image to fit cleanly.
        - Command-line overrides: --kitty (force Kitty protocol), --iterm, --half-block (force ANSI half-block).
-       - In view mode: allows browsing previous/next images with ← / → / [P] / [N] or returning to menu with [Enter] / [B].
+       - In view mode: allows browsing previous/next images with ← / → / [P] / [N] or returning to menu with [Enter] / [B] / [q] / [Esc].
+       - [Q] (or [Ctrl+C]) quits pix; [q] backs out of a viewer to the file list, keeping the selection.
     4. Video Playback Engines:
        - Cycle play engines with [m] inside the video player: LuaJIT FFI (libavcodec) -> FFmpeg CLI -> mpv.
        - FFI and FFmpeg CLI decode in-process inside the TUI (seek, speed, loop, frame step, playlist).
@@ -3731,7 +3732,7 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
             get_play_engine_name(video_play_engine), pe_idx, pe_total))
         table.insert(out, "\n")
         local play_engine_hint = string.format("  \27[1;96m[m]\27[0m Engine (%d)", #get_available_play_engines())
-        table.insert(out, string.format("  \27[93m[Space/p]\27[0m Pause  \27[93m[←/→]\27[0m ±5s  \27[93m[↑/↓]\27[0m ±60s  \27[93m[0-9]\27[0m %%  \27[93m[[/]]\27[0m Spd  \27[93m[.]\27[0m Step  \27[93m[l]\27[0m Loop  \27[93m[</>]\27[0m File%s  \27[91m[q]\27[0m Quit\27[K\n", play_engine_hint))
+        table.insert(out, string.format("  \27[93m[Space/p]\27[0m Pause  \27[93m[←/→]\27[0m ±5s  \27[93m[↑/↓]\27[0m ±60s  \27[93m[0-9]\27[0m %%  \27[93m[[/]]\27[0m Spd  \27[93m[.]\27[0m Step  \27[93m[l]\27[0m Loop  \27[93m[</>]\27[0m File%s  \27[91m[q]\27[0m Back\27[K\n", play_engine_hint))
         table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\27[K\n")
         io.write(table.concat(out))
         io.flush()
@@ -3774,10 +3775,11 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
     while true do
         local k = is_paused and read_key(80) or read_key(0)
         if k then
-            if k == "q" or k == "Q" or k == "CTRL_C" then
+            if k == "Q" or k == "CTRL_C" then
                 close_stream()
                 return "quit", protocol
-            elseif k == "ESC" or k == "b" then
+            elseif k == "q" or k == "ESC" or k == "b" then
+                -- q backs out to the file list (like b/Esc); Q / Ctrl+C quit pix
                 close_stream()
                 return "back", protocol
             elseif k == ">" or k == "ENTER" or k == "PAGE_DOWN" or k == "n" then
@@ -4028,7 +4030,7 @@ local function render_help_modal(term_w, term_h, active_protocol)
         "│    h / k / ← / p       Previous image                       │",
         "│    g / G               Jump to first / last image           │",
         cycle_line,
-        "│    Enter / b / Backsp  Return to file/folder list           │",
+        "│    q / Esc / b         Return to file/folder list           │",
         "│                                                             │",
         "│  Video Playback (engine & mpv shortcuts):                   │",
         "│    Space / p           Play / Pause playback                │",
@@ -4045,6 +4047,7 @@ local function render_help_modal(term_w, term_h, active_protocol)
         "│    Home / r, End       Restart from start / Seek to end     │",
         "│    o                   Toggle OSD / header visibility       │",
         "│    m                   Cycle play engine (FFI/FFmpeg/mpv)   │",
+        "│    q / b / Esc         Return to the file list              │",
         "│                                                             │",
         "│  Search & Sorting:                                          │",
         "│    /                   Start live search / filter query     │",
@@ -4061,7 +4064,7 @@ local function render_help_modal(term_w, term_h, active_protocol)
         "│                                                             │",
         "│  General:                                                   │",
         "│    ?                   Toggle this help window              │",
-        "│    q / Ctrl+C          Quit application cleanly             │",
+        "│    q / Q / Ctrl+C      Quit pix from the file list          │",
         "└─────────────────────────────────────────────────────────────┘",
         "                 Press any key to close help                   ",
     }
@@ -4612,9 +4615,10 @@ local function main()
                         current_msg = "Failed to load image: " .. tostring(view_err)
                     else
                         local k = read_key()
-                        if k == "q" or k == "ESC" or k == "CTRL_C" then
+                        if k == "Q" or k == "CTRL_C" then
                             break
-                        elseif k == "ENTER" or k == "b" or k == "BACKSPACE" then
+                        elseif k == "q" or k == "ESC" or k == "ENTER" or k == "b" or k == "BACKSPACE" then
+                            -- q / Esc return to the file list (Q / Ctrl+C still quit pix)
                             kitty_clear_screen()
                             in_viewer = false
                         elseif k == "RIGHT" or k == "n" or k == "SPACE" or k == "PAGE_DOWN" or k == "l" or k == "j" or k == "CTRL_D" or k == "CTRL_F" then

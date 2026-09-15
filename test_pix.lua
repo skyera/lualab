@@ -217,6 +217,11 @@ local tests = {
         expect = "OK_HIDDEN_TOGGLE"
     },
     {
+        name = "[q] backs out of player/viewer to the file list, [Q]/Ctrl+C quits",
+        cmd = luajit .. [==[ -e 'local s = io.open("pix.lua"):read("*a"); assert(s:find([[if k == "Q" or k == "CTRL_C" then]], 1, true)); assert(s:find([[elseif k == "q" or k == "ESC" or k == "b" then]], 1, true)); assert(s:find([[elseif k == "q" or k == "ESC" or k == "ENTER" or k == "b" or k == "BACKSPACE" then]], 1, true)); assert(s:find([[\27[91m[q]\27[0m Back]], 1, true)); assert(s:find("Return to the file list", 1, true)); print("OK_Q_BACK")' ]==],
+        expect = "OK_Q_BACK"
+    },
+    {
         name = "FFmpeg CLI play engine listed in --help",
         cmd = luajit .. " pix.lua --help",
         expect = "--play-engine ffmpeg"
