@@ -23,6 +23,11 @@
        - Auto-detects terminal width & height via POSIX ioctl(TIOCGWINSZ) and scales image to fit cleanly.
        - Command-line overrides: --kitty (force Kitty protocol), --iterm, --half-block (force ANSI half-block).
        - In view mode: allows browsing previous/next images with ← / → / [P] / [N] or returning to menu with [Enter] / [B].
+    4. Video Playback Engines:
+       - Cycle play engines with [m] inside the video player: LuaJIT FFI (libavcodec) -> FFmpeg CLI -> mpv.
+       - FFI and FFmpeg CLI decode in-process inside the TUI (seek, speed, loop, frame step, playlist).
+       - mpv (--vo=tct) is a hand-off engine with real audio; playback resumes in the TUI when it exits.
+       - Default engine is the first available inline engine; override with --play-engine <auto|ffi|ffmpeg|mpv>.
 ]]
 
 local ffi = require("ffi")
@@ -32,6 +37,10 @@ local posix_stat
 -- 1. C Declarations for Windows / POSIX, Terminal Window, Input, & Directory
 -- =========================================================================
 local is_windows = (ffi.os == "Windows")
+
+-- POSIX popen() only accepts exactly "r" or "w" (glibc >= 2.34 rejects "rb" with EINVAL),
+-- while Windows _popen needs the binary flag to avoid text-mode translation.
+local POPEN_READ_BIN = is_windows and "rb" or "r"
 
 ffi.cdef[[
     typedef struct { uint8_t r, g, b; } PixelRGB;
@@ -1962,7 +1971,7 @@ local function load_image_uncached(filepath)
 
         local devnull = is_windows and "2>nul" or "2>/dev/null"
         local cmd = string.format("ffmpeg -nostdin -loglevel quiet -i %q -vframes 1 -f image2pipe -vcodec ppm - %s", filepath, devnull)
-        local pipe = io.popen(cmd, "rb")
+        local pipe = io.popen(cmd, POPEN_READ_BIN)
         if pipe then
             local img = parse_ppm_stream(pipe)
             pipe:close()
@@ -2708,7 +2717,16 @@ end
 
 local has_ffmpeg = nil
 local function get_has_ffmpeg()
-    if has_ffmpeg == nil then has_ffmpeg = is_cmd_available("ffmpeg") end
+    if has_ffmpeg == nil then
+        -- ffmpeg uses the single-dash `-version` form; `--version` exits non-zero on some builds,
+        -- which made the ffmpeg CLI engine look missing even when it was installed.
+        local devnull = is_windows and "nul" or "/dev/null"
+        local ret = os.execute("ffmpeg -version >" .. devnull .. " 2>&1")
+        if not (ret == 0 or ret == true) then
+            ret = os.execute("ffmpeg --version >" .. devnull .. " 2>&1")
+        end
+        has_ffmpeg = (ret == 0 or ret == true)
+    end
     return has_ffmpeg
 end
 
@@ -3437,8 +3455,67 @@ local function render_video_frame_halfblock(raw_bytes, frame_w, frame_h, pad, ro
     io.flush()
 end
 
--- Video play engine state: "mpv" (preferred if available) or "builtin"
-local video_play_engine = get_has_mpv() and "mpv" or "builtin"
+-- Video play engines, in cycle order. [m] in the video player walks the detected ones.
+--   ffi    : in-process LuaJIT FFI decode (libavformat / libavcodec / libswscale)
+--   ffmpeg : external ffmpeg CLI raw-frame (rgb24) pipeline
+--   mpv    : hand-off to mpv's own terminal player (separate process, real audio)
+local VIDEO_PLAY_ENGINES = {
+    { id = "ffi",    name = "LuaJIT FFI (libavcodec)",         is_available = function() return has_ffi_video() end },
+    { id = "ffmpeg", name = "FFmpeg CLI (rgb24 pipe)",         is_available = function() return get_has_ffmpeg() end },
+    { id = "mpv",    name = "mpv --vo=tct (hand-off, audio)",  is_available = function() return get_has_mpv() end },
+}
+
+local function get_available_play_engines()
+    local available = {}
+    for _, eng in ipairs(VIDEO_PLAY_ENGINES) do
+        if eng.is_available() then
+            table.insert(available, eng)
+        end
+    end
+    return available
+end
+
+local function get_play_engine_name(engine_id)
+    for _, eng in ipairs(VIDEO_PLAY_ENGINES) do
+        if eng.id == engine_id then return eng.name end
+    end
+    return "Unknown engine"
+end
+
+local function get_play_engine_position(engine_id)
+    local available = get_available_play_engines()
+    for idx, eng in ipairs(available) do
+        if eng.id == engine_id then
+            return idx, #available
+        end
+    end
+    return 1, #available
+end
+
+local function cycle_play_engine(engine_id)
+    local available = get_available_play_engines()
+    if #available == 0 then return engine_id end
+    for idx, eng in ipairs(available) do
+        if eng.id == engine_id then
+            return available[(idx % #available) + 1].id
+        end
+    end
+    return available[1].id
+end
+
+-- In-TUI engines: prefer native FFI decode, then the ffmpeg CLI pipe. nil when neither exists.
+local function resolve_inline_play_engine()
+    if has_ffi_video() then return "ffi" end
+    if get_has_ffmpeg() then return "ffmpeg" end
+    return nil
+end
+
+-- Default: first inline engine so [m] cycling is usable right away; mpv only when it is all we have.
+local function default_play_engine()
+    return resolve_inline_play_engine() or "mpv"
+end
+
+local video_play_engine = default_play_engine()
 
 local function launch_mpv_tct(filepath, seek_sec)
     io.write("\27[?25h\27[0m") -- show cursor, reset attrs
@@ -3465,14 +3542,17 @@ local function launch_mpv_tct(filepath, seek_sec)
 end
 
 local function play_video_screen(img_entry, current_idx, total_count, protocol)
-    -- If mpv engine selected and available, launch mpv directly
+    local inline_engine = resolve_inline_play_engine()
+
+    -- mpv is a hand-off engine: it owns the terminal while running, then we return to the list.
     if video_play_engine == "mpv" and get_has_mpv() then
         launch_mpv_tct(img_entry.filepath, 0)
+        video_play_engine = inline_engine or "mpv"
         return "back", protocol
     end
 
-    local use_ffi = has_ffi_video()
-    if not use_ffi and not get_has_ffmpeg() then
+    local use_ffi = (video_play_engine == "ffi")
+    if not inline_engine then
         io.write("\27[H\27[2J")
         io.write("\n  \27[1;31m⚠ Video Player Dependencies Not Found\27[0m\n\n")
         io.write("  Video playback requires \27[1;36mmpv\27[0m, \27[1;36mlibavcodec\27[0m FFI libraries,\n")
@@ -3553,7 +3633,7 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
             local ss_part = (seek_sec > 0) and string.format("-ss %.2f", seek_sec) or ""
             local cmd = string.format('ffmpeg -nostdin -loglevel quiet %s -i %q -vf "scale=%d:%d:flags=fast_bilinear" -f rawvideo -pix_fmt rgb24 -',
                 ss_part, img_entry.filepath, frame_w, frame_h)
-            stream_proc = io.popen(cmd, "rb")
+            stream_proc = io.popen(cmd, POPEN_READ_BIN)
         end
     end
 
@@ -3588,11 +3668,13 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
         local out = {}
         table.insert(out, "\27[1;34m" .. string.rep("═", bar_len) .. "\27[0m\n")
         local dim_str = (v_info.width > 0) and string.format("%dx%d, %.1ffps", v_info.width, v_info.height, fps) or string.format("%.1ffps", fps)
-        table.insert(out, string.format("  \27[1;37mVIDEO PLAYER\27[0m \27[1;36m[%d/%d]\27[0m: \27[1;93m%s\27[0m \27[90m(%s, %s)\27[0m\27[K\n",
-            current_idx, total_count, img_entry.filename, dim_str, img_entry.size_str))
+        local pe_idx, pe_total = get_play_engine_position(video_play_engine)
+        table.insert(out, string.format("  \27[1;37mVIDEO PLAYER\27[0m \27[1;36m[%d/%d]\27[0m: \27[1;93m%s\27[0m \27[90m(%s, %s)\27[0m  \27[90m│\27[0m \27[1;96mEngine: %s\27[0m \27[90m[%d/%d] [m] cycle\27[0m\27[K\n",
+            current_idx, total_count, img_entry.filename, dim_str, img_entry.size_str,
+            get_play_engine_name(video_play_engine), pe_idx, pe_total))
         table.insert(out, "\n")
-        local mpv_hint = get_has_mpv() and "  \27[93m[m]\27[0m mpv" or ""
-        table.insert(out, string.format("  \27[93m[Space/p]\27[0m Pause  \27[93m[←/→]\27[0m ±5s  \27[93m[↑/↓]\27[0m ±60s  \27[93m[0-9]\27[0m %%  \27[93m[[/]]\27[0m Spd  \27[93m[.]\27[0m Step  \27[93m[l]\27[0m Loop  \27[93m[</>]\27[0m File%s  \27[91m[q]\27[0m Quit\27[K\n", mpv_hint))
+        local play_engine_hint = string.format("  \27[1;96m[m]\27[0m Engine (%d)", #get_available_play_engines())
+        table.insert(out, string.format("  \27[93m[Space/p]\27[0m Pause  \27[93m[←/→]\27[0m ±5s  \27[93m[↑/↓]\27[0m ±60s  \27[93m[0-9]\27[0m %%  \27[93m[[/]]\27[0m Spd  \27[93m[.]\27[0m Step  \27[93m[l]\27[0m Loop  \27[93m[</>]\27[0m File%s  \27[91m[q]\27[0m Quit\27[K\n", play_engine_hint))
         table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\27[K\n")
         io.write(table.concat(out))
         io.flush()
@@ -3766,14 +3848,26 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
                 protocol = cycle_next_engine(protocol)
                 cur_e, total_e = get_engine_position(protocol)
                 update_dynamic_header(current_fps)
-            elseif (k == "m" or k == "M") and get_has_mpv() then
-                close_stream()
-                video_play_engine = "mpv"
-                launch_mpv_tct(img_entry.filepath, cur_time)
-                video_play_engine = "builtin"  -- return to built-in after mpv exits
-                draw_static_header()
-                update_dynamic_header(current_fps)
-                open_stream(cur_time)
+            elseif k == "m" or k == "M" then
+                local next_engine = cycle_play_engine(video_play_engine)
+                if next_engine ~= video_play_engine then
+                    if next_engine == "mpv" then
+                        -- Hand-off engine: mpv drives the terminal, then we resume in the ring.
+                        close_stream()
+                        video_play_engine = "mpv"
+                        draw_static_header()
+                        launch_mpv_tct(img_entry.filepath, cur_time)
+                        local resume_engine = cycle_play_engine("mpv")
+                        video_play_engine = (resume_engine == "mpv") and "mpv" or resume_engine
+                    else
+                        close_stream()
+                        video_play_engine = next_engine
+                    end
+                    use_ffi = (video_play_engine == "ffi")
+                    draw_static_header()
+                    update_dynamic_header(current_fps)
+                    open_stream(cur_time)
+                end
             elseif k == "?" then
                 local tw, th = get_terminal_size()
                 render_help_modal(tw, th, protocol)
@@ -3879,7 +3973,7 @@ local function render_help_modal(term_w, term_h, active_protocol)
         cycle_line,
         "│    Enter / b / Backsp  Return to file/folder list           │",
         "│                                                             │",
-        "│  Video Playback (mpv shortcuts):                            │",
+        "│  Video Playback (engine & mpv shortcuts):                   │",
         "│    Space / p           Play / Pause playback                │",
         "│    ← / →               Seek ±5s                             │",
         "│    Shift+← / Shift+→   Seek ±1s (exact)                     │",
@@ -3893,7 +3987,7 @@ local function render_help_modal(term_w, term_h, active_protocol)
         "│    < / >               Previous / Next video in playlist    │",
         "│    Home / r, End       Restart from start / Seek to end     │",
         "│    o                   Toggle OSD / header visibility       │",
-        "│    m                   Switch to mpv player (with audio)    │",
+        "│    m                   Cycle play engine (FFI/FFmpeg/mpv)   │",
         "│                                                             │",
         "│  Search & Sorting:                                          │",
         "│    /                   Start live search / filter query     │",
@@ -4105,6 +4199,9 @@ local function main()
         elseif a == "--sort" then
             i = i + 1
             args["--sort"] = arg[i]
+        elseif a == "--play-engine" or a == "--video-engine" then
+            i = i + 1
+            args["--play-engine"] = arg[i]
         elseif a:sub(1, 2) == "--" or a:sub(1, 1) == "-" then
             args[a] = true
         else
@@ -4122,6 +4219,7 @@ local function main()
         print("  -r, --recursive       Recursively scan subdirectories for images")
         print("  --select, -s <id>     Directly select and display image #id")
         print("  --sort <name|date|size> Initial sort order (default: name)")
+        print("  --play-engine <auto|ffi|ffmpeg|mpv> Video play engine (default: auto)")
         print("  --nerd-icons          Use Nerd Font glyphs instead of standard Unicode")
         print("  --no-icons            Disable file icons")
         print("  --no-interactive      Non-interactive script/batch mode")
@@ -4136,15 +4234,14 @@ local function main()
         print("  --half-block          Alias for --truecolor")
         print("  --quarter-block       Alias for --timg-quarter")
         print("\nVideo Engine:")
-        local mpv_status = get_has_mpv() and "\27[32m[Available]\27[0m" or "\27[90m[Not Detected]\27[0m"
-        print("  mpv --vo=tct:         " .. mpv_status .. " mpv terminal player (preferred, with audio)")
-        if has_ffi_video() then
-            print("  Fallback:             \27[32m[Available]\27[0m LuaJIT FFI (libavformat, libavcodec, libswscale)")
-        elseif get_has_ffmpeg() then
-            print("  Fallback:             \27[32m[Available]\27[0m FFmpeg CLI pipeline")
-        else
-            print("  Fallback:             \27[90m[Not Detected]\27[0m Neither libavcodec FFI nor ffmpeg found")
+        print("  Play engines (cycle in the player with [m]):")
+        for _, eng in ipairs(VIDEO_PLAY_ENGINES) do
+            local status = eng.is_available() and "\27[32m[Available]\27[0m" or "\27[90m[Not Detected]\27[0m"
+            print(string.format("  --play-engine %-7s %s %s", eng.id, status, eng.name))
         end
+        print(string.format("  Default (auto):       %s", get_play_engine_name(video_play_engine)))
+        local mpv_status = get_has_mpv() and "\27[32m[Available]\27[0m" or "\27[90m[Not Detected]\27[0m"
+        print("  mpv --vo=tct:         " .. mpv_status .. " mpv terminal player (hand-off, with audio)")
         print("\nSupported formats:")
         print("  - Images: PNG, JPG/JPEG, PPM, WEBP, GIF, BMP")
         print("  - Videos: MP4, MKV, WEBM, AVI, MOV, M4V, FLV (via mpv, libavcodec FFI, or ffmpeg)")
@@ -4179,6 +4276,25 @@ local function main()
         icon_mode = "none"
     elseif args["--nerd-icons"] or args["--nerd-icon"] or args["--nerd"] then
         icon_mode = "nerd"
+    end
+
+    -- Video play engine: auto (default) or an explicitly detected engine
+    if args["--play-engine"] then
+        local requested = tostring(args["--play-engine"]):lower()
+        if requested == "auto" then
+            video_play_engine = default_play_engine()
+        else
+            local detected = false
+            for _, eng in ipairs(get_available_play_engines()) do
+                if eng.id == requested then detected = true break end
+            end
+            if detected then
+                video_play_engine = requested
+            else
+                io.stderr:write(string.format("\27[1;33m[!] Video play engine '%s' not detected; using %s\27[0m\n",
+                    requested, get_play_engine_name(video_play_engine)))
+            end
+        end
     end
 
     local recursive = args["-r"] or args["--recursive"]

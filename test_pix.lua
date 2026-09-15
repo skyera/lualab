@@ -150,9 +150,24 @@ local tests = {
         expect = "test_gallery_video.mp4"
     },
     {
-        name = "Video player mpv shortcut keys documented in help modal",
-        cmd = luajit .. " -e 'local f = io.open(\"pix.lua\"); local s = f:read(\"*a\"); f:close(); assert(s:find(\"Video Playback %(mpv shortcuts%)\")); print(\"OK_MPV_HELP\")'",
+        name = "Video player engine & mpv shortcut keys documented in help modal",
+        cmd = luajit .. " -e 'local f = io.open(\"pix.lua\"); local s = f:read(\"*a\"); f:close(); assert(s:find(\"Video Playback %(engine & mpv shortcuts%)\")); assert(s:find(\"Cycle play engine\")); print(\"OK_MPV_HELP\")'",
         expect = "OK_MPV_HELP"
+    },
+    {
+        name = "Video play engine registry and [m] cycling implementation",
+        cmd = luajit .. " -e 'local f = io.open(\"pix.lua\"); local s = f:read(\"*a\"); f:close(); assert(s:find(\"VIDEO_PLAY_ENGINES\")); assert(s:find(\"cycle_play_engine\")); assert(s:find(\"resolve_inline_play_engine\")); assert(s:find(\"play_engine_hint\")); print(\"OK_PLAY_ENGINES\")'",
+        expect = "OK_PLAY_ENGINES"
+    },
+    {
+        name = "FFmpeg CLI play engine listed in --help",
+        cmd = luajit .. " pix.lua --help",
+        expect = "--play-engine ffmpeg"
+    },
+    {
+        name = "Play engine cycle hint and default listed in --help",
+        cmd = luajit .. " pix.lua --help",
+        expect = "Play engines (cycle in the player with [m]):"
     },
     {
         name = "Video player mpv controls implementation (speed, loop, frame-step, seek)",
