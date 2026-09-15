@@ -9,7 +9,6 @@ local test_suites = {
     { file = "test_ffi_suite.lua", description = "LuaJIT FFI Structs & C Binding Suite" },
     { file = "test_gallery_portrait.lua", description = "Procedural Portrait Gallery & HTML Exporter" },
     { file = "test_view_gallery_terminal.lua", description = "Terminal Gallery Image Viewer" },
-    { file = "test_pix.lua", description = "Fast Terminal Image Viewer" },
     { file = "test_ffi_3d_viewer.lua", description = "FFI 3D Wireframe/Lambertian Software Renderer" },
     { file = "test_ffi_fractal_explorer.lua", description = "FFI Multi-Fractal Interactive Renderer" },
     { file = "test_ffi_image_filter_studio.lua", description = "FFI Image Filter & Convolution Studio" },
