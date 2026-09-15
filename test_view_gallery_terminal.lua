@@ -12,6 +12,30 @@ if f_check then
     luajit = (package.config:sub(1,1) == '\\') and ".\\LuaJIT\\src\\luajit.exe" or "./LuaJIT/src/luajit"
 end
 
+-- Create synthetic test fixture with EXIF DateTimeOriginal
+local exif_test_file = "/tmp/test_gallery_exif.jpg"
+local f_exif = io.open(exif_test_file, "wb")
+if f_exif then
+    local tiff_payload = "II\x2A\x00\x08\x00\x00\x00\x02\x00" ..
+        "\x32\x01\x02\x00\x14\x00\x00\x00\x26\x00\x00\x00" ..
+        "\x69\x87\x04\x00\x01\x00\x00\x00\x3A\x00\x00\x00" ..
+        "\x00\x00\x00\x00" ..
+        "2024:06:15 10:20:30\x00" ..
+        "\x01\x00" ..
+        "\x03\x90\x02\x00\x14\x00\x00\x00\x26\x00\x00\x00" ..
+        "\x00\x00\x00\x00"
+    local app1_len = 2 + 6 + #tiff_payload
+    local app1 = "\xFF\xE1" .. string.char(math.floor(app1_len/256), app1_len%256) .. "Exif\0\0" .. tiff_payload
+    local minimal_jpeg = "\xFF\xD8" .. app1 ..
+        "\xFF\xDB\x00\x43\x00" .. string.rep("\x10", 64) ..
+        "\xFF\xC0\x00\x0B\x08\x00\x01\x00\x01\x01\x01\x11\x00" ..
+        "\xFF\xC4\x00\x1F\x00\x00\x01\x05\x01\x01\x01\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00" ..
+        "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B" ..
+        "\xFF\xDA\x00\x08\x01\x01\x00\x00\x3F\x00\x7F\x00\xFF\xD9"
+    f_exif:write(minimal_jpeg)
+    f_exif:close()
+end
+
 local tests = {
     {
         name = "Help display (--help)",
@@ -62,6 +86,16 @@ local tests = {
         name = "Non-interactive directory navigation",
         cmd = "echo q| " .. luajit .. " view_gallery_terminal.lua LuaBridge/Source --no-interactive",
         expect = "TERMINAL DIRECTORY IMAGE VIEWER"
+    },
+    {
+        name = "EXIF timestamp extraction in viewer header",
+        cmd = luajit .. " view_gallery_terminal.lua /tmp/test_gallery_exif.jpg --timg-half --select 1",
+        expect = "Date: 2024-06-15 10:20:30 (EXIF)"
+    },
+    {
+        name = "Filesystem timestamp fallback in viewer header",
+        cmd = luajit .. " view_gallery_terminal.lua pillars_of_creation.jpg --timg-half --select 1",
+        expect = "(File)"
     }
 }
 
@@ -80,6 +114,8 @@ for i, t in ipairs(tests) do
         print("    Output preview: " .. out:sub(1, 200))
     end
 end
+
+os.remove(exif_test_file)
 
 print(string.format("\nTest Summary: %d / %d tests passed.", passed, #tests))
 if passed == #tests then

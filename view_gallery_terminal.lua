@@ -43,6 +43,7 @@ local disable_raw_mode
 local read_key
 local is_stdin_tty
 local scan_directory_images
+local get_file_mtime
 
 local SUPPORTED_EXTENSIONS = {
     png  = true,
@@ -319,6 +320,18 @@ if is_windows then
         until kernel32.FindNextFileA(hFind, find_data) == 0
 
         kernel32.FindClose(hFind)
+    end
+
+    get_file_mtime = function(filepath)
+        local norm = filepath:gsub("/", "\\")
+        local find_data = ffi.new("WIN32_FIND_DATAA")
+        local hFind = kernel32.FindFirstFileA(norm, find_data)
+        if hFind ~= INVALID_HANDLE_VALUE and hFind ~= nil and hFind ~= ffi.cast("void*", 0) then
+            local ft = tonumber(find_data.ftLastWriteTime.dwHighDateTime) * 4294967296 + tonumber(find_data.ftLastWriteTime.dwLowDateTime)
+            kernel32.FindClose(hFind)
+            return math.floor((ft - 116444736000000000) / 10000000)
+        end
+        return 0
     end
 
     scan_directory_images = function(dir_path, recursive)
@@ -675,6 +688,233 @@ else
         scan_posix_dir(dir_path, entries, recursive)
         return entries
     end
+
+    get_file_mtime = function(filepath)
+        local st = ffi.new("struct stat")
+        if posix_stat(filepath, st) == 0 then
+            return tonumber(st.st_mtime)
+        end
+        return 0
+    end
+end
+
+-- =========================================================================
+-- 3b. EXIF & Timestamp Parser (Zero-dependency pure LuaJIT parser)
+-- =========================================================================
+local function parse_tiff_exif(data)
+    if not data or #data < 14 then return nil end
+    local order = data:sub(1, 2)
+    local is_le
+    if order == "II" then
+        is_le = true
+    elseif order == "MM" then
+        is_le = false
+    else
+        return nil
+    end
+
+    local function u16(o)
+        if o + 1 > #data then return 0 end
+        local b1, b2 = data:byte(o, o + 1)
+        return is_le and (b1 + b2 * 256) or (b1 * 256 + b2)
+    end
+
+    local function u32(o)
+        if o + 3 > #data then return 0 end
+        local b1, b2, b3, b4 = data:byte(o, o + 3)
+        if is_le then
+            return b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
+        else
+            return b1 * 16777216 + b2 * 65536 + b3 * 256 + b4
+        end
+    end
+
+    if u16(3) ~= 42 then return nil end
+
+    local ifd0_off = u32(5) + 1
+    if ifd0_off <= 0 or ifd0_off + 2 > #data then return nil end
+
+    local num_entries = u16(ifd0_off)
+    local dt_val, dto_val, dtd_val
+    local sub_ifd_off
+
+    local function read_tag_val(entry_off)
+        if entry_off + 11 > #data then return nil end
+        local tag = u16(entry_off)
+        local typ = u16(entry_off + 2)
+        local cnt = u32(entry_off + 4)
+        local val
+        if cnt <= 4 and typ ~= 2 then
+            val = u32(entry_off + 8)
+        else
+            local voff = u32(entry_off + 8) + 1
+            if voff > 0 and voff + cnt - 1 <= #data then
+                val = data:sub(voff, voff + cnt - 1):gsub("%z+$", "")
+            end
+        end
+        return tag, val
+    end
+
+    for i = 0, num_entries - 1 do
+        local entry_off = ifd0_off + 2 + i * 12
+        local tag, val = read_tag_val(entry_off)
+        if tag == 0x0132 then
+            dt_val = val
+        elseif tag == 0x8769 then
+            if type(val) == "number" then
+                sub_ifd_off = val + 1
+            else
+                sub_ifd_off = u32(entry_off + 8) + 1
+            end
+        end
+    end
+
+    if sub_ifd_off and sub_ifd_off + 2 <= #data then
+        local num_sub = u16(sub_ifd_off)
+        for i = 0, num_sub - 1 do
+            local entry_off = sub_ifd_off + 2 + i * 12
+            local tag, val = read_tag_val(entry_off)
+            if tag == 0x9003 then
+                dto_val = val
+            elseif tag == 0x9004 then
+                dtd_val = val
+            end
+        end
+    end
+
+    return dto_val or dtd_val or dt_val
+end
+
+local function extract_image_exif_date(filepath)
+    local f = io.open(filepath, "rb")
+    if not f then return nil end
+    local head = f:read(65536)
+    f:close()
+    if not head or #head < 12 then return nil end
+
+    -- 1. JPEG (APP1 with Exif\0\0)
+    if head:byte(1) == 0xFF and head:byte(2) == 0xD8 then
+        local p = 3
+        while p + 3 <= #head do
+            if head:byte(p) ~= 0xFF then break end
+            local m = head:byte(p + 1)
+            if m == 0xDA or m == 0xD9 then break end -- SOS / EOI
+            local len = head:byte(p + 2) * 256 + head:byte(p + 3)
+            if len < 2 then break end
+            if m == 0xE1 and p + 9 <= #head and head:sub(p + 4, p + 9) == "Exif\0\0" then
+                local tiff_data = head:sub(p + 10, math.min(#head, p + 1 + len))
+                local raw_date = parse_tiff_exif(tiff_data)
+                if raw_date then return raw_date, "EXIF" end
+            end
+            p = p + 2 + len
+        end
+
+    -- 2. WebP (RIFF .... WEBP)
+    elseif head:sub(1, 4) == "RIFF" and head:sub(9, 12) == "WEBP" then
+        local p = 13
+        while p + 8 <= #head do
+            local fourcc = head:sub(p, p + 3)
+            local clen = head:byte(p + 4) + head:byte(p + 5) * 256 + head:byte(p + 6) * 65536 + head:byte(p + 7) * 16777216
+            p = p + 8
+            if fourcc == "EXIF" then
+                local cdata = head:sub(p, math.min(#head, p + clen - 1))
+                if cdata:sub(1, 6) == "Exif\0\0" then
+                    cdata = cdata:sub(7)
+                end
+                local raw_date = parse_tiff_exif(cdata)
+                if raw_date then return raw_date, "EXIF" end
+            end
+            p = p + clen + (clen % 2)
+        end
+
+    -- 3. PNG (\x89PNG\r\n\x1a\n)
+    elseif head:sub(1, 8) == "\137PNG\r\n\026\n" then
+        local p = 9
+        local time_date
+        while p + 8 <= #head do
+            local clen = head:byte(p) * 16777216 + head:byte(p + 1) * 65536 + head:byte(p + 2) * 256 + head:byte(p + 3)
+            local ctype = head:sub(p + 4, p + 7)
+            local data_start = p + 8
+            if ctype == "eXIf" then
+                local cdata = head:sub(data_start, math.min(#head, data_start + clen - 1))
+                local raw_date = parse_tiff_exif(cdata)
+                if raw_date then return raw_date, "EXIF" end
+            elseif ctype == "tIME" and clen >= 7 and data_start + 6 <= #head then
+                local y = head:byte(data_start) * 256 + head:byte(data_start + 1)
+                local mo = head:byte(data_start + 2)
+                local d = head:byte(data_start + 3)
+                local h = head:byte(data_start + 4)
+                local mi = head:byte(data_start + 5)
+                local s = head:byte(data_start + 6)
+                time_date = string.format("%04d:%02d:%02d %02d:%02d:%02d", y, mo, d, h, mi, s)
+            elseif ctype == "IEND" then
+                break
+            end
+            p = data_start + clen + 4
+        end
+        if time_date then return time_date, "tIME" end
+
+    -- 4. TIFF ("II*\0" or "MM\0*")
+    elseif head:sub(1, 4) == "II\x2A\x00" or head:sub(1, 4) == "MM\x00\x2A" then
+        local raw_date = parse_tiff_exif(head)
+        if raw_date then return raw_date, "EXIF" end
+    end
+
+    return nil
+end
+
+local function normalize_timestamp(raw_date)
+    if not raw_date or type(raw_date) ~= "string" then return nil end
+    local y, m, d, h, min, s = raw_date:match("(%d%d%d%d)[:/-](%d%d)[:/-](%d%d)[%sT](%d%d):(%d%d):?(%d*)")
+    if y and m and d and h and min then
+        local sec = (s ~= "" and tonumber(s)) or 0
+        local yr, mo, dy, hr, mn = tonumber(y), tonumber(m), tonumber(d), tonumber(h), tonumber(min)
+        local formatted = string.format("%04d-%02d-%02d %02d:%02d:%02d", yr, mo, dy, hr, mn, sec)
+        local ok, epoch = pcall(os.time, { year = yr, month = mo, day = dy, hour = hr, min = mn, sec = sec })
+        return formatted, (ok and epoch or 0)
+    end
+    return raw_date, 0
+end
+
+local function get_image_timestamp(img_entry)
+    if not img_entry then return "-", "None", 0 end
+    if img_entry.timestamp_formatted then
+        return img_entry.timestamp_formatted, img_entry.timestamp_source, img_entry.timestamp_sec
+    end
+
+    if img_entry.filepath and not img_entry.is_dir then
+        local raw_date, src = extract_image_exif_date(img_entry.filepath)
+        if raw_date then
+            local formatted, epoch = normalize_timestamp(raw_date)
+            if formatted then
+                img_entry.timestamp_formatted = formatted
+                img_entry.timestamp_source = src or "EXIF"
+                img_entry.timestamp_sec = epoch
+                return formatted, img_entry.timestamp_source, epoch
+            end
+        end
+    end
+
+    local mtime = img_entry.mtime
+    if (not mtime or mtime <= 0) and img_entry.filepath and get_file_mtime then
+        mtime = get_file_mtime(img_entry.filepath)
+        img_entry.mtime = mtime
+    end
+
+    if mtime and mtime > 0 then
+        local ok, formatted = pcall(os.date, "%Y-%m-%d %H:%M:%S", mtime)
+        if ok and formatted then
+            img_entry.timestamp_formatted = formatted
+            img_entry.timestamp_source = "File"
+            img_entry.timestamp_sec = mtime
+            return formatted, "File", mtime
+        end
+    end
+
+    img_entry.timestamp_formatted = "-"
+    img_entry.timestamp_source = "None"
+    img_entry.timestamp_sec = 0
+    return "-", "None", 0
 end
 
 -- =========================================================================
@@ -1577,14 +1817,16 @@ local function render_image_unicode_block(img_entry, current_idx, total_count, t
     table.insert(out, "\27[1;36m" .. string.rep("═", blen) .. "\27[0m\n")
     table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
         current_idx, total_count, img_entry.filename))
+    local date_disp, date_src = get_image_timestamp(img_entry)
+    local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
     local dpath = img_entry.filepath
-    if #dpath > math.max(20, term_w - 35) then dpath = "..." .. dpath:sub(#dpath-(term_w-38)) end
+    if #dpath > math.max(15, term_w - 60) then dpath = "..." .. dpath:sub(#dpath-(term_w-63)) end
     local eng = use_quarter
         and "\27[1;93mtimg Quarter-Block ▛▜▙▟ (Native LuaJIT)\27[90m"
         or  "\27[1;92mtimg Half-Block ▄ (Native LuaJIT)\27[90m"
     table.insert(out, string.format(
-        "  \27[90mSize: %s | Original: %dx%d | Engine: %s | Path: %s\27[0m\n",
-        img_entry.size_str, img.width, img.height, eng, dpath))
+        "  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s | Path: %s\27[0m\n",
+        img_entry.size_str, img.width, img.height, date_info, eng, dpath))
     table.insert(out, string.format(
         "  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next" ..
         "  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"))
@@ -1936,10 +2178,12 @@ local function render_image_chafa(img_entry, current_idx, total_count, term_w, t
     table.insert(out, "\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
     table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
         current_idx, total_count, img_entry.filename))
+    local date_disp, date_src = get_image_timestamp(img_entry)
+    local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
     local disp_path = img_entry.filepath
-    if #disp_path > math.max(20, term_w - 35) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 38)) end
-    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Engine: %s | Path: %s\27[0m\n",
-        img_entry.size_str, img.width, img.height, engine_label or "Chafa", disp_path))
+    if #disp_path > math.max(15, term_w - 60) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 63)) end
+    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s | Path: %s\27[0m\n",
+        img_entry.size_str, img.width, img.height, date_info, engine_label or "Chafa", disp_path))
     table.insert(out, string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"))
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
@@ -2029,10 +2273,12 @@ local function render_image_timg_cli(img_entry, current_idx, total_count, term_w
     table.insert(out, "\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
     table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
         current_idx, total_count, img_entry.filename))
+    local date_disp, date_src = get_image_timestamp(img_entry)
+    local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
     local disp_path = img_entry.filepath
-    if #disp_path > math.max(20, term_w - 35) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 38)) end
-    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Engine: \27[1;96mtimg (External CLI)\27[90m | Path: %s\27[0m\n",
-        img_entry.size_str, img.width, img.height, disp_path))
+    if #disp_path > math.max(15, term_w - 60) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 63)) end
+    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: \27[1;96mtimg (External CLI)\27[90m | Path: %s\27[0m\n",
+        img_entry.size_str, img.width, img.height, date_info, disp_path))
     table.insert(out, string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"))
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
@@ -2088,10 +2334,12 @@ local function render_image_chafa_cli_direct(img_entry, current_idx, total_count
     table.insert(out, "\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
     table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
         current_idx, total_count, img_entry.filename))
+    local date_disp, date_src = get_image_timestamp(img_entry)
+    local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
     local disp_path = img_entry.filepath
-    if #disp_path > math.max(20, term_w - 35) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 38)) end
-    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Engine: \27[1;95mChafa (External CLI)\27[90m | Path: %s\27[0m\n",
-        img_entry.size_str, img.width, img.height, disp_path))
+    if #disp_path > math.max(15, term_w - 60) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 63)) end
+    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: \27[1;95mChafa (External CLI)\27[90m | Path: %s\27[0m\n",
+        img_entry.size_str, img.width, img.height, date_info, disp_path))
     table.insert(out, string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"))
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
@@ -2297,10 +2545,12 @@ local function render_image_kitty(img_entry, current_idx, total_count, term_w, t
     io.write("\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
     io.write(string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
         current_idx, total_count, img_entry.filename))
+    local date_disp, date_src = get_image_timestamp(img_entry)
+    local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
     local disp_path = img_entry.filepath
-    if #disp_path > math.max(20, term_w - 35) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 38)) end
-    io.write(string.format("  \27[90mSize: %s | Original: %dx%d | Engine: \27[1;95mKitty Graphics Protocol\27[90m | Path: %s\27[0m\n",
-        img_entry.size_str, iw, ih, disp_path))
+    if #disp_path > math.max(15, term_w - 60) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 63)) end
+    io.write(string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: \27[1;95mKitty Graphics Protocol\27[90m | Path: %s\27[0m\n",
+        img_entry.size_str, iw, ih, date_info, disp_path))
     io.write(string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"))
     io.write("\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
     if pad_top > 0 then io.write(string.rep("\n", pad_top)) end
@@ -2348,10 +2598,12 @@ local function render_image_halfblock(img_entry, current_idx, total_count, term_
     table.insert(out, "\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
     table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
         current_idx, total_count, img_entry.filename))
+    local date_disp, date_src = get_image_timestamp(img_entry)
+    local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
     local disp_path = img_entry.filepath
-    if #disp_path > math.max(20, term_w - 35) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 38)) end
-    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Engine: \27[1;92mANSI 24-bit Truecolor Half-Block (▄)\27[90m | Path: %s\27[0m\n",
-        img_entry.size_str, img.width, img.height, disp_path))
+    if #disp_path > math.max(15, term_w - 60) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 63)) end
+    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: \27[1;92mANSI 24-bit Truecolor Half-Block (▄)\27[90m | Path: %s\27[0m\n",
+        img_entry.size_str, img.width, img.height, date_info, disp_path))
     table.insert(out, string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"))
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
@@ -2464,10 +2716,12 @@ local function render_image_iterm2(img_entry, current_idx, total_count, term_w, 
     io.write("\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
     io.write(string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
         current_idx, total_count, img_entry.filename))
+    local date_disp, date_src = get_image_timestamp(img_entry)
+    local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
     local disp_path = img_entry.filepath
-    if #disp_path > math.max(20, term_w - 35) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 38)) end
-    io.write(string.format("  \27[90mSize: %s | Original: %dx%d | Engine: \27[1;94miTerm2 Inline Protocol\27[90m | Path: %s\27[0m\n",
-        img_entry.size_str, iw, ih, disp_path))
+    if #disp_path > math.max(15, term_w - 60) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 63)) end
+    io.write(string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: \27[1;94miTerm2 Inline Protocol\27[90m | Path: %s\27[0m\n",
+        img_entry.size_str, iw, ih, date_info, disp_path))
     io.write(string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"))
     io.write("\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
     if pad_top > 0 then io.write(string.rep("\n", pad_top)) end
@@ -2667,12 +2921,18 @@ local function render_file_list(dir_path, images, total_unfiltered, selected_idx
         local pad_len = math.max(0, col2_w - (fn:len() + ((icon ~= "") and 3 or 0)))
         local padded_col2 = display_fn .. string.rep(" ", pad_len)
 
+        local date_disp, date_src = get_image_timestamp(img)
+        local list_date = (date_disp and date_disp ~= "-") and date_disp:sub(1, 10) or (img.date_str or "-")
+        if (date_src == "EXIF" or date_src == "tIME") and list_date ~= "-" then
+            list_date = list_date .. "*"
+        end
+
         local line_str = string.format("%-6s %s %-8s %-12s %-12s",
             string.format("[%d]", i),
             padded_col2,
             img.extension,
             img.size_str,
-            img.date_str or "-"
+            list_date
         )
 
         if is_sel then
@@ -2708,7 +2968,9 @@ local function sort_images(images, mode, desc)
 
         local val_a, val_b
         if mode == "date" then
-            val_a, val_b = a.mtime or 0, b.mtime or 0
+            if not a.timestamp_sec then get_image_timestamp(a) end
+            if not b.timestamp_sec then get_image_timestamp(b) end
+            val_a, val_b = a.timestamp_sec or a.mtime or 0, b.timestamp_sec or b.mtime or 0
         elseif mode == "size" then
             val_a, val_b = a.size or 0, b.size or 0
         else -- name
@@ -2844,11 +3106,15 @@ local function main()
         local ext = fname:match("%.([^.]+)$")
         if ext and SUPPORTED_EXTENSIONS[ext:lower()] then
             local is_a_dir = false
+            local mtime_val = 0
             if not is_windows and posix_stat then
                 local st = ffi.new("struct stat")
                 if posix_stat(target_dir, st) == 0 then
                     is_a_dir = (bit.band(tonumber(st.st_mode), 0xF000) == 0x4000)
+                    mtime_val = tonumber(st.st_mtime)
                 end
+            elseif is_windows and get_file_mtime then
+                mtime_val = get_file_mtime(target_dir)
             end
             if not is_a_dir then
                 raw_images = {
@@ -2859,8 +3125,8 @@ local function main()
                         extension = ext:upper(),
                         size = file_len,
                         size_str = format_file_size(file_len),
-                        mtime = 0,
-                        date_str = "-",
+                        mtime = mtime_val,
+                        date_str = format_date(mtime_val),
                     }
                 }
                 cli_select = cli_select or 1
