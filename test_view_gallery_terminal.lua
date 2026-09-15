@@ -13,7 +13,10 @@ if f_check then
 end
 
 -- Create synthetic test fixture with EXIF DateTimeOriginal
-local exif_test_file = "/tmp/test_gallery_exif.jpg"
+local exif_test_file = (os.getenv("TEMP") or "/tmp") .. "/test_gallery_exif.jpg"
+if package.config:sub(1,1) == '\\' then
+    exif_test_file = (os.getenv("TEMP") or "."):gsub("\\", "/") .. "/test_gallery_exif.jpg"
+end
 local f_exif = io.open(exif_test_file, "wb")
 if f_exif then
     local tiff_payload = "II\x2A\x00\x08\x00\x00\x00\x02\x00" ..
@@ -89,7 +92,7 @@ local tests = {
     },
     {
         name = "EXIF timestamp extraction in viewer header",
-        cmd = luajit .. " view_gallery_terminal.lua /tmp/test_gallery_exif.jpg --timg-half --select 1",
+        cmd = luajit .. " view_gallery_terminal.lua " .. exif_test_file .. " --timg-half --select 1",
         expect = "Date: 2024-06-15 10:20:30 (EXIF)"
     },
     {

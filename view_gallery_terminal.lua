@@ -2082,7 +2082,7 @@ local function render_image_chafa(img_entry, current_idx, total_count, term_w, t
 
     symbol_mode = symbol_mode or "symbols"
 
-    local reserved_header_rows = 5
+    local reserved_header_rows = 6
     local max_char_h = math.max(4, term_h - reserved_header_rows)
     local max_char_w = math.max(4, term_w - 4)
 
@@ -2126,7 +2126,8 @@ local function render_image_chafa(img_entry, current_idx, total_count, term_w, t
             local text = ffi.string(gs.str, gs.len)
             rendered_lines = {}
             for l in text:gmatch("([^\n]*)\n?") do
-                if #l > 0 then table.insert(rendered_lines, l) end
+                local vis = l:gsub("\27%[[%d;?]*[a-zA-Z]", ""):gsub("\r", "")
+                if #vis > 0 then table.insert(rendered_lines, l) end
             end
         end
 
@@ -2140,7 +2141,7 @@ local function render_image_chafa(img_entry, current_idx, total_count, term_w, t
     if not rendered_lines and is_chafa_cli_available() then
         local sym_flag = (symbol_mode == "braille") and "--symbols braille" or "--symbols block"
         local devnull = is_windows and "nul" or "/dev/null"
-        local cmd = string.format("chafa -s %dx%d %s %q 2>%s", fit_cols, fit_rows, sym_flag, img_entry.filepath, devnull)
+        local cmd = string.format("chafa -f symbols -s %dx%d %s %q 2>%s", fit_cols, fit_rows, sym_flag, img_entry.filepath, devnull)
         local p = io.popen(cmd, "r")
         if p then
             local text = p:read("*a")
@@ -2148,7 +2149,8 @@ local function render_image_chafa(img_entry, current_idx, total_count, term_w, t
             if text and #text > 0 then
                 rendered_lines = {}
                 for l in text:gmatch("([^\n]*)\n?") do
-                    if #l > 0 then table.insert(rendered_lines, l) end
+                    local vis = l:gsub("\27%[[%d;?]*[a-zA-Z]", ""):gsub("\r", "")
+                    if #vis > 0 then table.insert(rendered_lines, l) end
                 end
                 engine_label = (symbol_mode == "braille")
                     and "\27[1;95mChafa Braille 2×4 (CLI chafa)\27[90m"
@@ -2296,7 +2298,7 @@ local function render_image_chafa_cli_direct(img_entry, current_idx, total_count
     local img, err = load_image(img_entry.filepath)
     if not img then return false, err end
 
-    local reserved_header_rows = 5
+    local reserved_header_rows = 6
     local max_char_h = math.max(4, term_h - reserved_header_rows)
     local max_char_w = math.max(4, term_w - 4)
 
@@ -2309,7 +2311,7 @@ local function render_image_chafa_cli_direct(img_entry, current_idx, total_count
     end
 
     local devnull = is_windows and "nul" or "/dev/null"
-    local cmd = string.format("chafa -s %dx%d -c full %q 2>%s", fit_cols, fit_rows, img_entry.filepath, devnull)
+    local cmd = string.format("chafa -f symbols -s %dx%d -c full %q 2>%s", fit_cols, fit_rows, img_entry.filepath, devnull)
     local p = io.popen(cmd, "r")
     if not p then return false, "Failed to invoke chafa CLI" end
     local text = p:read("*a")
@@ -2321,7 +2323,8 @@ local function render_image_chafa_cli_direct(img_entry, current_idx, total_count
 
     local rendered_lines = {}
     for l in text:gmatch("([^\n]*)\n?") do
-        if #l > 0 then table.insert(rendered_lines, l) end
+        local vis = l:gsub("\27%[[%d;?]*[a-zA-Z]", ""):gsub("\r", "")
+        if #vis > 0 then table.insert(rendered_lines, l) end
     end
 
     local pad_left = math.max(0, math.floor((term_w - fit_cols) / 2))
