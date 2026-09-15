@@ -53,6 +53,7 @@ local get_terminal_size
 local enable_raw_mode
 local disable_raw_mode
 local read_key
+local sleep_ms
 local is_stdin_tty
 local scan_directory_images
 local get_file_mtime
@@ -219,6 +220,11 @@ if is_windows then
         local hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
         local mode = ffi.new("uint32_t[1]")
         return kernel32.GetConsoleMode(hIn, mode) ~= 0
+    end
+
+    -- Platform sleep (video player frame pacing); kernel32 stays inside this block
+    sleep_ms = function(ms)
+        kernel32.Sleep(ms)
     end
 
     get_terminal_size = function()
@@ -559,6 +565,11 @@ else
 
     is_stdin_tty = function()
         return ffi.C.isatty(STDIN_FILENO) == 1
+    end
+
+    -- Platform sleep (video player frame pacing)
+    sleep_ms = function(ms)
+        ffi.C.poll(nil, 0, ms)
     end
 
     get_terminal_size = function()
@@ -3966,12 +3977,7 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
                 local effective_dt = target_dt / playback_speed
                 local wait_dt = effective_dt - render_dur
                 if wait_dt > 0.002 then
-                    local wait_ms = math.floor(wait_dt * 1000)
-                    if is_windows then
-                        kernel32.Sleep(wait_ms)
-                    else
-                        ffi.C.poll(nil, 0, wait_ms)
-                    end
+                    sleep_ms(math.floor(wait_dt * 1000))
                 end
                 last_frame_clock = os.clock()
             end
