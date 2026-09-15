@@ -54,6 +54,7 @@ local enable_raw_mode
 local disable_raw_mode
 local read_key
 local sleep_ms
+local to_display_text
 local is_stdin_tty
 local scan_directory_images
 local get_file_mtime
@@ -93,13 +94,13 @@ end
 
 local EXTENSION_ICONS = {
     unicode = {
-        DIR  = "📁 ",
-        PNG  = "🖼 ",
+        DIR  = "📁",
+        PNG  = "🖼",
         JPG  = "📷",
         JPEG = "📷",
         PPM  = "▦ ",
         WEBP = "🌐",
-        GIF  = "🎞 ",
+        GIF  = "🎞",
         BMP  = "🎨",
         MP4  = "🎬",
         MKV  = "🎬",
@@ -150,6 +151,110 @@ local function format_date(timestamp)
     return ok and res or "-"
 end
 
+-- -------------------------------------------------------------------------
+-- Text helpers: what the OS gives us vs what the terminal expects
+-- -------------------------------------------------------------------------
+-- Windows hands pix ANSI filenames (CP_ACP, e.g. GBK/CP936 on a Chinese install) from the
+-- FindFirstFileA/argv side, while the console output code page is switched to UTF-8 below.
+-- to_display_text bridges that gap; it is assigned per platform and is the identity on POSIX
+-- and on Windows installations that already run the UTF-8 code page.
+
+-- Display width of one code point: wide glyphs (CJK, Hangul, fullwidth forms, emoji) fill two
+-- terminal cells. Everything else counts as one.
+local function codepoint_width(cp)
+    if cp < 0x1100 then return 1 end
+    if (cp >= 0x1100 and cp <= 0x115F)     -- Hangul Jamo
+        or (cp >= 0x2E80 and cp <= 0x303E) -- CJK radicals, Kangxi, CJK symbols
+        or (cp >= 0x3041 and cp <= 0x33FF) -- kana, CJK compatibility
+        or (cp >= 0x3400 and cp <= 0x4DBF) -- CJK extension A
+        or (cp >= 0x4E00 and cp <= 0x9FFF) -- CJK unified ideographs
+        or (cp >= 0xA000 and cp <= 0xA4CF) -- Yi
+        or (cp >= 0xAC00 and cp <= 0xD7A3) -- Hangul syllables
+        or (cp >= 0xF900 and cp <= 0xFAFF) -- CJK compatibility ideographs
+        or (cp >= 0xFE30 and cp <= 0xFE6F) -- CJK compatibility forms / small forms
+        or (cp >= 0xFF00 and cp <= 0xFF60) -- fullwidth forms
+        or (cp >= 0xFFE0 and cp <= 0xFFE6)
+        or (cp >= 0x1F300 and cp <= 0x1FAFF) -- emoji
+        or (cp >= 0x20000 and cp <= 0x3FFFD) then -- CJK extensions B+
+        return 2
+    end
+    return 1
+end
+
+-- Decode one UTF-8 sequence at byte offset i: returns code point and its byte length.
+-- A stray continuation or malformed byte is reported as one single-cell character.
+local function utf8_next(s, i)
+    local b = s:byte(i)
+    if not b then return nil end
+    if b < 0x80 then return b, 1 end
+    if b >= 0xF0 then
+        local b2, b3, b4 = s:byte(i + 1), s:byte(i + 2), s:byte(i + 3)
+        if b2 and b3 and b4 and b2 >= 0x80 and b2 < 0xC0 and b3 >= 0x80 and b3 < 0xC0 and b4 >= 0x80 and b4 < 0xC0 then
+            return (b - 0xF0) * 0x40000 + (b2 - 0x80) * 0x1000 + (b3 - 0x80) * 0x40 + (b4 - 0x80), 4
+        end
+    elseif b >= 0xE0 then
+        local b2, b3 = s:byte(i + 1), s:byte(i + 2)
+        if b2 and b3 and b2 >= 0x80 and b2 < 0xC0 and b3 >= 0x80 and b3 < 0xC0 then
+            return (b - 0xE0) * 0x1000 + (b2 - 0x80) * 0x40 + (b3 - 0x80), 3
+        end
+    elseif b >= 0xC0 then
+        local b2 = s:byte(i + 1)
+        if b2 and b2 >= 0x80 and b2 < 0xC0 then
+            return (b - 0xC0) * 0x40 + (b2 - 0x80), 2
+        end
+    end
+    return b, 1
+end
+
+-- Columns a string occupies on screen (byte length is wrong for any non-ASCII name)
+local function display_width(s)
+    local w, i = 0, 1
+    while i <= #s do
+        local cp, len = utf8_next(s, i)
+        w = w + codepoint_width(cp)
+        i = i + len
+    end
+    return w
+end
+
+-- Keep the first `max_cols` columns, ending in "..." when something had to be dropped.
+-- Never splits a multi-byte sequence and never lets a wide glyph straddle the limit.
+local function utf8_truncate(s, max_cols)
+    if display_width(s) <= max_cols then return s end
+    local budget = math.max(0, max_cols - 3)
+    local w, i, cut = 0, 1, 0
+    while i <= #s do
+        local cp, len = utf8_next(s, i)
+        local cw = codepoint_width(cp)
+        if w + cw > budget then break end
+        w = w + cw
+        i = i + len
+        cut = i - 1
+    end
+    return s:sub(1, cut) .. "..."
+end
+
+-- Keep the last `max_cols` columns, prefixed with "..." (used for long file paths)
+local function utf8_tail(s, max_cols)
+    if display_width(s) <= max_cols then return s end
+    local budget = math.max(0, max_cols - 3)
+    local starts = {}
+    local i = 1
+    while i <= #s do
+        local cp, len = utf8_next(s, i)
+        starts[#starts + 1] = { i, codepoint_width(cp) }
+        i = i + len
+    end
+    local w, from = 0, 1
+    for k = #starts, 1, -1 do
+        local cw = starts[k][2]
+        if w + cw > budget then break end
+        w = w + cw
+        from = starts[k][1]
+    end
+    return "..." .. s:sub(from)
+end
+
 if is_windows then
     local kernel32 = ffi.load("kernel32")
 
@@ -187,6 +292,9 @@ if is_windows then
         int      __stdcall GetConsoleMode(void* hConsoleHandle, uint32_t* lpMode);
         int      __stdcall SetConsoleMode(void* hConsoleHandle, uint32_t dwMode);
         int      __stdcall SetConsoleOutputCP(uint32_t wCodePageID);
+        uint32_t __stdcall GetACP(void);
+        int      __stdcall MultiByteToWideChar(uint32_t CodePage, uint32_t dwFlags, const char* lpMultiByteStr, int cbMultiByte, wchar_t* lpWideCharStr, int cchWideChar);
+        int      __stdcall WideCharToMultiByte(uint32_t CodePage, uint32_t dwFlags, const wchar_t* lpWideCharStr, int cchWideChar, char* lpMultiByteStr, int cbMultiByte, const char* lpDefaultChar, int* lpUsedDefaultChar);
         uint32_t __stdcall GetFileType(void* hFile);
         void*    __stdcall FindFirstFileA(const char* lpFileName, WIN32_FIND_DATAA* lpFindFileData);
         int      __stdcall FindNextFileA(void* hFindFile, WIN32_FIND_DATAA* lpFindFileData);
@@ -225,6 +333,25 @@ if is_windows then
     -- Platform sleep (video player frame pacing); kernel32 stays inside this block
     sleep_ms = function(ms)
         kernel32.Sleep(ms)
+    end
+
+    -- OS text -> terminal text. Names reach us as ANSI bytes (FindFirstFileA, the CRT argv) while
+    -- the console above is set to codepage 65001, so they must be transcoded before display.
+    if kernel32.GetACP() == 65001 then
+        to_display_text = function(s) return s end
+    else
+        to_display_text = function(s)
+            if type(s) ~= "string" or #s == 0 then return s end
+            local wlen = kernel32.MultiByteToWideChar(0, 0, s, #s, nil, 0) -- CP_ACP
+            if wlen <= 0 then return s end
+            local wbuf = ffi.new("wchar_t[?]", wlen + 1)
+            kernel32.MultiByteToWideChar(0, 0, s, #s, wbuf, wlen)
+            local ulen = kernel32.WideCharToMultiByte(65001, 0, wbuf, wlen, nil, 0, nil, nil)
+            if ulen <= 0 then return s end
+            local ubuf = ffi.new("char[?]", ulen + 1)
+            kernel32.WideCharToMultiByte(65001, 0, wbuf, wlen, ubuf, ulen, nil, nil)
+            return ffi.string(ubuf, ulen)
+        end
     end
 
     get_terminal_size = function()
@@ -571,6 +698,9 @@ else
     sleep_ms = function(ms)
         ffi.C.poll(nil, 0, ms)
     end
+
+    -- POSIX filenames are already UTF-8 bytes, exactly what the terminal expects
+    to_display_text = function(s) return s end
 
     get_terminal_size = function()
         local ws = ffi.new("struct winsize")
@@ -1525,15 +1655,27 @@ local function decode_gdiplus_ffi(filepath)
 
     local ok, res = pcall(function()
         local kernel32 = ffi.load("kernel32")
-        local len = kernel32.MultiByteToWideChar(65001, 0, filepath, #filepath, nil, 0)
-        if len <= 0 then return nil, "Path conversion error" end
-        local wpath = ffi.new("wchar_t[?]", len + 1)
-        kernel32.MultiByteToWideChar(65001, 0, filepath, #filepath, wpath, len)
-        wpath[len] = 0
 
+        -- Paths from the Windows A-APIs/CRT argv are ANSI (e.g. GBK), but MSYS/Git-Bash style
+        -- shells and UTF-8 code page installs hand us UTF-8. Try the system code page first,
+        -- then UTF-8, so Chinese names decode instead of failing.
+        local function to_wide(code_page)
+            local len = kernel32.MultiByteToWideChar(code_page, 0, filepath, #filepath, nil, 0)
+            if len <= 0 then return nil end
+            local wpath = ffi.new("wchar_t[?]", len + 1)
+            kernel32.MultiByteToWideChar(code_page, 0, filepath, #filepath, wpath, len)
+            wpath[len] = 0
+            return wpath
+        end
+
+        local wpath = to_wide(0) -- CP_ACP
         local bmp_ptr = ffi.new("void*[1]")
-        if gdi.GdipCreateBitmapFromFile(wpath, bmp_ptr) ~= 0 or bmp_ptr[0] == nil then
-            return nil, "GDI+ failed to load image file"
+        if not wpath or gdi.GdipCreateBitmapFromFile(wpath, bmp_ptr) ~= 0 or bmp_ptr[0] == nil then
+            wpath = to_wide(65001) -- CP_UTF8
+            bmp_ptr = ffi.new("void*[1]")
+            if not wpath or gdi.GdipCreateBitmapFromFile(wpath, bmp_ptr) ~= 0 or bmp_ptr[0] == nil then
+                return nil, "GDI+ failed to load image file"
+            end
         end
         local bmp = bmp_ptr[0]
 
@@ -2342,11 +2484,12 @@ local function render_image_unicode_block(img_entry, current_idx, total_count, t
     table.insert(out, "\27[H\27[2J")
     table.insert(out, "\27[1;36m" .. string.rep("═", blen) .. "\27[0m\n")
     table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
-        current_idx, total_count, img_entry.filename))
+        current_idx, total_count, to_display_text(img_entry.filename)))
     local date_disp, date_src = get_image_timestamp(img_entry)
     local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
-    local dpath = img_entry.filepath
-    if #dpath > math.max(15, term_w - 60) then dpath = "..." .. dpath:sub(#dpath-(term_w-63)) end
+    local dpath = to_display_text(img_entry.filepath)
+    local path_cols = math.max(15, term_w - 60)
+    if display_width(dpath) > path_cols then dpath = utf8_tail(dpath, path_cols) end
     local eng_prefix = (cur_e and total_e) and string.format("[%d/%d] ", cur_e, total_e) or ""
     local eng = use_quarter
         and (eng_prefix .. "\27[1;93mtimg Quarter-Block ▛▜▙▟ (Native LuaJIT)\27[90m")
@@ -2706,11 +2849,12 @@ local function render_image_chafa(img_entry, current_idx, total_count, term_w, t
     table.insert(out, "\27[H\27[2J")
     table.insert(out, "\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
     table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
-        current_idx, total_count, img_entry.filename))
+        current_idx, total_count, to_display_text(img_entry.filename)))
     local date_disp, date_src = get_image_timestamp(img_entry)
     local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
-    local disp_path = img_entry.filepath
-    if #disp_path > math.max(15, term_w - 60) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 63)) end
+    local disp_path = to_display_text(img_entry.filepath)
+    local path_cols = math.max(15, term_w - 60)
+    if display_width(disp_path) > path_cols then disp_path = utf8_tail(disp_path, path_cols) end
     local eng_label = engine_label or "Chafa"
     if cur_e and total_e then
         eng_label = string.format("[%d/%d] %s", cur_e, total_e, eng_label)
@@ -2828,11 +2972,12 @@ local function render_image_timg_cli(img_entry, current_idx, total_count, term_w
     table.insert(out, "\27[H\27[2J")
     table.insert(out, "\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
     table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
-        current_idx, total_count, img_entry.filename))
+        current_idx, total_count, to_display_text(img_entry.filename)))
     local date_disp, date_src = get_image_timestamp(img_entry)
     local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
-    local disp_path = img_entry.filepath
-    if #disp_path > math.max(15, term_w - 60) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 63)) end
+    local disp_path = to_display_text(img_entry.filepath)
+    local path_cols = math.max(15, term_w - 60)
+    if display_width(disp_path) > path_cols then disp_path = utf8_tail(disp_path, path_cols) end
     local eng_prefix = (cur_e and total_e) and string.format("[%d/%d] ", cur_e, total_e) or ""
     table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s\27[1;96mtimg (External CLI)\27[90m | Path: %s\27[0m\n",
         img_entry.size_str, img.width, img.height, date_info, eng_prefix, disp_path))
@@ -2893,11 +3038,12 @@ local function render_image_chafa_cli_direct(img_entry, current_idx, total_count
     table.insert(out, "\27[H\27[2J")
     table.insert(out, "\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
     table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
-        current_idx, total_count, img_entry.filename))
+        current_idx, total_count, to_display_text(img_entry.filename)))
     local date_disp, date_src = get_image_timestamp(img_entry)
     local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
-    local disp_path = img_entry.filepath
-    if #disp_path > math.max(15, term_w - 60) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 63)) end
+    local disp_path = to_display_text(img_entry.filepath)
+    local path_cols = math.max(15, term_w - 60)
+    if display_width(disp_path) > path_cols then disp_path = utf8_tail(disp_path, path_cols) end
     local eng_prefix = (cur_e and total_e) and string.format("[%d/%d] ", cur_e, total_e) or ""
     table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s\27[1;95mChafa (External CLI)\27[90m | Path: %s\27[0m\n",
         img_entry.size_str, img.width, img.height, date_info, eng_prefix, disp_path))
@@ -3108,11 +3254,12 @@ local function render_image_kitty(img_entry, current_idx, total_count, term_w, t
 
     io.write("\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
     io.write(string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
-        current_idx, total_count, img_entry.filename))
+        current_idx, total_count, to_display_text(img_entry.filename)))
     local date_disp, date_src = get_image_timestamp(img_entry)
     local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
-    local disp_path = img_entry.filepath
-    if #disp_path > math.max(15, term_w - 60) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 63)) end
+    local disp_path = to_display_text(img_entry.filepath)
+    local path_cols = math.max(15, term_w - 60)
+    if display_width(disp_path) > path_cols then disp_path = utf8_tail(disp_path, path_cols) end
     local eng_prefix = (cur_e and total_e) and string.format("[%d/%d] ", cur_e, total_e) or ""
     io.write(string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s\27[1;95mKitty Graphics Protocol\27[90m | Path: %s\27[0m\n",
         img_entry.size_str, iw, ih, date_info, eng_prefix, disp_path))
@@ -3164,11 +3311,12 @@ local function render_image_halfblock(img_entry, current_idx, total_count, term_
     local bar_len = math.max(20, term_w - 4)
     table.insert(out, "\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
     table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
-        current_idx, total_count, img_entry.filename))
+        current_idx, total_count, to_display_text(img_entry.filename)))
     local date_disp, date_src = get_image_timestamp(img_entry)
     local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
-    local disp_path = img_entry.filepath
-    if #disp_path > math.max(15, term_w - 60) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 63)) end
+    local disp_path = to_display_text(img_entry.filepath)
+    local path_cols = math.max(15, term_w - 60)
+    if display_width(disp_path) > path_cols then disp_path = utf8_tail(disp_path, path_cols) end
     local eng_prefix = (cur_e and total_e) and string.format("[%d/%d] ", cur_e, total_e) or ""
     table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s\27[1;92mANSI 24-bit Truecolor Half-Block (▄)\27[90m | Path: %s\27[0m\n",
         img_entry.size_str, img.width, img.height, date_info, eng_prefix, disp_path))
@@ -3294,11 +3442,12 @@ local function render_image_iterm2(img_entry, current_idx, total_count, term_w, 
 
     io.write("\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
     io.write(string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
-        current_idx, total_count, img_entry.filename))
+        current_idx, total_count, to_display_text(img_entry.filename)))
     local date_disp, date_src = get_image_timestamp(img_entry)
     local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
-    local disp_path = img_entry.filepath
-    if #disp_path > math.max(15, term_w - 60) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 63)) end
+    local disp_path = to_display_text(img_entry.filepath)
+    local path_cols = math.max(15, term_w - 60)
+    if display_width(disp_path) > path_cols then disp_path = utf8_tail(disp_path, path_cols) end
     local eng_prefix = (cur_e and total_e) and string.format("[%d/%d] ", cur_e, total_e) or ""
     io.write(string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s\27[1;94miTerm2 Inline Protocol\27[90m | Path: %s\27[0m\n",
         img_entry.size_str, iw, ih, date_info, eng_prefix, disp_path))
@@ -3768,7 +3917,7 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
         local dim_str = (v_info.width > 0) and string.format("%dx%d, %.1ffps", v_info.width, v_info.height, fps) or string.format("%.1ffps", fps)
         local pe_idx, pe_total = get_play_engine_position(video_play_engine)
         table.insert(out, string.format("  \27[1;37mVIDEO PLAYER\27[0m \27[1;36m[%d/%d]\27[0m: \27[1;93m%s\27[0m \27[90m(%s, %s)\27[0m  \27[90m│\27[0m \27[1;96mEngine: %s\27[0m \27[90m[%d/%d] [m] cycle\27[0m\27[K\n",
-            current_idx, total_count, img_entry.filename, dim_str, img_entry.size_str,
+            current_idx, total_count, to_display_text(img_entry.filename), dim_str, img_entry.size_str,
             get_play_engine_name(video_play_engine), pe_idx, pe_total))
         table.insert(out, "\n")
         local play_engine_hint = string.format("  \27[1;96m[m]\27[0m Engine (%d)", #get_available_play_engines())
@@ -4143,12 +4292,12 @@ local function render_file_list(dir_path, images, total_unfiltered, selected_idx
     local hidden_tag = show_hidden
         and "   \27[1;96m[.]\27[0m \27[90mHidden: \27[1;92mON\27[0m"
         or "   \27[1;96m[.]\27[0m \27[90mHidden: \27[90mOFF\27[0m"
-    table.insert(out, string.format("  \27[90mDir:\27[0m \27[1;33m%s\27[0m \27[90m(%d total, %s)\27[0m%s\n", dir_path, total_unfiltered, scan_type, hidden_tag))
+    table.insert(out, string.format("  \27[90mDir:\27[0m \27[1;33m%s\27[0m \27[90m(%d total, %s)\27[0m%s\n", to_display_text(dir_path), total_unfiltered, scan_type, hidden_tag))
 
     if search_mode then
-        table.insert(out, string.format("  \27[1;97;44m SEARCH: \27[0m \27[1;93m%s_\27[0m \27[90m(Type to filter, Enter to select, Esc to cancel)\27[0m\n", search_query))
+        table.insert(out, string.format("  \27[1;97;44m SEARCH: \27[0m \27[1;93m%s_\27[0m \27[90m(Type to filter, Enter to select, Esc to cancel)\27[0m\n", to_display_text(search_query)))
     elseif #search_query > 0 then
-        table.insert(out, string.format("  \27[90mFilter: \27[1;93m'%s'\27[0m \27[90m(%d matches) [Esc/ / to clear]\27[0m   \27[93m[?]\27[0m Help   \27[91m[Q]\27[0m Quit\n", search_query, #images))
+        table.insert(out, string.format("  \27[90mFilter: \27[1;93m'%s'\27[0m \27[90m(%d matches) [Esc/ / to clear]\27[0m   \27[93m[?]\27[0m Help   \27[91m[Q]\27[0m Quit\n", to_display_text(search_query), #images))
     else
         table.insert(out, string.format("  \27[93m[↑/↓/k/j]\27[0m Move   \27[1;92m[Enter/l]\27[0m Open/View   \27[93m[h/Backsp]\27[0m Up   \27[93m[/]\27[0m Filter   \27[93m[i]\27[0m Icon   \27[93m[?]\27[0m Help   \27[91m[Q]\27[0m Quit\n"))
     end
@@ -4162,10 +4311,10 @@ local function render_file_list(dir_path, images, total_unfiltered, selected_idx
 
     if #images == 0 then
         if #search_query > 0 then
-            table.insert(out, string.format("  \27[1;33mNo image files match query '%s'\27[0m\n", search_query))
+            table.insert(out, string.format("  \27[1;33mNo image files match query '%s'\27[0m\n", to_display_text(search_query)))
             table.insert(out, "  Press [Esc] to clear search filter.\n\n")
         else
-            table.insert(out, string.format("  \27[1;31mNo supported images found in %s\27[0m\n", dir_path))
+            table.insert(out, string.format("  \27[1;31mNo supported images found in %s\27[0m\n", to_display_text(dir_path)))
             table.insert(out, "  Supported formats: PNG, JPG/JPEG, PPM, WEBP, GIF, BMP\n\n")
         end
         io.write(table.concat(out))
@@ -4196,14 +4345,17 @@ local function render_file_list(dir_path, images, total_unfiltered, selected_idx
         local is_sel = (i == selected_idx)
         local icon = get_file_icon(img.extension, icon_mode)
         local icon_prefix = (icon ~= "") and (icon .. " ") or ""
-        local max_fn_w = (icon ~= "") and (col2_w - 3) or col2_w
-        local fn = img.filename
-        if #fn > max_fn_w then
-            fn = fn:sub(1, max_fn_w - 3) .. "..."
-        end
+        -- Measure the icon as well: emoji, nerd-font glyphs and the unicode set (where some
+        -- entries carry their own trailing space) are not all the same width, so a fixed
+        -- allowance left every PNG/DIR/GIF row one column out.
+        local icon_cols = display_width(icon_prefix)
+        local max_fn_w = col2_w - icon_cols
+        -- Names arrive from the OS in its own encoding (ANSI on Windows) and may be wide (CJK),
+        -- so transcode for the UTF-8 console and measure/cut by display columns, not bytes.
+        local fn = utf8_truncate(to_display_text(img.filename), max_fn_w)
 
         local display_fn = icon_prefix .. fn
-        local pad_len = math.max(0, col2_w - (fn:len() + ((icon ~= "") and 3 or 0)))
+        local pad_len = math.max(0, col2_w - (display_width(fn) + icon_cols))
         local padded_col2 = display_fn .. string.rep(" ", pad_len)
 
         local date_disp, date_src = get_image_timestamp(img)
@@ -4453,13 +4605,13 @@ local function main()
         local err
         raw_images, err = scan_directory_images(target_dir, recursive, show_hidden)
         if not raw_images then
-            io.stderr:write(string.format("\27[1;31mError: %s\27[0m\n", tostring(err)))
+            io.stderr:write(string.format("\27[1;31mError: %s\27[0m\n", to_display_text(tostring(err))))
             os.exit(1)
         end
     end
 
     if #raw_images == 0 and non_interactive then
-        print(string.format("\27[1;33m[!] No files or directories found in '%s'.\27[0m", target_dir))
+        print(string.format("\27[1;33m[!] No files or directories found in '%s'.\27[0m", to_display_text(target_dir)))
         os.exit(0)
     end
 
@@ -4547,7 +4699,7 @@ local function main()
 
         local new_items, scan_err = scan_directory_images(target_dir, recursive, show_hidden)
         if not new_items then
-            current_msg = "Cannot open directory: " .. tostring(scan_err)
+            current_msg = "Cannot open directory: " .. to_display_text(tostring(scan_err))
             return false
         end
 
@@ -4647,7 +4799,7 @@ local function main()
                         local ok, view_err = render_image_screen(cur_img, img_pos, #img_indices, active_protocol)
                     if not ok then
                         in_viewer = false
-                        current_msg = "Failed to load image: " .. tostring(view_err)
+                        current_msg = "Failed to load image: " .. to_display_text(tostring(view_err))
                     else
                         local k = read_key()
                         if k == "Q" or k == "CTRL_C" then

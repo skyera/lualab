@@ -264,6 +264,105 @@ print("OK_VIDEO_DIMS_PARSE")' ]==],
         name = "AVFrame struct layout pts offset verification (136 bytes)",
         cmd = luajit .. " -e 'local ffi = require(\"ffi\"); local s = io.open(\"pix.lua\"):read(\"*a\"); local cdef = s:match(\"typedef struct AVFrame .-}%s*AVFrame;\"); ffi.cdef(\"typedef struct AVRational { int num, den; } AVRational; \" .. cdef); assert(ffi.offsetof(\"AVFrame\", \"pts\") == 136); print(\"OK_PTS_OFFSET_136\")'",
         expect = "OK_PTS_OFFSET_136"
+    },
+    {
+        name = "UTF-8 text helpers: CJK counts as two columns, truncation never splits a character",
+        cmd = luajit .. [==[ -e '
+local s = io.open("pix.lua"):read("*a")
+local i = s:find("local function codepoint_width", 1, true)
+local j = s:find("if is_windows then", i, true)
+assert(i and j, "text helper block not found in pix.lua")
+local H = assert(loadstring(s:sub(i, j - 1) .. "\nreturn { display_width = display_width, utf8_truncate = utf8_truncate, utf8_tail = utf8_tail }\n", "helpers"))()
+local function valid_utf8(str)
+    local k = 1
+    while k <= #str do
+        local b = str:byte(k)
+        local len = (b < 0x80 and 1) or (b >= 0xF0 and 4) or (b >= 0xE0 and 3) or (b >= 0xC0 and 2) or 0
+        if len == 0 then return false end
+        for m = 1, len - 1 do
+            local c = str:byte(k + m)
+            if not c or c < 0x80 or c >= 0xC0 then return false end
+        end
+        k = k + len
+    end
+    return true
+end
+assert(H.display_width("photo.png") == 9, "ASCII width")
+assert(H.display_width("中文图片.png") == 12, "CJK width")
+assert(H.display_width("café.png") == 8, "accented width")
+assert(H.utf8_truncate("photo.png", 40) == "photo.png", "short name untouched")
+assert(H.utf8_truncate("space one.png", 20) == "space one.png", "short name with space untouched")
+local cut = H.utf8_truncate("中文图片.png", 10)
+assert(H.display_width(cut) <= 10, "truncated CJK name must fit the column")
+assert(cut == "中文图...", "truncated CJK name content")
+assert(valid_utf8(cut), "truncation must not split a multi-byte sequence")
+local ascii_cut = H.utf8_truncate("abcdefghijkl", 10)
+assert(ascii_cut == "abcdefg...", "ASCII truncation behaviour unchanged")
+assert(valid_utf8(H.utf8_tail("/home/中文目录/照片.png", 12)), "tail truncation valid UTF-8")
+assert(H.utf8_tail("/tmp/x.png", 40) == "/tmp/x.png", "short path untouched")
+print("OK_UTF8_TEXT")' ]==],
+        expect = "OK_UTF8_TEXT"
+    },
+    {
+        name = "Windows filenames are transcoded for the UTF-8 console (both text paths wired)",
+        cmd = luajit .. [==[ -e '
+local s = io.open("pix.lua"):read("*a")
+assert(s:find("local to_display_text", 1, true), "to_display_text not declared")
+assert(s:find("to_display_text = function(s) return s end", 1, true), "POSIX identity missing")
+assert(s:find("if kernel32.GetACP() == 65001 then", 1, true), "Windows UTF-8 fast path missing")
+assert(s:find("kernel32.MultiByteToWideChar(0, 0, s, #s, nil, 0)", 1, true), "ANSI->wide conversion missing")
+assert(s:find("kernel32.WideCharToMultiByte(65001, 0, wbuf, wlen, nil, 0, nil, nil)", 1, true), "wide->UTF-8 conversion missing")
+assert(s:find("utf8_truncate(to_display_text(img.filename), max_fn_w)", 1, true), "file list row not transcoded")
+assert(s:find("to_display_text(img_entry.filename)", 1, true), "viewer title not transcoded")
+assert(s:find("local dpath = to_display_text(img_entry.filepath)", 1, true), "viewer path not transcoded")
+assert(s:find("to_display_text(dir_path)", 1, true), "directory header not transcoded")
+assert(s:find("local wpath = to_wide(0) -- CP_ACP", 1, true), "GDI+ does not try the system code page")
+assert(s:find("wpath = to_wide(65001) -- CP_UTF8", 1, true), "GDI+ UTF-8 fallback missing")
+assert(s:find("local icon_cols = display_width(icon_prefix)", 1, true), "icon width hardcoded again")
+print("OK_CJK_WIRING")' ]==],
+        expect = "OK_CJK_WIRING"
+    },
+    {
+        name = "GBK (CP936) filenames render correctly through to_display_text",
+        cmd = (package.config:sub(1,1) == '\\')
+            and (luajit .. " -e 'local s = io.open(\"pix.lua\"):read(\"*a\"); assert(s:find(\"MultiByteToWideChar(0, 0, s\", 1, true)); print(\"OK_CJK_DISPLAY\")'")
+            or (luajit .. [==[ -e '
+local function sh(c) local f = io.popen(c); if not f then return "" end local s = f:read("*a") or ""; f:close(); return s end
+local LJ = (arg and arg[0]) or "luajit"
+local tmp = (os.getenv("TEMP") or "/tmp"):gsub("\\", "/")
+local dir = tmp .. "/test_pix_cjk"
+os.execute("rm -rf " .. dir .. " && mkdir -p " .. dir)
+local gbk = "\214\208\206\196\205\188\198\172.png"  -- 中文图片.png stored as GBK bytes
+local g = assert(io.open(dir .. "/" .. gbk, "wb")); g:write("P6\n1 1\n255\n\255\0\0"); g:close()
+local a = assert(io.open(dir .. "/ascii_one.png", "wb")); a:write("P6\n1 1\n255\n\0\0\255"); a:close()
+local src = io.open("pix.lua"):read("*a")
+local ident = "    -- POSIX filenames are already UTF-8 bytes, exactly what the terminal expects\n    to_display_text = function(s) return s end\n"
+local at = src:find(ident, 1, true)
+assert(at, "POSIX to_display_text assignment not found")
+local stub = [[    local CP936 = { ["\214\208"] = "\228\184\173", ["\206\196"] = "\230\150\135", ["\205\188"] = "\229\155\190", ["\198\172"] = "\231\137\135" }
+    to_display_text = function(s)
+        if type(s) ~= "string" then return s end
+        local out, i = {}, 1
+        while i <= #s do
+            local b = s:byte(i)
+            if b < 0x80 then out[#out + 1] = string.char(b); i = i + 1
+            else out[#out + 1] = CP936[s:sub(i, i + 1)] or "?"; i = i + 2 end
+        end
+        return table.concat(out)
+    end
+]]
+local sim = tmp .. "/test_pix_cjk_sim.lua"
+local out = assert(io.open(sim, "wb"))
+out:write(src:sub(1, at - 1), stub, src:sub(at + #ident)); out:close()
+local function listing(script) return sh(LJ .. " " .. script .. " " .. dir .. " --no-interactive 2>&1") end
+local expect = "\228\184\173\230\150\135\229\155\190\231\137\135.png"  -- 中文图片.png in UTF-8
+local before, after = listing("pix.lua"), listing(sim)
+assert(after:find(expect, 1, true), "transcoded listing does not show the UTF-8 name")
+assert(not before:find(expect, 1, true), "control build unexpectedly shows the UTF-8 name")
+os.remove(sim)
+os.execute("rm -rf " .. dir)
+print("OK_CJK_DISPLAY")' ]==] .. " " .. luajit),
+        expect = "OK_CJK_DISPLAY"
     }
 }
 
