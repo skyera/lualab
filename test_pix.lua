@@ -160,6 +160,11 @@ local tests = {
         expect = "OK_PLAY_ENGINES"
     },
     {
+        name = "mpv hand-off captures dependency stderr and surfaces it only on failure",
+        cmd = luajit .. " -e 'local f = io.open(\"pix.lua\"); local s = f:read(\"*a\"); f:close(); assert(s:find(\"get_mpv_stderr_log_path\", 1, true)); assert(s:find(\"show_mpv_failure\", 1, true)); assert(s:find(\"pix_mpv_stderr.log\", 1, true)); assert(s:find(\"2>nul\", 1, true)); print(\"OK_MPV_STDERR\")'",
+        expect = "OK_MPV_STDERR"
+    },
+    {
         name = "FFmpeg CLI play engine listed in --help",
         cmd = luajit .. " pix.lua --help",
         expect = "--play-engine ffmpeg"

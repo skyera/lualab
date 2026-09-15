@@ -27,6 +27,7 @@
        - Cycle play engines with [m] inside the video player: LuaJIT FFI (libavcodec) -> FFmpeg CLI -> mpv.
        - FFI and FFmpeg CLI decode in-process inside the TUI (seek, speed, loop, frame step, playlist).
        - mpv (--vo=tct) is a hand-off engine with real audio; playback resumes in the TUI when it exits.
+       - mpv dependency stderr (libvdpau/VA-API/mesa) is captured to a log and shown only on failure.
        - Default engine is the first available inline engine; override with --play-engine <auto|ffi|ffmpeg|mpv>.
 ]]
 
@@ -3517,28 +3518,81 @@ end
 
 local video_play_engine = default_play_engine()
 
+-- mpv's own log is muted with --msg-level=all=no, but library dependencies (libvdpau, VA-API,
+-- mesa, fontconfig) write raw diagnostics straight to stderr, e.g.
+--   Failed to open VDPAU backend libvdpau_nvidia.so: cannot open shared object file
+-- Those cannot be suppressed by mpv options, and they land on the main screen because the
+-- alternate buffer is released while mpv owns the terminal. Capture them to a log instead and
+-- surface the tail only when mpv actually fails; tct frames are drawn on stdout, so playback
+-- is unaffected by the redirect.
+local function get_mpv_stderr_log_path()
+    local tmpdir = is_windows and (os.getenv("TEMP") or ".") or (os.getenv("TMPDIR") or "/tmp")
+    return tmpdir .. (is_windows and "\\" or "/") .. "pix_mpv_stderr.log"
+end
+
+local function show_mpv_failure(log_path, status)
+    io.write("\27[H\27[2J")
+    io.write(string.format("\27[1;31m  ⚠ mpv exited with status %s\27[0m\n\n", tostring(status)))
+
+    local tail = {}
+    local f = io.open(log_path, "r")
+    if f then
+        for line in f:lines() do
+            line = line:gsub("[\r\n]+$", "")
+            if #line > 0 then
+                table.insert(tail, line:sub(1, 200))
+                if #tail > 5 then table.remove(tail, 1) end
+            end
+        end
+        f:close()
+    end
+
+    if #tail == 0 then
+        io.write("  \27[90m(no diagnostics captured)\27[0m\n")
+    else
+        for _, line in ipairs(tail) do
+            io.write("  \27[90m" .. line .. "\27[0m\n")
+        end
+    end
+    io.write("\n  \27[93mPress any key to return to the player...\27[0m")
+    io.flush()
+    read_key()
+end
+
 local function launch_mpv_tct(filepath, seek_sec)
     io.write("\27[?25h\27[0m") -- show cursor, reset attrs
     io.flush()
     local term_w, term_h = get_terminal_size()
     local seek_part = (seek_sec and seek_sec > 0) and string.format(" --start=%.2f", seek_sec) or ""
+    local mpv_log = get_mpv_stderr_log_path()
+    local stderr_part = is_windows and " 2>nul" or (" 2>" .. string.format("%q", mpv_log))
     local mpv_cmd = string.format(
         'mpv --vo=tct --vo-tct-width=%d --vo-tct-height=%d'
         .. ' --term-osd-bar'
         .. ' --msg-level=all=no'
         .. ' --term-status-msg="  ${filename}  ${playback-time} / ${duration} (${percent-pos}%%)  Speed: ${speed}x"'
-        .. '%s %q',
+        .. '%s %q%s',
         math.max(4, term_w), math.max(4, term_h - 3),
-        seek_part, filepath)
+        seek_part, filepath, stderr_part)
+
+    local ret
     if is_windows then
-        os.execute(mpv_cmd)
+        ret = os.execute(mpv_cmd)
     else
         disable_raw_mode()
-        os.execute(mpv_cmd)
+        ret = os.execute(mpv_cmd)
         enable_raw_mode()
     end
     io.write("\27[H\27[2J\27[?25l") -- clear screen, hide cursor
     io.flush()
+
+    if not is_windows then
+        if not (ret == 0 or ret == true) then
+            local status = (type(ret) == "number") and math.floor(ret / 256) or ret
+            show_mpv_failure(mpv_log, status)
+        end
+        os.remove(mpv_log)
+    end
 end
 
 local function play_video_screen(img_entry, current_idx, total_count, protocol)
@@ -3631,8 +3685,10 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
             end
         else
             local ss_part = (seek_sec > 0) and string.format("-ss %.2f", seek_sec) or ""
-            local cmd = string.format('ffmpeg -nostdin -loglevel quiet %s -i %q -vf "scale=%d:%d:flags=fast_bilinear" -f rawvideo -pix_fmt rgb24 -',
-                ss_part, img_entry.filepath, frame_w, frame_h)
+            local devnull = is_windows and "nul" or "/dev/null"
+            -- stderr to devnull so decode/hwaccel warnings cannot scribble across the TUI
+            local cmd = string.format('ffmpeg -nostdin -loglevel quiet %s -i %q -vf "scale=%d:%d:flags=fast_bilinear" -f rawvideo -pix_fmt rgb24 - 2>%s',
+                ss_part, img_entry.filepath, frame_w, frame_h, devnull)
             stream_proc = io.popen(cmd, POPEN_READ_BIN)
         end
     end
