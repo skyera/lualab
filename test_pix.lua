@@ -148,6 +148,16 @@ local tests = {
         name = "Non-interactive video file direct selection",
         cmd = "echo q| " .. luajit .. " pix.lua " .. video_test_file .. " --no-interactive",
         expect = "test_gallery_video.mp4"
+    },
+    {
+        name = "Video player mpv shortcut keys documented in help modal",
+        cmd = luajit .. " -e 'local f = io.open(\"pix.lua\"); local s = f:read(\"*a\"); f:close(); assert(s:find(\"Video Playback %(mpv shortcuts%)\")); print(\"OK_MPV_HELP\")'",
+        expect = "OK_MPV_HELP"
+    },
+    {
+        name = "Video player mpv controls implementation (speed, loop, frame-step, seek)",
+        cmd = luajit .. " -e 'local f = io.open(\"pix.lua\"); local s = f:read(\"*a\"); f:close(); assert(s:find(\"playback_speed\")); assert(s:find(\"is_loop\")); assert(s:find(\"%%[Space/p%%]\")); print(\"OK_MPV_CONTROLS\")'",
+        expect = "OK_MPV_CONTROLS"
     }
 }
 

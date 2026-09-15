@@ -3460,6 +3460,9 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
     local cur_time = 0
     local is_paused = false
     local is_eof = false
+    local is_loop = false
+    local show_osd = true
+    local playback_speed = 1.0
     local stream_reader = nil
     local stream_proc = nil
 
@@ -3513,6 +3516,7 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
     local cur_e, total_e = get_engine_position(protocol)
 
     local function draw_static_header()
+        if not show_osd then return end
         io.write("\27[H\27[2J")
         local out = {}
         table.insert(out, "\27[1;34m" .. string.rep("═", bar_len) .. "\27[0m\n")
@@ -3520,20 +3524,23 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
         table.insert(out, string.format("  \27[1;37mVIDEO PLAYER\27[0m \27[1;36m[%d/%d]\27[0m: \27[1;93m%s\27[0m \27[90m(%s, %s)\27[0m\27[K\n",
             current_idx, total_count, img_entry.filename, dim_str, img_entry.size_str))
         table.insert(out, "\n")
-        table.insert(out, string.format("  \27[93m[Space]\27[0m Pause   \27[93m[←/→]\27[0m ±5s   \27[93m[↑/↓]\27[0m ±30s   \27[93m[r]\27[0m Restart   \27[1;96m[t]\27[0m Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\27[K\n"))
+        table.insert(out, string.format("  \27[93m[Space/p]\27[0m Pause  \27[93m[←/→]\27[0m ±5s  \27[93m[↑/↓]\27[0m ±60s  \27[93m[0-9]\27[0m %%  \27[93m[[/]]\27[0m Spd  \27[93m[.]\27[0m Step  \27[93m[l]\27[0m Loop  \27[93m[</>]\27[0m File  \27[91m[q]\27[0m Quit\27[K\n"))
         table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\27[K\n")
         io.write(table.concat(out))
         io.flush()
     end
 
     local function update_dynamic_header(measured_fps)
+        if not show_osd then return end
         local status_tag
+        local speed_tag = (playback_speed ~= 1.0) and string.format(" %.1fx", playback_speed) or ""
+        local loop_tag = is_loop and " 🔁" or ""
         if is_eof then
             status_tag = "\27[1;91m[⏹ ENDED]\27[0m"
         elseif is_paused then
-            status_tag = "\27[1;93m[⏸ PAUSED]\27[0m"
+            status_tag = string.format("\27[1;93m[⏸ PAUSED%s%s]\27[0m", speed_tag, loop_tag)
         else
-            status_tag = "\27[1;92m[▶ PLAYING]\27[0m"
+            status_tag = string.format("\27[1;92m[▶ PLAY%s%s]\27[0m", speed_tag, loop_tag)
         end
 
         local pbar_w = math.min(32, math.max(10, term_w - 48))
@@ -3560,48 +3567,113 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
     while true do
         local k = is_paused and read_key(80) or read_key(0)
         if k then
-            if k == "q" or k == "ESC" or k == "CTRL_C" then
+            if k == "q" or k == "Q" or k == "CTRL_C" then
                 close_stream()
                 return "quit", protocol
-            elseif k == "ENTER" or k == "b" or k == "BACKSPACE" then
+            elseif k == "ESC" or k == "b" then
                 close_stream()
                 return "back", protocol
-            elseif k == "n" or k == "PAGE_DOWN" then
+            elseif k == ">" or k == "ENTER" or k == "PAGE_DOWN" or k == "n" then
                 close_stream()
                 return "next", protocol
-            elseif k == "p" or k == "PAGE_UP" then
+            elseif k == "<" or k == "PAGE_UP" then
                 close_stream()
                 return "prev", protocol
-            elseif k == "SPACE" then
+            elseif k == "SPACE" or k == "p" then
                 if is_eof then
                     cur_time = 0
                     open_stream(0)
                     is_paused = false
+                    is_eof = false
                 else
                     is_paused = not is_paused
                 end
                 update_dynamic_header(current_fps)
-            elseif k == "RIGHT" or k == "l" then
+            elseif k and #k == 1 and k >= "0" and k <= "9" then
+                local pct = tonumber(k) * 0.10
+                cur_time = (v_info.duration > 0) and (v_info.duration * pct) or 0
+                open_stream(cur_time)
+                is_eof = false
+                update_dynamic_header(current_fps)
+            elseif k == "RIGHT" then
                 cur_time = math.min(v_info.duration > 0 and v_info.duration or (cur_time + 5), cur_time + 5)
                 open_stream(cur_time)
+                is_eof = false
                 update_dynamic_header(current_fps)
             elseif k == "LEFT" or k == "h" then
                 cur_time = math.max(0, cur_time - 5)
                 open_stream(cur_time)
+                is_eof = false
                 update_dynamic_header(current_fps)
             elseif k == "UP" or k == "k" then
-                cur_time = math.min(v_info.duration > 0 and v_info.duration or (cur_time + 30), cur_time + 30)
+                cur_time = math.min(v_info.duration > 0 and v_info.duration or (cur_time + 60), cur_time + 60)
                 open_stream(cur_time)
+                is_eof = false
                 update_dynamic_header(current_fps)
             elseif k == "DOWN" or k == "j" then
-                cur_time = math.max(0, cur_time - 30)
+                cur_time = math.max(0, cur_time - 60)
                 open_stream(cur_time)
+                is_eof = false
                 update_dynamic_header(current_fps)
+            elseif k == "[" then
+                playback_speed = math.max(0.1, math.floor((playback_speed - 0.1) * 10 + 0.5) / 10)
+                update_dynamic_header(current_fps)
+            elseif k == "]" then
+                playback_speed = math.min(4.0, math.floor((playback_speed + 0.1) * 10 + 0.5) / 10)
+                update_dynamic_header(current_fps)
+            elseif k == "{" then
+                playback_speed = math.max(0.1, math.floor((playback_speed * 0.5) * 10 + 0.5) / 10)
+                update_dynamic_header(current_fps)
+            elseif k == "}" then
+                playback_speed = math.min(4.0, math.floor((playback_speed * 2.0) * 10 + 0.5) / 10)
+                update_dynamic_header(current_fps)
+            elseif k == "BACKSPACE" then
+                playback_speed = 1.0
+                update_dynamic_header(current_fps)
+            elseif k == "." then
+                is_paused = true
+                local raw_frame = read_next_frame()
+                if raw_frame and #raw_frame >= frame_bytes then
+                    render_video_frame_halfblock(raw_frame, frame_w, frame_h, pad, 6)
+                    update_dynamic_header(current_fps)
+                else
+                    is_eof = true
+                    update_dynamic_header(current_fps)
+                end
+            elseif k == "," then
+                is_paused = true
+                cur_time = math.max(0, cur_time - (target_dt * 2))
+                open_stream(cur_time)
+                local raw_frame = read_next_frame()
+                if raw_frame and #raw_frame >= frame_bytes then
+                    render_video_frame_halfblock(raw_frame, frame_w, frame_h, pad, 6)
+                end
+                update_dynamic_header(current_fps)
+            elseif k == "l" or k == "L" then
+                is_loop = not is_loop
+                update_dynamic_header(current_fps)
+            elseif k == "o" or k == "P" then
+                show_osd = not show_osd
+                if show_osd then
+                    draw_static_header()
+                    update_dynamic_header(current_fps)
+                else
+                    io.write("\27[H\27[2J")
+                    io.flush()
+                end
             elseif k == "r" or k == "HOME" then
                 cur_time = 0
                 open_stream(0)
                 is_paused = false
+                is_eof = false
                 update_dynamic_header(current_fps)
+            elseif k == "END" then
+                if v_info.duration > 0 then
+                    cur_time = math.max(0, v_info.duration - 1)
+                    open_stream(cur_time)
+                    is_eof = false
+                    update_dynamic_header(current_fps)
+                end
             elseif k == "t" or k == "T" then
                 protocol = cycle_next_engine(protocol)
                 cur_e, total_e = get_engine_position(protocol)
@@ -3618,9 +3690,17 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
         if not is_paused and (stream_reader or stream_proc) then
             local raw_frame = read_next_frame()
             if not raw_frame or #raw_frame < frame_bytes then
-                is_eof = true
-                is_paused = true
-                update_dynamic_header(current_fps)
+                if is_loop then
+                    cur_time = 0
+                    open_stream(0)
+                    is_paused = false
+                    is_eof = false
+                    update_dynamic_header(current_fps)
+                else
+                    is_eof = true
+                    is_paused = true
+                    update_dynamic_header(current_fps)
+                end
             else
                 render_video_frame_halfblock(raw_frame, frame_w, frame_h, pad, 6)
                 frames_rendered = frames_rendered + 1
@@ -3634,7 +3714,8 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
                 end
 
                 local render_dur = os.clock() - last_frame_clock
-                local wait_dt = target_dt - render_dur
+                local effective_dt = target_dt / playback_speed
+                local wait_dt = effective_dt - render_dur
                 if wait_dt > 0.002 then
                     local wait_ms = math.floor(wait_dt * 1000)
                     if is_windows then
@@ -3702,11 +3783,17 @@ local function render_help_modal(term_w, term_h, active_protocol)
         cycle_line,
         "│    Enter / b / Backsp  Return to file/folder list           │",
         "│                                                             │",
-        "│  Video Playback (FFmpeg):                                   │",
-        "│    Space               Play / Pause playback                │",
-        "│    ← / →, h / l        Seek backward / forward 5s           │",
-        "│    ↑ / ↓, k / j        Seek backward / forward 30s          │",
-        "│    r                   Restart playback from start          │",
+        "│  Video Playback (mpv shortcuts):                            │",
+        "│    Space / p           Play / Pause playback                │",
+        "│    ← / →, ↓ / ↑        Seek ±5s / ±60s                      │",
+        "│    0 - 9               Seek to 0% - 90% of duration         │",
+        "│    [ / ]               Speed -10% / +10% (Backspace: 1.0x)  │",
+        "│    { / }               Halve / Double playback speed        │",
+        "│    . / ,               Frame step forward / backward        │",
+        "│    l                   Toggle loop mode (inf / off)         │",
+        "│    < / >               Previous / Next video in playlist    │",
+        "│    Home / r, End       Restart from start / Seek to end     │",
+        "│    o                   Toggle OSD / header visibility       │",
         "│                                                             │",
         "│  Search & Sorting:                                          │",
         "│    /                   Start live search / filter query     │",
