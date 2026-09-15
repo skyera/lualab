@@ -1,9 +1,9 @@
 --[[
-    test_view_gallery_terminal.lua
-    Unit tests for view_gallery_terminal.lua.
+    test_pix.lua
+    Unit tests for pix.lua (Terminal Directory Image Viewer).
 ]]
 
-print("=== Running Unit Tests for view_gallery_terminal.lua ===")
+print("=== Running Unit Tests for pix.lua ===")
 
 local luajit = "luajit"
 local f_check = io.open("./LuaJIT/src/luajit", "rb") or io.open("./LuaJIT/src/luajit.exe", "rb")
@@ -42,77 +42,77 @@ end
 local tests = {
     {
         name = "Help display (--help)",
-        cmd = luajit .. " view_gallery_terminal.lua --help",
+        cmd = luajit .. " pix.lua --help",
         expect = "Terminal Directory Image Viewer"
     },
     {
         name = "Default current directory listing",
-        cmd = "echo q| " .. luajit .. " view_gallery_terminal.lua --no-interactive",
+        cmd = "echo q| " .. luajit .. " pix.lua --no-interactive",
         expect = "pillars_of_creation.jpg"
     },
     {
         name = "Direct image view via --truecolor flag",
-        cmd = luajit .. " view_gallery_terminal.lua pillars_of_creation.jpg --truecolor --select 1",
+        cmd = luajit .. " pix.lua pillars_of_creation.jpg --truecolor --select 1",
         expect = "ANSI 24-bit Truecolor Half-Block"
     },
     {
         name = "Direct image view via --timg-half flag",
-        cmd = luajit .. " view_gallery_terminal.lua pillars_of_creation.jpg --timg-half --select 1",
+        cmd = luajit .. " pix.lua pillars_of_creation.jpg --timg-half --select 1",
         expect = "timg Half-Block"
     },
     {
         name = "Direct image view via --timg-quarter flag",
-        cmd = luajit .. " view_gallery_terminal.lua pillars_of_creation.jpg --timg-quarter --select 1",
+        cmd = luajit .. " pix.lua pillars_of_creation.jpg --timg-quarter --select 1",
         expect = "timg Quarter-Block"
     },
     {
         name = "Direct image view via --chafa flag",
-        cmd = luajit .. " view_gallery_terminal.lua pillars_of_creation.jpg --chafa --select 1",
+        cmd = luajit .. " pix.lua pillars_of_creation.jpg --chafa --select 1",
         expect = "Chafa Symbols"
     },
     {
         name = "Direct image view via --chafa-braille flag",
-        cmd = luajit .. " view_gallery_terminal.lua pillars_of_creation.jpg --chafa-braille --select 1",
+        cmd = luajit .. " pix.lua pillars_of_creation.jpg --chafa-braille --select 1",
         expect = "Chafa Braille 2×4"
     },
     {
         name = "Direct image view via --timg-cli flag (if installed)",
-        cmd = luajit .. " view_gallery_terminal.lua pillars_of_creation.jpg --timg-cli --select 1",
+        cmd = luajit .. " pix.lua pillars_of_creation.jpg --timg-cli --select 1",
         expect = "timg"
     },
     {
         name = "Direct image view via --chafa-cli flag (if installed)",
-        cmd = luajit .. " view_gallery_terminal.lua pillars_of_creation.jpg --chafa-cli --select 1",
+        cmd = luajit .. " pix.lua pillars_of_creation.jpg --chafa-cli --select 1",
         expect = "Chafa"
     },
     {
         name = "Non-interactive directory navigation",
-        cmd = "echo q| " .. luajit .. " view_gallery_terminal.lua LuaBridge/Source --no-interactive",
+        cmd = "echo q| " .. luajit .. " pix.lua LuaBridge/Source --no-interactive",
         expect = "TERMINAL DIRECTORY IMAGE VIEWER"
     },
     {
         name = "EXIF timestamp extraction in viewer header",
-        cmd = luajit .. " view_gallery_terminal.lua " .. exif_test_file .. " --timg-half --select 1",
+        cmd = luajit .. " pix.lua " .. exif_test_file .. " --timg-half --select 1",
         expect = "Date: 2024-06-15 10:20:30 (EXIF)"
     },
     {
         name = "Filesystem timestamp fallback in viewer header",
-        cmd = luajit .. " view_gallery_terminal.lua pillars_of_creation.jpg --timg-half --select 1",
+        cmd = luajit .. " pix.lua pillars_of_creation.jpg --timg-half --select 1",
         expect = "(File)"
     },
     {
         name = "Render engine detection list in --help",
-        cmd = luajit .. " view_gallery_terminal.lua --help",
+        cmd = luajit .. " pix.lua --help",
         expect = "Render Engines (Detected on this system):"
     },
     {
         name = "Viewer header engine position indicator [cur/total]",
-        cmd = luajit .. " view_gallery_terminal.lua pillars_of_creation.jpg --select 1 --truecolor",
+        cmd = luajit .. " pix.lua pillars_of_creation.jpg --select 1 --truecolor",
         expect = "Engine: ["
     },
     {
         name = "Viewer header engine available count in cycle hint",
-        cmd = luajit .. " view_gallery_terminal.lua pillars_of_creation.jpg --select 1 --truecolor",
+        cmd = luajit .. " pix.lua pillars_of_creation.jpg --select 1 --truecolor",
         expect = "available)"
     }
 }
@@ -137,7 +137,7 @@ os.remove(exif_test_file)
 
 print(string.format("\nTest Summary: %d / %d tests passed.", passed, #tests))
 if passed == #tests then
-    print("\27[1;32mALL IMAGE GALLERY VIEWER TESTS PASSED!\27[0m")
+    print("\27[1;32mALL PIX TESTS PASSED!\27[0m")
 else
     os.exit(1)
 end
