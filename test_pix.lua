@@ -46,6 +46,32 @@ if package.config:sub(1,1) == '\\' then
 end
 os.execute(string.format('ffmpeg -y -loglevel quiet -f lavfi -i testsrc=duration=1:size=64x64:rate=10 -c:v libx264 -pix_fmt yuv420p %q', video_test_file))
 
+-- Create hidden-entry fixture: a dot image, a dot directory holding an image, plus a visible control
+local hidden_fixture_dir = (os.getenv("TEMP") or "/tmp") .. "/test_pix_hidden"
+if package.config:sub(1,1) == '\\' then
+    hidden_fixture_dir = (os.getenv("TEMP") or "."):gsub("\\", "/") .. "/test_pix_hidden"
+end
+do
+    local win = package.config:sub(1,1) == '\\'
+    local win_dir = hidden_fixture_dir:gsub("/", "\\")
+    if win then
+        os.execute(string.format('rmdir /s /q "%s" 2>nul', win_dir))
+        os.execute(string.format('mkdir "%s" 2>nul', win_dir))
+        os.execute(string.format('mkdir "%s\\.dot_dir" 2>nul', win_dir))
+    else
+        os.execute(string.format('rm -rf "%s"', hidden_fixture_dir))
+        os.execute(string.format('mkdir -p "%s/.dot_dir"', hidden_fixture_dir))
+    end
+
+    local function touch(name)
+        local f = io.open(hidden_fixture_dir .. "/" .. name, "wb")
+        if f then f:write("\137PNG\r\n\026\n") f:close() end
+    end
+    touch("visible.png")
+    touch(".dot_photo.png")
+    touch(".dot_dir/inside.png")
+end
+
 local tests = {
     {
         name = "Help display (--help)",
@@ -165,6 +191,32 @@ local tests = {
         expect = "OK_MPV_STDERR"
     },
     {
+        name = "Hidden (dot) entries are skipped by default",
+        cmd = "echo q | " .. luajit .. " pix.lua \"" .. hidden_fixture_dir .. "\" --no-interactive 2>&1 | grep -q dot_photo && echo UNEXPECTED_HIDDEN || echo HIDDEN_EXCLUDED",
+        expect = "HIDDEN_EXCLUDED"
+    },
+    {
+        name = "--hidden lists dot files and dot directories",
+        cmd = "out=$(echo q | " .. luajit .. " pix.lua \"" .. hidden_fixture_dir .. "\" --no-interactive --hidden 2>&1); "
+            .. "echo \"$out\" | grep -q dot_photo && echo \"$out\" | grep -q dot_dir && echo HIDDEN_SHOWN || echo MISSING_HIDDEN",
+        expect = "HIDDEN_SHOWN"
+    },
+    {
+        name = "-a alias enables hidden entries",
+        cmd = "echo q | " .. luajit .. " pix.lua \"" .. hidden_fixture_dir .. "\" --no-interactive -a 2>&1 | grep -q dot_photo && echo HIDDEN_SHOWN || echo MISSING_HIDDEN",
+        expect = "HIDDEN_SHOWN"
+    },
+    {
+        name = "Recursive scan descends into dot directories only when hidden is on",
+        cmd = "echo q | " .. luajit .. " pix.lua \"" .. hidden_fixture_dir .. "\" -r --no-interactive --hidden 2>&1 | grep -q inside.png && echo DESCENDED || echo NOT_DESCENDED",
+        expect = "DESCENDED"
+    },
+    {
+        name = "Hidden toggle wiring ([.] key, help entry, CLI flag)",
+        cmd = luajit .. " -e 'local f = io.open(\"pix.lua\"); local s = f:read(\"*a\"); f:close(); assert(s:find(\"show_hidden = not show_hidden\", 1, true)); assert(s:find(\"Toggle hidden files\", 1, true)); assert(s:find(\"--hidden, -a\", 1, true)); print(\"OK_HIDDEN_TOGGLE\")'",
+        expect = "OK_HIDDEN_TOGGLE"
+    },
+    {
         name = "FFmpeg CLI play engine listed in --help",
         cmd = luajit .. " pix.lua --help",
         expect = "--play-engine ffmpeg"
@@ -204,6 +256,11 @@ end
 
 os.remove(exif_test_file)
 os.remove(video_test_file)
+if package.config:sub(1,1) == '\\' then
+    os.execute(string.format('rmdir /s /q "%s" 2>nul', hidden_fixture_dir:gsub("/", "\\")))
+else
+    os.execute(string.format('rm -rf "%s"', hidden_fixture_dir))
+end
 
 print(string.format("\nTest Summary: %d / %d tests passed.", passed, #tests))
 if passed == #tests then

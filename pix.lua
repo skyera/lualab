@@ -8,6 +8,7 @@
        - Level 1 scanning default, or recursive scanning via -r / --recursive.
        - Supports standard image formats: PNG, JPG/JPEG, PPM, WEBP, GIF, BMP.
     2. Interactive File Selector & TUI:
+       - Hidden (dot) entries are skipped by default; [.] toggles them, or start with --hidden / -a.
        - Uses Terminal Alternate Screen Buffer (\27[?1049h) for clean enter and exit.
        - Live interactive substring search / filter with [/] and [Esc].
        - Sort cycle with [s] (Name -> Date -> Size) and reverse sort with [r].
@@ -324,7 +325,7 @@ if is_windows then
         return nil
     end
 
-    local function scan_win_dir(dir_path, entries, recursive)
+    local function scan_win_dir(dir_path, entries, recursive, show_hidden)
         local norm_dir = dir_path:gsub("/", "\\"):gsub("\\+$", "")
         if norm_dir == "" then norm_dir = "." end
         local search_pattern = (norm_dir == ".") and ".\\*" or (norm_dir .. "\\*")
@@ -339,14 +340,14 @@ if is_windows then
             local fname = ffi.string(find_data.cFileName)
             local is_dir = bit.band(find_data.dwFileAttributes, FILE_ATTRIBUTE_DIRECTORY) ~= 0
 
-            if fname ~= "." and fname ~= ".." and not fname:match("^%.") then
+            if fname ~= "." and fname ~= ".." and (show_hidden or not fname:match("^%.")) then
                 local full_path = (norm_dir == ".") and fname or (norm_dir .. "\\" .. fname)
                 local ft = tonumber(find_data.ftLastWriteTime.dwHighDateTime) * 4294967296 + tonumber(find_data.ftLastWriteTime.dwLowDateTime)
                 local mtime = math.floor((ft - 116444736000000000) / 10000000)
 
                 if is_dir then
                     if recursive then
-                        scan_win_dir(full_path, entries, true)
+                        scan_win_dir(full_path, entries, true, show_hidden)
                     else
                         table.insert(entries, {
                             filename = fname,
@@ -393,7 +394,7 @@ if is_windows then
         return 0
     end
 
-    scan_directory_images = function(dir_path, recursive)
+    scan_directory_images = function(dir_path, recursive, show_hidden)
         dir_path = dir_path or "."
         dir_path = dir_path:gsub("[/\\]+$", "")
         if dir_path == "" then dir_path = "." end
@@ -415,7 +416,7 @@ if is_windows then
             })
         end
 
-        scan_win_dir(dir_path, entries, recursive)
+        scan_win_dir(dir_path, entries, recursive, show_hidden)
 
         -- Fallback if FindFirstFileA discovered no entries (e.g. permission or shell path quirk)
         local has_content = false
@@ -430,7 +431,7 @@ if is_windows then
             if p then
                 for line in p:lines() do
                     local fname = line:gsub("[\r\n]+$", "")
-                    if fname ~= "" and fname ~= "." and fname ~= ".." and not fname:match("^%.") then
+                    if fname ~= "" and fname ~= "." and fname ~= ".." and (show_hidden or not fname:match("^%.")) then
                         local full_path = (dir_path == ".") and fname or (dir_path .. "\\" .. fname)
                         local ext = fname:match("%.([^.]+)$")
                         if ext and SUPPORTED_EXTENSIONS[ext:lower()] then
@@ -661,7 +662,7 @@ else
         return nil
     end
 
-    local function scan_posix_dir(dir_path, entries, recursive)
+    local function scan_posix_dir(dir_path, entries, recursive, show_hidden)
         local d = ffi.C.opendir(dir_path)
         if d == nil then return end
 
@@ -671,7 +672,7 @@ else
             if ent == nil then break end
             local fname = ffi.string(ent.d_name)
 
-            if fname ~= "." and fname ~= ".." and not fname:match("^%.") then
+            if fname ~= "." and fname ~= ".." and (show_hidden or not fname:match("^%.")) then
                 local full_path = (dir_path == ".") and fname or (dir_path .. "/" .. fname)
                 local d_type = ent.d_type
                 local is_dir = (d_type == 4)
@@ -704,7 +705,7 @@ else
 
                 if is_dir then
                     if recursive then
-                        scan_posix_dir(full_path, entries, true)
+                        scan_posix_dir(full_path, entries, true, show_hidden)
                     else
                         table.insert(entries, {
                             filename = fname,
@@ -737,7 +738,7 @@ else
         ffi.C.closedir(d)
     end
 
-    scan_directory_images = function(dir_path, recursive)
+    scan_directory_images = function(dir_path, recursive, show_hidden)
         dir_path = dir_path or "."
         if #dir_path > 1 and dir_path:sub(-1) == "/" then
             dir_path = dir_path:sub(1, -2)
@@ -760,7 +761,7 @@ else
             })
         end
 
-        scan_posix_dir(dir_path, entries, recursive)
+        scan_posix_dir(dir_path, entries, recursive, show_hidden)
         return entries
     end
 
@@ -4034,7 +4035,7 @@ local function render_help_modal(term_w, term_h, active_protocol)
         "│    ← / →               Seek ±5s                             │",
         "│    Shift+← / Shift+→   Seek ±1s (exact)                     │",
         "│    Ctrl+← / Ctrl+→     Seek ±10s                            │",
-        "│    ↓ / ↑               Seek ±60s                             │",
+        "│    ↓ / ↑               Seek ±60s                            │",
         "│    0 - 9               Seek to 0% - 90% of duration         │",
         "│    [ / ]               Speed -10% / +10% (Backspace: 1.0x)  │",
         "│    { / }               Halve / Double playback speed        │",
@@ -4050,7 +4051,8 @@ local function render_help_modal(term_w, term_h, active_protocol)
         "│    Esc                 Clear active search / exit search    │",
         "│    s                   Cycle sort (Name -> Date -> Size)    │",
         "│    r                   Reverse sort direction (Asc / Desc)  │",
-        "│    i                   Cycle icon mode (Unicode / Nerd / Off)│",
+        "│    i                   Cycle icons: Unicode / Nerd / Off    │",
+        "│    .                   Toggle hidden files / folders (.dot) │",
         "│                                                             │",
         eng_header,
         eng_row1,
@@ -4086,7 +4088,7 @@ local function render_help_modal(term_w, term_h, active_protocol)
     io.flush()
 end
 
-local function render_file_list(dir_path, images, total_unfiltered, selected_idx, page_offset, msg, search_mode, search_query, sort_mode, sort_desc, recursive, icon_mode)
+local function render_file_list(dir_path, images, total_unfiltered, selected_idx, page_offset, msg, search_mode, search_query, sort_mode, sort_desc, recursive, icon_mode, show_hidden)
     local term_w, term_h = get_terminal_size()
     local out = {}
     table.insert(out, "\27[H\27[2J") -- Clear screen & home
@@ -4100,7 +4102,10 @@ local function render_file_list(dir_path, images, total_unfiltered, selected_idx
     table.insert(out, string.format("%s   %s\n", title_left, title_right))
 
     local scan_type = recursive and "Recursive" or "Level 1"
-    table.insert(out, string.format("  \27[90mDir:\27[0m \27[1;33m%s\27[0m \27[90m(%d total, %s)\27[0m\n", dir_path, total_unfiltered, scan_type))
+    local hidden_tag = show_hidden
+        and "   \27[1;96m[.]\27[0m \27[90mHidden: \27[1;92mON\27[0m"
+        or "   \27[1;96m[.]\27[0m \27[90mHidden: \27[90mOFF\27[0m"
+    table.insert(out, string.format("  \27[90mDir:\27[0m \27[1;33m%s\27[0m \27[90m(%d total, %s)\27[0m%s\n", dir_path, total_unfiltered, scan_type, hidden_tag))
 
     if search_mode then
         table.insert(out, string.format("  \27[1;97;44m SEARCH: \27[0m \27[1;93m%s_\27[0m \27[90m(Type to filter, Enter to select, Esc to cancel)\27[0m\n", search_query))
@@ -4275,6 +4280,7 @@ local function main()
         print("  -r, --recursive       Recursively scan subdirectories for images")
         print("  --select, -s <id>     Directly select and display image #id")
         print("  --sort <name|date|size> Initial sort order (default: name)")
+        print("  --hidden, -a          Include hidden (dot) files and folders (toggle with [.])")
         print("  --play-engine <auto|ffi|ffmpeg|mpv> Video play engine (default: auto)")
         print("  --nerd-icons          Use Nerd Font glyphs instead of standard Unicode")
         print("  --no-icons            Disable file icons")
@@ -4354,6 +4360,8 @@ local function main()
     end
 
     local recursive = args["-r"] or args["--recursive"]
+    -- Hidden (dot) entries: off by default, toggled with [.] in the list view
+    local show_hidden = args["--hidden"] or args["-a"] or false
     local target_dir = positional[1] or "."
     local cli_select = tonumber(args["--select"])
     local non_interactive = args["--no-interactive"] or (not is_stdin_tty())
@@ -4405,7 +4413,7 @@ local function main()
 
     if not raw_images then
         local err
-        raw_images, err = scan_directory_images(target_dir, recursive)
+        raw_images, err = scan_directory_images(target_dir, recursive, show_hidden)
         if not raw_images then
             io.stderr:write(string.format("\27[1;31mError: %s\27[0m\n", tostring(err)))
             os.exit(1)
@@ -4454,7 +4462,7 @@ local function main()
     -- 4. Non-interactive fallback (e.g., pipes or redirect)
     if non_interactive then
         while true do
-            render_file_list(target_dir, raw_images, #raw_images, 1, 1, nil, false, "", sort_mode, sort_desc, recursive, icon_mode)
+            render_file_list(target_dir, raw_images, #raw_images, 1, 1, nil, false, "", sort_mode, sort_desc, recursive, icon_mode, show_hidden)
             io.write(string.format("\n\27[1;32mEnter item number [1-%d] to open/view, or 'q' to quit: \27[0m", #raw_images))
             io.flush()
             local line = io.read("*l")
@@ -4466,7 +4474,7 @@ local function main()
                 local item = raw_images[sel]
                 if item.is_dir then
                     target_dir = item.filepath
-                    raw_images = scan_directory_images(target_dir, recursive) or {}
+                    raw_images = scan_directory_images(target_dir, recursive, show_hidden) or {}
                     sort_images(raw_images, sort_mode, sort_desc)
                 else
                     if is_video_file(item.extension) then
@@ -4499,7 +4507,7 @@ local function main()
         target_dir = target_dir:gsub("/%./", "/"):gsub("/+$", "")
         if target_dir == "" then target_dir = "/" end
 
-        local new_items, scan_err = scan_directory_images(target_dir, recursive)
+        local new_items, scan_err = scan_directory_images(target_dir, recursive, show_hidden)
         if not new_items then
             current_msg = "Cannot open directory: " .. tostring(scan_err)
             return false
@@ -4648,7 +4656,7 @@ local function main()
             end
             else
                 update_page_window()
-                render_file_list(target_dir, filtered_images, #raw_images, selected_idx, page_offset, current_msg, search_mode, search_query, sort_mode, sort_desc, recursive, icon_mode)
+                render_file_list(target_dir, filtered_images, #raw_images, selected_idx, page_offset, current_msg, search_mode, search_query, sort_mode, sort_desc, recursive, icon_mode, show_hidden)
                 current_msg = nil
 
                 local k = read_key()
@@ -4733,6 +4741,12 @@ local function main()
                         filtered_images = filter_images(raw_images, search_query)
                         selected_idx = 1
                         page_offset = 1
+                    elseif k == "." then
+                        -- Toggle hidden (dot) files and folders
+                        show_hidden = not show_hidden
+                        if reload_directory(target_dir) then
+                            current_msg = show_hidden and "Hidden: ON" or "Hidden: OFF"
+                        end
                     elseif k == "r" then
                         sort_desc = not sort_desc
                         sort_images(raw_images, sort_mode, sort_desc)
