@@ -56,7 +56,7 @@ make
   ./LuaJIT/src/luajit ffi_sqlite_demo.lua   # In-memory SQLite3 FFI engine & benchmark
   ./LuaJIT/src/luajit ffi_game_snake.lua    # Real-time terminal Snake game via POSIX FFI
   ./LuaJIT/src/luajit ffi_image_terminal_demo.lua  # Fast C image generation & terminal truecolor viewer
-  ./LuaJIT/src/luajit view_image_terminal.lua <image.png|jpg|ppm>  # Terminal image viewer with auto-scaling
+  ./LuaJIT/src/luajit pix.lua <image.png|jpg|ppm>  # Fast terminal image viewer with auto-scaling
   ./LuaJIT/src/luajit view_gallery_terminal.lua [dir]              # Interactive directory image viewer (defaults to current dir)
   ./LuaJIT/src/luajit gallery_portrait.lua  # Dynamic procedural portrait gallery with interactive selection
   ./LuaJIT/src/luajit ffi_3d_viewer.lua     # Real-time interactive 3D polygonal mesh engine with Z-buffer shading

@@ -1,5 +1,5 @@
 --[[
-    view_image_terminal.lua
+    pix.lua
     A terminal image viewer written in LuaJIT FFI.
 
     Features:
@@ -242,9 +242,9 @@ end
 local filepath = arg and arg[1]
 
 if not filepath or filepath == "-h" or filepath == "--help" then
-    print("\27[1;36mUniversal Terminal Image Viewer (LuaJIT FFI)\27[0m")
+    print("\27[1;36mpix — Terminal Image Viewer (LuaJIT FFI)\27[0m")
     print("Usage:")
-    print("  ./LuaJIT/src/luajit view_image_terminal.lua <image_path> [max_width] [max_height]")
+    print("  ./LuaJIT/src/luajit pix.lua <image_path> [max_width] [max_height]")
     print("\nSupported formats:")
     print("  - PNG, JPG/JPEG, WEBP, GIF, BMP, PPM")
     os.exit(0)
