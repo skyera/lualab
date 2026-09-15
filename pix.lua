@@ -3437,25 +3437,37 @@ local function render_video_frame_halfblock(raw_bytes, frame_w, frame_h, pad, ro
     io.flush()
 end
 
+-- Video play engine state: "mpv" (preferred if available) or "builtin"
+local video_play_engine = get_has_mpv() and "mpv" or "builtin"
+
+local function launch_mpv_tct(filepath, seek_sec)
+    io.write("\27[?25h\27[0m") -- show cursor, reset attrs
+    io.flush()
+    local term_w, term_h = get_terminal_size()
+    local seek_part = (seek_sec and seek_sec > 0) and string.format(" --start=%.2f", seek_sec) or ""
+    local mpv_cmd = string.format(
+        'mpv --vo=tct --vo-tct-width=%d --vo-tct-height=%d'
+        .. ' --term-osd-bar'
+        .. ' --msg-level=all=no'
+        .. ' --term-status-msg="  ${filename}  ${playback-time} / ${duration} (${percent-pos}%%)  Speed: ${speed}x"'
+        .. '%s %q',
+        math.max(4, term_w), math.max(4, term_h - 3),
+        seek_part, filepath)
+    if is_windows then
+        os.execute(mpv_cmd)
+    else
+        disable_raw_mode()
+        os.execute(mpv_cmd)
+        enable_raw_mode()
+    end
+    io.write("\27[H\27[2J\27[?25l") -- clear screen, hide cursor
+    io.flush()
+end
+
 local function play_video_screen(img_entry, current_idx, total_count, protocol)
-    -- Prefer mpv in terminal mode when available (audio, subtitles, native mpv keys)
-    if get_has_mpv() then
-        io.write("\27[?25h\27[0m") -- show cursor, reset attrs
-        io.flush()
-        local term_w, term_h = get_terminal_size()
-        local mpv_cmd = string.format(
-            'mpv --vo=tct --really-quiet --term-osd-bar --vo-tct-width=%d --vo-tct-height=%d %q',
-            math.max(4, term_w), math.max(4, term_h - 3), img_entry.filepath)
-        if is_windows then
-            os.execute(mpv_cmd)
-        else
-            -- Temporarily restore terminal so mpv can manage it
-            disable_raw_mode()
-            os.execute(mpv_cmd)
-            enable_raw_mode()
-        end
-        io.write("\27[H\27[2J\27[?25l") -- clear screen, hide cursor
-        io.flush()
+    -- If mpv engine selected and available, launch mpv directly
+    if video_play_engine == "mpv" and get_has_mpv() then
+        launch_mpv_tct(img_entry.filepath, 0)
         return "back", protocol
     end
 
@@ -3579,7 +3591,8 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
         table.insert(out, string.format("  \27[1;37mVIDEO PLAYER\27[0m \27[1;36m[%d/%d]\27[0m: \27[1;93m%s\27[0m \27[90m(%s, %s)\27[0m\27[K\n",
             current_idx, total_count, img_entry.filename, dim_str, img_entry.size_str))
         table.insert(out, "\n")
-        table.insert(out, string.format("  \27[93m[Space/p]\27[0m Pause  \27[93m[←/→]\27[0m ±5s  \27[93m[↑/↓]\27[0m ±60s  \27[93m[0-9]\27[0m %%  \27[93m[[/]]\27[0m Spd  \27[93m[.]\27[0m Step  \27[93m[l]\27[0m Loop  \27[93m[</>]\27[0m File  \27[91m[q]\27[0m Quit\27[K\n"))
+        local mpv_hint = get_has_mpv() and "  \27[93m[m]\27[0m mpv" or ""
+        table.insert(out, string.format("  \27[93m[Space/p]\27[0m Pause  \27[93m[←/→]\27[0m ±5s  \27[93m[↑/↓]\27[0m ±60s  \27[93m[0-9]\27[0m %%  \27[93m[[/]]\27[0m Spd  \27[93m[.]\27[0m Step  \27[93m[l]\27[0m Loop  \27[93m[</>]\27[0m File%s  \27[91m[q]\27[0m Quit\27[K\n", mpv_hint))
         table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\27[K\n")
         io.write(table.concat(out))
         io.flush()
@@ -3753,6 +3766,14 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
                 protocol = cycle_next_engine(protocol)
                 cur_e, total_e = get_engine_position(protocol)
                 update_dynamic_header(current_fps)
+            elseif (k == "m" or k == "M") and get_has_mpv() then
+                close_stream()
+                video_play_engine = "mpv"
+                launch_mpv_tct(img_entry.filepath, cur_time)
+                video_play_engine = "builtin"  -- return to built-in after mpv exits
+                draw_static_header()
+                update_dynamic_header(current_fps)
+                open_stream(cur_time)
             elseif k == "?" then
                 local tw, th = get_terminal_size()
                 render_help_modal(tw, th, protocol)
@@ -3872,6 +3893,7 @@ local function render_help_modal(term_w, term_h, active_protocol)
         "│    < / >               Previous / Next video in playlist    │",
         "│    Home / r, End       Restart from start / Seek to end     │",
         "│    o                   Toggle OSD / header visibility       │",
+        "│    m                   Switch to mpv player (with audio)    │",
         "│                                                             │",
         "│  Search & Sorting:                                          │",
         "│    /                   Start live search / filter query     │",
