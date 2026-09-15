@@ -39,6 +39,13 @@ if f_exif then
     f_exif:close()
 end
 
+-- Create synthetic test video fixture via ffmpeg
+local video_test_file = (os.getenv("TEMP") or "/tmp") .. "/test_gallery_video.mp4"
+if package.config:sub(1,1) == '\\' then
+    video_test_file = (os.getenv("TEMP") or "."):gsub("\\", "/") .. "/test_gallery_video.mp4"
+end
+os.execute(string.format('ffmpeg -y -loglevel quiet -f lavfi -i testsrc=duration=1:size=64x64:rate=10 -c:v libx264 -pix_fmt yuv420p %q', video_test_file))
+
 local tests = {
     {
         name = "Help display (--help)",
@@ -114,6 +121,21 @@ local tests = {
         name = "Viewer header engine available count in cycle hint",
         cmd = luajit .. " pix.lua pillars_of_creation.jpg --select 1 --truecolor",
         expect = "available)"
+    },
+    {
+        name = "Video format support listed in --help",
+        cmd = luajit .. " pix.lua --help",
+        expect = "Videos: MP4, MKV, WEBM, AVI, MOV, M4V, FLV (via ffmpeg)"
+    },
+    {
+        name = "Direct video thumbnail decode via --select 1",
+        cmd = luajit .. " pix.lua " .. video_test_file .. " --select 1",
+        expect = "IMAGE VIEWER [1/1]"
+    },
+    {
+        name = "Non-interactive video file direct selection",
+        cmd = "echo q| " .. luajit .. " pix.lua " .. video_test_file .. " --no-interactive",
+        expect = "test_gallery_video.mp4"
     }
 }
 
@@ -134,6 +156,7 @@ for i, t in ipairs(tests) do
 end
 
 os.remove(exif_test_file)
+os.remove(video_test_file)
 
 print(string.format("\nTest Summary: %d / %d tests passed.", passed, #tests))
 if passed == #tests then

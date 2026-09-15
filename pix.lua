@@ -53,7 +53,30 @@ local SUPPORTED_EXTENSIONS = {
     webp = true,
     gif  = true,
     bmp  = true,
+    mp4  = true,
+    mkv  = true,
+    webm = true,
+    avi  = true,
+    mov  = true,
+    m4v  = true,
+    flv  = true,
 }
+
+local VIDEO_EXTENSIONS = {
+    mp4  = true,
+    mkv  = true,
+    webm = true,
+    avi  = true,
+    mov  = true,
+    m4v  = true,
+    flv  = true,
+}
+
+local function is_video_file(filepath_or_ext)
+    if not filepath_or_ext then return false end
+    local ext = filepath_or_ext:match("%.([^.]+)$") or filepath_or_ext
+    return VIDEO_EXTENSIONS[ext:lower()] == true
+end
 
 local EXTENSION_ICONS = {
     unicode = {
@@ -65,6 +88,13 @@ local EXTENSION_ICONS = {
         WEBP = "🌐",
         GIF  = "🎞 ",
         BMP  = "🎨",
+        MP4  = "🎬",
+        MKV  = "🎬",
+        WEBM = "🎬",
+        AVI  = "🎬",
+        MOV  = "🎬",
+        M4V  = "🎬",
+        FLV  = "🎬",
     },
     nerd = {
         DIR  = "\238\151\191 ", -- 
@@ -75,6 +105,13 @@ local EXTENSION_ICONS = {
         WEBP = "\238\176\159 ", -- 󰖟
         GIF  = "\238\181\184 ", -- 󰵸
         BMP  = "\238\175\152 ", -- 󰏘
+        MP4  = "\238\180\157 ", -- 󰕼
+        MKV  = "\238\180\157 ",
+        WEBM = "\238\180\157 ",
+        AVI  = "\238\180\157 ",
+        MOV  = "\238\180\157 ",
+        M4V  = "\238\180\157 ",
+        FLV  = "\238\180\157 ",
     }
 }
 
@@ -211,53 +248,65 @@ if is_windows then
         end
     end
 
+    local function parse_win_key()
+        local ch = ffi.C._getch()
+        if ch == 0 or ch == 224 then
+            local code = ffi.C._getch()
+            if code == 72 then return "UP"
+            elseif code == 80 then return "DOWN"
+            elseif code == 75 then return "LEFT"
+            elseif code == 77 then return "RIGHT"
+            elseif code == 73 then return "PAGE_UP"
+            elseif code == 81 then return "PAGE_DOWN"
+            elseif code == 71 then return "HOME"
+            elseif code == 79 then return "END"
+            end
+        elseif ch == 27 then
+            return "ESC"
+        elseif ch == 13 or ch == 10 then
+            return "ENTER"
+        elseif ch == 32 then
+            return "SPACE"
+        elseif ch == 8 then
+            return "BACKSPACE"
+        elseif ch == 3 then
+            return "CTRL_C"
+        elseif ch == 4 then
+            return "CTRL_D"
+        elseif ch == 21 then
+            return "CTRL_U"
+        elseif ch == 6 then
+            return "CTRL_F"
+        elseif ch == 2 then
+            return "CTRL_B"
+        elseif ch == 5 then
+            return "CTRL_E"
+        elseif ch == 25 then
+            return "CTRL_Y"
+        else
+            return string.char(ch)
+        end
+        return nil
+    end
+
     read_key = function(timeout_ms)
         timeout_ms = timeout_ms or -1
+        if timeout_ms == 0 then
+            if ffi.C._kbhit() ~= 0 then
+                return parse_win_key()
+            end
+            return nil
+        end
+
         local elapsed = 0
         while timeout_ms < 0 or elapsed <= timeout_ms do
             if ffi.C._kbhit() ~= 0 then
-                local ch = ffi.C._getch()
-                if ch == 0 or ch == 224 then
-                    -- Extended key code
-                    local code = ffi.C._getch()
-                    if code == 72 then return "UP"
-                    elseif code == 80 then return "DOWN"
-                    elseif code == 75 then return "LEFT"
-                    elseif code == 77 then return "RIGHT"
-                    elseif code == 73 then return "PAGE_UP"
-                    elseif code == 81 then return "PAGE_DOWN"
-                    elseif code == 71 then return "HOME"
-                    elseif code == 79 then return "END"
-                    end
-                elseif ch == 27 then
-                    return "ESC"
-                elseif ch == 13 or ch == 10 then
-                    return "ENTER"
-                elseif ch == 32 then
-                    return "SPACE"
-                elseif ch == 8 then
-                    return "BACKSPACE"
-                elseif ch == 3 then
-                    return "CTRL_C"
-                elseif ch == 4 then
-                    return "CTRL_D"
-                elseif ch == 21 then
-                    return "CTRL_U"
-                elseif ch == 6 then
-                    return "CTRL_F"
-                elseif ch == 2 then
-                    return "CTRL_B"
-                elseif ch == 5 then
-                    return "CTRL_E"
-                elseif ch == 25 then
-                    return "CTRL_Y"
-                else
-                    return string.char(ch)
-                end
+                return parse_win_key()
             end
             if timeout_ms >= 0 then
-                kernel32.Sleep(20)
-                elapsed = elapsed + 20
+                local sleep_chunk = math.min(10, math.max(1, timeout_ms - elapsed))
+                kernel32.Sleep(sleep_chunk)
+                elapsed = elapsed + sleep_chunk
             else
                 kernel32.Sleep(10)
             end
@@ -1550,6 +1599,21 @@ local function load_image_uncached(filepath)
         if img then return img end
     end
 
+    -- Video thumbnail extraction via ffmpeg
+    if is_video_file(filepath) then
+        local devnull = is_windows and "2>nul" or "2>/dev/null"
+        local cmd = string.format("ffmpeg -nostdin -loglevel quiet -i %q -vframes 1 -f image2pipe -vcodec ppm - %s", filepath, devnull)
+        local pipe = io.popen(cmd, "rb")
+        if pipe then
+            local img = parse_ppm_stream(pipe)
+            pipe:close()
+            if img then
+                img.engine = "FFmpeg Video Thumbnail"
+                return img
+            end
+        end
+    end
+
     -- 6. Secondary fallback: CLI tools (ImageMagick / ffmpeg) if available
     local devnull = is_windows and "nul" or "/dev/null"
     local cmd
@@ -2283,6 +2347,12 @@ local function get_has_chafa_cli_direct()
     return has_chafa_cli_direct
 end
 
+local has_ffmpeg = nil
+local function get_has_ffmpeg()
+    if has_ffmpeg == nil then has_ffmpeg = is_cmd_available("ffmpeg") end
+    return has_ffmpeg
+end
+
 local function render_image_timg_cli(img_entry, current_idx, total_count, term_w, term_h, cur_e, total_e)
     local img, err = load_image(img_entry.filepath)
     if not img then return false, err end
@@ -2937,6 +3007,313 @@ local function render_image_screen(img_entry, current_idx, total_count, protocol
 end
 
 -- =========================================================================
+-- 5j. Video Player Engine (FFmpeg Stream Pipeline)
+-- =========================================================================
+local function get_video_info(filepath)
+    local devnull = is_windows and "2>nul" or "2>/dev/null"
+    local p = io.popen(string.format('ffmpeg -i %q 2>&1', filepath))
+    if not p then
+        return { duration = 0, duration_str = "00:00", width = 0, height = 0, fps = 25 }
+    end
+    local info = p:read("*a") or ""
+    p:close()
+
+    local dur_str = info:match("Duration:%s*(%d+:%d+:[%d%.]+)")
+    local total_sec = 0
+    if dur_str then
+        local h, m, s = dur_str:match("(%d+):(%d+):([%d%.]+)")
+        if h and m and s then
+            total_sec = tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(s)
+        end
+    end
+
+    local w, h = info:match("Video:.-%s(%d+)x(%d+)")
+    local fps = info:match("([%d%.]+)%s*fps") or info:match("([%d%.]+)%s*tbr") or 25
+
+    return {
+        duration = total_sec,
+        duration_str = dur_str and dur_str:match("(%d+:%d+:%d+)") or "00:00",
+        width = tonumber(w) or 0,
+        height = tonumber(h) or 0,
+        fps = tonumber(fps) or 25,
+    }
+end
+
+local function format_video_time(sec)
+    sec = math.max(0, math.floor(sec or 0))
+    local m = math.floor(sec / 60)
+    local s = sec % 60
+    local h = math.floor(m / 60)
+    m = m % 60
+    if h > 0 then
+        return string.format("%02d:%02d:%02d", h, m, s)
+    else
+        return string.format("%02d:%02d", m, s)
+    end
+end
+
+local function render_video_progress_bar(cur_sec, total_sec, bar_w)
+    bar_w = math.max(10, bar_w or 30)
+    local frac = (total_sec > 0) and math.min(1.0, math.max(0.0, cur_sec / total_sec)) or 0
+    local pos = math.floor(frac * (bar_w - 1)) + 1
+    local bar = {}
+    for i = 1, bar_w do
+        if i == pos then
+            table.insert(bar, "●")
+        elseif i < pos then
+            table.insert(bar, "━")
+        else
+            table.insert(bar, "─")
+        end
+    end
+    return table.concat(bar)
+end
+
+local function render_video_frame_halfblock(raw_bytes, frame_w, frame_h, pad, row_start)
+    local fit_rows = math.floor(frame_h / 2)
+    local out = {}
+    table.insert(out, string.format("\27[%d;1H", row_start))
+
+    local last_fg = nil
+    local last_bg = nil
+    local row_stride = frame_w * 3
+
+    for y = 0, fit_rows - 1 do
+        table.insert(out, pad)
+        local top_row_off = (y * 2) * row_stride
+        local bot_row_off = (y * 2 + 1) * row_stride
+
+        for x = 0, frame_w - 1 do
+            local tp = top_row_off + x * 3 + 1
+            local bp = bot_row_off + x * 3 + 1
+            local tr, tg, tb = raw_bytes:byte(tp, tp + 2)
+            local br, bg, bb = raw_bytes:byte(bp, bp + 2)
+
+            local fg = (br * 65536) + (bg * 256) + bb
+            local bg_c = (tr * 65536) + (tg * 256) + tb
+
+            if bg_c ~= last_bg then
+                table.insert(out, string.format("\27[48;2;%d;%d;%dm", tr, tg, tb))
+                last_bg = bg_c
+            end
+            if fg ~= last_fg then
+                table.insert(out, string.format("\27[38;2;%d;%d;%dm", br, bg, bb))
+                last_fg = fg
+            end
+            table.insert(out, "▄")
+        end
+        if y < fit_rows - 1 then
+            table.insert(out, "\27[0m\27[K\n")
+        else
+            table.insert(out, "\27[0m\27[K")
+        end
+        last_fg = nil
+        last_bg = nil
+    end
+
+    io.write(table.concat(out))
+    io.flush()
+end
+
+local function play_video_screen(img_entry, current_idx, total_count, protocol)
+    if not get_has_ffmpeg() then
+        io.write("\27[H\27[2J")
+        io.write("\n  \27[1;31m⚠ FFmpeg Not Found\27[0m\n\n")
+        io.write("  Video playback requires \27[1;36mffmpeg\27[0m in your system PATH.\n")
+        io.write("  Install with: \27[93mwinget install Gyan.FFmpeg\27[0m or \27[93mchoco install ffmpeg\27[0m\n\n")
+        io.write("  \27[90mPress any key to return to gallery...\27[0m")
+        io.flush()
+        read_key()
+        return "back", protocol
+    end
+
+    local v_info = get_video_info(img_entry.filepath)
+    local fps = (v_info.fps > 0 and v_info.fps <= 120) and v_info.fps or 25
+    local target_dt = 1.0 / fps
+
+    local term_w, term_h = get_terminal_size()
+    local reserved_header_rows = 5
+    local max_char_h = math.max(4, term_h - reserved_header_rows - 1)
+    local max_char_w = math.max(4, term_w - 4)
+
+    local fit_cols, fit_rows
+    if v_info.width > 0 and v_info.height > 0 then
+        local optical_aspect = (v_info.width / v_info.height) * 2.0
+        fit_rows = max_char_h
+        fit_cols = math.max(2, math.floor(fit_rows * optical_aspect))
+        if fit_cols > max_char_w then
+            fit_cols = max_char_w
+            fit_rows = math.max(2, math.floor(fit_cols / optical_aspect))
+        end
+    else
+        fit_cols = math.min(max_char_w, 80)
+        fit_rows = math.min(max_char_h, 30)
+    end
+    fit_rows = math.floor(fit_rows)
+    local frame_w = fit_cols
+    local frame_h = fit_rows * 2
+    local frame_bytes = frame_w * frame_h * 3
+
+    local pad_left = math.max(0, math.floor((term_w - fit_cols) / 2))
+    local pad = string.rep(" ", pad_left)
+    local bar_len = math.min(term_w - 2, 90)
+
+    local cur_time = 0
+    local is_paused = false
+    local is_eof = false
+    local stream_proc = nil
+
+    local function open_stream(seek_sec)
+        if stream_proc then pcall(function() stream_proc:close() end) end
+        seek_sec = math.max(0, seek_sec or 0)
+        local ss_part = (seek_sec > 0) and string.format("-ss %.2f", seek_sec) or ""
+        local cmd = string.format('ffmpeg -nostdin -loglevel quiet %s -i %q -vf "scale=%d:%d:flags=fast_bilinear" -f rawvideo -pix_fmt rgb24 -',
+            ss_part, img_entry.filepath, frame_w, frame_h)
+        stream_proc = io.popen(cmd, "rb")
+        cur_time = seek_sec
+        is_eof = false
+    end
+
+    local cur_e, total_e = get_engine_position(protocol)
+
+    local function draw_static_header()
+        io.write("\27[H\27[2J")
+        local out = {}
+        table.insert(out, "\27[1;34m" .. string.rep("═", bar_len) .. "\27[0m\n")
+        local dim_str = (v_info.width > 0) and string.format("%dx%d, %.1ffps", v_info.width, v_info.height, fps) or string.format("%.1ffps", fps)
+        table.insert(out, string.format("  \27[1;37mVIDEO PLAYER\27[0m \27[1;36m[%d/%d]\27[0m: \27[1;93m%s\27[0m \27[90m(%s, %s)\27[0m\27[K\n",
+            current_idx, total_count, img_entry.filename, dim_str, img_entry.size_str))
+        table.insert(out, "\n")
+        table.insert(out, string.format("  \27[93m[Space]\27[0m Pause   \27[93m[←/→]\27[0m ±5s   \27[93m[↑/↓]\27[0m ±30s   \27[93m[r]\27[0m Restart   \27[1;96m[t]\27[0m Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\27[K\n"))
+        table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\27[K\n")
+        io.write(table.concat(out))
+        io.flush()
+    end
+
+    local function update_dynamic_header(measured_fps)
+        local status_tag
+        if is_eof then
+            status_tag = "\27[1;91m[⏹ ENDED]\27[0m"
+        elseif is_paused then
+            status_tag = "\27[1;93m[⏸ PAUSED]\27[0m"
+        else
+            status_tag = "\27[1;92m[▶ PLAYING]\27[0m"
+        end
+
+        local pbar_w = math.min(32, math.max(10, term_w - 48))
+        local pbar = render_video_progress_bar(cur_time, v_info.duration, pbar_w)
+        local time_str = string.format("%s / %s", format_video_time(cur_time), format_video_time(v_info.duration))
+        local fps_str = measured_fps and string.format(" \27[90m(%.1f fps)\27[0m", measured_fps) or ""
+        local eng_str = string.format(" \27[90m| [%d/%d] %s\27[0m", cur_e or 1, total_e or 1, protocol)
+
+        io.write(string.format("\27[3;1H  %s \27[1;37m%s\27[0m \27[90m[\27[1;36m%s\27[90m]\27[0m%s%s\27[K",
+            status_tag, time_str, pbar, fps_str, eng_str))
+        io.flush()
+    end
+
+    draw_static_header()
+    update_dynamic_header(fps)
+    open_stream(0)
+
+    local last_frame_clock = os.clock()
+    local frames_rendered = 0
+    local fps_timer = os.clock()
+    local current_fps = fps
+
+    while true do
+        local k = is_paused and read_key(80) or read_key(0)
+        if k then
+            if k == "q" or k == "ESC" or k == "CTRL_C" then
+                if stream_proc then pcall(function() stream_proc:close() end) end
+                return "quit", protocol
+            elseif k == "ENTER" or k == "b" or k == "BACKSPACE" then
+                if stream_proc then pcall(function() stream_proc:close() end) end
+                return "back", protocol
+            elseif k == "n" or k == "PAGE_DOWN" then
+                if stream_proc then pcall(function() stream_proc:close() end) end
+                return "next", protocol
+            elseif k == "p" or k == "PAGE_UP" then
+                if stream_proc then pcall(function() stream_proc:close() end) end
+                return "prev", protocol
+            elseif k == "SPACE" then
+                if is_eof then
+                    cur_time = 0
+                    open_stream(0)
+                    is_paused = false
+                else
+                    is_paused = not is_paused
+                end
+                update_dynamic_header(current_fps)
+            elseif k == "RIGHT" or k == "l" then
+                cur_time = math.min(v_info.duration > 0 and v_info.duration or (cur_time + 5), cur_time + 5)
+                open_stream(cur_time)
+                update_dynamic_header(current_fps)
+            elseif k == "LEFT" or k == "h" then
+                cur_time = math.max(0, cur_time - 5)
+                open_stream(cur_time)
+                update_dynamic_header(current_fps)
+            elseif k == "UP" or k == "k" then
+                cur_time = math.min(v_info.duration > 0 and v_info.duration or (cur_time + 30), cur_time + 30)
+                open_stream(cur_time)
+                update_dynamic_header(current_fps)
+            elseif k == "DOWN" or k == "j" then
+                cur_time = math.max(0, cur_time - 30)
+                open_stream(cur_time)
+                update_dynamic_header(current_fps)
+            elseif k == "r" or k == "HOME" then
+                cur_time = 0
+                open_stream(0)
+                is_paused = false
+                update_dynamic_header(current_fps)
+            elseif k == "t" or k == "T" then
+                protocol = cycle_next_engine(protocol)
+                cur_e, total_e = get_engine_position(protocol)
+                update_dynamic_header(current_fps)
+            elseif k == "?" then
+                local tw, th = get_terminal_size()
+                render_help_modal(tw, th, protocol)
+                read_key()
+                draw_static_header()
+                update_dynamic_header(current_fps)
+            end
+        end
+
+        if not is_paused and stream_proc then
+            local raw_frame = stream_proc:read(frame_bytes)
+            if not raw_frame or #raw_frame < frame_bytes then
+                is_eof = true
+                is_paused = true
+                update_dynamic_header(current_fps)
+            else
+                render_video_frame_halfblock(raw_frame, frame_w, frame_h, pad, 6)
+                cur_time = cur_time + target_dt
+                frames_rendered = frames_rendered + 1
+
+                local now = os.clock()
+                if now - fps_timer >= 1.0 then
+                    current_fps = frames_rendered / (now - fps_timer)
+                    frames_rendered = 0
+                    fps_timer = now
+                    update_dynamic_header(current_fps)
+                end
+
+                local render_dur = os.clock() - last_frame_clock
+                local wait_dt = target_dt - render_dur
+                if wait_dt > 0.002 then
+                    local wait_ms = math.floor(wait_dt * 1000)
+                    if is_windows then
+                        kernel32.Sleep(wait_ms)
+                    else
+                        ffi.C.poll(nil, 0, wait_ms)
+                    end
+                end
+                last_frame_clock = os.clock()
+            end
+        end
+    end
+end
+
+-- =========================================================================
 -- 6. File List Selector Screen & Help Popup
 -- =========================================================================
 local function render_help_modal(term_w, term_h, active_protocol)
@@ -2988,6 +3365,12 @@ local function render_help_modal(term_w, term_h, active_protocol)
         "│    g / G               Jump to first / last image           │",
         cycle_line,
         "│    Enter / b / Backsp  Return to file/folder list           │",
+        "│                                                             │",
+        "│  Video Playback (FFmpeg):                                   │",
+        "│    Space               Play / Pause playback                │",
+        "│    ← / →, h / l        Seek backward / forward 5s           │",
+        "│    ↑ / ↓, k / j        Seek backward / forward 30s          │",
+        "│    r                   Restart playback from start          │",
         "│                                                             │",
         "│  Search & Sorting:                                          │",
         "│    /                   Start live search / filter query     │",
@@ -3230,7 +3613,8 @@ local function main()
         print("  --half-block          Alias for --truecolor")
         print("  --quarter-block       Alias for --timg-quarter")
         print("\nSupported formats:")
-        print("  - PNG, JPG/JPEG, PPM, WEBP, GIF, BMP")
+        print("  - Images: PNG, JPG/JPEG, PPM, WEBP, GIF, BMP")
+        print("  - Videos: MP4, MKV, WEBM, AVI, MOV, M4V, FLV (via ffmpeg)")
         os.exit(0)
     end
 
@@ -3340,11 +3724,24 @@ local function main()
 
     -- 3. If direct CLI selection is specified
     if cli_select then
+        local target_item = nil
+        local total_c = #only_images > 0 and #only_images or #raw_images
         if #only_images > 0 and cli_select >= 1 and cli_select <= #only_images then
-            render_image_screen(only_images[cli_select], cli_select, #only_images, active_protocol)
-            return
+            target_item = only_images[cli_select]
         elseif cli_select >= 1 and cli_select <= #raw_images then
-            render_image_screen(raw_images[cli_select], cli_select, #raw_images, active_protocol)
+            target_item = raw_images[cli_select]
+        end
+
+        if target_item then
+            -- If user ran 'pix.lua my_video.mp4' directly in terminal without --select or --no-interactive
+            if is_video_file(target_item.extension) and not non_interactive and not args["--select"] then
+                enable_raw_mode()
+                play_video_screen(target_item, cli_select, total_c, active_protocol)
+                kitty_clear_screen()
+                disable_raw_mode()
+                return
+            end
+            render_image_screen(target_item, cli_select, total_c, active_protocol)
             return
         end
     end
@@ -3367,7 +3764,11 @@ local function main()
                     raw_images = scan_directory_images(target_dir, recursive) or {}
                     sort_images(raw_images, sort_mode, sort_desc)
                 else
-                    render_image_screen(item, sel, #raw_images, active_protocol)
+                    if is_video_file(item.extension) then
+                        play_video_screen(item, sel, #raw_images, active_protocol)
+                    else
+                        render_image_screen(item, sel, #raw_images, active_protocol)
+                    end
                     break
                 end
             end
@@ -3468,7 +3869,31 @@ local function main()
                         end
                     end
 
-                    local ok, view_err = render_image_screen(cur_img, img_pos, #img_indices, active_protocol)
+                    if is_video_file(cur_img.extension) then
+                        local action, new_protocol = play_video_screen(cur_img, img_pos, #img_indices, active_protocol)
+                        if new_protocol then active_protocol = new_protocol end
+                        if action == "quit" then
+                            break
+                        elseif action == "back" then
+                            kitty_clear_screen()
+                            in_viewer = false
+                        elseif action == "next" then
+                            kitty_clear_screen()
+                            if #img_indices > 1 then
+                                img_pos = (img_pos % #img_indices) + 1
+                                selected_idx = img_indices[img_pos]
+                                update_page_window()
+                            end
+                        elseif action == "prev" then
+                            kitty_clear_screen()
+                            if #img_indices > 1 then
+                                img_pos = (img_pos - 2 + #img_indices) % #img_indices + 1
+                                selected_idx = img_indices[img_pos]
+                                update_page_window()
+                            end
+                        end
+                    else
+                        local ok, view_err = render_image_screen(cur_img, img_pos, #img_indices, active_protocol)
                     if not ok then
                         in_viewer = false
                         current_msg = "Failed to load image: " .. tostring(view_err)
@@ -3515,6 +3940,7 @@ local function main()
                         end
                     end
                 end
+            end
             else
                 update_page_window()
                 render_file_list(target_dir, filtered_images, #raw_images, selected_idx, page_offset, current_msg, search_mode, search_query, sort_mode, sort_desc, recursive, icon_mode)
