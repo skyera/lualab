@@ -3445,7 +3445,7 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
         local term_w, term_h = get_terminal_size()
         local mpv_cmd = string.format(
             'mpv --vo=tct --really-quiet --term-osd-bar --vo-tct-width=%d --vo-tct-height=%d %q',
-            math.max(4, term_w), math.max(4, (term_h - 2) * 2), img_entry.filepath)
+            math.max(4, term_w), math.max(4, term_h - 3), img_entry.filepath)
         if is_windows then
             os.execute(mpv_cmd)
         else
