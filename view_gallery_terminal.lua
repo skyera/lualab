@@ -1496,7 +1496,11 @@ local function decode_gdiplus_ffi(filepath)
     return nil, tostring(res or "GDI+ decode error")
 end
 
-local function load_image(filepath)
+local image_cache = {}
+local image_cache_order = {}
+local MAX_IMAGE_CACHE = 8
+
+local function load_image_uncached(filepath)
     local test_f = io.open(filepath, "rb")
     if not test_f then
         return nil, "Cannot open file: " .. filepath
@@ -1567,6 +1571,31 @@ local function load_image(filepath)
     return nil, "Failed to decode image. Ensure image is valid (PNG, JPG, BMP, WEBP, PPM) and FFI libraries (gdk_pixbuf, libpng, libturbojpeg, libwebp) or ImageMagick/ffmpeg are available."
 end
 
+local function load_image(filepath)
+    if image_cache[filepath] then
+        -- Refresh LRU position
+        for i, p in ipairs(image_cache_order) do
+            if p == filepath then
+                table.remove(image_cache_order, i)
+                break
+            end
+        end
+        table.insert(image_cache_order, filepath)
+        return image_cache[filepath]
+    end
+
+    local img, err = load_image_uncached(filepath)
+    if img then
+        if #image_cache_order >= MAX_IMAGE_CACHE then
+            local evicted = table.remove(image_cache_order, 1)
+            image_cache[evicted] = nil
+        end
+        table.insert(image_cache_order, filepath)
+        image_cache[filepath] = img
+    end
+    return img, err
+end
+
 -- =========================================================================
 -- 5. timg-style UnicodeBlockCanvas — Native LuaJIT Port
 --    Implements timg's half-block and quarter-block rendering algorithms:
@@ -1621,13 +1650,6 @@ local function area_average_scale(img, out_w, out_h)
     local xs = iw / out_w       -- x scale factor (src pixels per output pixel)
     local ys = ih / out_h       -- y scale factor
 
-    -- Pre-linearise the whole source image into a flat array (avoids repeat sqrt)
-    local lin_src = {}
-    for i = 0, iw*ih - 1 do
-        local p = px[i]
-        lin_src[i] = { lin(p.r), lin(p.g), lin(p.b) }
-    end
-
     local out = {}
     for oy = 0, out_h - 1 do
         local y0 = oy * ys;         local y1 = y0 + ys
@@ -1635,17 +1657,21 @@ local function area_average_scale(img, out_w, out_h)
         for ox = 0, out_w - 1 do
             local x0 = ox * xs;         local x1 = x0 + xs
             local ix0 = math.floor(x0); local ix1 = math.min(iw-1, math.ceil(x1)-1)
-            -- Accumulate linear values weighted by overlap area
+            -- Accumulate linear values weighted by overlap area directly from FFI buffer
             local wr, wg, wb, wa = 0, 0, 0, 0
             for sy = iy0, iy1 do
                 -- Vertical overlap fraction
                 local fy0 = math.max(y0, sy);   local fy1 = math.min(y1, sy+1)
                 local yw = fy1 - fy0
+                local row_offset = sy * iw
                 for sx = ix0, ix1 do
                     local fx0 = math.max(x0, sx); local fx1 = math.min(x1, sx+1)
                     local w = yw * (fx1 - fx0)
-                    local lp = lin_src[sy*iw + sx]
-                    wr = wr + lp[1]*w; wg = wg + lp[2]*w; wb = wb + lp[3]*w
+                    local p = px[row_offset + sx]
+                    local pr, pg, pb = p.r, p.g, p.b
+                    wr = wr + (pr * pr) * w
+                    wg = wg + (pg * pg) * w
+                    wb = wb + (pb * pb) * w
                     wa = wa + w
                 end
             end
@@ -1741,6 +1767,22 @@ end
 -- ---------------------------------------------------------------------------
 local bit_at = { 0x1, 0x2, 0x4, 0x8 }   -- bit mask for TL, TR, BL, BR
 
+-- Precomputed static partition masks (eliminates table churn in inner rendering loop)
+local QUARTER_PARTITIONS = {}
+for mask = 0, 15 do
+    local fg_idx, bg_idx = {}, {}
+    for q = 1, 4 do
+        if bit.band(mask, bit_at[q]) ~= 0 then
+            table.insert(fg_idx, q)
+        else
+            table.insert(bg_idx, q)
+        end
+    end
+    if #fg_idx == 0 then fg_idx = bg_idx end
+    if #bg_idx == 0 then bg_idx = fg_idx end
+    QUARTER_PARTITIONS[mask] = { fg = fg_idx, bg = bg_idx }
+end
+
 local function find_best_glyph_quarter(tl, tr, bl, br)
     local quads = { tl, tr, bl, br }   -- TL=1, TR=2, BL=3, BR=4
     local best_dist  = math.huge
@@ -1748,27 +1790,36 @@ local function find_best_glyph_quarter(tl, tr, bl, br)
 
     for _, entry in ipairs(QUARTER_GLYPHS) do
         local glyph, fg_mask = entry[1], entry[2]
-        -- Partition the four quadrant pixels into fg-set and bg-set
-        local fg_set, bg_set = {}, {}
-        for q = 1, 4 do
-            if bit.band(fg_mask, bit_at[q]) ~= 0 then
-                fg_set[#fg_set+1] = quads[q]
-            else
-                bg_set[#bg_set+1] = quads[q]
-            end
-        end
-        -- Degenerate: all pixels on same side → copy to the other side
-        if #fg_set == 0 then fg_set = bg_set end
-        if #bg_set == 0 then bg_set = fg_set end
+        local part = QUARTER_PARTITIONS[fg_mask]
+        local f_idx = part.fg
+        local b_idx = part.bg
 
-        local fg_avg, d_fg = lin_avd(fg_set)
-        local bg_avg, d_bg = lin_avd(bg_set)
+        local fn = #f_idx
+        local fr, fg, fb = 0, 0, 0
+        for i = 1, fn do
+            local q = quads[f_idx[i]]
+            fr = fr + q[1]; fg = fg + q[2]; fb = fb + q[3]
+        end
+        local f_avg = { fr/fn, fg/fn, fb/fn }
+        local d_fg = 0
+        for i = 1, fn do d_fg = d_fg + lin_dist2(f_avg, quads[f_idx[i]]) end
+
+        local bn = #b_idx
+        local brr, bg_val, bb = 0, 0, 0
+        for i = 1, bn do
+            local q = quads[b_idx[i]]
+            brr = brr + q[1]; bg_val = bg_val + q[2]; bb = bb + q[3]
+        end
+        local b_avg = { brr/bn, bg_val/bn, bb/bn }
+        local d_bg = 0
+        for i = 1, bn do d_bg = d_bg + lin_dist2(b_avg, quads[b_idx[i]]) end
+
         local total = d_fg + d_bg
 
         if total < best_dist then
             best_dist  = total
-            best_fg    = fg_avg
-            best_bg    = bg_avg
+            best_fg    = f_avg
+            best_bg    = b_avg
             best_glyph = glyph
             if total < 1 then break end   -- essentially zero → stop early
         end
@@ -2653,6 +2704,8 @@ local function render_image_halfblock(img_entry, current_idx, total_count, term_
 
     for y = 0, out_h - 1, 2 do
         local line = { pad }
+        local last_top_r, last_top_g, last_top_b = -1, -1, -1
+        local last_bot_r, last_bot_g, last_bot_b = -1, -1, -1
         for x = 0, out_w - 1 do
             local src_x = math.min(img.width - 1, math.floor(x * (img.width / out_w)))
             local src_y_top = math.min(img.height - 1, math.floor(y * (img.height / out_h)))
@@ -2660,11 +2713,18 @@ local function render_image_halfblock(img_entry, current_idx, total_count, term_
 
             local top = px[src_y_top * iw + src_x]
             local bot = px[src_y_bot * iw + src_x]
+            local tr, tg, tb = top.r, top.g, top.b
+            local br, bg, bb = bot.r, bot.g, bot.b
 
-            table.insert(line, string.format("\27[48;2;%d;%d;%dm\27[38;2;%d;%d;%dm▄",
-                top.r, top.g, top.b,
-                bot.r, bot.g, bot.b
-            ))
+            if tr ~= last_top_r or tg ~= last_top_g or tb ~= last_top_b then
+                table.insert(line, string.format("\27[48;2;%d;%d;%dm", tr, tg, tb))
+                last_top_r, last_top_g, last_top_b = tr, tg, tb
+            end
+            if br ~= last_bot_r or bg ~= last_bot_g or bb ~= last_bot_b then
+                table.insert(line, string.format("\27[38;2;%d;%d;%dm", br, bg, bb))
+                last_bot_r, last_bot_g, last_bot_b = br, bg, bb
+            end
+            table.insert(line, "▄")
         end
         table.insert(line, "\27[0m\n")
         table.insert(out, table.concat(line))
