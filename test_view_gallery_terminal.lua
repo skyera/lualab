@@ -39,6 +39,16 @@ local tests = {
         expect = "timg Quarter-Block"
     },
     {
+        name = "Direct image view via --chafa flag",
+        cmd = luajit .. " view_gallery_terminal.lua pillars_of_creation.jpg --chafa --select 1",
+        expect = "Chafa Symbols"
+    },
+    {
+        name = "Direct image view via --chafa-braille flag",
+        cmd = luajit .. " view_gallery_terminal.lua pillars_of_creation.jpg --chafa-braille --select 1",
+        expect = "Chafa Braille 2×4"
+    },
+    {
         name = "Non-interactive directory navigation",
         cmd = "echo q| " .. luajit .. " view_gallery_terminal.lua LuaBridge/Source --no-interactive",
         expect = "TERMINAL DIRECTORY IMAGE VIEWER"

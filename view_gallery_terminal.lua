@@ -1660,6 +1660,277 @@ local function render_image_unicode_block(img_entry, current_idx, total_count, t
 end
 
 -- =========================================================================
+-- 5h. Chafa Terminal Graphics Engine (Multi-Tier Architecture)
+--     Tier 1: Direct FFI binding to libchafa.so.0 / chafa.dll (SIMD accelerated)
+--     Tier 2: CLI chafa pipe fallback if binary is in $PATH
+--     Tier 3: Pure LuaJIT Native 2x4 Braille & Smooth-Block engine (Zero Dependencies)
+-- =========================================================================
+
+local libchafa_instance = nil
+local libchafa_attempted = false
+
+local function get_libchafa()
+    if libchafa_attempted then return libchafa_instance end
+    libchafa_attempted = true
+
+    pcall(ffi.cdef, [[
+        typedef struct ChafaCanvas ChafaCanvas;
+        typedef struct ChafaCanvasConfig ChafaCanvasConfig;
+        typedef struct ChafaSymbolMap ChafaSymbolMap;
+        typedef struct ChafaTermInfo ChafaTermInfo;
+        typedef struct GString { char *str; size_t len; size_t allocated_len; } GString;
+
+        ChafaCanvasConfig *chafa_canvas_config_new(void);
+        void chafa_canvas_config_unref(ChafaCanvasConfig *config);
+        void chafa_canvas_config_set_geometry(ChafaCanvasConfig *config, int width, int height);
+        void chafa_canvas_config_set_canvas_mode(ChafaCanvasConfig *config, int mode);
+
+        ChafaSymbolMap *chafa_symbol_map_new(void);
+        void chafa_symbol_map_unref(ChafaSymbolMap *symbol_map);
+        void chafa_symbol_map_add_by_tags(ChafaSymbolMap *symbol_map, int tags);
+        void chafa_canvas_config_set_symbol_map(ChafaCanvasConfig *config, const ChafaSymbolMap *symbol_map);
+
+        ChafaCanvas *chafa_canvas_new(const ChafaCanvasConfig *config);
+        void chafa_canvas_unref(ChafaCanvas *canvas);
+        void chafa_canvas_draw_all_pixels(ChafaCanvas *canvas, int pixel_type, const uint8_t *src_pixels, int width, int height, int rowstride);
+        GString *chafa_canvas_print(ChafaCanvas *canvas, ChafaTermInfo *term_info);
+        char *g_string_free(GString *string, int free_segment);
+    ]])
+
+    libchafa_instance = load_first_lib({
+        "libchafa.so.0", "chafa", "libchafa.so", "chafa.dll", "libchafa-0.dll"
+    })
+    return libchafa_instance
+end
+
+-- Check if /usr/bin/chafa CLI is callable
+local chafa_cli_available = nil
+local function is_chafa_cli_available()
+    if chafa_cli_available ~= nil then return chafa_cli_available end
+    local devnull = is_windows and "nul" or "/dev/null"
+    local ret = os.execute("chafa --version >" .. devnull .. " 2>&1")
+    chafa_cli_available = (ret == 0 or ret == true)
+    return chafa_cli_available
+end
+
+-- Unicode Braille UTF-8 Generator
+local function utf8_braille(mask)
+    local cp = 0x2800 + mask
+    return string.char(
+        0xE0 + bit.rshift(cp, 12),
+        0x80 + bit.band(bit.rshift(cp, 6), 0x3F),
+        0x80 + bit.band(cp, 0x3F)
+    )
+end
+
+-- Braille dot mapping matrix (2 cols x 4 rows = 8 subpixels per character cell):
+-- (0,0)->bit 0, (0,1)->bit 1, (0,2)->bit 2, (0,3)->bit 6
+-- (1,0)->bit 3, (1,1)->bit 4, (1,2)->bit 5, (1,3)->bit 7
+local BRAILLE_DOTS = {
+    {0, 0, 0x01}, {0, 1, 0x02}, {0, 2, 0x04}, {0, 3, 0x40},
+    {1, 0, 0x08}, {1, 1, 0x10}, {1, 2, 0x20}, {1, 3, 0x80}
+}
+
+-- Tier 3: Pure LuaJIT Native Chafa-style Braille 2x4 Matrix Renderer (Zero Dependencies)
+local function render_image_native_braille(img, fit_cols, fit_rows)
+    local sub_w = fit_cols * 2
+    local sub_h = fit_rows * 4
+
+    -- Downscale image to (sub_w x sub_h) subpixel grid using linear area averaging
+    local scaled = area_average_scale(img, sub_w, sub_h)
+
+    local lines = {}
+    local last_fg = nil
+    local last_bg = nil
+
+    for cy = 0, fit_rows - 1 do
+        local line = {}
+        for cx = 0, fit_cols - 1 do
+            local base_x = cx * 2
+            local base_y = cy * 4
+
+            local sum_lum = 0
+            local subpixels = {}
+            for i = 1, 8 do
+                local dot = BRAILLE_DOTS[i]
+                local sx = base_x + dot[1]
+                local sy = base_y + dot[2]
+                local p = scaled[sy * sub_w + sx] or {0, 0, 0}
+                local col = repack(p)
+                local lum = 0.299 * col.r + 0.587 * col.g + 0.114 * col.b
+                sum_lum = sum_lum + lum
+                subpixels[i] = { r = col.r, g = col.g, b = col.b, lum = lum, bit = dot[3] }
+            end
+
+            local avg_lum = sum_lum / 8
+            local mask = 0
+            local fg_r, fg_g, fg_b, fg_n = 0, 0, 0, 0
+            local bg_r, bg_g, bg_b, bg_n = 0, 0, 0, 0
+
+            for i = 1, 8 do
+                local sp = subpixels[i]
+                if sp.lum >= avg_lum then
+                    mask = bit.bor(mask, sp.bit)
+                    fg_r = fg_r + sp.r; fg_g = fg_g + sp.g; fg_b = fg_b + sp.b; fg_n = fg_n + 1
+                else
+                    bg_r = bg_r + sp.r; bg_g = bg_g + sp.g; bg_b = bg_b + sp.b; bg_n = bg_n + 1
+                end
+            end
+
+            if fg_n == 0 then fg_r, fg_g, fg_b = bg_r, bg_g, bg_b; fg_n = 1 end
+            if bg_n == 0 then bg_r, bg_g, bg_b = fg_r, fg_g, fg_b; bg_n = 1 end
+
+            local fg = { r = math.floor(fg_r / fg_n), g = math.floor(fg_g / fg_n), b = math.floor(fg_b / fg_n) }
+            local bg = { r = math.floor(bg_r / bg_n), g = math.floor(bg_g / bg_n), b = math.floor(bg_b / bg_n) }
+
+            -- BG emit if changed
+            if not last_bg or last_bg.r ~= bg.r or last_bg.g ~= bg.g or last_bg.b ~= bg.b then
+                table.insert(line, string.format("\27[48;2;%d;%d;%dm", bg.r, bg.g, bg.b))
+                last_bg = bg
+            end
+            -- FG emit if changed (and not empty mask)
+            if mask ~= 0 then
+                if not last_fg or last_fg.r ~= fg.r or last_fg.g ~= fg.g or last_fg.b ~= fg.b then
+                    table.insert(line, string.format("\27[38;2;%d;%d;%dm", fg.r, fg.g, fg.b))
+                    last_fg = fg
+                end
+                table.insert(line, utf8_braille(mask))
+            else
+                table.insert(line, " ")
+                last_fg = nil
+            end
+        end
+        table.insert(line, "\27[0m")
+        last_fg, last_bg = nil, nil
+        table.insert(lines, table.concat(line))
+    end
+    return lines
+end
+
+-- Unified Chafa renderer (dispatches Tier 1 FFI -> Tier 2 CLI -> Tier 3 Pure Lua)
+local function render_image_chafa(img_entry, current_idx, total_count, term_w, term_h, symbol_mode)
+    local img, err = load_image(img_entry.filepath)
+    if not img then return false, err end
+
+    symbol_mode = symbol_mode or "symbols"
+
+    local reserved_header_rows = 5
+    local max_char_h = math.max(4, term_h - reserved_header_rows)
+    local max_char_w = math.max(4, term_w - 4)
+
+    -- Optical aspect ratio correction: terminal font height/width ~ 2.0
+    local optical_aspect = (img.width / img.height) * 2.0
+    local fit_rows = max_char_h
+    local fit_cols = math.max(2, math.floor(fit_rows * optical_aspect))
+    if fit_cols > max_char_w then
+        fit_cols = max_char_w
+        fit_rows = math.max(2, math.floor(fit_cols / optical_aspect))
+    end
+
+    local rendered_lines = nil
+    local engine_label = nil
+
+    -- Tier 1: FFI libchafa
+    local chafa = get_libchafa()
+    if chafa then
+        local cfg = chafa.chafa_canvas_config_new()
+        chafa.chafa_canvas_config_set_geometry(cfg, fit_cols, fit_rows)
+        chafa.chafa_canvas_config_set_canvas_mode(cfg, 0) -- CHAFA_CANVAS_MODE_TRUECOLOR
+
+        local sm = chafa.chafa_symbol_map_new()
+        if symbol_mode == "braille" then
+            chafa.chafa_symbol_map_add_by_tags(sm, 0x0801) -- SPACE | BRAILLE
+            engine_label = "\27[1;95mChafa Braille 2×4 (FFI libchafa)\27[90m"
+        else
+            -- Smooth blocks, quadrants, fractional bars
+            chafa.chafa_symbol_map_add_by_tags(sm, 0x38F)
+            engine_label = "\27[1;95mChafa Symbols (FFI libchafa)\27[90m"
+        end
+        chafa.chafa_canvas_config_set_symbol_map(cfg, sm)
+
+        local canvas = chafa.chafa_canvas_new(cfg)
+        local CHAFA_PIXEL_RGB8 = 8
+        local raw_bytes = ffi.cast("const uint8_t*", img.pixels)
+        chafa.chafa_canvas_draw_all_pixels(canvas, CHAFA_PIXEL_RGB8, raw_bytes, img.width, img.height, img.width * 3)
+
+        local gs = chafa.chafa_canvas_print(canvas, nil)
+        if gs and gs.str ~= nil and gs.len > 0 then
+            local text = ffi.string(gs.str, gs.len)
+            rendered_lines = {}
+            for l in text:gmatch("([^\n]*)\n?") do
+                if #l > 0 then table.insert(rendered_lines, l) end
+            end
+        end
+
+        if gs then chafa.g_string_free(gs, 1) end
+        chafa.chafa_canvas_unref(canvas)
+        chafa.chafa_symbol_map_unref(sm)
+        chafa.chafa_canvas_config_unref(cfg)
+    end
+
+    -- Tier 2: CLI Fallback if FFI failed but chafa command is in PATH
+    if not rendered_lines and is_chafa_cli_available() then
+        local sym_flag = (symbol_mode == "braille") and "--symbols braille" or "--symbols block"
+        local devnull = is_windows and "nul" or "/dev/null"
+        local cmd = string.format("chafa -s %dx%d %s %q 2>%s", fit_cols, fit_rows, sym_flag, img_entry.filepath, devnull)
+        local p = io.popen(cmd, "r")
+        if p then
+            local text = p:read("*a")
+            p:close()
+            if text and #text > 0 then
+                rendered_lines = {}
+                for l in text:gmatch("([^\n]*)\n?") do
+                    if #l > 0 then table.insert(rendered_lines, l) end
+                end
+                engine_label = (symbol_mode == "braille")
+                    and "\27[1;95mChafa Braille 2×4 (CLI chafa)\27[90m"
+                    or  "\27[1;95mChafa Symbols (CLI chafa)\27[90m"
+            end
+        end
+    end
+
+    -- Tier 3: Zero-Dependency Pure LuaJIT Native Braille Engine
+    if not rendered_lines then
+        rendered_lines = render_image_native_braille(img, fit_cols, fit_rows)
+        engine_label = "\27[1;95mChafa Braille 2×4 (Native LuaJIT)\27[90m"
+    end
+
+    if not rendered_lines or #rendered_lines == 0 then
+        return false, "Failed to render image with Chafa"
+    end
+
+    -- 2D Centering
+    local pad_left = math.max(0, math.floor((term_w - fit_cols) / 2))
+    local pad_top  = math.max(0, math.floor((max_char_h - #rendered_lines) / 2))
+    local pad      = string.rep(" ", pad_left)
+
+    local out = {}
+    local bar_len = math.max(20, term_w - 4)
+    table.insert(out, "\27[H\27[2J")
+    table.insert(out, "\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
+    table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
+        current_idx, total_count, img_entry.filename))
+    local disp_path = img_entry.filepath
+    if #disp_path > math.max(20, term_w - 35) then disp_path = "..." .. disp_path:sub(#disp_path - (term_w - 38)) end
+    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Engine: %s | Path: %s\27[0m\n",
+        img_entry.size_str, img.width, img.height, engine_label or "Chafa", disp_path))
+    table.insert(out, string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"))
+    table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
+
+    if pad_top > 0 then
+        table.insert(out, string.rep("\n", pad_top))
+    end
+
+    for _, l in ipairs(rendered_lines) do
+        table.insert(out, pad .. l .. "\27[0m\n")
+    end
+
+    io.write(table.concat(out))
+    io.flush()
+    return true
+end
+
+-- =========================================================================
 -- 6. Kitty Graphics Protocol & Fallback Truecolor Renderer
 -- =========================================================================
 local b64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -2034,7 +2305,7 @@ local function render_image_iterm2(img_entry, current_idx, total_count, term_w, 
 end
 
 -- Unified image renderer: Dispatches to the selected protocol.
--- Supported protocols: "truecolor" | "timg-half" | "timg-quarter" | "kitty" | "iterm"
+-- Supported protocols: "truecolor" | "timg-half" | "timg-quarter" | "chafa" | "chafa-braille" | "kitty" | "iterm"
 local function render_image_screen(img_entry, current_idx, total_count, protocol)
     local term_w, term_h = get_terminal_size()
     protocol = protocol or "truecolor"
@@ -2044,6 +2315,12 @@ local function render_image_screen(img_entry, current_idx, total_count, protocol
         if ok then return true end
     elseif protocol == "iterm" then
         local ok = render_image_iterm2(img_entry, current_idx, total_count, term_w, term_h)
+        if ok then return true end
+    elseif protocol == "chafa-braille" or protocol == "braille" then
+        local ok = render_image_chafa(img_entry, current_idx, total_count, term_w, term_h, "braille")
+        if ok then return true end
+    elseif protocol == "chafa" or protocol == "chafa-symbols" then
+        local ok = render_image_chafa(img_entry, current_idx, total_count, term_w, term_h, "symbols")
         if ok then return true end
     elseif protocol == "timg-quarter" or protocol == "quarter" then
         -- timg -p q  (quarter-block, 2x2 pixels per cell, linear-space avd minimisation, aspect-corrected)
@@ -2081,7 +2358,7 @@ local function render_help_modal(term_w, term_h)
         "│  Viewer Controls:                                           │",
         "│    ← / p, → / n        Browse previous / next image         │",
         "│    PgUp / PgDn         Browse previous / next image         │",
-        "│    t                   Cycle render engine (5 modes)        │",
+        "│    t                   Cycle render engine (7 modes)        │",
         "│    Enter / b / Backsp  Return to file/folder list           │",
         "│                                                             │",
         "│  Search & Sorting:                                          │",
@@ -2305,6 +2582,8 @@ local function main()
         print("  --truecolor           ANSI 24-bit Truecolor Half-Block (Original Renderer)")
         print("  --timg-half           timg -p h: Half-block ▄ (linear γ, area-avg, colour diff)")
         print("  --timg-quarter        timg -p q: Quarter-block ▛▜▙▟ (aspect-corrected)")
+        print("  --chafa               Chafa Symbols (FFI libchafa, CLI, or native Braille)")
+        print("  --chafa-braille       Chafa Braille 2×4 dot matrix (Native LuaJIT or FFI)")
         print("  --half-block          Alias for --truecolor")
         print("  --quarter-block       Alias for --timg-quarter")
         print("  --no-interactive      Non-interactive script/batch mode")
@@ -2320,6 +2599,10 @@ local function main()
         active_protocol = "kitty"
     elseif args["--iterm"] or args["--iterm2"] then
         active_protocol = "iterm"
+    elseif args["--chafa-braille"] or args["--braille"] then
+        active_protocol = "chafa-braille"
+    elseif args["--chafa"] or args["--chafa-symbols"] then
+        active_protocol = "chafa"
     elseif args["--timg-quarter"] or args["--quarter-block"] or args["--quarter"] then
         active_protocol = "timg-quarter"
     elseif args["--timg-half"] or args["--timg"] then
@@ -2563,12 +2846,16 @@ local function main()
                             end
                         elseif k == "t" or k == "T" then
                             kitty_clear_screen()
-                            -- Engine cycle: truecolor -> timg-half -> timg-quarter -> kitty -> iterm -> truecolor
+                            -- Engine cycle: truecolor -> timg-half -> timg-quarter -> chafa -> chafa-braille -> kitty -> iterm -> truecolor
                             if active_protocol == "truecolor" or active_protocol == "halfblock" then
                                 active_protocol = "timg-half"
                             elseif active_protocol == "timg-half" then
                                 active_protocol = "timg-quarter"
                             elseif active_protocol == "timg-quarter" or active_protocol == "quarter" then
+                                active_protocol = "chafa"
+                            elseif active_protocol == "chafa" or active_protocol == "chafa-symbols" then
+                                active_protocol = "chafa-braille"
+                            elseif active_protocol == "chafa-braille" or active_protocol == "braille" then
                                 active_protocol = "kitty"
                             elseif active_protocol == "kitty" then
                                 active_protocol = "iterm"
