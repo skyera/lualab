@@ -2712,6 +2712,12 @@ local function get_has_ffmpeg()
     return has_ffmpeg
 end
 
+local has_mpv = nil
+local function get_has_mpv()
+    if has_mpv == nil then has_mpv = is_cmd_available("mpv") end
+    return has_mpv
+end
+
 local function render_image_timg_cli(img_entry, current_idx, total_count, term_w, term_h, cur_e, total_e)
     local img, err = load_image(img_entry.filepath)
     if not img then return false, err end
@@ -3432,13 +3438,34 @@ local function render_video_frame_halfblock(raw_bytes, frame_w, frame_h, pad, ro
 end
 
 local function play_video_screen(img_entry, current_idx, total_count, protocol)
+    -- Prefer mpv in terminal mode when available (audio, subtitles, native mpv keys)
+    if get_has_mpv() then
+        io.write("\27[?25h\27[0m") -- show cursor, reset attrs
+        io.flush()
+        local term_w, term_h = get_terminal_size()
+        local mpv_cmd = string.format(
+            'mpv --vo=tct --really-quiet --term-osd-bar --vo-tct-width=%d --vo-tct-height=%d %q',
+            math.max(4, term_w), math.max(4, (term_h - 2) * 2), img_entry.filepath)
+        if is_windows then
+            os.execute(mpv_cmd)
+        else
+            -- Temporarily restore terminal so mpv can manage it
+            disable_raw_mode()
+            os.execute(mpv_cmd)
+            enable_raw_mode()
+        end
+        io.write("\27[H\27[2J\27[?25l") -- clear screen, hide cursor
+        io.flush()
+        return "back", protocol
+    end
+
     local use_ffi = has_ffi_video()
     if not use_ffi and not get_has_ffmpeg() then
         io.write("\27[H\27[2J")
         io.write("\n  \27[1;31m⚠ Video Player Dependencies Not Found\27[0m\n\n")
-        io.write("  Video playback requires \27[1;36mlibavcodec\27[0m FFI libraries\n")
+        io.write("  Video playback requires \27[1;36mmpv\27[0m, \27[1;36mlibavcodec\27[0m FFI libraries,\n")
         io.write("  or \27[1;36mffmpeg\27[0m in your system PATH.\n")
-        io.write("  Install with: \27[93msudo apt install ffmpeg\27[0m or \27[93mwinget install Gyan.FFmpeg\27[0m\n\n")
+        io.write("  Install with: \27[93msudo apt install mpv\27[0m or \27[93msudo apt install ffmpeg\27[0m\n\n")
         io.write("  \27[90mPress any key to return to gallery...\27[0m")
         io.flush()
         read_key()
@@ -4087,16 +4114,18 @@ local function main()
         print("  --half-block          Alias for --truecolor")
         print("  --quarter-block       Alias for --timg-quarter")
         print("\nVideo Engine:")
+        local mpv_status = get_has_mpv() and "\27[32m[Available]\27[0m" or "\27[90m[Not Detected]\27[0m"
+        print("  mpv --vo=tct:         " .. mpv_status .. " mpv terminal player (preferred, with audio)")
         if has_ffi_video() then
-            print("  Backend:              \27[32m[Available]\27[0m LuaJIT FFI (libavformat, libavcodec, libswscale)")
+            print("  Fallback:             \27[32m[Available]\27[0m LuaJIT FFI (libavformat, libavcodec, libswscale)")
         elseif get_has_ffmpeg() then
-            print("  Backend:              \27[32m[Available]\27[0m FFmpeg CLI pipeline")
+            print("  Fallback:             \27[32m[Available]\27[0m FFmpeg CLI pipeline")
         else
-            print("  Backend:              \27[90m[Not Detected]\27[0m Neither libavcodec FFI nor ffmpeg found")
+            print("  Fallback:             \27[90m[Not Detected]\27[0m Neither libavcodec FFI nor ffmpeg found")
         end
         print("\nSupported formats:")
         print("  - Images: PNG, JPG/JPEG, PPM, WEBP, GIF, BMP")
-        print("  - Videos: MP4, MKV, WEBM, AVI, MOV, M4V, FLV (via libavcodec FFI or ffmpeg)")
+        print("  - Videos: MP4, MKV, WEBM, AVI, MOV, M4V, FLV (via mpv, libavcodec FFI, or ffmpeg)")
         os.exit(0)
     end
 
