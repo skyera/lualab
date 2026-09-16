@@ -2175,7 +2175,7 @@ local function load_image_uncached(filepath)
     else
         cmd = string.format("magick %q ppm:- 2>%s || convert %q ppm:- 2>%s || ffmpeg -v error -i %q -f image2pipe -vcodec ppm - 2>%s", filepath, devnull, filepath, devnull, filepath, devnull)
     end
-    local pipe = io.popen(cmd, "r")
+    local pipe = io.popen(cmd, POPEN_READ_BIN)
     if pipe then
         local img = parse_ppm_stream(pipe)
         pipe:close()
@@ -3197,7 +3197,7 @@ local function render_image_kitty(img_entry, current_idx, total_count, term_w, t
         else
             cmd = string.format("magick %q png:- 2>%s || convert %q png:- 2>%s || ffmpeg -v error -i %q -f image2pipe -vcodec png - 2>%s", img_entry.filepath, devnull, img_entry.filepath, devnull, img_entry.filepath, devnull)
         end
-        local pipe = io.popen(cmd, "r")
+        local pipe = io.popen(cmd, POPEN_READ_BIN)
         if pipe then
             png_data = pipe:read("*all")
             pipe:close()
