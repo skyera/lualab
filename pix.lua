@@ -356,7 +356,21 @@ if is_windows then
 
         int _kbhit(void);
         int _getch(void);
+
+        void* _wpopen(const wchar_t *command, const wchar_t *mode);
+        int _pclose(void *stream);
+        int _wsystem(const wchar_t *command);
+        void* _wfopen(const wchar_t *filename, const wchar_t *mode);
+        int fclose(void *stream);
+        size_t fread(void *ptr, size_t size, size_t n, void *stream);
+        int fgetc(void *stream);
+        int feof(void *stream);
+        int _fileno(void *stream);
+        int _fseeki64(void *stream, int64_t offset, int origin);
+        int64_t _telli64(int fd);
     ]]
+
+    local msvcrt = pcall(function() return ffi.load("msvcrt") end) and ffi.load("msvcrt") or nil
 
     local STD_INPUT_HANDLE  = 0xFFFFFFF6 -- ((uint32_t)-10)
     local STD_OUTPUT_HANDLE = 0xFFFFFFF5 -- ((uint32_t)-11)
@@ -563,6 +577,165 @@ if is_windows then
         return path
     end
 
+    local function win_popen(cmd, mode)
+        mode = mode or "r"
+        local wcmd = to_win_wide(cmd)
+        local wmode = to_win_wide(mode)
+        if not wcmd or not wmode or not msvcrt or not msvcrt._wpopen then return nil end
+        local fp = msvcrt._wpopen(wcmd, wmode)
+        if fp == nil then return nil end
+
+        local pipe = { fp = fp, closed = false }
+
+        function pipe:read(fmt)
+            if self.closed or self.fp == nil then return nil end
+            if fmt == "*a" or fmt == "*all" or fmt == nil or fmt == "a" then
+                local buf_size = 65536
+                local cbuf = ffi.new("char[?]", buf_size)
+                local chunks = {}
+                while true do
+                    local n = msvcrt.fread(cbuf, 1, buf_size, self.fp)
+                    if n > 0 then
+                        table.insert(chunks, ffi.string(cbuf, n))
+                    else
+                        break
+                    end
+                end
+                if #chunks == 0 then return "" end
+                return table.concat(chunks)
+            elseif type(fmt) == "number" then
+                local nbytes = fmt
+                if nbytes <= 0 then return "" end
+                local cbuf = ffi.new("char[?]", nbytes)
+                local total_read = 0
+                while total_read < nbytes do
+                    local n = msvcrt.fread(cbuf + total_read, 1, nbytes - total_read, self.fp)
+                    if n > 0 then
+                        total_read = total_read + tonumber(n)
+                    else
+                        break
+                    end
+                end
+                if total_read == 0 then return nil end
+                return ffi.string(cbuf, total_read)
+            elseif fmt == "*l" or fmt == "l" then
+                local chars = {}
+                while true do
+                    local c = msvcrt.fgetc(self.fp)
+                    if c == -1 or c == 10 then break end
+                    if c ~= 13 then
+                        table.insert(chars, string.char(c))
+                    end
+                end
+                if #chars == 0 and msvcrt.feof(self.fp) ~= 0 then return nil end
+                return table.concat(chars)
+            end
+            return nil
+        end
+
+        function pipe:lines()
+            return function()
+                return self:read("*l")
+            end
+        end
+
+        function pipe:close()
+            if not self.closed and self.fp ~= nil then
+                local ret = msvcrt._pclose(self.fp)
+                self.fp = nil
+                self.closed = true
+                return ret
+            end
+            return 0
+        end
+
+        return pipe
+    end
+
+    local function win_fopen(path, mode)
+        mode = mode or "r"
+        local wpath = to_win_wide(path)
+        local wmode = to_win_wide(mode)
+        if not wpath or not wmode or not msvcrt or not msvcrt._wfopen then return nil end
+        local fp = msvcrt._wfopen(wpath, wmode)
+        if fp == nil then return nil end
+
+        local file = { fp = fp, closed = false }
+
+        function file:read(fmt)
+            if self.closed or self.fp == nil then return nil end
+            if fmt == "*a" or fmt == "*all" or fmt == nil or fmt == "a" then
+                local buf_size = 65536
+                local cbuf = ffi.new("char[?]", buf_size)
+                local chunks = {}
+                while true do
+                    local n = msvcrt.fread(cbuf, 1, buf_size, self.fp)
+                    if n > 0 then
+                        table.insert(chunks, ffi.string(cbuf, n))
+                    else
+                        break
+                    end
+                end
+                if #chunks == 0 then return "" end
+                return table.concat(chunks)
+            elseif type(fmt) == "number" then
+                local nbytes = fmt
+                if nbytes <= 0 then return "" end
+                local cbuf = ffi.new("char[?]", nbytes)
+                local total_read = 0
+                while total_read < nbytes do
+                    local n = msvcrt.fread(cbuf + total_read, 1, nbytes - total_read, self.fp)
+                    if n > 0 then
+                        total_read = total_read + tonumber(n)
+                    else
+                        break
+                    end
+                end
+                if total_read == 0 then return nil end
+                return ffi.string(cbuf, total_read)
+            elseif fmt == "*l" or fmt == "l" then
+                local chars = {}
+                while true do
+                    local c = msvcrt.fgetc(self.fp)
+                    if c == -1 or c == 10 then break end
+                    if c ~= 13 then
+                        table.insert(chars, string.char(c))
+                    end
+                end
+                if #chars == 0 and msvcrt.feof(self.fp) ~= 0 then return nil end
+                return table.concat(chars)
+            end
+            return nil
+        end
+
+        function file:seek(whence, offset)
+            if self.closed or self.fp == nil then return nil end
+            whence = whence or "cur"
+            offset = offset or 0
+            local origin = 1 -- SEEK_CUR
+            if whence == "set" then origin = 0
+            elseif whence == "end" then origin = 2
+            end
+            if msvcrt._fseeki64(self.fp, offset, origin) ~= 0 then
+                return nil
+            end
+            local fd = msvcrt._fileno(self.fp)
+            return tonumber(msvcrt._telli64(fd))
+        end
+
+        function file:close()
+            if not self.closed and self.fp ~= nil then
+                local ret = msvcrt.fclose(self.fp)
+                self.fp = nil
+                self.closed = true
+                return (ret == 0)
+            end
+            return true
+        end
+
+        return file
+    end
+
     local orig_io_open = io.open
     io.open = function(path, mode)
         local f, err = orig_io_open(path, mode)
@@ -573,8 +746,30 @@ if is_windows then
                 local sf = orig_io_open(sp, mode)
                 if sf then return sf end
             end
+            local wf = win_fopen(path, mode)
+            if wf then return wf end
         end
         return nil, err
+    end
+
+    local orig_io_popen = io.popen
+    io.popen = function(cmd, mode)
+        if type(cmd) == "string" and msvcrt and msvcrt._wpopen then
+            local p = win_popen(cmd, mode)
+            if p then return p end
+        end
+        return orig_io_popen(cmd, mode)
+    end
+
+    local orig_os_execute = os.execute
+    os.execute = function(cmd)
+        if type(cmd) == "string" and msvcrt and msvcrt._wsystem then
+            local wcmd = to_win_wide(cmd)
+            if wcmd then
+                return msvcrt._wsystem(wcmd)
+            end
+        end
+        return orig_os_execute(cmd)
     end
 
     get_win_utf8_args = function()
@@ -2084,8 +2279,7 @@ local function get_video_info(filepath)
 
     -- Fallback to the CLI tools
     local devnull = is_windows and "2>nul" or "2>/dev/null"
-    local cmd_path = (is_windows and get_win_short_path) and get_win_short_path(filepath) or filepath
-    local p = io.popen(string.format('ffmpeg -i %q 2>&1', cmd_path))
+    local p = io.popen(string.format('ffmpeg -i %q 2>&1', filepath))
     if not p then
         return { duration = 0, duration_str = "00:00", width = 0, height = 0, fps = 25 }
     end
@@ -2100,7 +2294,7 @@ local function get_video_info(filepath)
 
     -- Prefer ffprobe: machine-readable, so no banner parsing ambiguity. Missing ffprobe just
     -- yields empty output (its stderr is discarded), and the banner parse below takes over.
-    local fp = io.popen(string.format('ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 %q %s', cmd_path, devnull))
+    local fp = io.popen(string.format('ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 %q %s', filepath, devnull))
     if fp then
         local out = fp:read("*a") or ""
         fp:close()
@@ -2318,8 +2512,7 @@ local function load_image_uncached(filepath)
         end
 
         local devnull = is_windows and "2>nul" or "2>/dev/null"
-        local cmd_path = (is_windows and get_win_short_path) and get_win_short_path(filepath) or filepath
-        local cmd = string.format("ffmpeg -nostdin -loglevel quiet -i %q -vframes 1 -f image2pipe -vcodec ppm - %s", cmd_path, devnull)
+        local cmd = string.format("ffmpeg -nostdin -loglevel quiet -i %q -vframes 1 -f image2pipe -vcodec ppm - %s", filepath, devnull)
         local pipe = io.popen(cmd, POPEN_READ_BIN)
         if pipe then
             local img = parse_ppm_stream(pipe)
@@ -2333,10 +2526,9 @@ local function load_image_uncached(filepath)
 
     -- 6. Secondary fallback: CLI tools (ImageMagick / ffmpeg) if available
     local devnull = is_windows and "nul" or "/dev/null"
-    local cmd_path = (is_windows and get_win_short_path) and get_win_short_path(filepath) or filepath
     local cmd
     if is_windows then
-        cmd = string.format("magick %q ppm:- 2>%s || ffmpeg -v error -i %q -f image2pipe -vcodec ppm - 2>%s", cmd_path, devnull, cmd_path, devnull)
+        cmd = string.format("magick %q ppm:- 2>%s || ffmpeg -v error -i %q -f image2pipe -vcodec ppm - 2>%s", filepath, devnull, filepath, devnull)
     else
         cmd = string.format("magick %q ppm:- 2>%s || convert %q ppm:- 2>%s || ffmpeg -v error -i %q -f image2pipe -vcodec ppm - 2>%s", filepath, devnull, filepath, devnull, filepath, devnull)
     end
@@ -3949,7 +4141,7 @@ local function launch_mpv_tct(filepath, seek_sec)
         .. ' --term-status-msg="  ${filename}  ${playback-time} / ${duration} (${percent-pos}%%)  Speed: ${speed}x"'
         .. '%s %q%s',
         math.max(4, term_w), math.max(4, term_h - 3),
-        seek_part, (is_windows and get_win_short_path and get_win_short_path(filepath) or filepath), stderr_part)
+        seek_part, filepath, stderr_part)
 
     local ret
     if is_windows then
@@ -4062,10 +4254,9 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
         else
             local ss_part = (seek_sec > 0) and string.format("-ss %.2f", seek_sec) or ""
             local devnull = is_windows and "nul" or "/dev/null"
-            local cmd_path = (is_windows and get_win_short_path) and get_win_short_path(img_entry.filepath) or img_entry.filepath
             -- stderr to devnull so decode/hwaccel warnings cannot scribble across the TUI
             local cmd = string.format('ffmpeg -nostdin -loglevel quiet %s -i %q -vf "scale=%d:%d:flags=fast_bilinear" -f rawvideo -pix_fmt rgb24 - 2>%s',
-                ss_part, cmd_path, frame_w, frame_h, devnull)
+                ss_part, img_entry.filepath, frame_w, frame_h, devnull)
             stream_proc = io.popen(cmd, POPEN_READ_BIN)
         end
     end
