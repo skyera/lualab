@@ -2521,6 +2521,10 @@ local function has_ffi_video()
 end
 
 local function get_video_info(filepath)
+    local function valid_dim(v)
+        return v and v >= 16 and v <= 32768
+    end
+
     if has_ffi_video() then
         local ps = ffi.new("AVFormatContext*[1]")
         if lib_avformat.avformat_open_input(ps, filepath, nil, nil) == 0 then
@@ -2542,17 +2546,21 @@ local function get_video_info(filepath)
                         fps = st.r_frame_rate.num / st.r_frame_rate.den
                     end
                 end
+                if valid_dim(width) and valid_dim(height) then
+                    lib_avformat.avformat_close_input(ps)
+                    return {
+                        duration = total_sec,
+                        duration_str = format_video_time(total_sec),
+                        width = width,
+                        height = height,
+                        fps = (fps > 0 and fps <= 120) and fps or 25,
+                        has_audio = has_audio,
+                    }
+                end
                 lib_avformat.avformat_close_input(ps)
-                return {
-                    duration = total_sec,
-                    duration_str = format_video_time(total_sec),
-                    width = width,
-                    height = height,
-                    fps = (fps > 0 and fps <= 120) and fps or 25,
-                    has_audio = has_audio,
-                }
+            else
+                lib_avformat.avformat_close_input(ps)
             end
-            lib_avformat.avformat_close_input(ps)
         end
     end
 
@@ -2564,10 +2572,6 @@ local function get_video_info(filepath)
     end
     local info = p:read("*a") or ""
     p:close()
-
-    local function valid_dim(v)
-        return v and v >= 16 and v <= 32768
-    end
 
     local width, height = 0, 0
 
@@ -4732,14 +4736,11 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
     local fps = (v_info.fps > 0 and v_info.fps <= 120) and v_info.fps or 25
     local target_dt = 1.0 / fps
 
-    local term_w, term_h, term_px_w, term_px_h = get_terminal_size()
-    -- Half-block rendering uses two decoded pixel rows per terminal row. Prefer the
-    -- terminal's reported pixel geometry over the usual 2:1 character-cell fallback;
-    -- remote terminals can have substantially different cell proportions.
+    local term_w, term_h = get_terminal_size()
+    -- Half-block rendering uses two decoded pixel rows per terminal row. Keep the
+    -- conventional 2:1 character-cell ratio because terminal pixel dimensions can
+    -- be stale or refer to the outer display rather than the current terminal pane.
     local cell_height_width_ratio = 2.0
-    if term_px_w and term_px_h and term_px_w > 0 and term_px_h > 0 then
-        cell_height_width_ratio = (term_px_h / term_h) / (term_px_w / term_w)
-    end
     local reserved_header_rows = 5
     local max_char_h = math.max(4, term_h - reserved_header_rows)
     local max_char_w = math.max(4, term_w - 4)
