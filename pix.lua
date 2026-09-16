@@ -1294,7 +1294,7 @@ else
     get_terminal_size = function()
         local ws = ffi.new("struct winsize")
         if pcall(function() return ffi.C.ioctl(1, TIOCGWINSZ, ws) end) and ws.ws_col > 0 and ws.ws_row > 0 then
-            return tonumber(ws.ws_col), tonumber(ws.ws_row)
+            return tonumber(ws.ws_col), tonumber(ws.ws_row), tonumber(ws.ws_xpixel), tonumber(ws.ws_ypixel)
         end
         return 80, 24
     end
@@ -4732,14 +4732,21 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
     local fps = (v_info.fps > 0 and v_info.fps <= 120) and v_info.fps or 25
     local target_dt = 1.0 / fps
 
-    local term_w, term_h = get_terminal_size()
+    local term_w, term_h, term_px_w, term_px_h = get_terminal_size()
+    -- Half-block rendering uses two decoded pixel rows per terminal row. Prefer the
+    -- terminal's reported pixel geometry over the usual 2:1 character-cell fallback;
+    -- remote terminals can have substantially different cell proportions.
+    local cell_height_width_ratio = 2.0
+    if term_px_w and term_px_h and term_px_w > 0 and term_px_h > 0 then
+        cell_height_width_ratio = (term_px_h / term_h) / (term_px_w / term_w)
+    end
     local reserved_header_rows = 5
     local max_char_h = math.max(4, term_h - reserved_header_rows - 1)
     local max_char_w = math.max(4, term_w - 4)
 
     local fit_cols, fit_rows
     if v_info.width > 0 and v_info.height > 0 then
-        local optical_aspect = (v_info.width / v_info.height) * 2.0
+        local optical_aspect = (v_info.width / v_info.height) * cell_height_width_ratio
         fit_rows = max_char_h
         fit_cols = math.max(2, math.floor(fit_rows * optical_aspect))
         if fit_cols > max_char_w then
