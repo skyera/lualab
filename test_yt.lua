@@ -41,4 +41,22 @@ if p_search then
     end
 end
 
+-- Test 3: Non-interactive music search
+local p_music = io.popen(luajit .. ' yt.lua --music --no-interactive --max-results 2 "synthwave"', "r")
+assert(p_music, "Failed to run yt.lua in non-interactive music mode")
+local music_out = p_music:read("*a")
+p_music:close()
+assert(music_out:find("MUSIC mode", 1, true), "Music mode header missing")
+assert(music_out:find("01.", 1, true), "Music item 1 missing")
+print("  [✓] Test 3 passed: yt.lua --music --no-interactive successfully extracted and listed items.")
+
+-- Test 4: Non-interactive video search
+local p_video = io.popen(luajit .. ' yt.lua --video --no-interactive --max-results 2 "space documentary"', "r")
+assert(p_video, "Failed to run yt.lua in non-interactive video mode")
+local video_out = p_video:read("*a")
+p_video:close()
+assert(video_out:find("VIDEO mode", 1, true), "Video mode header missing")
+assert(video_out:find("01.", 1, true), "Video item 1 missing")
+print("  [✓] Test 4 passed: yt.lua --video --no-interactive successfully extracted and listed items.")
+
 print("=== All Backend Verification Tests Completed Successfully ===")

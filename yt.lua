@@ -359,19 +359,68 @@ end
 -- =========================================================================
 -- 3. YouTube Search & Extraction Engine
 -- =========================================================================
+local function codepoint_to_utf8(cp)
+    if cp < 0x80 then
+        return string.char(cp)
+    elseif cp < 0x800 then
+        return string.char(bit.bor(0xC0, bit.rshift(cp, 6)), bit.bor(0x80, bit.band(cp, 0x3F)))
+    elseif cp < 0x10000 then
+        return string.char(bit.bor(0xE0, bit.rshift(cp, 12)), bit.bor(0x80, bit.band(bit.rshift(cp, 6), 0x3F)), bit.bor(0x80, bit.band(cp, 0x3F)))
+    elseif cp < 0x110000 then
+        return string.char(bit.bor(0xF0, bit.rshift(cp, 18)), bit.bor(0x80, bit.band(bit.rshift(cp, 12), 0x3F)), bit.bor(0x80, bit.band(bit.rshift(cp, 6), 0x3F)), bit.bor(0x80, bit.band(cp, 0x3F)))
+    end
+    return ""
+end
+
+local function unescape_unicode(s)
+    if not s or not s:find("\\u") then return s end
+    -- Handle surrogate pairs: \uD8xx\uDCxx
+    s = s:gsub("\\u([dD][89a-bA-B]%x%x)\\u([dD][c-fC-F]%x%x)", function(hi_hex, lo_hex)
+        local hi = tonumber(hi_hex, 16)
+        local lo = tonumber(lo_hex, 16)
+        local cp = 0x10000 + bit.lshift(bit.band(hi, 0x3FF), 10) + bit.band(lo, 0x3FF)
+        return codepoint_to_utf8(cp)
+    end)
+    -- Handle standard \uXXXX
+    s = s:gsub("\\u(%x%x%x%x)", function(hex)
+        local cp = tonumber(hex, 16)
+        return codepoint_to_utf8(cp)
+    end)
+    return s
+end
+
 local function parse_json_field(line, key)
-    -- Match string value: "key": "value"
-    local str_val = line:match('"' .. key .. '"%s*:%s*"([^"\\]*(?:\\.[^"\\]*)*)"')
-    if str_val then
-        -- Unescape common JSON escapes
-        str_val = str_val:gsub('\\"', '"'):gsub('\\\\', '\\'):gsub('\\/', '/'):gsub('\\n', ' ')
-        return str_val
+    local pat = '"' .. key .. '"%s*:%s*"'
+    local s, e = line:find(pat)
+    if s then
+        local pos = e + 1
+        local chars = {}
+        local len = #line
+        while pos <= len do
+            local b = line:sub(pos, pos)
+            if b == "\\" then
+                pos = pos + 1
+                local next_b = line:sub(pos, pos)
+                if next_b == '"' then table.insert(chars, '"')
+                elseif next_b == "\\" then table.insert(chars, "\\")
+                elseif next_b == "/" then table.insert(chars, "/")
+                elseif next_b == "n" then table.insert(chars, " ")
+                elseif next_b == "u" then
+                    -- Keep \uXXXX intact for unescape_unicode to parse
+                    local u_part = line:sub(pos - 1, pos + 4)
+                    table.insert(chars, u_part)
+                    pos = pos + 4
+                else table.insert(chars, next_b) end
+            elseif b == '"' then
+                return unescape_unicode(table.concat(chars))
+            else
+                table.insert(chars, b)
+            end
+            pos = pos + 1
+        end
     end
-    -- Match numeric value: "key": 123.45
-    local num_val = line:match('"' .. key .. '"%s*:%s*([%d%.]+)')
-    if num_val then
-        return tonumber(num_val)
-    end
+    local num = line:match('"' .. key .. '"%s*:%s*([%d%.]+)')
+    if num then return tonumber(num) end
     return nil
 end
 
@@ -392,8 +441,11 @@ local function fetch_youtube_results(query, mode, browser, cookies_file, max_res
     elseif query:match("^https?://") or query:match("^www%.") or query:match("^youtu%.be/") then
         search_spec = string.format("%q", query)
     else
-        local prefix = (mode == "music") and "ytmsearch" or "ytsearch"
-        search_spec = string.format('"%s%d:%s"', prefix, max_results, query:gsub('"', '\\"'))
+        local term = query
+        if mode == "music" and not query:lower():find("music") and not query:lower():find("song") and not query:lower():find("audio") then
+            term = query .. " music"
+        end
+        search_spec = string.format('"ytsearch%d:%s"', max_results, term:gsub('"', '\\"'))
     end
 
     local cookie_opts = ""
@@ -754,6 +806,7 @@ local function print_help()
     print("  -v, --video           Video mode: video streaming in terminal via mpv --vo=tct")
     print("  --window              In video mode, play in external MPV GUI window instead of terminal")
     print("  --browser <name>      Extract session cookies from browser (firefox, chrome, brave, edge)")
+    print("  --no-interactive      Non-interactive script/batch mode (print results and exit)")
     print("  --cookies <file>      Use Netscape format cookies.txt file")
     print("  --liked               Load user's Liked Music or Liked Videos playlist")
     print("  -h, --help            Show this help message")
@@ -775,6 +828,8 @@ local function main()
     local cookies_file = nil
     local is_liked = false
     local use_window = false
+    local non_interactive = false
+    local max_results = 20
     local query_parts = {}
 
     local i = 1
@@ -791,6 +846,11 @@ local function main()
             use_window = true
         elseif a == "--liked" then
             is_liked = true
+        elseif a == "--no-interactive" then
+            non_interactive = true
+        elseif a == "--max-results" then
+            i = i + 1
+            max_results = tonumber(arg[i]) or 20
         elseif a == "--browser" then
             i = i + 1
             browser = arg[i]
@@ -804,6 +864,20 @@ local function main()
     end
 
     local query = #query_parts > 0 and table.concat(query_parts, " ") or nil
+
+    if non_interactive or (not is_stdin_tty()) then
+        local q = query or "lofi hip hop"
+        local res, err = fetch_youtube_results(q, mode, browser, cookies_file, max_results, is_liked)
+        if not res then
+            io.stderr:write("Error: " .. tostring(err) .. "\n")
+            os.exit(1)
+        end
+        print(string.format("\27[1;36m=== YouTube Results for '%s' (%s mode) ===\27[0m", q, mode:upper()))
+        for idx, item in ipairs(res) do
+            print(string.format("  %02d. %-50s | %-22s | %s", idx, item.title:sub(1, 50), item.uploader:sub(1, 22), item.duration_str))
+        end
+        return
+    end
 
     run_app(query, mode, browser, cookies_file, is_liked, use_window)
 end
