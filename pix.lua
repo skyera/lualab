@@ -3437,6 +3437,26 @@ local function render_image_iterm2(img_entry, current_idx, total_count, term_w, 
     local raw_data = f:read("*all")
     f:close()
 
+    local ext = img_entry.extension:lower()
+    if ext == "ppm" or raw_data:sub(1, 2) == "P6" or raw_data:sub(1, 2) == "P3" then
+        -- iTerm2 inline image protocol does not support Netpbm PPM. Convert to PNG if possible.
+        local devnull = is_windows and "nul" or "/dev/null"
+        local cmd = string.format("magick %q png:- 2>%s || convert %q png:- 2>%s || ffmpeg -v error -i %q -f image2pipe -vcodec png - 2>%s",
+            img_entry.filepath, devnull, img_entry.filepath, devnull, img_entry.filepath, devnull)
+        local pipe = io.popen(cmd, POPEN_READ_BIN)
+        if pipe then
+            local converted = pipe:read("*all")
+            pipe:close()
+            if converted and #converted > 0 then
+                raw_data = converted
+            else
+                return false, "PPM format not supported by iTerm2 protocol without ImageMagick/ffmpeg"
+            end
+        else
+            return false, "PPM format not supported by iTerm2 protocol"
+        end
+    end
+
     local b64 = base64_encode(raw_data)
     local reserved_header_rows = 7
     local max_rows = math.max(4, term_h - reserved_header_rows - 1)
