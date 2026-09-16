@@ -58,6 +58,8 @@ local to_display_text
 local is_stdin_tty
 local scan_directory_images
 local get_file_mtime
+local get_win_utf8_args
+local get_win_short_path
 
 local SUPPORTED_EXTENSIONS = {
     png  = true,
@@ -206,6 +208,38 @@ local function utf8_next(s, i)
     return b, 1
 end
 
+local function is_valid_utf8(s)
+    if type(s) ~= "string" or #s == 0 then return true end
+    local i, len = 1, #s
+    while i <= len do
+        local b = s:byte(i)
+        if b < 0x80 then
+            i = i + 1
+        elseif b >= 0xC2 and b <= 0xDF then
+            local b2 = s:byte(i + 1)
+            if not b2 or b2 < 0x80 or b2 > 0xBF then return false end
+            i = i + 2
+        elseif b >= 0xE0 and b <= 0xEF then
+            local b2, b3 = s:byte(i + 1), s:byte(i + 2)
+            if not b2 or not b3 then return false end
+            if b == 0xE0 and (b2 < 0xA0 or b2 > 0xBF) then return false end
+            if b == 0xED and (b2 < 0x80 or b2 > 0x9F) then return false end
+            if (b2 < 0x80 or b2 > 0xBF) or (b3 < 0x80 or b3 > 0xBF) then return false end
+            i = i + 3
+        elseif b >= 0xF0 and b <= 0xF4 then
+            local b2, b3, b4 = s:byte(i + 1), s:byte(i + 2), s:byte(i + 3)
+            if not b2 or not b3 or not b4 then return false end
+            if b == 0xF0 and (b2 < 0x90 or b2 > 0xBF) then return false end
+            if b == 0xF4 and (b2 < 0x80 or b2 > 0x8F) then return false end
+            if (b2 < 0x80 or b2 > 0xBF) or (b3 < 0x80 or b3 > 0xBF) or (b4 < 0x80 or b4 > 0xBF) then return false end
+            i = i + 4
+        else
+            return false
+        end
+    end
+    return true
+end
+
 -- Columns a string occupies on screen (byte length is wrong for any non-ASCII name)
 local function display_width(s)
     local w, i = 0, 1
@@ -287,6 +321,19 @@ if is_windows then
             char     cAlternateFileName[14];
         } WIN32_FIND_DATAA;
 
+        typedef struct {
+            uint32_t dwFileAttributes;
+            FILETIME ftCreationTime;
+            FILETIME ftLastAccessTime;
+            FILETIME ftLastWriteTime;
+            uint32_t nFileSizeHigh;
+            uint32_t nFileSizeLow;
+            uint32_t dwReserved0;
+            uint32_t dwReserved1;
+            wchar_t  cFileName[260];
+            wchar_t  cAlternateFileName[14];
+        } WIN32_FIND_DATAW;
+
         void*    __stdcall GetStdHandle(uint32_t nStdHandle);
         int      __stdcall GetConsoleScreenBufferInfo(void* hConsoleOutput, CONSOLE_SCREEN_BUFFER_INFO* lpConsoleScreenBufferInfo);
         int      __stdcall GetConsoleMode(void* hConsoleHandle, uint32_t* lpMode);
@@ -295,11 +342,17 @@ if is_windows then
         uint32_t __stdcall GetACP(void);
         int      __stdcall MultiByteToWideChar(uint32_t CodePage, uint32_t dwFlags, const char* lpMultiByteStr, int cbMultiByte, wchar_t* lpWideCharStr, int cchWideChar);
         int      __stdcall WideCharToMultiByte(uint32_t CodePage, uint32_t dwFlags, const wchar_t* lpWideCharStr, int cchWideChar, char* lpMultiByteStr, int cbMultiByte, const char* lpDefaultChar, int* lpUsedDefaultChar);
+        uint32_t __stdcall GetShortPathNameW(const wchar_t* lpszLongPath, wchar_t* lpszShortPath, uint32_t cchBuffer);
         uint32_t __stdcall GetFileType(void* hFile);
         void*    __stdcall FindFirstFileA(const char* lpFileName, WIN32_FIND_DATAA* lpFindFileData);
         int      __stdcall FindNextFileA(void* hFindFile, WIN32_FIND_DATAA* lpFindFileData);
+        void*    __stdcall FindFirstFileW(const wchar_t* lpFileName, WIN32_FIND_DATAW* lpFindFileData);
+        int      __stdcall FindNextFileW(void* hFindFile, WIN32_FIND_DATAW* lpFindFileData);
         int      __stdcall FindClose(void* hFindFile);
         void     __stdcall Sleep(uint32_t dwMilliseconds);
+        wchar_t* __stdcall GetCommandLineW(void);
+        wchar_t** __stdcall CommandLineToArgvW(const wchar_t* lpCmdLine, int* pNumArgs);
+        void*    __stdcall LocalFree(void* hMem);
 
         int _kbhit(void);
         int _getch(void);
@@ -342,6 +395,7 @@ if is_windows then
     else
         to_display_text = function(s)
             if type(s) ~= "string" or #s == 0 then return s end
+            if is_valid_utf8(s) then return s end
             local wlen = kernel32.MultiByteToWideChar(0, 0, s, #s, nil, 0) -- CP_ACP
             if wlen <= 0 then return s end
             local wbuf = ffi.new("wchar_t[?]", wlen + 1)
@@ -472,19 +526,94 @@ if is_windows then
         return nil
     end
 
+    local function to_win_wide(str)
+        if type(str) ~= "string" then return nil end
+        local cp = (is_valid_utf8(str) or kernel32.GetACP() == 65001) and 65001 or 0
+        local len = kernel32.MultiByteToWideChar(cp, 0, str, #str, nil, 0)
+        if len <= 0 then return nil end
+        local wbuf = ffi.new("wchar_t[?]", len + 1)
+        kernel32.MultiByteToWideChar(cp, 0, str, #str, wbuf, len)
+        wbuf[len] = 0
+        return wbuf
+    end
+
+    local function win_wide_to_utf8(wstr)
+        local len = kernel32.WideCharToMultiByte(65001, 0, wstr, -1, nil, 0, nil, nil)
+        if len <= 0 then return "" end
+        local buf = ffi.new("char[?]", len)
+        kernel32.WideCharToMultiByte(65001, 0, wstr, -1, buf, len, nil, nil)
+        return ffi.string(buf, len - 1)
+    end
+
+    get_win_short_path = function(path)
+        if type(path) ~= "string" or path == "" then return path end
+        local wpath = to_win_wide(path)
+        if not wpath then return path end
+        local buf_len = 512
+        local wbuf = ffi.new("wchar_t[?]", buf_len)
+        local res = kernel32.GetShortPathNameW(wpath, wbuf, buf_len)
+        if res > 0 and res < buf_len then
+            return win_wide_to_utf8(wbuf)
+        elseif res >= buf_len then
+            local big_buf = ffi.new("wchar_t[?]", res + 1)
+            if kernel32.GetShortPathNameW(wpath, big_buf, res + 1) > 0 then
+                return win_wide_to_utf8(big_buf)
+            end
+        end
+        return path
+    end
+
+    local orig_io_open = io.open
+    io.open = function(path, mode)
+        local f, err = orig_io_open(path, mode)
+        if f then return f end
+        if type(path) == "string" then
+            local sp = get_win_short_path(path)
+            if sp and sp ~= path then
+                local sf = orig_io_open(sp, mode)
+                if sf then return sf end
+            end
+        end
+        return nil, err
+    end
+
+    get_win_utf8_args = function()
+        pcall(function()
+            local shell32 = ffi.load("shell32")
+            local cmdline = kernel32.GetCommandLineW()
+            if cmdline == nil then return end
+            local num_args = ffi.new("int[1]")
+            local argv_w = shell32.CommandLineToArgvW(cmdline, num_args)
+            if argv_w == nil then return end
+            local raw_argv = {}
+            for i = 0, num_args[0] - 1 do
+                table.insert(raw_argv, win_wide_to_utf8(argv_w[i]))
+            end
+            kernel32.LocalFree(argv_w)
+
+            if arg and #arg > 0 and #raw_argv >= #arg then
+                local offset = #raw_argv - #arg
+                for i = 1, #arg do
+                    arg[i] = raw_argv[offset + i]
+                end
+            end
+        end)
+    end
+
     local function scan_win_dir(dir_path, entries, recursive, show_hidden)
         local norm_dir = dir_path:gsub("/", "\\"):gsub("\\+$", "")
         if norm_dir == "" then norm_dir = "." end
         local search_pattern = (norm_dir == ".") and ".\\*" or (norm_dir .. "\\*")
-        local find_data = ffi.new("WIN32_FIND_DATAA")
-        local hFind = kernel32.FindFirstFileA(search_pattern, find_data)
+        local find_data = ffi.new("WIN32_FIND_DATAW")
+        local wpattern = to_win_wide(search_pattern)
+        local hFind = wpattern and kernel32.FindFirstFileW(wpattern, find_data) or INVALID_HANDLE_VALUE
 
         if hFind == INVALID_HANDLE_VALUE or hFind == nil or hFind == ffi.cast("void*", 0) then
             return
         end
 
         repeat
-            local fname = ffi.string(find_data.cFileName)
+            local fname = win_wide_to_utf8(find_data.cFileName)
             local is_dir = bit.band(find_data.dwFileAttributes, FILE_ATTRIBUTE_DIRECTORY) ~= 0
 
             if fname ~= "." and fname ~= ".." and (show_hidden or not fname:match("^%.")) then
@@ -524,15 +653,16 @@ if is_windows then
                     end
                 end
             end
-        until kernel32.FindNextFileA(hFind, find_data) == 0
+        until kernel32.FindNextFileW(hFind, find_data) == 0
 
         kernel32.FindClose(hFind)
     end
 
     get_file_mtime = function(filepath)
         local norm = filepath:gsub("/", "\\")
-        local find_data = ffi.new("WIN32_FIND_DATAA")
-        local hFind = kernel32.FindFirstFileA(norm, find_data)
+        local find_data = ffi.new("WIN32_FIND_DATAW")
+        local wpath = to_win_wide(norm)
+        local hFind = wpath and kernel32.FindFirstFileW(wpath, find_data) or INVALID_HANDLE_VALUE
         if hFind ~= INVALID_HANDLE_VALUE and hFind ~= nil and hFind ~= ffi.cast("void*", 0) then
             local ft = tonumber(find_data.ftLastWriteTime.dwHighDateTime) * 4294967296 + tonumber(find_data.ftLastWriteTime.dwLowDateTime)
             kernel32.FindClose(hFind)
@@ -714,6 +844,7 @@ else
 
     -- POSIX filenames are already UTF-8 bytes, exactly what the terminal expects
     to_display_text = function(s) return s end
+    get_win_short_path = function(path) return path end
 
     get_terminal_size = function()
         local ws = ffi.new("struct winsize")
@@ -1953,7 +2084,8 @@ local function get_video_info(filepath)
 
     -- Fallback to the CLI tools
     local devnull = is_windows and "2>nul" or "2>/dev/null"
-    local p = io.popen(string.format('ffmpeg -i %q 2>&1', filepath))
+    local cmd_path = (is_windows and get_win_short_path) and get_win_short_path(filepath) or filepath
+    local p = io.popen(string.format('ffmpeg -i %q 2>&1', cmd_path))
     if not p then
         return { duration = 0, duration_str = "00:00", width = 0, height = 0, fps = 25 }
     end
@@ -1968,7 +2100,7 @@ local function get_video_info(filepath)
 
     -- Prefer ffprobe: machine-readable, so no banner parsing ambiguity. Missing ffprobe just
     -- yields empty output (its stderr is discarded), and the banner parse below takes over.
-    local fp = io.popen(string.format('ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 %q %s', filepath, devnull))
+    local fp = io.popen(string.format('ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 %q %s', cmd_path, devnull))
     if fp then
         local out = fp:read("*a") or ""
         fp:close()
@@ -2186,7 +2318,8 @@ local function load_image_uncached(filepath)
         end
 
         local devnull = is_windows and "2>nul" or "2>/dev/null"
-        local cmd = string.format("ffmpeg -nostdin -loglevel quiet -i %q -vframes 1 -f image2pipe -vcodec ppm - %s", filepath, devnull)
+        local cmd_path = (is_windows and get_win_short_path) and get_win_short_path(filepath) or filepath
+        local cmd = string.format("ffmpeg -nostdin -loglevel quiet -i %q -vframes 1 -f image2pipe -vcodec ppm - %s", cmd_path, devnull)
         local pipe = io.popen(cmd, POPEN_READ_BIN)
         if pipe then
             local img = parse_ppm_stream(pipe)
@@ -2200,9 +2333,10 @@ local function load_image_uncached(filepath)
 
     -- 6. Secondary fallback: CLI tools (ImageMagick / ffmpeg) if available
     local devnull = is_windows and "nul" or "/dev/null"
+    local cmd_path = (is_windows and get_win_short_path) and get_win_short_path(filepath) or filepath
     local cmd
     if is_windows then
-        cmd = string.format("magick %q ppm:- 2>%s || ffmpeg -v error -i %q -f image2pipe -vcodec ppm - 2>%s", filepath, devnull, filepath, devnull)
+        cmd = string.format("magick %q ppm:- 2>%s || ffmpeg -v error -i %q -f image2pipe -vcodec ppm - 2>%s", cmd_path, devnull, cmd_path, devnull)
     else
         cmd = string.format("magick %q ppm:- 2>%s || convert %q ppm:- 2>%s || ffmpeg -v error -i %q -f image2pipe -vcodec ppm - 2>%s", filepath, devnull, filepath, devnull, filepath, devnull)
     end
@@ -3815,7 +3949,7 @@ local function launch_mpv_tct(filepath, seek_sec)
         .. ' --term-status-msg="  ${filename}  ${playback-time} / ${duration} (${percent-pos}%%)  Speed: ${speed}x"'
         .. '%s %q%s',
         math.max(4, term_w), math.max(4, term_h - 3),
-        seek_part, filepath, stderr_part)
+        seek_part, (is_windows and get_win_short_path and get_win_short_path(filepath) or filepath), stderr_part)
 
     local ret
     if is_windows then
@@ -3928,9 +4062,10 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
         else
             local ss_part = (seek_sec > 0) and string.format("-ss %.2f", seek_sec) or ""
             local devnull = is_windows and "nul" or "/dev/null"
+            local cmd_path = (is_windows and get_win_short_path) and get_win_short_path(img_entry.filepath) or img_entry.filepath
             -- stderr to devnull so decode/hwaccel warnings cannot scribble across the TUI
             local cmd = string.format('ffmpeg -nostdin -loglevel quiet %s -i %q -vf "scale=%d:%d:flags=fast_bilinear" -f rawvideo -pix_fmt rgb24 - 2>%s',
-                ss_part, img_entry.filepath, frame_w, frame_h, devnull)
+                ss_part, cmd_path, frame_w, frame_h, devnull)
             stream_proc = io.popen(cmd, POPEN_READ_BIN)
         end
     end
@@ -4492,6 +4627,9 @@ local function filter_images(all_images, query)
 end
 
 local function main()
+    if is_windows and get_win_utf8_args then
+        get_win_utf8_args()
+    end
     local args = {}
     local positional = {}
     local i = 1
