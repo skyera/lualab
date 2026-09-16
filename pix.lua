@@ -429,7 +429,20 @@ if is_windows then
         elseif ch == 25 then
             return "CTRL_Y"
         else
-            return string.char(ch)
+            if ch >= 192 and ch < 248 then
+                local expected = (ch >= 240 and 4) or (ch >= 224 and 3) or 2
+                local bytes = { string.char(ch) }
+                for _ = 2, expected do
+                    if ffi.C._kbhit() ~= 0 then
+                        table.insert(bytes, string.char(ffi.C._getch()))
+                    else
+                        break
+                    end
+                end
+                return table.concat(bytes)
+            elseif ch >= 32 then
+                return string.char(ch)
+            end
         end
         return nil
     end
@@ -746,7 +759,7 @@ else
         if ret > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
             local n = ffi.C.read(STDIN_FILENO, key_buf, 16)
             if n > 0 then
-                local c0 = key_buf[0]
+                local c0 = bit.band(key_buf[0], 0xFF)
                 if c0 == 27 then
                     if n >= 3 and key_buf[1] == 91 then
                         local c2 = key_buf[2]
@@ -797,7 +810,21 @@ else
                 elseif c0 == 25 then
                     return "CTRL_Y"
                 else
-                    return string.char(c0)
+                    if c0 >= 192 and c0 < 248 then
+                        local expected = (c0 >= 240 and 4) or (c0 >= 224 and 3) or 2
+                        while n < expected do
+                            local r = ffi.C.poll(pfd, 1, 15)
+                            if r > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
+                                local rn = ffi.C.read(STDIN_FILENO, key_buf + n, expected - n)
+                                if rn > 0 then n = n + rn else break end
+                            else
+                                break
+                            end
+                        end
+                        return ffi.string(key_buf, math.min(n, expected))
+                    elseif c0 >= 32 then
+                        return string.char(c0)
+                    end
                 end
             end
         end
@@ -4431,7 +4458,9 @@ local function filter_images(all_images, query)
     local q = query:lower()
     local res = {}
     for _, img in ipairs(all_images) do
-        if img.filename:lower():find(q, 1, true) or img.filepath:lower():find(q, 1, true) then
+        local fn = to_display_text(img.filename):lower()
+        local fp = to_display_text(img.filepath):lower()
+        if fn:find(q, 1, true) or fp:find(q, 1, true) or img.filename:lower():find(q, 1, true) then
             table.insert(res, img)
         end
     end
@@ -4873,7 +4902,12 @@ local function main()
                         end
                     elseif k == "BACKSPACE" then
                         if #search_query > 0 then
-                            search_query = search_query:sub(1, -2)
+                            local cut = #search_query
+                            while cut > 0 and search_query:byte(cut) >= 0x80 and search_query:byte(cut) < 0xC0 do
+                                cut = cut - 1
+                            end
+                            if cut > 0 then cut = cut - 1 end
+                            search_query = search_query:sub(1, cut)
                             filtered_images = filter_images(raw_images, search_query)
                             selected_idx = 1
                             page_offset = 1
@@ -4884,7 +4918,7 @@ local function main()
                         if selected_idx > 1 then selected_idx = selected_idx - 1 end
                     elseif k == "DOWN" then
                         if selected_idx < #filtered_images then selected_idx = selected_idx + 1 end
-                    elseif k and #k == 1 and k:byte() >= 32 and k:byte() <= 126 then
+                    elseif k and (#k > 1 or (k:byte() >= 32 and k:byte() ~= 127)) then
                         search_query = search_query .. k
                         filtered_images = filter_images(raw_images, search_query)
                         selected_idx = 1

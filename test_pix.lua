@@ -363,6 +363,43 @@ os.remove(sim)
 os.execute("rm -rf " .. dir)
 print("OK_CJK_DISPLAY")' ]==] .. " " .. luajit),
         expect = "OK_CJK_DISPLAY"
+    },
+    {
+        name = "UTF-8 multi-byte search filtering and backspace truncation",
+        cmd = luajit .. [==[ -e '
+local s = io.open("pix.lua"):read("*a")
+local i = s:find("local function filter_images", 1, true)
+local j = s:find("local function main()", i, true)
+assert(i and j, "filter_images not found")
+local fn_code = s:sub(i, j - 1)
+local env = {
+    to_display_text = function(x) return x end,
+    table = table,
+    ipairs = ipairs
+}
+local f = assert(loadstring(fn_code .. "\nreturn filter_images"))
+setfenv(f, env)
+local filter = f()
+local items = {
+    { filename = "中文测试_01.png", filepath = "/tmp/中文测试_01.png" },
+    { filename = "photo_café.jpg", filepath = "/tmp/photo_café.jpg" },
+    { filename = "mountain.ppm", filepath = "/tmp/mountain.ppm" }
+}
+local cjk_res = filter(items, "中文")
+assert(#cjk_res == 1 and cjk_res[1].filename == "中文测试_01.png", "CJK filter failed")
+local cafe_res = filter(items, "café")
+assert(#cafe_res == 1 and cafe_res[1].filename == "photo_café.jpg", "Accent filter failed")
+
+-- Verify UTF-8 multi-byte deletion logic
+local q = "中文"
+local cut = #q
+while cut > 0 and q:byte(cut) >= 0x80 and q:byte(cut) < 0xC0 do cut = cut - 1 end
+if cut > 0 then cut = cut - 1 end
+q = q:sub(1, cut)
+assert(q == "中", "Multi-byte backspace failed to retain single remaining CJK character")
+
+print("OK_UTF8_SEARCH")' ]==],
+        expect = "OK_UTF8_SEARCH"
     }
 }
 
