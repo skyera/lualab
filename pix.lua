@@ -2584,6 +2584,7 @@ local function load_image(filepath)
         if #image_cache_order >= MAX_IMAGE_CACHE then
             local evicted = table.remove(image_cache_order, 1)
             image_cache[evicted] = nil
+            collectgarbage("step", 100)
         end
         table.insert(image_cache_order, filepath)
         image_cache[filepath] = img
