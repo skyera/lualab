@@ -4682,7 +4682,7 @@ local function launch_mpv_tct(filepath, seek_sec)
         .. ' --msg-level=all=no'
         .. ' --term-status-msg="  ${filename}  ${playback-time} / ${duration} (${percent-pos}%%)  Speed: ${speed}x"'
         .. '%s %q%s',
-        math.max(4, term_w), math.max(4, term_h - 3),
+        math.max(4, term_w), math.max(4, term_h - 1),
         seek_part, filepath, stderr_part)
 
     local ret
@@ -4741,7 +4741,7 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
         cell_height_width_ratio = (term_px_h / term_h) / (term_px_w / term_w)
     end
     local reserved_header_rows = 5
-    local max_char_h = math.max(4, term_h - reserved_header_rows - 1)
+    local max_char_h = math.max(4, term_h - reserved_header_rows)
     local max_char_w = math.max(4, term_w - 4)
 
     local fit_cols, fit_rows
