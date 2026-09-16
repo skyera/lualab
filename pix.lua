@@ -7,12 +7,13 @@
        - Scans current working directory ('.') by default, or an input directory provided via argument / prompt.
        - Level 1 scanning default, or recursive scanning via -r / --recursive.
        - Supports standard image formats: PNG, JPG/JPEG, PPM, WEBP, GIF, BMP.
+       - Supports music formats: MP3, FLAC, WAV, OGG/OGA, M4A, AAC, OPUS, WMA.
     2. Interactive File Selector & TUI:
        - Hidden (dot) entries are skipped by default; [.] toggles them, or start with --hidden / -a.
        - Uses Terminal Alternate Screen Buffer (\27[?1049h) for clean enter and exit.
        - Live interactive substring search / filter with [/] and [Esc].
        - Sort cycle with [s] (Name -> Date -> Size) and reverse sort with [r].
-       - Displays sorted list of image files with index numbers, filenames, file sizes, formats, and dates.
+       - Displays sorted list of media files with index numbers, filenames, file sizes, formats, and dates.
        - Supports arrow keys (↑ / ↓ / k / j), direct number entry, Enter/Space to view, 'q' to quit.
        - Interactive Help popup modal with [?].
        - CLI direct selection flag: --select <n> or -s <n>.
@@ -85,6 +86,15 @@ local SUPPORTED_EXTENSIONS = {
     mov  = true,
     m4v  = true,
     flv  = true,
+    mp3  = true,
+    flac = true,
+    wav  = true,
+    ogg  = true,
+    oga  = true,
+    m4a  = true,
+    aac  = true,
+    opus = true,
+    wma  = true,
 }
 
 local VIDEO_EXTENSIONS = {
@@ -199,6 +209,17 @@ local function is_video_file(filepath_or_ext)
     return false
 end
 
+local AUDIO_EXTENSIONS = {
+    mp3 = true, flac = true, wav = true, ogg = true, oga = true,
+    m4a = true, aac = true, opus = true, wma = true,
+}
+
+local function is_audio_file(filepath_or_ext)
+    if not filepath_or_ext then return false end
+    local ext = filepath_or_ext:match("%.([^.]+)$") or filepath_or_ext
+    return AUDIO_EXTENSIONS[ext:lower()] == true
+end
+
 local EXTENSION_ICONS = {
     unicode = {
         DIR  = "📁",
@@ -216,6 +237,15 @@ local EXTENSION_ICONS = {
         MOV  = "🎬",
         M4V  = "🎬",
         FLV  = "🎬",
+        MP3  = "🎵",
+        FLAC = "🎵",
+        WAV  = "🎵",
+        OGG  = "🎵",
+        OGA  = "🎵",
+        M4A  = "🎵",
+        AAC  = "🎵",
+        OPUS = "🎵",
+        WMA  = "🎵",
     },
     nerd = {
         DIR  = "\238\151\191 ", -- 
@@ -233,6 +263,15 @@ local EXTENSION_ICONS = {
         MOV  = "\238\180\157 ",
         M4V  = "\238\180\157 ",
         FLV  = "\238\180\157 ",
+        MP3  = "\238\170\157 ", -- 󰋋
+        FLAC = "\238\170\157 ",
+        WAV  = "\238\170\157 ",
+        OGG  = "\238\170\157 ",
+        OGA  = "\238\170\157 ",
+        M4A  = "\238\170\157 ",
+        AAC  = "\238\170\157 ",
+        OPUS = "\238\170\157 ",
+        WMA  = "\238\170\157 ",
     }
 }
 
@@ -5113,6 +5152,128 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
     end
 end
 
+local function play_music_screen(audio_entry, current_idx, total_count)
+    if not get_has_ffplay() then
+        io.write("\27[H\27[2J")
+        io.write("\n  \27[1;31m⚠ Music Player Dependency Not Found\27[0m\n\n")
+        io.write("  Music playback requires \27[1;36mffplay\27[0m in your system PATH.\n")
+        io.write("  Install with: \27[93msudo apt install ffmpeg\27[0m\n\n")
+        io.write("  \27[90mPress any key to return to the gallery...\27[0m")
+        io.flush()
+        read_key()
+        return "back"
+    end
+
+    local info = get_video_info(audio_entry.filepath)
+    local duration = info.duration or 0
+    local cur_time = 0
+    local is_paused = false
+    local is_eof = false
+    local playback_speed = 1.0
+    local started_at = get_now_sec()
+
+    local function stop_audio()
+        stop_companion_audio()
+    end
+
+    local function start_audio(seek_sec)
+        stop_audio()
+        start_companion_audio(audio_entry.filepath, seek_sec, playback_speed)
+        started_at = get_now_sec()
+    end
+
+    local function format_position()
+        return string.format("%s / %s", format_video_time(cur_time), format_video_time(duration))
+    end
+
+    local function draw_screen()
+        local term_w = get_terminal_size()
+        local bar_len = math.min(term_w - 2, 90)
+        local progress = duration > 0 and math.min(1, cur_time / duration) or 0
+        local progress_w = math.max(10, math.min(48, bar_len - 8))
+        local filled = math.floor(progress_w * progress)
+        local bar = string.rep("█", filled) .. string.rep("░", progress_w - filled)
+        local status = is_eof and "ENDED" or (is_paused and "PAUSED" or "PLAYING")
+        local speed = playback_speed ~= 1.0 and string.format("  %.1fx", playback_speed) or ""
+
+        io.write("\27[H\27[2J")
+        io.write("\27[1;34m" .. string.rep("═", bar_len) .. "\27[0m\n")
+        io.write(string.format("  \27[1;37mMUSIC PLAYER\27[0m \27[1;36m[%d/%d]\27[0m: \27[1;93m%s\27[0m  \27[1;92m[%s]\27[0m%s\27[K\n",
+            current_idx, total_count, to_display_text(audio_entry.filename), status, speed))
+        io.write(string.format("  \27[90mFormat: %s  Size: %s\27[0m\27[K\n\n", audio_entry.extension, audio_entry.size_str))
+        io.write(string.format("  \27[1;37m%s\27[0m  \27[1;36m%s\27[0m\27[K\n", format_position(), bar))
+        io.write("\n  \27[93m[Space/p]\27[0m Pause  \27[93m[←/→]\27[0m ±5s  \27[93m[↑/↓]\27[0m ±60s  \27[93m[[/]]\27[0m Speed  \27[91m[q]\27[0m Back\27[K\n")
+        io.write("\27[90m" .. string.rep("─", bar_len) .. "\27[0m\27[K")
+        io.flush()
+    end
+
+    local function seek_to(position)
+        cur_time = math.max(0, position)
+        if duration > 0 then cur_time = math.min(duration, cur_time) end
+        is_eof = false
+        if not is_paused then start_audio(cur_time) end
+    end
+
+    start_audio(0)
+    draw_screen()
+    while true do
+        local k = read_key(100)
+        if not is_paused and not is_eof then
+            cur_time = math.max(0, cur_time + (get_now_sec() - started_at) * playback_speed)
+            started_at = get_now_sec()
+            if duration > 0 and cur_time >= duration then
+                cur_time = duration
+                is_eof = true
+                stop_audio()
+            end
+        end
+        if k then
+            if k == "Q" or k == "CTRL_C" then
+                stop_audio()
+                return "quit"
+            elseif k == "q" or k == "ESC" or k == "b" then
+                stop_audio()
+                return "back"
+            elseif k == "SPACE" or k == "p" then
+                if is_eof then
+                    is_paused = false
+                    seek_to(0)
+                else
+                    is_paused = not is_paused
+                    if is_paused then
+                        stop_audio()
+                    else
+                        start_audio(cur_time)
+                    end
+                end
+            elseif k == "RIGHT" then
+                seek_to(cur_time + 5)
+            elseif k == "LEFT" or k == "h" then
+                seek_to(cur_time - 5)
+            elseif k == "UP" or k == "k" then
+                seek_to(cur_time + 60)
+            elseif k == "DOWN" or k == "j" then
+                seek_to(cur_time - 60)
+            elseif k == "[" then
+                playback_speed = math.max(0.5, math.floor((playback_speed - 0.1) * 10 + 0.5) / 10)
+                if not is_paused and not is_eof then start_audio(cur_time) end
+            elseif k == "]" then
+                playback_speed = math.min(2.0, math.floor((playback_speed + 0.1) * 10 + 0.5) / 10)
+                if not is_paused and not is_eof then start_audio(cur_time) end
+            elseif k == "n" or k == "PAGE_DOWN" then
+                stop_audio()
+                return "next"
+            elseif k == "PAGE_UP" then
+                stop_audio()
+                return "prev"
+            end
+            draw_screen()
+        elseif not is_eof then
+            draw_screen()
+        end
+    end
+end
+
 -- =========================================================================
 -- 6. File List Selector Screen & Help Popup
 -- =========================================================================
@@ -5275,11 +5436,11 @@ local function render_file_list(dir_path, images, total_unfiltered, selected_idx
 
     if #images == 0 then
         if #search_query > 0 then
-            table.insert(out, string.format("  \27[1;33mNo image files match query '%s'\27[0m\n", to_display_text(search_query)))
+            table.insert(out, string.format("  \27[1;33mNo media files match query '%s'\27[0m\n", to_display_text(search_query)))
             table.insert(out, "  Press [Esc] to clear search filter.\n\n")
         else
-            table.insert(out, string.format("  \27[1;31mNo supported images found in %s\27[0m\n", to_display_text(dir_path)))
-            table.insert(out, "  Supported formats: PNG, JPG/JPEG, PPM, WEBP, GIF, BMP\n\n")
+            table.insert(out, string.format("  \27[1;31mNo supported media found in %s\27[0m\n", to_display_text(dir_path)))
+            table.insert(out, "  Supported formats: images, videos, MP3, FLAC, WAV, OGG, M4A, AAC, OPUS, WMA\n\n")
         end
         io.write(table.concat(out))
         io.flush()
@@ -5436,8 +5597,8 @@ local function main()
         print("  ./LuaJIT/src/luajit pix.lua [directory] [options]")
         print("\nOptions:")
         print("  [directory]           Directory to scan (default: current directory '.')")
-        print("  -r, --recursive       Recursively scan subdirectories for images")
-        print("  --select, -s <id>     Directly select and display image #id")
+        print("  -r, --recursive       Recursively scan subdirectories for media")
+        print("  --select, -s <id>     Directly select and display media #id")
         print("  --sort <name|date|size> Initial sort order (default: name)")
         print("  --hidden, -a          Include hidden (dot) files and folders (toggle with [.])")
         print("  --play-engine <auto|ffi|ffmpeg|mpv> Video play engine (default: auto)")
@@ -5468,6 +5629,7 @@ local function main()
         print("\nSupported formats:")
         print("  - Images: PNG, JPG/JPEG, PPM, WEBP, GIF, BMP")
         print("  - Videos: MP4, MKV, WEBM, AVI, MOV, M4V, FLV (via mpv, libavcodec FFI, or ffmpeg)")
+        print("  - Music:  MP3, FLAC, WAV, OGG/OGA, M4A, AAC, OPUS, WMA (via ffplay)")
         os.exit(0)
     end
 
@@ -5536,7 +5698,7 @@ local function main()
     end
     local sort_desc = (sort_mode == "date" or sort_mode == "size")
 
-    -- 2. Scan Directory for Images & Folders (or support direct single image file)
+    -- 2. Scan Directory for Media & Folders (or support direct single media file)
     local raw_images = nil
     local direct_file = io.open(target_dir, "rb")
     if direct_file then
@@ -5590,7 +5752,7 @@ local function main()
 
     sort_images(raw_images, sort_mode, sort_desc)
 
-    -- Extract images list excluding directories for direct selection and validation
+    -- Extract media list excluding directories for direct selection and validation
     local only_images = {}
     for _, item in ipairs(raw_images) do
         if not item.is_dir then
@@ -5613,6 +5775,12 @@ local function main()
             if is_video_file(target_item.filepath or target_item.extension) and not non_interactive and not args["--select"] then
                 enable_raw_mode()
                 play_video_screen(target_item, cli_select, total_c, active_protocol)
+                kitty_clear_screen()
+                disable_raw_mode()
+                return
+            elseif is_audio_file(target_item.filepath or target_item.extension) and not non_interactive and not args["--select"] then
+                enable_raw_mode()
+                play_music_screen(target_item, cli_select, total_c)
                 kitty_clear_screen()
                 disable_raw_mode()
                 return
@@ -5642,6 +5810,8 @@ local function main()
                 else
                     if is_video_file(item.filepath or item.extension) then
                         play_video_screen(item, sel, #raw_images, active_protocol)
+                    elseif is_audio_file(item.filepath or item.extension) then
+                        play_music_screen(item, sel, #raw_images)
                     else
                         render_image_screen(item, sel, #raw_images, active_protocol)
                     end
@@ -5714,7 +5884,7 @@ local function main()
         end
     end
 
-    -- Build a list of indices that correspond to actual image files (excluding directories)
+    -- Build a list of indices that correspond to actual media files (excluding directories)
     local function get_image_indices()
         local indices = {}
         for idx, item in ipairs(filtered_images) do
@@ -5751,6 +5921,28 @@ local function main()
                     if is_video_file(cur_img.filepath or cur_img.extension) then
                         local action, new_protocol = play_video_screen(cur_img, img_pos, #img_indices, active_protocol)
                         if new_protocol then active_protocol = new_protocol end
+                        if action == "quit" then
+                            break
+                        elseif action == "back" then
+                            kitty_clear_screen()
+                            in_viewer = false
+                        elseif action == "next" then
+                            kitty_clear_screen()
+                            if #img_indices > 1 then
+                                img_pos = (img_pos % #img_indices) + 1
+                                selected_idx = img_indices[img_pos]
+                                update_page_window()
+                            end
+                        elseif action == "prev" then
+                            kitty_clear_screen()
+                            if #img_indices > 1 then
+                                img_pos = (img_pos - 2 + #img_indices) % #img_indices + 1
+                                selected_idx = img_indices[img_pos]
+                                update_page_window()
+                            end
+                        end
+                    elseif is_audio_file(cur_img.filepath or cur_img.extension) then
+                        local action = play_music_screen(cur_img, img_pos, #img_indices)
                         if action == "quit" then
                             break
                         elseif action == "back" then
