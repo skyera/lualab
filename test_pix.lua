@@ -1,6 +1,6 @@
 --[[
     test_pix.lua
-    Unit tests for pix.lua (Terminal Directory Image Viewer).
+    Unit tests for pix.lua (Terminal Media Viewer).
 ]]
 
 print("=== Running Unit Tests for pix.lua ===")
@@ -76,7 +76,7 @@ local tests = {
     {
         name = "Help display (--help)",
         cmd = luajit .. " pix.lua --help",
-        expect = "Terminal Directory Image Viewer"
+        expect = "Terminal Media Viewer"
     },
     {
         name = "Default current directory listing",
@@ -121,7 +121,7 @@ local tests = {
     {
         name = "Non-interactive directory navigation",
         cmd = "echo q| " .. luajit .. " pix.lua LuaBridge/Source --no-interactive",
-        expect = "TERMINAL DIRECTORY IMAGE VIEWER"
+        expect = "Terminal Media Viewer"
     },
     {
         name = "EXIF timestamp extraction in viewer header",

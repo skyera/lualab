@@ -1,6 +1,6 @@
 --[[
     pix.lua
-    Professional Interactive Terminal Directory Image Viewer written in LuaJIT FFI.
+    Professional Interactive Terminal Media Viewer written in LuaJIT FFI.
 
     Features:
     1. Directory Scanning:
@@ -5242,8 +5242,14 @@ local function render_file_list(dir_path, images, total_unfiltered, selected_idx
     table.insert(out, "\27[1;34m" .. string.rep("═", bar_len) .. "\27[0m\n")
     
     local sort_label = sort_mode:upper() .. (sort_desc and " (Desc)" or " (Asc)")
-    local title_left = "  \27[1;37mTERMINAL DIRECTORY IMAGE VIEWER\27[0m \27[90m(LuaJIT FFI)\27[0m"
-    local title_right = string.format("\27[90mSort: \27[1;93m%s\27[90m [s/r]\27[0m", sort_label)
+    local title_icon = ""
+    if icon_mode == "unicode" then
+        title_icon = "🖼 🎬 "
+    elseif icon_mode == "nerd" then
+        title_icon = "\238\176\169 \238\180\157 " -- 󰋩 󰕼
+    end
+    local title_left = string.format("  %s\27[1;36mPIX\27[0m \27[1;37m— Terminal Media Viewer\27[0m \27[90m(LuaJIT FFI)\27[0m", title_icon)
+    local title_right = string.format("\27[90mSort: \27[1;93m⇅ %s\27[90m [s/r]\27[0m", sort_label)
     table.insert(out, string.format("%s   %s\n", title_left, title_right))
 
     local scan_type = recursive and "Recursive" or "Level 1"
@@ -5425,7 +5431,7 @@ local function main()
     end
 
     if args["-h"] or args["--help"] then
-        print("\27[1;36mpix — Terminal Directory Image Viewer (LuaJIT FFI)\27[0m")
+        print("\27[1;36mpix — Terminal Media Viewer (LuaJIT FFI)\27[0m")
         print("Usage:")
         print("  ./LuaJIT/src/luajit pix.lua [directory] [options]")
         print("\nOptions:")
