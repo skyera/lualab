@@ -2949,7 +2949,7 @@ local function render_image_unicode_block(img_entry, current_idx, total_count, t
         table.insert(out, table.concat(line))
     end
 
-    io.write(table.concat(out))
+    io.write("\27[?2026h" .. table.concat(out) .. "\27[?2026l")
     io.flush()
     return true
 end
@@ -3231,7 +3231,7 @@ local function render_image_chafa(img_entry, current_idx, total_count, term_w, t
         table.insert(out, pad .. l .. "\27[0m\n")
     end
 
-    io.write(table.concat(out))
+    io.write("\27[?2026h" .. table.concat(out) .. "\27[?2026l")
     io.flush()
     return true
 end
@@ -3751,7 +3751,7 @@ local function render_image_halfblock(img_entry, current_idx, total_count, term_
         table.insert(out, table.concat(line))
     end
 
-    io.write(table.concat(out))
+    io.write("\27[?2026h" .. table.concat(out) .. "\27[?2026l")
     io.flush()
     return true
 end
@@ -4020,7 +4020,7 @@ local function render_video_frame_halfblock(raw_bytes, frame_w, frame_h, pad, ro
         last_bg = nil
     end
 
-    io.write(table.concat(out))
+    io.write("\27[?2026h" .. table.concat(out) .. "\27[?2026l")
     io.flush()
 end
 
@@ -4762,7 +4762,7 @@ local function render_file_list(dir_path, images, total_unfiltered, selected_idx
             page_start, page_end, #images))
     end
 
-    io.write(table.concat(out))
+    io.write("\27[?2026h" .. table.concat(out) .. "\27[?2026l")
     io.flush()
 end
 
