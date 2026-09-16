@@ -90,10 +90,106 @@ local VIDEO_EXTENSIONS = {
     flv  = true,
 }
 
+local function is_animated_gif(path)
+    local f = io.open(path, "rb")
+    if not f then return false end
+    local head = f:read(6)
+    if head ~= "GIF89a" and head ~= "GIF87a" then f:close(); return false end
+    local sd = f:read(7)
+    if not sd or #sd < 7 then f:close(); return false end
+    local packed = sd:byte(5)
+    if bit.band(packed, 0x80) ~= 0 then
+        local gct_size = 3 * bit.lshift(1, bit.band(packed, 7) + 1)
+        f:seek("cur", gct_size)
+    end
+    local frame_count = 0
+    while true do
+        local b = f:read(1)
+        if not b or b == "\59" then break end -- 0x3B Trailer
+        local b_val = b:byte()
+        if b_val == 0x21 then -- Extension
+            local _ = f:read(1)
+            while true do
+                local sz_b = f:read(1)
+                if not sz_b then break end
+                local sz = sz_b:byte()
+                if sz == 0 then break end
+                f:seek("cur", sz)
+            end
+        elseif b_val == 0x2C then -- Image Descriptor
+            frame_count = frame_count + 1
+            if frame_count > 1 then f:close(); return true end
+            local img_head = f:read(9)
+            if not img_head or #img_head < 9 then break end
+            local img_packed = img_head:byte(9)
+            if bit.band(img_packed, 0x80) ~= 0 then
+                local lct_size = 3 * bit.lshift(1, bit.band(img_packed, 7) + 1)
+                f:seek("cur", lct_size)
+            end
+            f:seek("cur", 1) -- LZW min code size
+            while true do
+                local sz_b = f:read(1)
+                if not sz_b then break end
+                local sz = sz_b:byte()
+                if sz == 0 then break end
+                f:seek("cur", sz)
+            end
+        else
+            break
+        end
+    end
+    f:close()
+    return frame_count > 1
+end
+
+local function is_animated_webp(path)
+    local f = io.open(path, "rb")
+    if not f then return false end
+    local head = f:read(12)
+    if not head or #head < 12 or head:sub(1, 4) ~= "RIFF" or head:sub(9, 12) ~= "WEBP" then
+        f:close(); return false
+    end
+    local chunk_tag = f:read(4)
+    if chunk_tag == "VP8X" then
+        local _ = f:read(4)
+        local flags = f:read(1)
+        f:close()
+        if flags and bit.band(flags:byte(), 0x02) ~= 0 then
+            return true
+        end
+    end
+    f:close()
+    return false
+end
+
+local animated_cache = {}
+local function is_animated_media(filepath)
+    if not filepath then return false end
+    if animated_cache[filepath] ~= nil then return animated_cache[filepath] end
+    local ext = filepath:match("%.([^.]+)$")
+    if not ext then return false end
+    ext = ext:lower()
+    local res = false
+    if ext == "gif" then
+        res = is_animated_gif(filepath)
+    elseif ext == "webp" then
+        res = is_animated_webp(filepath)
+    end
+    animated_cache[filepath] = res
+    return res
+end
+
 local function is_video_file(filepath_or_ext)
     if not filepath_or_ext then return false end
     local ext = filepath_or_ext:match("%.([^.]+)$") or filepath_or_ext
-    return VIDEO_EXTENSIONS[ext:lower()] == true
+    if VIDEO_EXTENSIONS[ext:lower()] == true then return true end
+    local lower = ext:lower()
+    if lower == "gif" or lower == "webp" then
+        if filepath_or_ext:find("[/\\]") or filepath_or_ext:find("%.") then
+            return is_animated_media(filepath_or_ext)
+        end
+    end
+    return false
 end
 
 local EXTENSION_ICONS = {
@@ -4259,7 +4355,8 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
     local cur_time = 0
     local is_paused = false
     local is_eof = false
-    local is_loop = false
+    local is_anim = is_animated_media(img_entry.filepath)
+    local is_loop = is_anim
     local show_osd = true
     local playback_speed = 1.0
     local stream_reader = nil
@@ -4332,8 +4429,9 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
         table.insert(out, "\27[1;34m" .. string.rep("═", bar_len) .. "\27[0m\n")
         local dim_str = (v_info.width > 0) and string.format("%dx%d, %.1ffps", v_info.width, v_info.height, fps) or string.format("%.1ffps", fps)
         local pe_idx, pe_total = get_play_engine_position(video_play_engine)
-        table.insert(out, string.format("  \27[1;37mVIDEO PLAYER\27[0m \27[1;36m[%d/%d]\27[0m: \27[1;93m%s\27[0m \27[90m(%s, %s)\27[0m  \27[90m│\27[0m \27[1;96mEngine: %s\27[0m \27[90m[%d/%d] [m] cycle\27[0m\27[K\n",
-            current_idx, total_count, to_display_text(img_entry.filename), dim_str, img_entry.size_str,
+        local player_type = is_anim and "ANIMATION PLAYER" or "VIDEO PLAYER"
+        table.insert(out, string.format("  \27[1;37m%s\27[0m \27[1;36m[%d/%d]\27[0m: \27[1;93m%s\27[0m \27[90m(%s, %s)\27[0m  \27[90m│\27[0m \27[1;96mEngine: %s\27[0m \27[90m[%d/%d] [m] cycle\27[0m\27[K\n",
+            player_type, current_idx, total_count, to_display_text(img_entry.filename), dim_str, img_entry.size_str,
             get_play_engine_name(video_play_engine), pe_idx, pe_total))
         table.insert(out, "\n")
         local play_engine_hint = string.format("  \27[1;96m[m]\27[0m Engine (%d)", #get_available_play_engines())
@@ -5058,7 +5156,7 @@ local function main()
 
         if target_item then
             -- If user ran 'pix.lua my_video.mp4' directly in terminal without --select or --no-interactive
-            if is_video_file(target_item.extension) and not non_interactive and not args["--select"] then
+            if is_video_file(target_item.filepath or target_item.extension) and not non_interactive and not args["--select"] then
                 enable_raw_mode()
                 play_video_screen(target_item, cli_select, total_c, active_protocol)
                 kitty_clear_screen()
@@ -5088,7 +5186,7 @@ local function main()
                     raw_images = scan_directory_images(target_dir, recursive, show_hidden) or {}
                     sort_images(raw_images, sort_mode, sort_desc)
                 else
-                    if is_video_file(item.extension) then
+                    if is_video_file(item.filepath or item.extension) then
                         play_video_screen(item, sel, #raw_images, active_protocol)
                     else
                         render_image_screen(item, sel, #raw_images, active_protocol)
@@ -5193,7 +5291,7 @@ local function main()
                         end
                     end
 
-                    if is_video_file(cur_img.extension) then
+                    if is_video_file(cur_img.filepath or cur_img.extension) then
                         local action, new_protocol = play_video_screen(cur_img, img_pos, #img_indices, active_protocol)
                         if new_protocol then active_protocol = new_protocol end
                         if action == "quit" then
