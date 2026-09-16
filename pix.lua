@@ -1583,18 +1583,22 @@ local function decode_gdk_pixbuf_ffi(filepath)
         end
 
         local pixels = ffi.new("PixelRGB[?]", w * h)
+        if channels == 3 then
+            if stride == w * 3 then
+                ffi.copy(pixels, raw_ptr, w * h * 3)
+            else
+                for y = 0, h - 1 do
+                    ffi.copy(pixels + y * w, raw_ptr + y * stride, w * 3)
+                end
+            end
+            pixbuf_lib.g_object_unref(pb)
+            return { width = w, height = h, pixels = pixels, engine = "FFI (GdkPixbuf)" }
+        end
+
         for y = 0, h - 1 do
             local src_row = raw_ptr + y * stride
             local dst_offset = y * w
-            if channels == 3 then
-                for x = 0, w - 1 do
-                    local p = src_row + x * 3
-                    local d = dst_offset + x
-                    pixels[d].r = p[0]
-                    pixels[d].g = p[1]
-                    pixels[d].b = p[2]
-                end
-            elseif channels == 4 then
+            if channels == 4 then
                 for x = 0, w - 1 do
                     local p = src_row + x * 4
                     local d = dst_offset + x
