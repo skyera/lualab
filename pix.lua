@@ -4007,6 +4007,140 @@ local function render_image_iterm2(img_entry, current_idx, total_count, term_w, 
     return true
 end
 
+-- Detect Sixel terminal graphics support
+local function detect_sixel_support()
+    local term = (os.getenv("TERM") or ""):lower()
+    local term_prog = (os.getenv("TERM_PROGRAM") or ""):lower()
+    if term:find("sixel") or term:find("foot") or term:find("mlterm") or term:find("mintty") or
+       term_prog:find("mintty") or term_prog:find("foot") or term_prog:find("wezterm") or
+       os.getenv("MINTTY_SHORTCUT") then
+        return true
+    end
+    if get_has_chafa_cli_direct() then
+        return true
+    end
+    return false
+end
+
+-- Built-in pure Lua/FFI Sixel generator fallback
+local function encode_image_to_sixel(img, max_cols, max_rows)
+    local optical_aspect = (img.width / img.height) * 2.0
+    local fit_rows = max_rows
+    local fit_cols = math.max(2, math.floor(fit_rows * optical_aspect))
+    if fit_cols > max_cols then
+        fit_cols = max_cols
+        fit_rows = math.max(2, math.floor(fit_cols / optical_aspect))
+    end
+    local target_w = fit_cols * 8
+    local target_h = fit_rows * 16
+
+    local xs = img.width / target_w
+    local ys = img.height / target_h
+    local px = img.pixels
+    local iw = img.width
+    local ih = img.height
+
+    local out = { "\27Pq\"1;1;", tostring(target_w), ";", tostring(target_h) }
+    for r = 0, 3 do
+        for g = 0, 3 do
+            for b = 0, 3 do
+                local c_idx = r * 16 + g * 4 + b
+                table.insert(out, string.format("#%d;2;%d;%d;%d", c_idx, math.floor(r * 33.3), math.floor(g * 33.3), math.floor(b * 33.3)))
+            end
+        end
+    end
+
+    for y0 = 0, target_h - 1, 6 do
+        local col_colors = {}
+        for y_sub = 0, 5 do
+            local y = y0 + y_sub
+            if y < target_h then
+                local sy = math.min(ih - 1, math.floor(y * ys))
+                for x = 0, target_w - 1 do
+                    local sx = math.min(iw - 1, math.floor(x * xs))
+                    local p = px[sy * iw + sx]
+                    local qr = math.min(3, math.floor(p.r / 64))
+                    local qg = math.min(3, math.floor(p.g / 64))
+                    local qb = math.min(3, math.floor(p.b / 64))
+                    local c = qr * 16 + qg * 4 + qb
+                    if not col_colors[c] then col_colors[c] = {} end
+                    col_colors[c][x] = bit.bor(col_colors[c][x] or 0, bit.lshift(1, y_sub))
+                end
+            end
+        end
+
+        for c, x_map in pairs(col_colors) do
+            table.insert(out, string.format("#%d", c))
+            local last_x = -1
+            for x = 0, target_w - 1 do
+                local mask = x_map[x] or 0
+                if mask > 0 then
+                    if x > last_x + 1 then
+                        table.insert(out, string.rep("?", x - last_x - 1))
+                    end
+                    table.insert(out, string.char(63 + mask))
+                    last_x = x
+                end
+            end
+            table.insert(out, "$")
+        end
+        table.insert(out, "-")
+    end
+    table.insert(out, "\27\\")
+    return table.concat(out)
+end
+
+-- Render image using Sixel Graphics Protocol
+local function render_image_sixel(img_entry, current_idx, total_count, term_w, term_h, cur_e, total_e)
+    local max_rows = math.max(4, term_h - 7)
+    local max_cols = math.max(10, term_w - 4)
+
+    local bar_len = math.max(20, term_w - 4)
+    io.write("\27[H\27[2J")
+    local out = {}
+    table.insert(out, "\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
+    table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
+        current_idx, total_count, to_display_text(img_entry.filename)))
+    local date_disp, date_src = get_image_timestamp(img_entry)
+    local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
+    local disp_path = to_display_text(img_entry.filepath)
+    local path_cols = math.max(15, term_w - 60)
+    if display_width(disp_path) > path_cols then disp_path = utf8_tail(disp_path, path_cols) end
+    local eng_prefix = (cur_e and total_e) and string.format("[%d/%d] ", cur_e, total_e) or ""
+    table.insert(out, string.format("  \27[90mSize: %s | Date: %s | Engine: %s\27[1;95mSixel Graphics Protocol\27[90m | Path: %s\27[0m\n",
+        img_entry.size_str, date_info, eng_prefix, disp_path))
+    local cycle_hint = total_e and string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine (%d available)   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n", total_e)
+        or "  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"
+    table.insert(out, cycle_hint)
+    table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
+    io.write(table.concat(out))
+
+    if get_has_chafa_cli_direct() then
+        local devnull = is_windows and "nul" or "/dev/null"
+        local cmd = string.format("chafa -f sixels -s %dx%d %q 2>%s", max_cols, max_rows, img_entry.filepath, devnull)
+        local pipe = io.popen(cmd, POPEN_READ_BIN)
+        if pipe then
+            local data = pipe:read("*all")
+            pipe:close()
+            if data and #data > 0 then
+                write_raw_terminal_seq(data)
+                io.flush()
+                return true
+            end
+        end
+    end
+
+    local img, err = load_image(img_entry.filepath)
+    if not img then return false, err end
+    local sixel_data = encode_image_to_sixel(img, max_cols, max_rows)
+    if sixel_data then
+        write_raw_terminal_seq(sixel_data)
+        io.flush()
+        return true
+    end
+    return false, "Could not render sixel"
+end
+
 -- Available Render Engines Definition & Dynamic Detection
 local RENDER_ENGINES = {
     { id = "truecolor",     name = "ANSI 24-bit Truecolor Half-Block", short_name = "Truecolor",     is_available = function() return true end },
@@ -4021,6 +4155,7 @@ local RENDER_ENGINES = {
         local g = detect_terminal_graphics()
         return g == "iterm" or g == "wezterm"
     end },
+    { id = "sixel",         name = "Sixel Graphics Protocol",          short_name = "Sixel Proto",   is_available = function() return detect_sixel_support() end },
 }
 
 local function normalize_protocol(protocol)
@@ -4030,6 +4165,7 @@ local function normalize_protocol(protocol)
     if protocol == "chafa-symbols" then return "chafa" end
     if protocol == "braille" then return "chafa-braille" end
     if protocol == "iterm2" then return "iterm" end
+    if protocol == "sixels" then return "sixel" end
     return protocol
 end
 
@@ -4117,6 +4253,9 @@ local function render_image_screen(img_entry, current_idx, total_count, protocol
     elseif protocol == "timg-half" then
         -- timg -p h  (half-block, linear-space area-average)
         local ok, err = render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, false, cur_e, total_e, zoom, pan_x, pan_y)
+        if ok then return true end
+    elseif protocol == "sixel" then
+        local ok = render_image_sixel(img_entry, current_idx, total_count, term_w, term_h, cur_e, total_e)
         if ok then return true end
     end
 
@@ -4736,9 +4875,11 @@ local function render_help_modal(term_w, term_h, active_protocol)
     local e9 = get_mark(RENDER_ENGINES[9]) .. RENDER_ENGINES[9].short_name
 
     local eng_header = string.format("│  %-59s│", string.format("Detected Engines: [*] Active  [+] Ready  [-] N/A (%d Avail)", #avail))
+    local e10 = RENDER_ENGINES[10] and (get_mark(RENDER_ENGINES[10]) .. RENDER_ENGINES[10].short_name) or ""
     local eng_row1   = string.format("│    %-18s%-19s%-20s│", e1, e2, e3)
     local eng_row2   = string.format("│    %-18s%-19s%-20s│", e4, e5, e6)
     local eng_row3   = string.format("│    %-18s%-19s%-20s│", e7, e8, e9)
+    local eng_row4   = string.format("│    %-18s%-39s│", e10, "")
     local cycle_line = string.format("│    t                   Cycle render engine (%d available)     │", #avail)
 
     local lines = {
@@ -4793,6 +4934,8 @@ local function render_help_modal(term_w, term_h, active_protocol)
         eng_row1,
         eng_row2,
         eng_row3,
+        eng_row4,
+        cycle_line,
         "│                                                             │",
         "│  General:                                                   │",
         "│    ?                   Toggle this help window              │",
@@ -5059,6 +5202,8 @@ local function main()
         active_protocol = "kitty"
     elseif args["--iterm"] or args["--iterm2"] then
         active_protocol = "iterm"
+    elseif args["--sixel"] or args["--sixels"] then
+        active_protocol = "sixel"
     elseif args["--timg-cli"] or args["--timg-bin"] then
         active_protocol = "timg-cli"
     elseif args["--chafa-cli"] or args["--chafa-bin"] then
