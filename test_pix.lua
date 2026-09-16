@@ -354,7 +354,7 @@ local stub = [[    local CP936 = { ["\214\208"] = "\228\184\173", ["\206\196"] =
 local sim = tmp .. "/test_pix_cjk_sim.lua"
 local out = assert(io.open(sim, "wb"))
 out:write(src:sub(1, at - 1), stub, src:sub(at + #ident)); out:close()
-local function listing(script) return sh(LJ .. " " .. script .. " " .. dir .. " --no-interactive 2>&1") end
+local function listing(script) return sh("echo q | " .. LJ .. " " .. script .. " " .. dir .. " --no-interactive 2>&1") end
 local expect = "\228\184\173\230\150\135\229\155\190\231\137\135.png"  -- 中文图片.png in UTF-8
 local before, after = listing("pix.lua"), listing(sim)
 assert(after:find(expect, 1, true), "transcoded listing does not show the UTF-8 name")
