@@ -47,6 +47,7 @@ local POPEN_READ_BIN = is_windows and "rb" or "r"
 
 ffi.cdef[[
     typedef struct { uint8_t r, g, b; } PixelRGB;
+    typedef struct { float r, g, b; } LinearRGB;
 ]]
 
 local get_terminal_size
@@ -2603,6 +2604,15 @@ end
 -- 5a.  Linear-light colour helpers  (timg: LinearColor in framebuffer.h)
 --      Approximates γ=2.2 with γ=2  (v² linearize, sqrt de-gamma).
 -- ---------------------------------------------------------------------------
+ffi.metatype("LinearRGB", {
+    __index = function(t, k)
+        if k == 1 then return t.r
+        elseif k == 2 then return t.g
+        elseif k == 3 then return t.b
+        end
+    end
+})
+
 local function lin(v)   return v * v   end          -- uint8 → linear float
 local function degamma(l)
     local g = math.sqrt(l)
@@ -2610,7 +2620,9 @@ local function degamma(l)
 end
 -- Squared Euclidean distance in linear space  (LinearColor::dist)
 local function lin_dist2(a, b)
-    local dr = a[1]-b[1]; local dg = a[2]-b[2]; local db = a[3]-b[3]
+    local ar = a.r or a[1]; local ag = a.g or a[2]; local ab = a.b or a[3]
+    local br = b.r or b[1]; local bg = b.g or b[2]; local bb = b.b or b[3]
+    local dr = ar-br; local dg = ag-bg; local db = ab-bb
     return dr*dr + dg*dg + db*db
 end
 -- Average N linear-colour triples; return avg triple + sum-of-distances  (avd())
@@ -2625,7 +2637,10 @@ local function lin_avd(colours)
 end
 -- Convert a linear-float triple back to an {r,g,b} uint8 table  (repack())
 local function repack(lc)
-    return { r=degamma(lc[1]), g=degamma(lc[2]), b=degamma(lc[3]) }
+    local r = lc.r or lc[1]
+    local g = lc.g or lc[2]
+    local b = lc.b or lc[3]
+    return { r=degamma(r), g=degamma(g), b=degamma(b) }
 end
 -- Linearise a PixelRGB cdata pixel to a triple  [r², g², b²]
 local function px_to_lin(p)
@@ -2644,7 +2659,7 @@ local function area_average_scale(img, out_w, out_h)
     local xs = iw / out_w       -- x scale factor (src pixels per output pixel)
     local ys = ih / out_h       -- y scale factor
 
-    local out = {}
+    local out = ffi.new("LinearRGB[?]", out_w * out_h)
     for oy = 0, out_h - 1 do
         local y0 = oy * ys;         local y1 = y0 + ys
         local iy0 = math.floor(y0); local iy1 = math.min(ih-1, math.ceil(y1)-1)
@@ -2670,10 +2685,13 @@ local function area_average_scale(img, out_w, out_h)
                 end
             end
             if wa < 1e-9 then wa = 1 end
-            out[oy * out_w + ox] = { wr/wa, wg/wa, wb/wa }
+            local p_out = out[oy * out_w + ox]
+            p_out.r = wr / wa
+            p_out.g = wg / wa
+            p_out.b = wb / wa
         end
     end
-    return out  -- linear-float triples, indexed [oy*out_w + ox]  (0-based)
+    return out  -- LinearRGB FFI array, indexed [oy*out_w + ox]  (0-based)
 end
 
 -- ---------------------------------------------------------------------------
