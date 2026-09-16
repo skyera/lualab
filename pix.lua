@@ -62,6 +62,13 @@ local scan_directory_images
 local get_file_mtime
 local get_win_utf8_args
 local get_win_short_path
+local win_start_audio
+local win_stop_audio
+local posix_start_audio
+local posix_stop_audio
+local start_companion_audio
+local stop_companion_audio
+local get_has_ffplay
 
 local SUPPORTED_EXTENSIONS = {
     png  = true,
@@ -452,6 +459,50 @@ if is_windows then
         wchar_t** __stdcall CommandLineToArgvW(const wchar_t* lpCmdLine, int* pNumArgs);
         void*    __stdcall LocalFree(void* hMem);
 
+        typedef struct {
+            uint32_t cb;
+            wchar_t* lpReserved;
+            wchar_t* lpDesktop;
+            wchar_t* lpTitle;
+            uint32_t dwX;
+            uint32_t dwY;
+            uint32_t dwXSize;
+            uint32_t dwYSize;
+            uint32_t dwXCountChars;
+            uint32_t dwYCountChars;
+            uint32_t dwFillAttribute;
+            uint32_t dwFlags;
+            uint16_t wShowWindow;
+            uint16_t cbReserved2;
+            uint8_t* lpReserved2;
+            void*    hStdInput;
+            void*    hStdOutput;
+            void*    hStdError;
+        } STARTUPINFOW;
+
+        typedef struct {
+            void*    hProcess;
+            void*    hThread;
+            uint32_t dwProcessId;
+            uint32_t dwThreadId;
+        } PROCESS_INFORMATION;
+
+        int __stdcall CreateProcessW(
+            const wchar_t* lpApplicationName,
+            wchar_t* lpCommandLine,
+            void* lpProcessAttributes,
+            void* lpThreadAttributes,
+            int bInheritHandles,
+            uint32_t dwCreationFlags,
+            void* lpEnvironment,
+            const wchar_t* lpCurrentDirectory,
+            STARTUPINFOW* lpStartupInfo,
+            PROCESS_INFORMATION* lpProcessInformation
+        );
+
+        int __stdcall TerminateProcess(void* hProcess, uint32_t uExitCode);
+        int __stdcall CloseHandle(void* hObject);
+
         int _kbhit(void);
         int _getch(void);
 
@@ -551,6 +602,7 @@ if is_windows then
     end
 
     disable_raw_mode = function()
+        if win_stop_audio then win_stop_audio() end
         if raw_mode_enabled then
             io.write("\27[?1049l\27[?25h\27[0m") -- Restore main screen + show cursor
             io.flush()
@@ -674,6 +726,48 @@ if is_windows then
             end
         end
         return path
+    end
+
+    local active_audio_proc = nil
+    local active_audio_thread = nil
+    local active_audio_pid = nil
+
+    win_stop_audio = function()
+        if active_audio_pid then
+            os.execute(string.format("taskkill /F /T /PID %d >nul 2>&1", active_audio_pid))
+            active_audio_pid = nil
+        end
+        if active_audio_proc then
+            pcall(function()
+                kernel32.TerminateProcess(active_audio_proc, 0)
+                kernel32.CloseHandle(active_audio_proc)
+                if active_audio_thread then
+                    kernel32.CloseHandle(active_audio_thread)
+                end
+            end)
+            active_audio_proc = nil
+            active_audio_thread = nil
+        end
+    end
+
+    win_start_audio = function(cmd)
+        win_stop_audio()
+        local wcmd = to_win_wide(cmd)
+        if not wcmd then return false end
+        local si = ffi.new("STARTUPINFOW")
+        si.cb = ffi.sizeof("STARTUPINFOW")
+        si.dwFlags = 1 -- STARTF_USESHOWWINDOW
+        si.wShowWindow = 0 -- SW_HIDE
+        local pi = ffi.new("PROCESS_INFORMATION")
+        local CREATE_NO_WINDOW = 0x08000000
+        local ok = kernel32.CreateProcessW(nil, wcmd, nil, nil, 0, CREATE_NO_WINDOW, nil, nil, si, pi)
+        if ok ~= 0 then
+            active_audio_proc = pi.hProcess
+            active_audio_thread = pi.hThread
+            active_audio_pid = tonumber(pi.dwProcessId)
+            return true
+        end
+        return false
     end
 
     local function win_popen(cmd, mode)
@@ -1184,7 +1278,33 @@ else
         return true
     end
 
+    local active_audio_pid = nil
+
+    posix_stop_audio = function()
+        if active_audio_pid then
+            pcall(function()
+                os.execute(string.format("kill -9 %d >/dev/null 2>&1", active_audio_pid))
+            end)
+            active_audio_pid = nil
+        else
+            os.execute("killall -9 ffplay >/dev/null 2>&1 || pkill -9 -x ffplay >/dev/null 2>&1")
+        end
+    end
+
+    posix_start_audio = function(cmd)
+        posix_stop_audio()
+        local p = io.popen(cmd .. " >/dev/null 2>&1 & echo $!", "r")
+        if p then
+            local pid_str = p:read("*l")
+            p:close()
+            active_audio_pid = tonumber(pid_str)
+            return true
+        end
+        return false
+    end
+
     disable_raw_mode = function()
+        if posix_stop_audio then posix_stop_audio() end
         if raw_mode_enabled then
             io.write("\27[?1049l\27[?25h\27[0m") -- Restore main screen + show cursor
             io.flush()
@@ -2371,6 +2491,8 @@ local function get_video_info(filepath)
                 local width, height, fps = 0, 0, 25
                 local dec = ffi.new("const AVCodec*[1]")
                 local v_idx = lib_avformat.av_find_best_stream(fmt, 0, -1, -1, dec, 0)
+                local a_idx = lib_avformat.av_find_best_stream(fmt, 1, -1, -1, nil, 0)
+                local has_audio = (a_idx >= 0)
                 if v_idx >= 0 then
                     local st = fmt.streams[v_idx]
                     width = st.codecpar.width
@@ -2388,6 +2510,7 @@ local function get_video_info(filepath)
                     width = width,
                     height = height,
                     fps = (fps > 0 and fps <= 120) and fps or 25,
+                    has_audio = has_audio,
                 }
             end
             lib_avformat.avformat_close_input(ps)
@@ -2398,7 +2521,7 @@ local function get_video_info(filepath)
     local devnull = is_windows and "2>nul" or "2>/dev/null"
     local p = io.popen(string.format('ffmpeg -i %q 2>&1', filepath))
     if not p then
-        return { duration = 0, duration_str = "00:00", width = 0, height = 0, fps = 25 }
+        return { duration = 0, duration_str = "00:00", width = 0, height = 0, fps = 25, has_audio = false }
     end
     local info = p:read("*a") or ""
     p:close()
@@ -2433,6 +2556,20 @@ local function get_video_info(filepath)
         end
     end
 
+    -- Probe audio stream via ffprobe or banner
+    local has_audio = false
+    local fa = io.popen(string.format('ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of csv=p=0 %q %s', filepath, devnull))
+    if fa then
+        local out = fa:read("*a") or ""
+        fa:close()
+        if out:find("audio") then
+            has_audio = true
+        end
+    end
+    if not has_audio and info:find("Audio:") then
+        has_audio = true
+    end
+
     local dur_str = info:match("Duration:%s*(%d+:%d+:[%d%.]+)")
     local total_sec = 0
     if dur_str then
@@ -2450,6 +2587,7 @@ local function get_video_info(filepath)
         width = width,
         height = height,
         fps = tonumber(fps) or 25,
+        has_audio = has_audio,
     }
 end
 
@@ -3428,6 +3566,66 @@ local has_mpv = nil
 local function get_has_mpv()
     if has_mpv == nil then has_mpv = is_cmd_available("mpv") end
     return has_mpv
+end
+
+local has_ffplay = nil
+get_has_ffplay = function()
+    if has_ffplay == nil then
+        local devnull = is_windows and "nul" or "/dev/null"
+        local ret = os.execute("ffplay -version >" .. devnull .. " 2>&1")
+        if not (ret == 0 or ret == true) then
+            ret = os.execute("ffplay --version >" .. devnull .. " 2>&1")
+        end
+        has_ffplay = (ret == 0 or ret == true)
+    end
+    return has_ffplay
+end
+
+local function build_atempo_filter(speed)
+    speed = tonumber(speed) or 1.0
+    if math.abs(speed - 1.0) < 0.01 then return nil end
+    local filters = {}
+    while speed > 2.0 do
+        table.insert(filters, "atempo=2.0")
+        speed = speed / 2.0
+    end
+    while speed < 0.5 do
+        table.insert(filters, "atempo=0.5")
+        speed = speed / 0.5
+    end
+    table.insert(filters, string.format("atempo=%.3f", speed))
+    return table.concat(filters, ",")
+end
+
+stop_companion_audio = function()
+    if is_windows then
+        if win_stop_audio then win_stop_audio() end
+    else
+        if posix_stop_audio then posix_stop_audio() end
+    end
+end
+
+start_companion_audio = function(filepath, seek_sec, speed)
+    stop_companion_audio()
+    if not filepath or not get_has_ffplay() then return end
+
+    local ss_part = (seek_sec and seek_sec > 0.05) and string.format("-ss %.2f", seek_sec) or ""
+    local af_filter = build_atempo_filter(speed)
+    local af_part = af_filter and string.format('-af "%s"', af_filter) or ""
+
+    if is_windows then
+        local cmd = string.format('ffplay -nodisp -vn -sn -autoexit -loglevel quiet %s %s -i "%s"',
+            ss_part, af_part, filepath)
+        if win_start_audio then
+            win_start_audio(cmd)
+        end
+    else
+        local cmd = string.format('ffplay -nodisp -vn -sn -autoexit -loglevel quiet %s %s -i %q',
+            ss_part, af_part, filepath)
+        if posix_start_audio then
+            posix_start_audio(cmd)
+        end
+    end
 end
 
 local function render_image_timg_cli(img_entry, current_idx, total_count, term_w, term_h, cur_e, total_e)
@@ -4527,12 +4725,24 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
     local is_eof = false
     local is_anim = is_animated_media(img_entry.filepath)
     local is_loop = is_anim
+    local audio_enabled = (v_info.has_audio == true) and (get_has_ffplay() == true) and not is_anim
     local show_osd = true
     local playback_speed = 1.0
     local stream_reader = nil
     local stream_proc = nil
 
+    local function stop_audio()
+        stop_companion_audio()
+    end
+
+    local function start_audio(seek_sec)
+        if audio_enabled and not is_anim and v_info.has_audio then
+            start_companion_audio(img_entry.filepath, seek_sec, playback_speed)
+        end
+    end
+
     local function close_stream()
+        stop_audio()
         if stream_reader then
             stream_reader:close()
             stream_reader = nil
@@ -4564,6 +4774,10 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
             local cmd = string.format('ffmpeg -nostdin -loglevel quiet %s -i %q -vf "scale=%d:%d:flags=fast_bilinear" -f rawvideo -pix_fmt rgb24 - 2>%s',
                 ss_part, img_entry.filepath, frame_w, frame_h, devnull)
             stream_proc = io.popen(cmd, POPEN_READ_BIN)
+        end
+
+        if not is_paused and audio_enabled then
+            start_audio(cur_time)
         end
     end
 
@@ -4605,7 +4819,8 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
             get_play_engine_name(video_play_engine), pe_idx, pe_total))
         table.insert(out, "\n")
         local play_engine_hint = string.format("  \27[1;96m[m]\27[0m Engine (%d)", #get_available_play_engines())
-        table.insert(out, string.format("  \27[93m[Space/p]\27[0m Pause  \27[93m[←/→]\27[0m ±5s  \27[93m[↑/↓]\27[0m ±60s  \27[93m[0-9]\27[0m %%  \27[93m[[/]]\27[0m Spd  \27[93m[.]\27[0m Step  \27[93m[l]\27[0m Loop  \27[93m[</>]\27[0m File%s  \27[91m[q]\27[0m Back\27[K\n", play_engine_hint))
+        local audio_hint = (v_info.has_audio and not is_anim and get_has_ffplay()) and "  \27[93m[a]\27[0m Audio" or ""
+        table.insert(out, string.format("  \27[93m[Space/p]\27[0m Pause  \27[93m[←/→]\27[0m ±5s  \27[93m[↑/↓]\27[0m ±60s  \27[93m[0-9]\27[0m %%  \27[93m[[/]]\27[0m Spd%s  \27[93m[l]\27[0m Loop%s  \27[91m[q]\27[0m Back\27[K\n", audio_hint, play_engine_hint))
         table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\27[K\n")
         io.write(table.concat(out))
         io.flush()
@@ -4616,12 +4831,16 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
         local status_tag
         local speed_tag = (playback_speed ~= 1.0) and string.format(" %.1fx", playback_speed) or ""
         local loop_tag = is_loop and " 🔁" or ""
+        local audio_tag = ""
+        if v_info.has_audio and not is_anim and get_has_ffplay() then
+            audio_tag = audio_enabled and " 🔊" or " 🔇"
+        end
         if is_eof then
             status_tag = "\27[1;91m[⏹ ENDED]\27[0m"
         elseif is_paused then
-            status_tag = string.format("\27[1;93m[⏸ PAUSED%s%s]\27[0m", speed_tag, loop_tag)
+            status_tag = string.format("\27[1;93m[⏸ PAUSED%s%s%s]\27[0m", speed_tag, loop_tag, audio_tag)
         else
-            status_tag = string.format("\27[1;92m[▶ PLAY%s%s]\27[0m", speed_tag, loop_tag)
+            status_tag = string.format("\27[1;92m[▶ PLAY%s%s%s]\27[0m", speed_tag, loop_tag, audio_tag)
         end
 
         local pbar_w = math.min(32, math.max(10, term_w - 48))
@@ -4664,11 +4883,18 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
             elseif k == "SPACE" or k == "p" then
                 if is_eof then
                     cur_time = 0
-                    open_stream(0)
                     is_paused = false
                     is_eof = false
+                    open_stream(0)
                 else
                     is_paused = not is_paused
+                    if is_paused then
+                        stop_audio()
+                    else
+                        if audio_enabled then
+                            start_audio(cur_time)
+                        end
+                    end
                 end
                 update_dynamic_header(current_fps)
             elseif k and #k == 1 and k >= "0" and k <= "9" then
@@ -4719,31 +4945,58 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
                 update_dynamic_header(current_fps)
             elseif k == "[" then
                 playback_speed = math.max(0.1, math.floor((playback_speed - 0.1) * 10 + 0.5) / 10)
+                if not is_paused and not is_eof and audio_enabled then
+                    stop_audio()
+                    start_audio(cur_time)
+                end
                 update_dynamic_header(current_fps)
             elseif k == "]" then
                 playback_speed = math.min(4.0, math.floor((playback_speed + 0.1) * 10 + 0.5) / 10)
+                if not is_paused and not is_eof and audio_enabled then
+                    stop_audio()
+                    start_audio(cur_time)
+                end
                 update_dynamic_header(current_fps)
             elseif k == "{" then
                 playback_speed = math.max(0.1, math.floor((playback_speed * 0.5) * 10 + 0.5) / 10)
+                if not is_paused and not is_eof and audio_enabled then
+                    stop_audio()
+                    start_audio(cur_time)
+                end
                 update_dynamic_header(current_fps)
             elseif k == "}" then
                 playback_speed = math.min(4.0, math.floor((playback_speed * 2.0) * 10 + 0.5) / 10)
+                if not is_paused and not is_eof and audio_enabled then
+                    stop_audio()
+                    start_audio(cur_time)
+                end
                 update_dynamic_header(current_fps)
             elseif k == "BACKSPACE" then
                 playback_speed = 1.0
+                if not is_paused and not is_eof and audio_enabled then
+                    stop_audio()
+                    start_audio(cur_time)
+                end
                 update_dynamic_header(current_fps)
             elseif k == "." then
-                is_paused = true
+                if not is_paused then
+                    is_paused = true
+                    stop_audio()
+                end
                 local raw_frame = read_next_frame()
                 if raw_frame and #raw_frame >= frame_bytes then
                     render_video_frame_halfblock(raw_frame, frame_w, frame_h, pad, 6)
                     update_dynamic_header(current_fps)
                 else
+                    stop_audio()
                     is_eof = true
                     update_dynamic_header(current_fps)
                 end
             elseif k == "," then
-                is_paused = true
+                if not is_paused then
+                    is_paused = true
+                    stop_audio()
+                end
                 cur_time = math.max(0, cur_time - (target_dt * 2))
                 open_stream(cur_time)
                 local raw_frame = read_next_frame()
@@ -4751,6 +5004,18 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
                     render_video_frame_halfblock(raw_frame, frame_w, frame_h, pad, 6)
                 end
                 update_dynamic_header(current_fps)
+            elseif k == "a" or k == "A" then
+                if v_info.has_audio and not is_anim and get_has_ffplay() then
+                    audio_enabled = not audio_enabled
+                    if audio_enabled then
+                        if not is_paused and not is_eof then
+                            start_audio(cur_time)
+                        end
+                    else
+                        stop_audio()
+                    end
+                    update_dynamic_header(current_fps)
+                end
             elseif k == "l" or k == "L" then
                 is_loop = not is_loop
                 update_dynamic_header(current_fps)
@@ -4819,6 +5084,7 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
                     is_eof = false
                     update_dynamic_header(current_fps)
                 else
+                    stop_audio()
                     is_eof = true
                     is_paused = true
                     update_dynamic_header(current_fps)
@@ -4916,6 +5182,7 @@ local function render_help_modal(term_w, term_h, active_protocol)
         "│    { / }               Halve / Double playback speed        │",
         "│    . / ,               Frame step forward / backward        │",
         "│    l                   Toggle loop mode (inf / off)         │",
+        "│    a                   Toggle companion audio (ffplay)      │",
         "│    < / >               Previous / Next video in playlist    │",
         "│    Home / r, End       Restart from start / Seek to end     │",
         "│    o                   Toggle OSD / header visibility       │",
@@ -5190,6 +5457,8 @@ local function main()
         print(string.format("  Default (auto):       %s", get_play_engine_name(video_play_engine)))
         local mpv_status = get_has_mpv() and "\27[32m[Available]\27[0m" or "\27[90m[Not Detected]\27[0m"
         print("  mpv --vo=tct:         " .. mpv_status .. " mpv terminal player (hand-off, with audio)")
+        local ffplay_status = get_has_ffplay() and "\27[32m[Available]\27[0m" or "\27[90m[Not Detected]\27[0m"
+        print("  ffplay audio:         " .. ffplay_status .. " synchronized companion audio for in-TUI player")
         print("\nSupported formats:")
         print("  - Images: PNG, JPG/JPEG, PPM, WEBP, GIF, BMP")
         print("  - Videos: MP4, MKV, WEBM, AVI, MOV, M4V, FLV (via mpv, libavcodec FFI, or ffmpeg)")
