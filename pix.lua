@@ -54,6 +54,7 @@ local enable_raw_mode
 local disable_raw_mode
 local read_key
 local sleep_ms
+local get_now_sec
 local to_display_text
 local is_stdin_tty
 local scan_directory_images
@@ -401,6 +402,7 @@ if is_windows then
     sleep_ms = function(ms)
         kernel32.Sleep(ms)
     end
+    get_now_sec = os.clock
 
     -- OS text -> terminal text. Names reach us as ANSI bytes (FindFirstFileA, the CRT argv) while
     -- the console above is set to codepage 65001, so they must be transcoded before display.
@@ -1035,6 +1037,24 @@ else
     -- Platform sleep (video player frame pacing)
     sleep_ms = function(ms)
         ffi.C.poll(nil, 0, ms)
+    end
+
+    pcall(ffi.cdef, [[
+        typedef struct timespec {
+            long tv_sec;
+            long tv_nsec;
+        } timespec;
+        int clock_gettime(int clk_id, struct timespec *tp);
+    ]])
+    local mono_ts = ffi.new("struct timespec")
+    local has_clock_gettime = pcall(function() return ffi.C.clock_gettime(1, mono_ts) end)
+    if has_clock_gettime then
+        get_now_sec = function()
+            ffi.C.clock_gettime(1, mono_ts)
+            return tonumber(mono_ts.tv_sec) + tonumber(mono_ts.tv_nsec) * 1e-9
+        end
+    else
+        get_now_sec = os.clock
     end
 
     -- POSIX filenames are already UTF-8 bytes, exactly what the terminal expects
@@ -4333,9 +4353,9 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
     update_dynamic_header(fps)
     open_stream(0)
 
-    local last_frame_clock = os.clock()
+    local last_frame_clock = get_now_sec()
     local frames_rendered = 0
-    local fps_timer = os.clock()
+    local fps_timer = get_now_sec()
     local current_fps = fps
 
     while true do
@@ -4520,7 +4540,7 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
                 render_video_frame_halfblock(raw_frame, frame_w, frame_h, pad, 6)
                 frames_rendered = frames_rendered + 1
 
-                local now = os.clock()
+                local now = get_now_sec()
                 if now - fps_timer >= 1.0 then
                     current_fps = frames_rendered / (now - fps_timer)
                     frames_rendered = 0
@@ -4528,13 +4548,13 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
                     update_dynamic_header(current_fps)
                 end
 
-                local render_dur = os.clock() - last_frame_clock
+                local render_dur = get_now_sec() - last_frame_clock
                 local effective_dt = target_dt / playback_speed
                 local wait_dt = effective_dt - render_dur
                 if wait_dt > 0.002 then
                     sleep_ms(math.floor(wait_dt * 1000))
                 end
-                last_frame_clock = os.clock()
+                last_frame_clock = get_now_sec()
             end
         end
     end
