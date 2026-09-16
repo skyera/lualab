@@ -1023,7 +1023,7 @@ else
         posix_stat = function(path, st) return -1 end
     end
 
-    local TIOCGWINSZ = 0x5413
+    local TIOCGWINSZ = (ffi.os == "OSX" or ffi.os == "BSD") and 0x40087468 or 0x5413
     local STDIN_FILENO = 0
     local TCSANOW = 0
     local ICANON = 2
