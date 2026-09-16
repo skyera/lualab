@@ -2750,19 +2750,32 @@ end
 --      pixel-exact box-filter: for each output pixel, average all source
 --      pixels whose projection overlaps the output pixel area.
 -- ---------------------------------------------------------------------------
-local function area_average_scale(img, out_w, out_h)
+local function area_average_scale(img, out_w, out_h, zoom, pan_x, pan_y)
+    zoom = zoom or 1.0
+    pan_x = pan_x or 0
+    pan_y = pan_y or 0
     local iw, ih = img.width, img.height
     local px     = img.pixels
-    local xs = iw / out_w       -- x scale factor (src pixels per output pixel)
-    local ys = ih / out_h       -- y scale factor
+
+    local view_w = iw / zoom
+    local view_h = ih / zoom
+    local max_pan_x = (iw - view_w) * 0.5
+    local max_pan_y = (ih - view_h) * 0.5
+    local center_x = iw * 0.5 + math.max(-max_pan_x, math.min(max_pan_x, pan_x))
+    local center_y = ih * 0.5 + math.max(-max_pan_y, math.min(max_pan_y, pan_y))
+    local src_x0 = center_x - view_w * 0.5
+    local src_y0 = center_y - view_h * 0.5
+
+    local xs = view_w / out_w       -- x scale factor (src pixels per output pixel)
+    local ys = view_h / out_h       -- y scale factor
 
     local out = ffi.new("LinearRGB[?]", out_w * out_h)
     for oy = 0, out_h - 1 do
-        local y0 = oy * ys;         local y1 = y0 + ys
-        local iy0 = math.floor(y0); local iy1 = math.min(ih-1, math.ceil(y1)-1)
+        local y0 = src_y0 + oy * ys;         local y1 = y0 + ys
+        local iy0 = math.max(0, math.floor(y0)); local iy1 = math.min(ih-1, math.ceil(y1)-1)
         for ox = 0, out_w - 1 do
-            local x0 = ox * xs;         local x1 = x0 + xs
-            local ix0 = math.floor(x0); local ix1 = math.min(iw-1, math.ceil(x1)-1)
+            local x0 = src_x0 + ox * xs;         local x1 = x0 + xs
+            local ix0 = math.max(0, math.floor(x0)); local ix1 = math.min(iw-1, math.ceil(x1)-1)
             -- Accumulate linear values weighted by overlap area directly from FFI buffer
             local wr, wg, wb, wa = 0, 0, 0, 0
             for sy = iy0, iy1 do
@@ -2941,7 +2954,7 @@ end
 --      use_quarter=false → half-block  (timg -p h)
 --      use_quarter=true  → quarter-block (timg -p q)
 -- ---------------------------------------------------------------------------
-local function render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, use_quarter, cur_e, total_e)
+local function render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, use_quarter, cur_e, total_e, zoom, pan_x, pan_y)
     local img, err = load_image(img_entry.filepath)
     if not img then return false, err end
 
@@ -2958,8 +2971,8 @@ local function render_image_unicode_block(img_entry, current_idx, total_count, t
     local out_w, out_h = calc_scale_to_fit(
         img.width, img.height, max_char_w, max_char_h, cell_x, cell_y)
 
-    -- Area-average downscale to out_w × out_h pixel canvas (linear space)
-    local scaled = area_average_scale(img, out_w, out_h)
+    -- Area-average downscale to out_w × out_h pixel canvas (linear space) with zoom/pan
+    local scaled = area_average_scale(img, out_w, out_h, zoom, pan_x, pan_y)
 
     -- Character-cell dimensions
     local char_w = out_w / cell_x
@@ -2989,8 +3002,10 @@ local function render_image_unicode_block(img_entry, current_idx, total_count, t
     table.insert(out, string.format(
         "  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s | Path: %s\27[0m\n",
         img_entry.size_str, img.width, img.height, date_info, eng, dpath))
-    local cycle_hint = total_e and string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine (%d available)  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n", total_e)
-        or "  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"
+    local cycle_hint = (zoom and zoom > 1.0)
+        and string.format("  \27[1;93m[Zoom %.1fx]\27[0m  \27[93m[+ / -]\27[0m Zoom  \27[93m[Arrows/WASD]\27[0m Pan  \27[93m[0]\27[0m Reset  \27[92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n", zoom)
+        or (total_e and string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[93m[+/-]\27[0m Zoom  \27[1;96m[t]\27[0m Cycle Engine (%d available)  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n", total_e)
+            or "  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[93m[+/-]\27[0m Zoom  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n")
     table.insert(out, cycle_hint)
     table.insert(out, "\27[90m" .. string.rep("─", blen) .. "\27[0m\n")
 
@@ -3790,11 +3805,15 @@ local function render_image_kitty(img_entry, current_idx, total_count, term_w, t
 end
 
 -- Render image using ANSI Truecolor Half-Block (▄)
-local function render_image_halfblock(img_entry, current_idx, total_count, term_w, term_h, cur_e, total_e)
+local function render_image_halfblock(img_entry, current_idx, total_count, term_w, term_h, cur_e, total_e, zoom, pan_x, pan_y)
     local img, err = load_image(img_entry.filepath)
     if not img then
         return false, err
     end
+
+    zoom = zoom or 1.0
+    pan_x = pan_x or 0
+    pan_y = pan_y or 0
 
     local out = {}
     table.insert(out, "\27[H\27[2J") -- Clear screen & home cursor
@@ -3812,8 +3831,10 @@ local function render_image_halfblock(img_entry, current_idx, total_count, term_
     local eng_prefix = (cur_e and total_e) and string.format("[%d/%d] ", cur_e, total_e) or ""
     table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s\27[1;92mANSI 24-bit Truecolor Half-Block (▄)\27[90m | Path: %s\27[0m\n",
         img_entry.size_str, img.width, img.height, date_info, eng_prefix, disp_path))
-    local cycle_hint = total_e and string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine (%d available)   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n", total_e)
-        or "  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"
+    local cycle_hint = (zoom > 1.0)
+        and string.format("  \27[1;93m[Zoom %.1fx]\27[0m  \27[93m[+ / -]\27[0m Zoom  \27[93m[Arrows/WASD]\27[0m Pan  \27[93m[0]\27[0m Reset  \27[92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n", zoom)
+        or (total_e and string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[93m[+/-]\27[0m Zoom   \27[1;96m[t]\27[0m Cycle Engine (%d available)   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n", total_e)
+            or "  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[93m[+/-]\27[0m Zoom   \27[1;96m[t]\27[0m Cycle Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n")
     table.insert(out, cycle_hint)
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
@@ -3857,15 +3878,25 @@ local function render_image_halfblock(img_entry, current_idx, total_count, term_
 
     local px = img.pixels
     local iw = img.width
+    local ih = img.height
+
+    local view_w = iw / zoom
+    local view_h = ih / zoom
+    local max_pan_x = (iw - view_w) * 0.5
+    local max_pan_y = (ih - view_h) * 0.5
+    local cx = iw * 0.5 + math.max(-max_pan_x, math.min(max_pan_x, pan_x))
+    local cy = ih * 0.5 + math.max(-max_pan_y, math.min(max_pan_y, pan_y))
+    local src_x0 = cx - view_w * 0.5
+    local src_y0 = cy - view_h * 0.5
 
     for y = 0, out_h - 1, 2 do
         local line = { pad }
         local last_top_r, last_top_g, last_top_b = -1, -1, -1
         local last_bot_r, last_bot_g, last_bot_b = -1, -1, -1
         for x = 0, out_w - 1 do
-            local src_x = math.min(img.width - 1, math.floor(x * (img.width / out_w)))
-            local src_y_top = math.min(img.height - 1, math.floor(y * (img.height / out_h)))
-            local src_y_bot = math.min(img.height - 1, math.floor((y + 1) * (img.height / out_h)))
+            local src_x = math.min(iw - 1, math.max(0, math.floor(src_x0 + x * (view_w / out_w))))
+            local src_y_top = math.min(ih - 1, math.max(0, math.floor(src_y0 + y * (view_h / out_h))))
+            local src_y_bot = math.min(ih - 1, math.max(0, math.floor(src_y0 + (y + 1) * (view_h / out_h))))
 
             local top = px[src_y_top * iw + src_x]
             local bot = px[src_y_bot * iw + src_x]
@@ -4046,7 +4077,7 @@ end
 
 -- Unified image renderer: Dispatches to the selected protocol.
 -- Supported protocols: "truecolor" | "timg-half" | "timg-quarter" | "timg-cli" | "chafa" | "chafa-braille" | "chafa-cli" | "kitty" | "iterm"
-local function render_image_screen(img_entry, current_idx, total_count, protocol)
+local function render_image_screen(img_entry, current_idx, total_count, protocol, zoom, pan_x, pan_y)
     local term_w, term_h = get_terminal_size()
     protocol = protocol or "truecolor"
     local cur_e, total_e = get_engine_position(protocol)
@@ -4063,7 +4094,7 @@ local function render_image_screen(img_entry, current_idx, total_count, protocol
             if ok then return true end
         end
         -- fallback to native timg
-        local ok = render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, false, cur_e, total_e)
+        local ok = render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, false, cur_e, total_e, zoom, pan_x, pan_y)
         if ok then return true end
     elseif protocol == "chafa-cli" then
         if get_has_chafa_cli_direct() then
@@ -4081,16 +4112,16 @@ local function render_image_screen(img_entry, current_idx, total_count, protocol
         if ok then return true end
     elseif protocol == "timg-quarter" or protocol == "quarter" then
         -- timg -p q  (quarter-block, 2x2 pixels per cell, linear-space avd minimisation, aspect-corrected)
-        local ok, err = render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, true, cur_e, total_e)
+        local ok, err = render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, true, cur_e, total_e, zoom, pan_x, pan_y)
         if ok then return true end
     elseif protocol == "timg-half" then
         -- timg -p h  (half-block, linear-space area-average)
-        local ok, err = render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, false, cur_e, total_e)
+        local ok, err = render_image_unicode_block(img_entry, current_idx, total_count, term_w, term_h, false, cur_e, total_e, zoom, pan_x, pan_y)
         if ok then return true end
     end
 
     -- Default: Original ANSI 24-bit Truecolor Half-Block (▄) renderer
-    return render_image_halfblock(img_entry, current_idx, total_count, term_w, term_h, cur_e, total_e)
+    return render_image_halfblock(img_entry, current_idx, total_count, term_w, term_h, cur_e, total_e, zoom, pan_x, pan_y)
 end
 
 -- =========================================================================
@@ -4727,6 +4758,9 @@ local function render_help_modal(term_w, term_h, active_protocol)
         "│    l / j / → / n       Next image                           │",
         "│    h / k / ← / p       Previous image                       │",
         "│    g / G               Jump to first / last image           │",
+        "│    + / - / z           Zoom in / Zoom out (1x - 16x)        │",
+        "│    Arrows / WASD       Pan image viewport (when zoomed in)  │",
+        "│    0                   Reset zoom & pan to fit window       │",
         cycle_line,
         "│    q / Esc / b         Return to file/folder list           │",
         "│                                                             │",
@@ -5209,6 +5243,9 @@ local function main()
     local in_viewer = false
     local in_help = false
     local current_msg = nil
+    local viewer_zoom = 1.0
+    local viewer_pan_x = 0
+    local viewer_pan_y = 0
 
     local function reload_directory(new_dir)
         target_dir = new_dir or target_dir
@@ -5315,7 +5352,7 @@ local function main()
                             end
                         end
                     else
-                        local ok, view_err = render_image_screen(cur_img, img_pos, #img_indices, active_protocol)
+                        local ok, view_err = render_image_screen(cur_img, img_pos, #img_indices, active_protocol, viewer_zoom, viewer_pan_x, viewer_pan_y)
                     if not ok then
                         in_viewer = false
                         current_msg = "Failed to load image: " .. to_display_text(tostring(view_err))
@@ -5327,8 +5364,35 @@ local function main()
                             -- q / Esc return to the file list (Q / Ctrl+C still quit pix)
                             kitty_clear_screen()
                             in_viewer = false
+                            viewer_zoom = 1.0; viewer_pan_x = 0; viewer_pan_y = 0
+                        elseif k == "+" or k == "=" or k == "z" then
+                            viewer_zoom = math.min(16.0, viewer_zoom * 1.4)
+                        elseif k == "-" or k == "_" then
+                            viewer_zoom = math.max(1.0, viewer_zoom / 1.4)
+                            if viewer_zoom <= 1.05 then
+                                viewer_zoom = 1.0
+                                viewer_pan_x = 0
+                                viewer_pan_y = 0
+                            end
+                        elseif k == "0" then
+                            viewer_zoom = 1.0
+                            viewer_pan_x = 0
+                            viewer_pan_y = 0
+                        elseif viewer_zoom > 1.0 and (k == "w" or k == "UP") then
+                            local step_y = (cur_img.height or 800) * (0.1 / viewer_zoom)
+                            viewer_pan_y = viewer_pan_y - step_y
+                        elseif viewer_zoom > 1.0 and (k == "s" or k == "DOWN") then
+                            local step_y = (cur_img.height or 800) * (0.1 / viewer_zoom)
+                            viewer_pan_y = viewer_pan_y + step_y
+                        elseif viewer_zoom > 1.0 and (k == "a" or k == "LEFT") then
+                            local step_x = (cur_img.width or 800) * (0.1 / viewer_zoom)
+                            viewer_pan_x = viewer_pan_x - step_x
+                        elseif viewer_zoom > 1.0 and (k == "d" or k == "RIGHT") then
+                            local step_x = (cur_img.width or 800) * (0.1 / viewer_zoom)
+                            viewer_pan_x = viewer_pan_x + step_x
                         elseif k == "RIGHT" or k == "n" or k == "SPACE" or k == "PAGE_DOWN" or k == "l" or k == "j" or k == "CTRL_D" or k == "CTRL_F" then
                             kitty_clear_screen()
+                            viewer_zoom = 1.0; viewer_pan_x = 0; viewer_pan_y = 0
                             if #img_indices > 1 then
                                 img_pos = (img_pos % #img_indices) + 1
                                 selected_idx = img_indices[img_pos]
@@ -5336,6 +5400,7 @@ local function main()
                             end
                         elseif k == "LEFT" or k == "p" or k == "PAGE_UP" or k == "k" or k == "h" or k == "CTRL_U" or k == "CTRL_B" then
                             kitty_clear_screen()
+                            viewer_zoom = 1.0; viewer_pan_x = 0; viewer_pan_y = 0
                             if #img_indices > 1 then
                                 img_pos = (img_pos - 2 + #img_indices) % #img_indices + 1
                                 selected_idx = img_indices[img_pos]
@@ -5343,6 +5408,7 @@ local function main()
                             end
                         elseif k == "g" or k == "HOME" then
                             kitty_clear_screen()
+                            viewer_zoom = 1.0; viewer_pan_x = 0; viewer_pan_y = 0
                             if #img_indices > 0 then
                                 img_pos = 1
                                 selected_idx = img_indices[img_pos]
@@ -5350,6 +5416,7 @@ local function main()
                             end
                         elseif k == "G" or k == "END" then
                             kitty_clear_screen()
+                            viewer_zoom = 1.0; viewer_pan_x = 0; viewer_pan_y = 0
                             if #img_indices > 0 then
                                 img_pos = #img_indices
                                 selected_idx = img_indices[img_pos]
