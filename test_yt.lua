@@ -22,8 +22,11 @@ assert(help_out:find("yt.lua", 1, true), "Help output missing header")
 assert(help_out:find("System Status:", 1, true), "Help output missing status")
 print("  [✓] Test 1 passed: yt.lua --help renders properly.")
 
+local is_win = (package.config:sub(1,1) == '\\')
+local null_dev = is_win and "2>nul" or "2>/dev/null"
+
 -- Test 2: Extraction & search via yt-dlp
-local p_search = io.popen('yt-dlp --dump-json --flat-playlist --skip-download "ytsearch2:lofi" 2>/dev/null', "r")
+local p_search = io.popen('yt-dlp --dump-json --flat-playlist --skip-download "ytsearch2:lofi" ' .. null_dev, "r")
 if p_search then
     local count = 0
     for line in p_search:lines() do
@@ -58,5 +61,12 @@ p_video:close()
 assert(video_out:find("VIDEO mode", 1, true), "Video mode header missing")
 assert(video_out:find("01.", 1, true), "Video item 1 missing")
 print("  [✓] Test 4 passed: yt.lua --video --no-interactive successfully extracted and listed items.")
+
+-- Test 5: Stream playback verification (verify player_client=android avoids 403 Forbidden)
+local test_stream_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+local mpv_check_cmd = string.format('mpv --no-video --end=2 --ytdl-raw-options="extractor-args=youtube:player_client=android" %q %s', test_stream_url, null_dev)
+local exit_code = os.execute(mpv_check_cmd)
+assert(exit_code == 0, "mpv stream playback verification failed (unexpected exit code " .. tostring(exit_code) .. ")")
+print("  [✓] Test 5 passed: Stream playback connected and played cleanly without 403 Forbidden.")
 
 print("=== All Backend Verification Tests Completed Successfully ===")

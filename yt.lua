@@ -531,12 +531,13 @@ local function play_item(item, mode, browser, cookies_file, use_external_window)
         return
     end
 
-    local cookie_opts = ""
+    local raw_opts = { "extractor-args=youtube:player_client=android" }
     if browser and #browser > 0 then
-        cookie_opts = string.format(" --ytdl-raw-options=cookies-from-browser=%s", browser)
+        table.insert(raw_opts, string.format("cookies-from-browser=%s", browser))
     elseif cookies_file and #cookies_file > 0 then
-        cookie_opts = string.format(" --ytdl-raw-options=cookies=%s", cookies_file)
+        table.insert(raw_opts, string.format("cookies=%s", cookies_file))
     end
+    local ytdl_raw_opts = string.format(' --ytdl-raw-options=%q', table.concat(raw_opts, ","))
 
     local term_w, term_h = get_terminal_size()
     local mpv_cmd
@@ -547,12 +548,12 @@ local function play_item(item, mode, browser, cookies_file, use_external_window)
             'mpv --no-video --term-osd-bar --ytdl-format="bestaudio/best" '
             .. '--term-status-msg="  ${media-title}  [${playback-time} / ${duration}]  Vol: ${volume}%%" '
             .. '%s %q',
-            cookie_opts, item.url
+            ytdl_raw_opts, item.url
         )
     else
         -- Video playback
         if use_external_window then
-            mpv_cmd = string.format('mpv %s %q', cookie_opts, item.url)
+            mpv_cmd = string.format('mpv %s %q', ytdl_raw_opts, item.url)
         else
             -- Terminal ASCII/Half-block video
             mpv_cmd = string.format(
@@ -560,7 +561,7 @@ local function play_item(item, mode, browser, cookies_file, use_external_window)
                 .. '--term-status-msg="  ${media-title}  [${playback-time} / ${duration}]" '
                 .. '%s %q',
                 math.max(10, term_w), math.max(6, term_h - 1),
-                cookie_opts, item.url
+                ytdl_raw_opts, item.url
             )
         end
     end
