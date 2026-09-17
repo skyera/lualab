@@ -917,6 +917,9 @@ function M.get_home_page_html()
   <li><a href="https://developer.mozilla.org">MDN Web Docs</a> - Web platform documentation</li>
   <li><a href="https://docs.python.org">Python Documentation</a> - Official Python language documentation</li>
   <li><a href="https://github.com/trending">GitHub Trending</a> - Today's trending open-source repositories</li>
+  <li><a href="https://huaren.us">Huaren.us</a> - Chinese-language community forums</li>
+  <li><a href="https://www.wenxuecity.com">Wenxuecity</a> - Chinese-language news and community forums</li>
+  <li><a href="https://bbsland.com">BBSland</a> - Chinese-language discussion forums</li>
   <li><a href="https://www.reddit.com/r/programming">Reddit Programming</a> - News, articles, and discussions for software developers</li>
   <li><a href="https://luajit.org">LuaJIT Official Site</a> - Just-In-Time Compiler for Lua</li>
   <li><a href="https://luajit.org/ext_ffi.html">LuaJIT FFI Library</a> - Direct C calls and performance bindings</li>
