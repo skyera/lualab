@@ -1219,10 +1219,13 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
             -- GUI window mode: keep scripts enabled (mpv-cut, shaders, OSC, etc. work in GUI window)
             mpv_cmd = string.format('mpv --hwdec=auto --term-status-msg="%s" %s%s %q', status_msg, ytdl_raw_opts, extra_mpv_opts, item.url)
         else
-            -- Terminal ASCII/Half-block video: load-scripts=no to prevent script log spam & key interception in terminal
-            local h_offset = 2
+            -- Terminal ASCII/Half-block video:
+            -- 1. Budget 5 rows for footer (CC line + title + OSD bar) to prevent terminal scroll-flicker
+            -- 2. vo-tct-buffering=frame eliminates redraw tearing
+            -- 3. sub-visibility=no keeps video frame clean without pixelated burnt-in text (CC rendered cleanly below)
+            local h_offset = 5
             mpv_cmd = string.format(
-                'mpv --vo=tct --vo-tct-width=%d --vo-tct-height=%d --load-scripts=no --hwdec=auto --term-osd-bar '
+                'mpv --vo=tct --vo-tct-buffering=frame --sub-visibility=no --vo-tct-width=%d --vo-tct-height=%d --load-scripts=no --hwdec=auto --term-osd-bar '
                 .. '--ytdl-format="bestvideo[height<=480]+bestaudio/best[height<=480]/best" '
                 .. '--term-status-msg="%s" '
                 .. '%s%s %q',
@@ -1633,7 +1636,7 @@ end
 local function run_app(init_query, init_mode, browser, cookies_file, is_liked, use_window, proxy, insecure, init_show_cc, init_sub_lang, init_filters)
     local current_query = init_query or "lofi beats"
     local mode = init_mode or "music"
-    local show_cc = init_show_cc or false
+    local show_cc = (init_show_cc ~= nil) and init_show_cc or true
     local sub_lang = init_sub_lang or "en.*"
     local selected_idx = 1
     local scroll_offset = 0
@@ -2168,7 +2171,8 @@ local function print_help()
     print("  -d, --download <q|url> Download track offline to ./downloads/ (MP3 for music, MP4 for video)")
     print("  --sort <type>         Sort search results (relevance, views, date, rating)")
     print("  --duration <type>     Filter results by duration (all, short, medium, long)")
-    print("  -c, --cc, --lyrics    Show Closed Captions (CC) / lyrics in terminal characters")
+    print("  -c, --cc, --lyrics    Show Closed Captions (CC) / lyrics (enabled by default)")
+    print("  --no-cc               Disable Closed Captions (CC) / lyrics")
     print("  --sub-lang <lang>     Preferred subtitle/lyrics language pattern (default: en.*)")
     print("  --browser <name>      Extract session cookies from browser (firefox, chrome, brave, edge)")
     print("  --no-interactive      Non-interactive script/batch mode (print results and exit)")
@@ -2203,7 +2207,9 @@ local function print_help()
     print(string.format("  deno:      %s", HAS_DENO and "\27[32m[Installed - Fast JS solver for yt-dlp]\27[0m" or "\27[90m[Not Detected - Optional for yt-dlp]\27[0m"))
     print("\nExamples:")
     print("  luajit yt.lua \"synthwave radio\"")
-    print("  luajit yt.lua --download \"lofi hip hop\"")
+    print("  luajit yt.lua -v \"World War 2 in color\"")
+    print("  luajit yt.lua -v --window \"nature 4k\"")
+    print("  luajit yt.lua -d \"https://www.youtube.com/watch?v=dQw4w9WgXcQ\"")
     print("  luajit yt.lua --sort views --duration short \"piano relax\"")
     print("  luajit yt.lua --music --lyrics \"never gonna give you up\"")
     print("  luajit yt.lua --music --browser firefox")
@@ -2220,7 +2226,7 @@ local function main()
     local is_liked = false
     local use_window = false
     local non_interactive = false
-    local show_cc = false
+    local show_cc = true
     local sub_lang = "en.*"
     local download_target = nil
     local active_filters = { sort = "relevance", duration = "all" }
@@ -2251,6 +2257,8 @@ local function main()
             use_window = true
         elseif a == "-c" or a == "--cc" or a == "--lyrics" or a == "--subtitles" then
             show_cc = true
+        elseif a == "--no-cc" or a == "--no-lyrics" or a == "--no-subtitles" then
+            show_cc = false
         elseif a == "--sub-lang" or a == "--sub-langs" or a == "--slang" then
             i = i + 1
             sub_lang = arg[i]
