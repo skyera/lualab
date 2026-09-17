@@ -36,6 +36,8 @@ local read_key
 local sleep_ms
 local get_now_sec
 local is_stdin_tty
+local safe_popen = io.popen
+local safe_execute = os.execute
 
 if is_windows then
     ffi.cdef[[
@@ -71,8 +73,18 @@ if is_windows then
         BOOL SetConsoleMode(HANDLE hConsoleHandle, DWORD dwMode);
         BOOL SetConsoleOutputCP(DWORD wCodePageID);
         BOOL SetConsoleCP(DWORD wCodePageID);
+        wchar_t* GetCommandLineW(void);
+        void* LocalFree(void* hMem);
+        int WideCharToMultiByte(unsigned int CodePage, unsigned long dwFlags, const wchar_t* lpWideCharStr, int cchWideChar, char* lpMultiByteStr, int cbMultiByte, const char* lpDefaultChar, int* lpUsedDefaultChar);
+        int MultiByteToWideChar(unsigned int CodePage, unsigned long dwFlags, const char* lpMultiByteStr, int cbMultiByte, wchar_t* lpWideCharStr, int cchWideChar);
         DWORD GetTickCount(void);
         void Sleep(DWORD dwMilliseconds);
+
+        typedef struct FILE FILE;
+        FILE* _wpopen(const wchar_t *command, const wchar_t *mode);
+        int _pclose(FILE *stream);
+        size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream);
+        int _wsystem(const wchar_t *command);
 
         int _kbhit(void);
         int _getch(void);
@@ -80,6 +92,7 @@ if is_windows then
     ]]
 
     local kernel32 = ffi.load("kernel32")
+    local msvcrt = ffi.load("msvcrt")
     local STD_INPUT_HANDLE = ffi.cast("DWORD", -10)
     local STD_OUTPUT_HANDLE = ffi.cast("DWORD", -11)
 
@@ -97,6 +110,85 @@ if is_windows then
             kernel32.SetConsoleMode(hOut, bit.bor(out_mode[0], ENABLE_VIRTUAL_TERMINAL_PROCESSING))
         end
     end)
+
+    local function win_wide_to_utf8(wstr)
+        if not wstr or wstr == nil then return "" end
+        local len = kernel32.WideCharToMultiByte(65001, 0, wstr, -1, nil, 0, nil, nil)
+        if len <= 0 then return "" end
+        local buf = ffi.new("char[?]", len)
+        kernel32.WideCharToMultiByte(65001, 0, wstr, -1, buf, len, nil, nil)
+        return ffi.string(buf, len - 1)
+    end
+
+    local function utf8_to_wide(s)
+        if not s then return nil end
+        local wlen = kernel32.MultiByteToWideChar(65001, 0, s, -1, nil, 0)
+        if wlen <= 0 then return nil end
+        local wbuf = ffi.new("wchar_t[?]", wlen)
+        kernel32.MultiByteToWideChar(65001, 0, s, -1, wbuf, wlen)
+        return wbuf
+    end
+
+    safe_popen = function(cmd, mode)
+        mode = mode or "r"
+        local wcmd = utf8_to_wide(cmd)
+        local wmode = utf8_to_wide(mode)
+        if wcmd and wmode and msvcrt._wpopen then
+            local fp = msvcrt._wpopen(wcmd, wmode)
+            if fp ~= nil then
+                local chunks = {}
+                local buf = ffi.new("char[16384]")
+                while true do
+                    local n = msvcrt.fread(buf, 1, 16384, fp)
+                    if n <= 0 then break end
+                    table.insert(chunks, ffi.string(buf, n))
+                end
+                msvcrt._pclose(fp)
+                local full = table.concat(chunks)
+                return {
+                    read = function(self, fmt) return full end,
+                    lines = function(self) return full:gmatch("([^\r\n]+)") end,
+                    close = function(self) return true end,
+                }
+            end
+        end
+        return io.popen(cmd, mode)
+    end
+
+    safe_execute = function(cmd)
+        local wcmd = utf8_to_wide(cmd)
+        if wcmd and msvcrt._wsystem then
+            return msvcrt._wsystem(wcmd)
+        end
+        return os.execute(cmd)
+    end
+
+    local function get_win_utf8_args()
+        pcall(function()
+            local shell32 = ffi.load("shell32")
+            ffi.cdef[[
+                wchar_t** CommandLineToArgvW(const wchar_t* lpCmdLine, int* pNumArgs);
+            ]]
+            local cmdline = kernel32.GetCommandLineW()
+            if cmdline == nil then return end
+            local num_args = ffi.new("int[1]")
+            local argv_w = shell32.CommandLineToArgvW(cmdline, num_args)
+            if argv_w == nil then return end
+            local raw_argv = {}
+            for i = 0, num_args[0] - 1 do
+                table.insert(raw_argv, win_wide_to_utf8(argv_w[i]))
+            end
+            kernel32.LocalFree(argv_w)
+
+            if arg and #arg > 0 and #raw_argv >= #arg then
+                local offset = #raw_argv - #arg
+                for i = 1, #arg do
+                    arg[i] = raw_argv[offset + i]
+                end
+            end
+        end)
+    end
+    get_win_utf8_args()
 
     is_stdin_tty = function()
         return ffi.C._isatty(0) ~= 0
@@ -406,6 +498,77 @@ local function sanitize_display_text(s)
     return s:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
 end
 
+local function codepoint_width(cp)
+    if cp < 0x1100 then return 1 end
+    if (cp >= 0x1100 and cp <= 0x115F)     -- Hangul Jamo
+        or (cp >= 0x2E80 and cp <= 0x303E) -- CJK Radicals, Kangxi, CJK Symbols
+        or (cp >= 0x3041 and cp <= 0x33FF) -- Kana, CJK Compatibility
+        or (cp >= 0x3400 and cp <= 0x4DBF) -- CJK Unified Ideographs Ext A
+        or (cp >= 0x4E00 and cp <= 0x9FFF) -- CJK Unified Ideographs (Common Hanzi)
+        or (cp >= 0xA000 and cp <= 0xA4CF) -- Yi
+        or (cp >= 0xAC00 and cp <= 0xD7A3) -- Hangul Syllables
+        or (cp >= 0xF900 and cp <= 0xFAFF) -- CJK Compatibility Ideographs
+        or (cp >= 0xFE30 and cp <= 0xFE6F) -- CJK Compatibility Forms
+        or (cp >= 0xFF00 and cp <= 0xFF60) -- Fullwidth Latin / Punctuation
+        or (cp >= 0xFFE0 and cp <= 0xFFE6)
+        or (cp >= 0x20000 and cp <= 0x3FFFD) then -- CJK Extensions B+
+        return 2
+    end
+    return 1
+end
+
+local function utf8_next(s, i)
+    local b = s:byte(i)
+    if not b then return nil end
+    if b < 0x80 then return b, 1 end
+    if b >= 0xF0 then
+        local b2, b3, b4 = s:byte(i + 1), s:byte(i + 2), s:byte(i + 3)
+        if b2 and b3 and b4 and b2 >= 0x80 and b2 < 0xC0 and b3 >= 0x80 and b3 < 0xC0 and b4 >= 0x80 and b4 < 0xC0 then
+            return (b - 0xF0) * 0x40000 + (b2 - 0x80) * 0x1000 + (b3 - 0x80) * 0x40 + (b4 - 0x80), 4
+        end
+    elseif b >= 0xE0 then
+        local b2, b3 = s:byte(i + 1), s:byte(i + 2)
+        if b2 and b3 and b2 >= 0x80 and b2 < 0xC0 and b3 >= 0x80 and b3 < 0xC0 then
+            return (b - 0xE0) * 0x1000 + (b2 - 0x80) * 0x40 + (b3 - 0x80), 3
+        end
+    elseif b >= 0xC0 then
+        local b2 = s:byte(i + 1)
+        if b2 and b2 >= 0x80 and b2 < 0xC0 then
+            return (b - 0xC0) * 0x40 + (b2 - 0x80), 2
+        end
+    end
+    return b, 1
+end
+
+local function display_width(s)
+    if not s or type(s) ~= "string" or #s == 0 then return 0 end
+    local w, i = 0, 1
+    local len = #s
+    while i <= len do
+        local cp, clen = utf8_next(s, i)
+        w = w + codepoint_width(cp)
+        i = i + clen
+    end
+    return w
+end
+
+local function utf8_truncate(s, max_cols)
+    if not s or type(s) ~= "string" then return "" end
+    if display_width(s) <= max_cols then return s end
+    local budget = math.max(0, max_cols - 2)
+    local w, i, cut = 0, 1, 0
+    local len = #s
+    while i <= len do
+        local cp, clen = utf8_next(s, i)
+        local cw = codepoint_width(cp)
+        if w + cw > budget then break end
+        w = w + cw
+        i = i + clen
+        cut = i - 1
+    end
+    return s:sub(1, cut) .. ".."
+end
+
 local function parse_json_field(line, key)
     local pat = '"' .. key .. '"%s*:%s*"'
     local s, e = line:find(pat)
@@ -537,7 +700,7 @@ local function scrape_youtube_search(query, max_results, proxy, insecure)
     local url = "https://www.youtube.com/results?search_query=" .. encoded
     local cmd = string.format('curl -s -L --max-time 8%s%s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" %q',
         sec_opt, proxy_opt, url)
-    local p = io.popen(cmd, POPEN_READ_BIN)
+    local p = safe_popen(cmd, POPEN_READ_BIN)
     if not p then return nil end
     local html = p:read("*a")
     p:close()
@@ -618,7 +781,7 @@ local function fetch_youtube_results(query, mode, browser, cookies_file, max_res
             extra_opts, search_spec, redirect
         )
 
-        local p = io.popen(cmd, POPEN_READ_BIN)
+        local p = safe_popen(cmd, POPEN_READ_BIN)
         if p then
             for line in p:lines() do
                 if line:sub(1, 1) == "{" then
@@ -715,7 +878,7 @@ local function render_thumbnail_art(thumb_url, box_w, box_h)
     end
 
     if HAS_CHAFA then
-        local p = io.popen(string.format('chafa --size=%dx%d --format=symbols --symbols=block %q 2>/dev/null',
+        local p = safe_popen(string.format('chafa --size=%dx%d --format=symbols --symbols=block %q 2>/dev/null',
             box_w, box_h, thumb_file), "r")
         if p then
             local lines = {}
@@ -792,7 +955,7 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     io.write("\27[H\27[2J\27[1;36m> Connecting to YouTube stream: \27[1;33m" .. item.title .. "\27[0m\n\n")
     io.flush()
 
-    local exit_code = os.execute(mpv_cmd)
+    local exit_code = safe_execute(mpv_cmd)
 
     enable_raw_mode()
     return exit_code
@@ -988,18 +1151,12 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                     local cursor = is_sel and "\27[1;92m> " or "  "
                     
                     local max_title_w = math.max(15, term_w - 38)
-                    local t = it.title
-                    if #t > max_title_w then
-                        t = t:sub(1, max_title_w - 2) .. ".."
-                    end
-                    local title_pad = string.rep(" ", math.max(0, max_title_w - #t))
+                    local t = utf8_truncate(it.title, max_title_w)
+                    local title_pad = string.rep(" ", math.max(0, max_title_w - display_width(t)))
 
                     local max_up_w = 18
-                    local up = it.uploader
-                    if #up > max_up_w then
-                        up = up:sub(1, max_up_w - 2) .. ".."
-                    end
-                    local up_pad = string.rep(" ", math.max(0, max_up_w - #up))
+                    local up = utf8_truncate(it.uploader, max_up_w)
+                    local up_pad = string.rep(" ", math.max(0, max_up_w - display_width(up)))
 
                     local row_str
                     if is_sel then
@@ -1140,7 +1297,15 @@ local function run_self_tests()
     assert(sanitize_display_text(emoji_title) == "HOT HITS Pop", "sanitize_display_text failed on emojis")
     print("  [✓] sanitize_display_text passed")
 
-    -- 6. save_history_item & load_history_items
+    -- 6. display_width & utf8_truncate (East Asian Full-Width CJK Support)
+    local cjk_sample = "周杰倫 Jay Chou"
+    assert(display_width(cjk_sample) == 15, "display_width for CJK failed, expected 15, got " .. display_width(cjk_sample))
+    local trunc_cjk = utf8_truncate(cjk_sample, 10)
+    assert(display_width(trunc_cjk) <= 10, "utf8_truncate exceeded max_cols")
+    assert(trunc_cjk:sub(-2) == "..", "utf8_truncate missing .. ending")
+    print("  [✓] display_width & utf8_truncate passed")
+
+    -- 7. save_history_item & load_history_items
     local test_item = {
         id = "selftest_" .. tostring(os.time()),
         title = "Self Test Video - " .. tostring(os.time()),
@@ -1268,7 +1433,11 @@ local function main()
         local sec_note = (used_insecure or insecure) and " [CORP SSL/INSECURE]" or ""
         print(string.format("\27[1;36m=== YouTube Results for '%s' (%s mode)%s ===\27[0m", q, mode:upper(), sec_note))
         for idx, item in ipairs(res) do
-            print(string.format("  %02d. %-50s | %-22s | %s", idx, item.title:sub(1, 50), item.uploader:sub(1, 22), item.duration_str))
+            local t_disp = utf8_truncate(item.title, 50)
+            local t_pad = string.rep(" ", math.max(0, 50 - display_width(t_disp)))
+            local up_disp = utf8_truncate(item.uploader, 22)
+            local up_pad = string.rep(" ", math.max(0, 22 - display_width(up_disp)))
+            print(string.format("  %02d. %s%s | %s%s | %s", idx, t_disp, t_pad, up_disp, up_pad, item.duration_str))
         end
         return
     end
