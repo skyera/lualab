@@ -942,12 +942,11 @@ local function build_mpv_status_msg(mode, show_cc)
         end
         return msg
     else
-        -- Video mode: keep status to one line so mpv can redraw it without leaving stale rows.
+        -- Terminal video status must stay short and single-line on Windows consoles.
         local msg = ""
         if show_cc then
-            msg = "${sub-text?  >> CC: ${sub-text}  |  }"
+            msg = "${sub-text?  >> CC: ${sub-text}}"
         end
-        msg = msg .. "  ${media-title}  [${playback-time} / ${duration}]"
         return msg
     end
 end
@@ -1227,15 +1226,16 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
             -- 1. vo-tct-buffering=frame eliminates redraw tearing
             -- 2. sub-visibility=no strictly prevents burning vector subtitles into video half-blocks
             -- 3. Reserve more terminal rows so the status/CC line is clearly separated from the video frame
-            -- 4. video-margin-ratio-bottom=0.08 leaves additional space inside the video area
+            -- 4. Keep a larger bottom margin because Windows consoles redraw status at the terminal edge
             -- 5. term-osd-bar=no and single-line status_msg prevent vo-tct relative cursor drift
             local h_offset = 10
+            local video_margin_bottom = is_windows and 0.20 or 0.12
             mpv_cmd = string.format(
-                'mpv --vo=tct --vo-tct-buffering=frame --sub-visibility=no --video-margin-ratio-bottom=0.08 --vo-tct-width=%d --vo-tct-height=%d --load-scripts=no --hwdec=auto --term-osd-bar=no '
+                'mpv --vo=tct --vo-tct-buffering=frame --sub-visibility=no --video-margin-ratio-bottom=%.2f --vo-tct-width=%d --vo-tct-height=%d --load-scripts=no --hwdec=auto --term-osd-bar=no '
                 .. '--ytdl-format="bestvideo[height<=480]+bestaudio/best[height<=480]/best" '
                 .. '--term-status-msg="%s" '
                 .. '%s%s %q',
-                math.max(10, term_w), math.max(6, term_h - h_offset),
+                video_margin_bottom, math.max(10, term_w), math.max(6, term_h - h_offset),
                 status_msg,
                 ytdl_raw_opts, extra_mpv_opts, item.url
             )
