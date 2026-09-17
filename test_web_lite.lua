@@ -59,11 +59,12 @@ TestRunner.describe("1. HTML Entity Decoding & Tag Cleaning", function()
     end)
 
     TestRunner.it("should strip script, style, svg, and comment blocks", function()
-        local dirty_html = "<!-- Comment --><h1>Title</h1><script>alert(1);</script><style>body{color:red;}</style><p>Content</p>"
+        local dirty_html = "<!-- Comment --><h1>Title</h1><script>alert(1);</script><style>body{color:red;}</style><div class=\"[&>:first-child]:h-full\"><p>Content</p></div>"
         local cleaned = web.strip_scripts_and_styles(dirty_html)
         assert_true(not cleaned:find("alert"), "script content must be removed")
         assert_true(not cleaned:find("color:red"), "style content must be removed")
         assert_true(not cleaned:find("Comment"), "comments must be removed")
+        assert_true(not cleaned:find("&>:first%-child"), "tailwind CSS selector classes must be stripped")
         assert_true(cleaned:find("Title"), "HTML tags and content must be preserved")
     end)
 end)
@@ -93,6 +94,10 @@ TestRunner.describe("2. URL Resolution & Smart Omnibox Input", function()
         local u4, mode4 = web.smart_resolve_input("about:home")
         assert_eq(u4, "about:home")
         assert_eq(mode4, "about")
+
+        local u5, mode5 = web.smart_resolve_input("r/programming")
+        assert_eq(u5, "https://www.reddit.com/r/programming", "r/<subname> must resolve to reddit")
+        assert_eq(mode5, "url")
     end)
 end)
 

@@ -60,6 +60,13 @@ local kernel32
 
 if is_windows then
     kernel32 = ffi.load("kernel32")
+    local user32
+    pcall(function()
+        user32 = ffi.load("user32")
+        ffi.cdef[[
+            short GetAsyncKeyState(int vKey);
+        ]]
+    end)
     ffi.cdef[[
         typedef void *HANDLE;
         typedef struct _COORD { short X; short Y; } COORD;
@@ -149,8 +156,33 @@ if is_windows then
                     elseif c1 == 15 then return "SHIFT_TAB"
                     end
                 elseif c0 == 27 then
+                    local seq = ""
+                    local t_wait = 0
+                    while t_wait < 25 and ffi.C._kbhit() == 0 do
+                        kernel32.Sleep(2)
+                        t_wait = t_wait + 2
+                    end
+                    while ffi.C._kbhit() ~= 0 do
+                        local c_next = ffi.C._getch()
+                        seq = seq .. string.char(c_next)
+                    end
+                    if #seq > 0 then
+                        if seq == "[Z" or seq:find("%[.*Z$") then return "SHIFT_TAB"
+                        elseif seq == "[A" then return "UP"
+                        elseif seq == "[B" then return "DOWN"
+                        elseif seq == "[C" then return "RIGHT"
+                        elseif seq == "[D" then return "LEFT"
+                        elseif seq == "[5~" then return "PAGE_UP"
+                        elseif seq == "[6~" then return "PAGE_DOWN"
+                        elseif seq == "[H" or seq == "[1~" then return "HOME"
+                        elseif seq == "[F" or seq == "[4~" then return "END"
+                        end
+                    end
                     return "ESC"
                 elseif c0 == 9 then
+                    if user32 and user32.GetAsyncKeyState(0x10) < 0 then
+                        return "SHIFT_TAB"
+                    end
                     return "TAB"
                 elseif c0 == 13 or c0 == 10 then
                     return "ENTER"
@@ -493,6 +525,8 @@ local function strip_scripts_and_styles(html)
     html = html:gsub("<[sS][tT][yY][lL][eE][^>]*>.-</[sS][tT][yY][lL][eE]>", "")
     html = html:gsub("<[nN][oO][sS][cC][rR][iI][pP][tT][^>]*>.-</[nN][oO][sS][cC][rR][iI][pP][tT]>", "")
     html = html:gsub("<[sS][vV][gG][^>]*>.-</[sS][vV][gG]>", "")
+    html = html:gsub('class="[^"]*"', ''):gsub("class='[^']*'", '')
+    html = html:gsub('style="[^"]*"', ''):gsub("style='[^']*'", '')
     return html
 end
 
@@ -551,6 +585,10 @@ local function smart_resolve_input(input)
         return input, "url"
     end
 
+    if input:match("^r/[%w_%-]+") then
+        return "https://www.reddit.com/" .. input, "url"
+    end
+
     if input:match("^[%w%-]+%.[%w%.%-%/]+$") or (input:match("%.") and not input:match("%s")) then
         return "https://" .. input, "url"
     end
@@ -589,7 +627,9 @@ local function fetch_url(url)
     local curl_cmd = is_windows and "curl.exe" or "curl"
     local user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) web_lite/1.0"
     local escaped_url = url:gsub("\"", "\\\"")
-    local cmd = string.format("%s -sSL --max-time 15 -H \"Accept-Language: zh-CN,zh;q=0.9,en;q=0.8\" -H \"Accept-Charset: utf-8, *;q=0.8\" -A \"%s\" \"%s\"", curl_cmd, user_agent, escaped_url)
+    local tmp_dir = os.getenv("TEMP") or os.getenv("TMP") or "/tmp"
+    local cookie_file = tmp_dir:gsub("\\", "/") .. "/web_lite_cookies.txt"
+    local cmd = string.format("%s -sSL --max-time 15 -b \"%s\" -c \"%s\" -H \"Accept-Language: zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7\" -H \"Accept-Charset: utf-8, *;q=0.8\" -A \"%s\" \"%s\"", curl_cmd, cookie_file, cookie_file, user_agent, escaped_url)
 
     local pipe = io.popen(cmd, is_windows and "rb" or "r")
     if not pipe then
@@ -598,6 +638,25 @@ local function fetch_url(url)
 
     local body = pipe:read("*a")
     pipe:close()
+
+    -- Auto-solve Reddit client challenge if encountered
+    if body and body:find('name="jsc_token"') then
+        local token = body:match('name="jsc_token"%s+value="([^"]+)"')
+        local seed = body:match('%("([0-9a-fA-F]+)"%)')
+        if token and seed then
+            local delim = url:find("%?") and "&" or "?"
+            local solve_url = string.format("%s%ssolution=%s&js_challenge=1&jsc_token=%s", url, delim, seed .. seed, token)
+            local solve_cmd = string.format("%s -sSL --max-time 15 -b \"%s\" -c \"%s\" -A \"%s\" \"%s\"", curl_cmd, cookie_file, cookie_file, user_agent, solve_url:gsub("\"", "\\\""))
+            local p2 = io.popen(solve_cmd, is_windows and "rb" or "r")
+            if p2 then
+                local solved_body = p2:read("*a")
+                p2:close()
+                if solved_body and #solved_body > 0 then
+                    body = solved_body
+                end
+            end
+        end
+    end
 
     if not body or #body == 0 then
         return string.format("<html><body><h1>Connection Failed</h1><p>Could not connect to: %s</p><p>Please check your internet connection or URL.</p></body></html>", url), 502, "text/html"
@@ -624,6 +683,7 @@ function M.get_home_page_html()
 <h2>Quick Bookmarks / 热门书签</h2>
 <ul>
   <li><a href="https://news.ycombinator.com">Hacker News</a> - Tech, startups, and programming discussions</li>
+  <li><a href="https://www.reddit.com/r/programming">Reddit Programming</a> - News, articles, and discussions for software developers</li>
   <li><a href="https://luajit.org">LuaJIT Official Site</a> - Just-In-Time Compiler for Lua</li>
   <li><a href="https://luajit.org/ext_ffi.html">LuaJIT FFI Library</a> - Direct C calls and performance bindings</li>
   <li><a href="https://zh.wikipedia.org">中文维基百科</a> - 自由的百科全书</li>
