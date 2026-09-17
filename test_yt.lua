@@ -152,6 +152,9 @@ p_test11:close()
 assert(t11_out:find("Download directory validation passed", 1, true), "Self-test missing download dir validation")
 assert(t11_out:find("Up-Next Playback Queue FIFO logic passed", 1, true), "Self-test missing queue validation")
 assert(t11_out:find("Search Filters & Sorting validation passed", 1, true), "Self-test missing search filters validation")
+if is_win then
+    assert(t11_out:find("Win32 Named Pipe FFI bindings validated", 1, true), "Self-test missing pipe bindings validation")
+end
 print("  [✓] Test 11 passed: Mini-Player, Playback Queue, Offline Download, and Search Filters verified.")
 
 print("=== All Backend Verification Tests Completed Successfully ===")

@@ -36,8 +36,11 @@ local read_key
 local sleep_ms
 local get_now_sec
 local is_stdin_tty
+local raw_mode_enabled = false
 local safe_popen = io.popen
 local safe_execute = os.execute
+local kernel32
+local msvcrt
 
 if is_windows then
     ffi.cdef[[
@@ -97,13 +100,13 @@ if is_windows then
         BOOL PeekNamedPipe(HANDLE hNamedPipe, void* lpBuffer, DWORD nBufferSize, DWORD* lpBytesRead, DWORD* lpTotalBytesAvail, DWORD* lpBytesLeftThisMessage);
     ]]
 
-    local kernel32 = ffi.load("kernel32")
-    local msvcrt = ffi.load("msvcrt")
+    kernel32 = ffi.load("kernel32")
+    msvcrt = ffi.load("msvcrt")
     local STD_INPUT_HANDLE = ffi.cast("DWORD", -10)
     local STD_OUTPUT_HANDLE = ffi.cast("DWORD", -11)
 
     local orig_in_mode = ffi.new("DWORD[1]")
-    local raw_mode_enabled = false
+    raw_mode_enabled = false
 
     -- Initialize Windows UTF-8 console output and ANSI Virtual Terminal Processing
     pcall(function()
@@ -365,7 +368,7 @@ else
 
     local orig_termios = ffi.new("struct termios")
     local raw_termios = ffi.new("struct termios")
-    local raw_mode_enabled = false
+    raw_mode_enabled = false
 
     enable_raw_mode = function()
         if not is_stdin_tty() then return false end
@@ -2102,6 +2105,17 @@ local function run_self_tests()
     end
     assert(#short_items == 1 and short_items[1].id == "1", "Duration filter short logic failed")
     print("  [✓] Search Filters & Sorting validation passed")
+
+    -- 12. Win32 Named Pipe FFI bindings
+    if is_windows then
+        assert(kernel32 ~= nil, "kernel32 library handle must be initialized")
+        assert(kernel32.CreateFileA ~= nil, "kernel32.CreateFileA must be defined")
+        assert(kernel32.WriteFile ~= nil, "kernel32.WriteFile must be defined")
+        assert(kernel32.ReadFile ~= nil, "kernel32.ReadFile must be defined")
+        assert(kernel32.PeekNamedPipe ~= nil, "kernel32.PeekNamedPipe must be defined")
+        assert(kernel32.CloseHandle ~= nil, "kernel32.CloseHandle must be defined")
+        print("  [✓] Win32 Named Pipe FFI bindings validated")
+    end
 
     print("=== All Internal Self-Tests Passed Successfully ===")
     return true
