@@ -536,7 +536,9 @@ local function smart_resolve_input(input)
     end
 
     input = input:match("^%s*(.-)%s*$")
-    if input == "about:home" or input == "about:blank" or input == "about:help" then
+    if input == "about:home" or input == "about:blank" or input == "about:help" or input == "home" or input == "help" then
+        if input == "home" then return "about:home", "about" end
+        if input == "help" then return "about:help", "about" end
         return input, "about"
     end
 
@@ -671,6 +673,7 @@ function M.get_help_page_html()
   <li><b>Ctrl-b</b> or <b>PageUp</b>: Scroll up full page</li>
   <li><b>gg</b>: Jump to the very top of document</li>
   <li><b>G</b>: Jump to the very bottom of document</li>
+  <li><b>gh</b>: <b>Go Home</b> (jump directly to about:home)</li>
 </ul>
 <h2>2. Links & Vimium Hint Mode</h2>
 <ul>
@@ -1357,7 +1360,7 @@ function Browser:render()
         emit("\27[1;30;43m " .. hint_prompt .. " \27[0m" .. string.rep(" ", pad))
     else
         local mode_tag = "\27[1;30;46m NORMAL \27[0m"
-        local shortcuts = "\27[90m[j/k] Scroll [f] Hint [o] Open [H/L] Hist [/] Find [:] Cmd [q] Quit\27[0m"
+        local shortcuts = "\27[90m[j/k] Scroll [gh] Home [f] Hint [o] Open [H/L] Hist [/] Find [:] Cmd [q] Quit\27[0m"
         local status_left = string.format("%s  \27[1;37m%s\27[0m", mode_tag, truncate(self.status_msg, 40))
         local right_info = string.format("%s  %s", shortcuts, pos_info)
         local pad = math.max(1, term_w - visual_len(status_left) - visual_len(right_info) - 1)
@@ -1390,6 +1393,8 @@ function Browser:handle_key(k)
             self.mode = "NORMAL"
             if cmd == "q" or cmd == "quit" then
                 self.running = false
+            elseif cmd == "home" then
+                self:navigate_to("about:home")
             elseif cmd == "help" or cmd == "h" then
                 self:navigate_to("about:help")
             elseif cmd == "r" or cmd == "reload" then
@@ -1486,6 +1491,10 @@ function Browser:handle_key(k)
         if k == "g" then
             self.scroll_y = 1
             self.status_msg = "Jumped to top."
+            return
+        elseif k == "h" then
+            self:navigate_to("about:home")
+            self.status_msg = "Navigated to Home."
             return
         end
     end

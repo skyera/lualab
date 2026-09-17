@@ -229,6 +229,32 @@ TestRunner.describe("4. Browser State Machine & Vim Navigation", function()
         b:handle_key("L")
         assert_eq(b.url, "about:help", "'L' should go forward to help")
     end)
+
+    TestRunner.it("should return to HOME via 'gh' key shortcut", function()
+        -- Ensure we are currently away from home
+        b:navigate_to("about:help")
+        assert_eq(b.url, "about:help")
+
+        -- Press 'g' then 'h'
+        b:handle_key("g")
+        b:handle_key("h")
+        assert_eq(b.url, "about:home", "'gh' must navigate directly to about:home")
+        assert_eq(b.scroll_y, 1, "viewport must reset to top")
+    end)
+
+    TestRunner.it("should return to HOME via ':home' command", function()
+        b:navigate_to("about:help")
+        assert_eq(b.url, "about:help")
+
+        b:handle_key(":")
+        assert_eq(b.mode, "COMMAND")
+        for char in string.gmatch("home", ".") do
+            b:handle_key(char)
+        end
+        b:handle_key("ENTER")
+        assert_eq(b.mode, "NORMAL")
+        assert_eq(b.url, "about:home", "':home' command must navigate to about:home")
+    end)
 end)
 
 -- 5. Chinese (CJK) Text Processing, Word Wrapping & Input
