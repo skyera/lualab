@@ -4695,22 +4695,28 @@ local function launch_mpv(filepath, seek_sec, use_window)
     local seek_part = (seek_sec and seek_sec > 0) and string.format(" --start=%.2f", seek_sec) or ""
     local mpv_log = get_mpv_stderr_log_path()
     local stderr_part = is_windows and " 2>nul" or (" 2>" .. string.format("%q", mpv_log))
+    local ext = (filepath:match("%.([^.]+)$") or ""):lower()
+    local is_rm = (ext == "rmvb" or ext == "rm")
+    local rm_opts = is_rm and " --video-sync=audio --autosync=30 --framedrop=vo --hr-seek=no --msg-level=ffmpeg=error" or ""
     local mpv_cmd
     if use_window then
         io.write("\27[H\27[2J")
         io.write("\27[1;36m> Launching MPV window: \27[1;33m" .. filepath .. "\27[0m\n")
+        if is_rm then
+            io.write("  \27[90m(RealMedia A/V sync recovery active: --video-sync=audio --autosync=30 --framedrop=vo --hr-seek=no)\27[0m\n")
+        end
         io.write("  \27[90m(Playing in external window; control playback in MPV, close window or press 'q' to return)\27[0m\n\n")
         io.flush()
-        mpv_cmd = string.format('mpv --hwdec=auto%s %q%s', seek_part, filepath, stderr_part)
+        mpv_cmd = string.format('mpv --hwdec=auto%s%s %q%s', rm_opts, seek_part, filepath, stderr_part)
     else
         mpv_cmd = string.format(
             'mpv --vo=tct --vo-tct-width=%d --vo-tct-height=%d'
             .. ' --term-osd-bar'
             .. ' --msg-level=all=no'
             .. ' --term-status-msg="  ${filename}  ${playback-time} / ${duration} (${percent-pos}%%)  Speed: ${speed}x"'
-            .. '%s %q%s',
+            .. '%s%s %q%s',
             math.max(4, term_w), math.max(4, term_h - 1),
-            seek_part, filepath, stderr_part)
+            rm_opts, seek_part, filepath, stderr_part)
     end
 
     local ret
