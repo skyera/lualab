@@ -613,7 +613,7 @@ M.smart_resolve_input  = smart_resolve_input
 -- =========================================================================
 -- 5. Network & HTTP/HTTPS Fetcher
 -- =========================================================================
-local function fetch_url(url)
+local function fetch_url(url, insecure)
     if url == "about:home" or url == "about:blank" then
         return M.get_home_page_html(), 200, "text/html"
     elseif url == "about:help" then
@@ -643,7 +643,8 @@ local function fetch_url(url)
     local escaped_url = url:gsub("\"", "\\\"")
     local tmp_dir = os.getenv("TEMP") or os.getenv("TMP") or "/tmp"
     local cookie_file = tmp_dir:gsub("\\", "/") .. "/weblite_cookies.txt"
-    local cmd = string.format("%s -sSL --max-time 15 -b \"%s\" -c \"%s\" -H \"Accept-Language: en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7\" -H \"Accept-Charset: utf-8, *;q=0.8\" -A \"%s\" \"%s\"", curl_cmd, cookie_file, cookie_file, user_agent, escaped_url)
+    local insecure_opt = insecure and " -k" or ""
+    local cmd = string.format("%s -sSL%s --max-time 15 -b \"%s\" -c \"%s\" -H \"Accept-Language: en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7\" -H \"Accept-Charset: utf-8, *;q=0.8\" -A \"%s\" \"%s\"", curl_cmd, insecure_opt, cookie_file, cookie_file, user_agent, escaped_url)
 
     local pipe = io.popen(cmd, is_windows and "rb" or "r")
     if not pipe then
@@ -1515,9 +1516,10 @@ end
 local Browser = {}
 Browser.__index = Browser
 
-function Browser.new(initial_url)
+function Browser.new(initial_url, insecure)
     local self = setmetatable({}, Browser)
     self.url = initial_url or "about:home"
+    self.insecure = insecure or false
     self.history = { self.url }
     self.history_idx = 1
     self.page_cache = {}
@@ -1590,7 +1592,7 @@ function Browser:load_url(target_url, from_history)
     end
 
     self.status_msg = "Fetching " .. target_url .. "..."
-    local html, status_code, content_type = fetch_url(target_url)
+    local html, status_code, content_type = fetch_url(target_url, self.insecure)
 
     self.raw_html = html
     self.doc = M.render_html_to_document(html, target_url, term_w - 4, self.reader_mode)
@@ -1598,7 +1600,8 @@ function Browser:load_url(target_url, from_history)
     self.scroll_y = 1
     self.selected_link_idx = 1
     self.search_matches = {}
-    self.status_msg = string.format("Loaded (%d lines, %d links)", #self.doc.lines, #self.doc.links)
+    self.status_msg = string.format("Loaded (%d lines, %d links)%s", #self.doc.lines, #self.doc.links,
+        self.insecure and " [INSECURE TLS]" or "")
 
     M.add_history_entry(target_url, self.doc and self.doc.title or target_url)
 end
@@ -1915,7 +1918,7 @@ function Browser:render()
         emit(status_left .. string.rep(" ", pad) .. right_info)
     end
 
-    io.write(table.concat(buf))
+    io.write("\27[?2026h" .. table.concat(buf) .. "\27[?2026l")
     io.flush()
 end
 
@@ -2368,10 +2371,10 @@ M.Browser = Browser
 -- =========================================================================
 -- 11. Headless Dump Mode & CLI Entry Point
 -- =========================================================================
-local function dump_page(url, max_width)
+local function dump_page(url, max_width, insecure)
     max_width = max_width or 80
     local resolved, _ = smart_resolve_input(url)
-    local html, code = fetch_url(resolved)
+    local html, code = fetch_url(resolved, insecure)
     local doc = M.render_html_to_document(html, resolved, max_width)
 
     print(string.format("=== %s (%s) ===\n", doc.title, resolved))
@@ -2392,6 +2395,7 @@ local function main(args)
     args = args or {}
     local dump_target = nil
     local target_url = "about:home"
+    local insecure = false
 
     local i = 1
     while i <= #args do
@@ -2399,11 +2403,14 @@ local function main(args)
         if a == "--dump" or a == "-d" then
             i = i + 1
             dump_target = args[i] or "about:home"
+        elseif a == "--insecure" or a == "--no-check-certificates" then
+            insecure = true
         elseif a == "--help" or a == "-h" then
             print("weblite: Modern Vim-Driven Terminal Web Browser for LuaJIT FFI")
             print("Usage:")
             print("  weblite [URL or Search Query]")
             print("  weblite --dump <URL>    (print rendered text to stdout)")
+            print("  weblite --insecure      (skip HTTPS certificate verification)")
             print("  weblite --test          (run unit test suite)")
             return 0
         elseif a == "--test" or a == "-t" then
@@ -2417,11 +2424,11 @@ local function main(args)
 
     if dump_target then
         local cols, _ = get_terminal_size()
-        dump_page(dump_target, cols or 80)
+        dump_page(dump_target, cols or 80, insecure)
         return 0
     end
 
-    local browser = Browser.new(target_url)
+    local browser = Browser.new(target_url, insecure)
     return browser:run()
 end
 
