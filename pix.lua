@@ -7,6 +7,7 @@
        - Scans current working directory ('.') by default, or an input directory provided via argument / prompt.
        - Level 1 scanning default, or recursive scanning via -r / --recursive.
        - Supports standard image formats: PNG, JPG/JPEG, PPM, WEBP, GIF, BMP.
+       - Supports video formats: MP4, MKV, WEBM, AVI, MOV, M4V, FLV, RMVB, RM.
        - Supports music formats: MP3, FLAC, WAV, OGG/OGA, M4A, AAC, OPUS, WMA.
     2. Interactive File Selector & TUI:
        - Hidden (dot) entries are skipped by default; [.] toggles them, or start with --hidden / -a.
@@ -86,6 +87,8 @@ local SUPPORTED_EXTENSIONS = {
     mov  = true,
     m4v  = true,
     flv  = true,
+    rmvb = true,
+    rm   = true,
     mp3  = true,
     flac = true,
     wav  = true,
@@ -105,6 +108,8 @@ local VIDEO_EXTENSIONS = {
     mov  = true,
     m4v  = true,
     flv  = true,
+    rmvb = true,
+    rm   = true,
 }
 
 local function is_animated_gif(path)
@@ -237,6 +242,8 @@ local EXTENSION_ICONS = {
         MOV  = "🎬",
         M4V  = "🎬",
         FLV  = "🎬",
+        RMVB = "🎬",
+        RM   = "🎬",
         MP3  = "🎵",
         FLAC = "🎵",
         WAV  = "🎵",
@@ -263,6 +270,8 @@ local EXTENSION_ICONS = {
         MOV  = "\238\180\157 ",
         M4V  = "\238\180\157 ",
         FLV  = "\238\180\157 ",
+        RMVB = "\238\180\157 ",
+        RM   = "\238\180\157 ",
         MP3  = "\238\170\157 ", -- 󰋋
         FLAC = "\238\170\157 ",
         WAV  = "\238\170\157 ",
@@ -5660,7 +5669,7 @@ local function main()
         print("  ffplay audio:         " .. ffplay_status .. " synchronized companion audio for in-TUI player")
         print("\nSupported formats:")
         print("  - Images: PNG, JPG/JPEG, PPM, WEBP, GIF, BMP")
-        print("  - Videos: MP4, MKV, WEBM, AVI, MOV, M4V, FLV (via mpv, libavcodec FFI, or ffmpeg)")
+        print("  - Videos: MP4, MKV, WEBM, AVI, MOV, M4V, FLV, RMVB, RM (via mpv, libavcodec FFI, or ffmpeg)")
         print("  - Music:  MP3, FLAC, WAV, OGG/OGA, M4A, AAC, OPUS, WMA (via ffplay)")
         os.exit(0)
     end
