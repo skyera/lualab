@@ -1198,7 +1198,7 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
         local sub_vis = (mode == "video" and not use_external_window) and "yes" or (show_cc and "yes" or "no")
         extra_mpv_opts = extra_mpv_opts .. string.format(" --sub-auto=all --sub-visibility=%s --slang=%s", sub_vis, to_mpv_slang(sub_lang))
         if mode == "video" and not use_external_window then
-            extra_mpv_opts = extra_mpv_opts .. " --sub-use-margins=yes --sub-pos=0 --sub-ass-use-video-data=no"
+            extra_mpv_opts = extra_mpv_opts .. " --sub-use-margins=yes --sub-pos=0 --sub-ass-use-video-data=none"
         end
     end
 
