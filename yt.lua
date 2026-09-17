@@ -950,6 +950,31 @@ local function build_mpv_status_msg(mode, show_cc)
     end
 end
 
+local function to_mpv_slang(sub_lang)
+    if not sub_lang or sub_lang == "" or sub_lang == "en.*" or sub_lang == "en" then
+        return "en,eng,en-GB,en-US,en-orig"
+    end
+    local parts = {}
+    for lang in sub_lang:gmatch("[^,]+") do
+        local clean = lang:gsub("%.%*", ""):gsub("%*", ""):match("^%s*(.-)%s*$")
+        if #clean > 0 then
+            table.insert(parts, clean)
+            if clean == "en" then
+                table.insert(parts, "eng")
+                table.insert(parts, "en-GB")
+                table.insert(parts, "en-US")
+                table.insert(parts, "en-orig")
+            elseif clean == "zh" then
+                table.insert(parts, "chi")
+                table.insert(parts, "zho")
+                table.insert(parts, "zh-Hans")
+                table.insert(parts, "zh-Hant")
+            end
+        end
+    end
+    return #parts > 0 and table.concat(parts, ",") or "en,eng,en-GB,en-US,en-orig"
+end
+
 -- =========================================================================
 -- 5. Background Mini-Player & Foreground Playback Controller
 -- =========================================================================
@@ -1009,8 +1034,7 @@ function MpvController:start(item, show_cc, sub_lang, browser, cookies_file, pro
         extra_mpv_opts = extra_mpv_opts .. string.format(" --http-proxy=%q", proxy)
     end
     if show_cc then
-        local lang_pref = sub_lang or "en,eng"
-        extra_mpv_opts = extra_mpv_opts .. string.format(" --sub-auto=all --sub-visibility=yes --slang=%s", lang_pref)
+        extra_mpv_opts = extra_mpv_opts .. string.format(" --sub-auto=all --sub-visibility=yes --slang=%s", to_mpv_slang(sub_lang))
     end
 
     local cmd
@@ -1147,7 +1171,7 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     end
 
     local raw_opts = { "extractor-args=youtube:player_client=android" }
-    if show_cc then
+    if show_cc or mode == "video" then
         table.insert(raw_opts, "write-subs=")
         table.insert(raw_opts, "write-auto-subs=")
         table.insert(raw_opts, string.format("sub-langs=%s", sub_lang or "en.*"))
@@ -1172,9 +1196,9 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     if proxy and #proxy > 0 then
         extra_mpv_opts = extra_mpv_opts .. string.format(" --http-proxy=%q", proxy)
     end
-    if show_cc then
-        local lang_pref = sub_lang or "en,eng"
-        extra_mpv_opts = extra_mpv_opts .. string.format(" --sub-auto=all --sub-visibility=yes --slang=%s", lang_pref)
+    if show_cc or mode == "video" then
+        local sub_vis = show_cc and "yes" or "no"
+        extra_mpv_opts = extra_mpv_opts .. string.format(" --sub-auto=all --sub-visibility=%s --slang=%s", sub_vis, to_mpv_slang(sub_lang))
     end
 
     local term_w, term_h = get_terminal_size()
@@ -1586,6 +1610,9 @@ local function show_help_modal()
         line_pad("\27[1;36m|    \27[93m[<- / ->]\27[0m     Seek backward / forward 5 seconds"),
         line_pad("\27[1;36m|    \27[93m[9 / 0]\27[0m       Volume down / Volume up (-/+10%)"),
         line_pad("\27[1;36m|    \27[93m[q]\27[0m           Quit application"),
+        line_pad("\27[1;36m|  \27[1;33mMPV Video Window Controls:\27[0m"),
+        line_pad("\27[1;36m|    \27[93m[v]\27[0m           Toggle subtitle visibility (Show/Hide CC)"),
+        line_pad("\27[1;36m|    \27[93m[j / J]\27[0m       Cycle subtitle tracks / languages"),
         string.format("\27[1;36m+%s+\27[0m", string.rep("-", box_w - 2)),
         line_pad("\27[1;36m|  \27[90mPress any key to close this help modal...\27[0m"),
         string.format("\27[1;36m+%s+\27[0m", string.rep("-", box_w - 2)),
@@ -2116,6 +2143,14 @@ local function run_self_tests()
         assert(kernel32.CloseHandle ~= nil, "kernel32.CloseHandle must be defined")
         print("  [✓] Win32 Named Pipe FFI bindings validated")
     end
+
+    -- 13. Subtitle / slang language expansion
+    assert(to_mpv_slang("en.*") == "en,eng,en-GB,en-US,en-orig", "to_mpv_slang default expansion failed")
+    assert(to_mpv_slang("en") == "en,eng,en-GB,en-US,en-orig", "to_mpv_slang en expansion failed")
+    assert(to_mpv_slang("zh.*") == "zh,chi,zho,zh-Hans,zh-Hant", "to_mpv_slang zh expansion failed")
+    assert(to_mpv_slang("es.*") == "es", "to_mpv_slang es strip wildcard failed")
+    assert(to_mpv_slang("fr,de") == "fr,de", "to_mpv_slang multiple list failed")
+    print("  [✓] to_mpv_slang language expansion passed")
 
     print("=== All Internal Self-Tests Passed Successfully ===")
     return true
