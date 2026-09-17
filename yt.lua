@@ -942,7 +942,10 @@ local function build_mpv_status_msg(mode, show_cc)
         end
         return msg
     else
-        -- Terminal video CC is rendered by mpv in the top margin, not terminal status.
+        -- Keep terminal-video status to a short CC-only line so it remains visible on Windows.
+        if show_cc then
+            return "${sub-text?  >> CC: ${sub-text}}"
+        end
         return ""
     end
 end
@@ -1194,12 +1197,9 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
         extra_mpv_opts = extra_mpv_opts .. string.format(" --http-proxy=%q", proxy)
     end
     if show_cc or mode == "video" then
-        -- Keep terminal-video CC in the top margin; terminal status redraw is unreliable on Windows.
-        local sub_vis = (mode == "video" and not use_external_window) and "yes" or (show_cc and "yes" or "no")
+        -- Terminal video uses the status line for CC; GUI video uses normal subtitle rendering.
+        local sub_vis = (mode == "video" and not use_external_window) and "no" or (show_cc and "yes" or "no")
         extra_mpv_opts = extra_mpv_opts .. string.format(" --sub-auto=all --sub-visibility=%s --slang=%s", sub_vis, to_mpv_slang(sub_lang))
-        if mode == "video" and not use_external_window then
-            extra_mpv_opts = extra_mpv_opts .. " --sub-use-margins=yes --sub-pos=0 --sub-ass-use-video-data=none"
-        end
     end
 
     local term_w, term_h = get_terminal_size()
@@ -1222,16 +1222,16 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
         else
             -- Terminal ASCII/Half-block video:
             -- 1. vo-tct-buffering=frame eliminates redraw tearing
-            -- 2. Render CC in a top margin above the video frame
-            -- 3. Reserve terminal rows for the top CC band
-            -- 4. Disable terminal status output to prevent Windows cursor/redraw artifacts
-            local h_offset = 4
-            local video_margin_top = 0.15
+            -- 2. Keep a fixed bottom area for the short CC-only status line
+            -- 3. Avoid title/time wrapping, which leaves stale rows on Windows consoles
+            local h_offset = 5
             mpv_cmd = string.format(
-                'mpv --vo=tct --vo-tct-buffering=frame --video-margin-ratio-top=%.2f --vo-tct-width=%d --vo-tct-height=%d --load-scripts=no --hwdec=auto --term-osd=no --term-status-msg="" '
+                'mpv --vo=tct --vo-tct-buffering=frame --sub-visibility=no --video-margin-ratio-bottom=0.15 --vo-tct-width=%d --vo-tct-height=%d --load-scripts=no --hwdec=auto --term-osd=no '
                 .. '--ytdl-format="bestvideo[height<=480]+bestaudio/best[height<=480]/best" '
+                .. '--term-status-msg="%s" '
                 .. '%s%s %q',
-                video_margin_top, math.max(10, term_w), math.max(6, term_h - h_offset),
+                math.max(10, term_w), math.max(6, term_h - h_offset),
+                status_msg,
                 ytdl_raw_opts, extra_mpv_opts, item.url
             )
         end
@@ -2100,7 +2100,8 @@ local function run_self_tests()
     assert(status_music:find("sub-text", 1, true), "Music CC status format missing sub-text")
     assert(status_music:find("CC/Lyrics:", 1, true), "Music CC status format missing label")
     local status_video = build_mpv_status_msg("video", true)
-    assert(status_video == "", "Video CC should use the MPV top margin instead of terminal status")
+    assert(status_video:find("sub-text", 1, true), "Video CC status format missing sub-text")
+    assert(status_video:find("CC:", 1, true), "Video CC status format missing label")
     local status_no_cc = build_mpv_status_msg("music", false)
     assert(not status_no_cc:find("sub-text", 1, true), "Non-CC status should not contain sub-text")
     print("  [✓] CC / Lyrics status formatting passed")
