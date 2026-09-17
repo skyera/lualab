@@ -942,9 +942,9 @@ local function build_mpv_status_msg(mode, show_cc)
         end
         return msg
     else
-        -- Keep terminal-video status to a short CC-only line so it remains visible on Windows.
+        -- Move CC one row below the tct frame without embedding newlines, which leaves stale rows.
         if show_cc then
-            return "${sub-text?  >> CC: ${sub-text}}"
+            return "\27[1B\27[2K${sub-text?  >> CC: ${sub-text}}\27[1A"
         end
         return ""
     end
@@ -2100,6 +2100,8 @@ local function run_self_tests()
     assert(status_music:find("sub-text", 1, true), "Music CC status format missing sub-text")
     assert(status_music:find("CC/Lyrics:", 1, true), "Music CC status format missing label")
     local status_video = build_mpv_status_msg("video", true)
+    assert(status_video:find("\27[1B", 1, true), "Video CC status must move below the video frame")
+    assert(status_video:find("\27[1A", 1, true), "Video CC status must restore the cursor position")
     assert(status_video:find("sub-text", 1, true), "Video CC status format missing sub-text")
     assert(status_video:find("CC:", 1, true), "Video CC status format missing label")
     local status_no_cc = build_mpv_status_msg("music", false)
