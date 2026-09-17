@@ -942,14 +942,10 @@ local function build_mpv_status_msg(mode, show_cc)
         end
         return msg
     else
-        -- Terminal video mode:
-        -- 1. Leading \n creates an empty line of space between video and CC text
-        -- 2. CC text renders below the space, followed by title and duration
+        -- Video mode: single line status without newlines to prevent vo-tct relative cursor drift
         local msg = ""
         if show_cc then
-            msg = "\\n${sub-text?  >> CC: ${sub-text}\\n}"
-        else
-            msg = "\\n"
+            msg = "${sub-text?  >> CC: ${sub-text}  |  }"
         end
         msg = msg .. "  ${media-title}  [${playback-time} / ${duration}]"
         return msg
@@ -1228,12 +1224,13 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
             mpv_cmd = string.format('mpv --hwdec=auto --term-status-msg="%s" %s%s %q', status_msg, ytdl_raw_opts, extra_mpv_opts, item.url)
         else
             -- Terminal ASCII/Half-block video:
-            -- 1. Budget 6 rows for footer (blank separator + CC line + title + OSD bar) to prevent terminal scroll-flicker
-            -- 2. vo-tct-buffering=frame eliminates redraw tearing
-            -- 3. sub-visibility=no keeps video frame clean without pixelated burnt-in text (CC rendered cleanly below)
-            local h_offset = 6
+            -- 1. vo-tct-buffering=frame eliminates redraw tearing
+            -- 2. sub-visibility=no strictly prevents burning vector subtitles into video half-blocks
+            -- 3. video-margin-ratio-bottom=0.08 leaves clean vertical space between video and CC text
+            -- 4. term-osd-bar=no and single-line status_msg prevent vo-tct relative cursor drift and overlap
+            local h_offset = 3
             mpv_cmd = string.format(
-                'mpv --vo=tct --vo-tct-buffering=frame --sub-visibility=no --vo-tct-width=%d --vo-tct-height=%d --load-scripts=no --hwdec=auto --term-osd-bar '
+                'mpv --vo=tct --vo-tct-buffering=frame --sub-visibility=no --video-margin-ratio-bottom=0.08 --vo-tct-width=%d --vo-tct-height=%d --load-scripts=no --hwdec=auto --term-osd-bar=no '
                 .. '--ytdl-format="bestvideo[height<=480]+bestaudio/best[height<=480]/best" '
                 .. '--term-status-msg="%s" '
                 .. '%s%s %q',
