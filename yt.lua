@@ -961,11 +961,11 @@ local function build_mpv_status_msg(mode, show_cc)
         end
         return msg
     else
-        -- Move CC one row below the tct frame without embedding newlines, which leaves stale rows.
+        -- Keep progress immediately below the frame and render normalized CC beneath it.
         if show_cc then
-            return "\27[s\27[1B\27[2K\27[1B\27[2K\27[1B\27[2K\27[2A\27[1B${?user-data/yt-cc:  >> CC: ${user-data/yt-cc}}\27[1B[${playback-time} / ${duration}]\27[u"
+            return "\27[s\27[1B\27[2K\27[1B\27[2K\27[1B\27[2K\27[2A\27[1B[${playback-time} / ${duration}]\27[1B${?user-data/yt-cc:  >> CC: ${user-data/yt-cc}}\27[u"
         end
-        return "\27[s\27[1B\27[2K\27[1B\27[2K\27[1B\27[2K\27[2A\27[1B\27[1B[${playback-time} / ${duration}]\27[u"
+        return "\27[s\27[1B\27[2K\27[1B\27[2K\27[1B\27[2K\27[2A\27[1B[${playback-time} / ${duration}]\27[u"
     end
 end
 
@@ -2150,6 +2150,9 @@ local function run_self_tests()
     assert(status_video:find("CC:", 1, true), "Video CC status format missing label")
     assert(status_video:find("${playback-time}", 1, true), "Video status format missing playback time")
     assert(status_video:find("${duration}", 1, true), "Video status format missing duration")
+    local progress_pos = status_video:find("[${playback-time}", 1, true)
+    local cc_pos = status_video:find("${?user-data/yt-cc:", 1, true)
+    assert(progress_pos and cc_pos and progress_pos < cc_pos, "Video status should place progress before CC")
     local status_no_cc = build_mpv_status_msg("music", false)
     assert(not status_no_cc:find("sub-text", 1, true), "Non-CC status should not contain sub-text")
     print("  [✓] CC / Lyrics status formatting passed")
