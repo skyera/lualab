@@ -1039,10 +1039,10 @@ function MpvController:start(item, show_cc, sub_lang, browser, cookies_file, pro
 
     local cmd
     if is_windows then
-        cmd = string.format('start /B "" mpv --no-video --idle=yes --input-ipc-server=%s --ytdl-format="bestaudio/best" %s%s %q >nul 2>&1',
+        cmd = string.format('start /B "" mpv --no-video --load-scripts=no --idle=yes --input-ipc-server=%s --ytdl-format="bestaudio/best" %s%s %q >nul 2>&1',
             pipe_path, ytdl_raw_opts, extra_mpv_opts, item.url)
     else
-        cmd = string.format('mpv --no-video --idle=yes --input-ipc-server=%s --ytdl-format="bestaudio/best" %s%s %q >/dev/null 2>&1 &',
+        cmd = string.format('mpv --no-video --load-scripts=no --idle=yes --input-ipc-server=%s --ytdl-format="bestaudio/best" %s%s %q >/dev/null 2>&1 &',
             pipe_path, ytdl_raw_opts, extra_mpv_opts, item.url)
     end
     safe_execute(cmd)
@@ -1202,13 +1202,13 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     end
 
     local term_w, term_h = get_terminal_size()
-    local status_msg = build_mpv_status_msg(mode, show_cc)
+    local status_msg = build_mpv_status_msg(mode, show_cc or mode == "video")
     local mpv_cmd
 
     if mode == "music" then
-        -- Audio-only streaming with OSD status
+        -- Audio-only streaming with OSD status (terminal mode: load-scripts=no)
         mpv_cmd = string.format(
-            'mpv --no-video --hwdec=auto --term-osd-bar --ytdl-format="bestaudio/best" '
+            'mpv --no-video --load-scripts=no --hwdec=auto --term-osd-bar --ytdl-format="bestaudio/best" '
             .. '--term-status-msg="%s" '
             .. '%s%s %q',
             status_msg, ytdl_raw_opts, extra_mpv_opts, item.url
@@ -1216,12 +1216,13 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     else
         -- Video playback
         if use_external_window then
+            -- GUI window mode: keep scripts enabled (mpv-cut, shaders, OSC, etc. work in GUI window)
             mpv_cmd = string.format('mpv --hwdec=auto --term-status-msg="%s" %s%s %q', status_msg, ytdl_raw_opts, extra_mpv_opts, item.url)
         else
-            -- Terminal ASCII/Half-block video (capped to 480p for performance & bandwidth efficiency)
-            local h_offset = show_cc and 2 or 1
+            -- Terminal ASCII/Half-block video: load-scripts=no to prevent script log spam & key interception in terminal
+            local h_offset = 2
             mpv_cmd = string.format(
-                'mpv --vo=tct --vo-tct-width=%d --vo-tct-height=%d --hwdec=auto --term-osd-bar '
+                'mpv --vo=tct --vo-tct-width=%d --vo-tct-height=%d --load-scripts=no --hwdec=auto --term-osd-bar '
                 .. '--ytdl-format="bestvideo[height<=480]+bestaudio/best[height<=480]/best" '
                 .. '--term-status-msg="%s" '
                 .. '%s%s %q',
