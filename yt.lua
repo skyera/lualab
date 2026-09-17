@@ -1226,10 +1226,10 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
             -- Terminal ASCII/Half-block video:
             -- 1. vo-tct-buffering=frame eliminates redraw tearing
             -- 2. sub-visibility=no strictly prevents burning vector subtitles into video half-blocks
-            -- 3. Reserve additional terminal rows so the status/CC line is clearly separated from the video frame
+            -- 3. Reserve more terminal rows so the status/CC line is clearly separated from the video frame
             -- 4. video-margin-ratio-bottom=0.08 leaves additional space inside the video area
             -- 5. term-osd-bar=no and single-line status_msg prevent vo-tct relative cursor drift
-            local h_offset = 7
+            local h_offset = 10
             mpv_cmd = string.format(
                 'mpv --vo=tct --vo-tct-buffering=frame --sub-visibility=no --video-margin-ratio-bottom=0.08 --vo-tct-width=%d --vo-tct-height=%d --load-scripts=no --hwdec=auto --term-osd-bar=no '
                 .. '--ytdl-format="bestvideo[height<=480]+bestaudio/best[height<=480]/best" '
