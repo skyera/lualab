@@ -54,7 +54,6 @@ local bit = require("bit")
 local is_windows = (ffi.os == "Windows")
 local M = {}
 package.loaded["weblite"] = M
-package.loaded["web_lite"] = M
 
 -- =========================================================================
 -- 1. Platform FFI Declarations (Windows & POSIX)
@@ -699,19 +698,7 @@ end
 
 local function get_bookmarks_file_path()
     local home = os.getenv("USERPROFILE") or os.getenv("HOME") or os.getenv("TEMP") or "."
-    local new_path = home:gsub("\\", "/") .. "/.weblite_bookmarks.txt"
-    local old_path = home:gsub("\\", "/") .. "/.web_lite_bookmarks.txt"
-    local f = io.open(new_path, "r")
-    if f then
-        f:close()
-        return new_path
-    end
-    local f_old = io.open(old_path, "r")
-    if f_old then
-        f_old:close()
-        return old_path
-    end
-    return new_path
+    return home:gsub("\\", "/") .. "/.weblite_bookmarks.txt"
 end
 
 local function load_bookmarks()
@@ -807,19 +794,7 @@ end
 
 local function get_history_file_path()
     local home = os.getenv("USERPROFILE") or os.getenv("HOME") or os.getenv("TEMP") or "."
-    local new_path = home:gsub("\\", "/") .. "/.weblite_history.txt"
-    local old_path = home:gsub("\\", "/") .. "/.web_lite_history.txt"
-    local f = io.open(new_path, "r")
-    if f then
-        f:close()
-        return new_path
-    end
-    local f_old = io.open(old_path, "r")
-    if f_old then
-        f_old:close()
-        return old_path
-    end
-    return new_path
+    return home:gsub("\\", "/") .. "/.weblite_history.txt"
 end
 
 local function load_history(limit, custom_path)
@@ -2455,7 +2430,7 @@ M.main = main
 local is_entry_point = false
 if arg and arg[0] then
     local script_name = arg[0]:match("([^/\\]+)$")
-    if script_name and (script_name == "weblite.lua" or script_name == "weblite" or script_name == "web_lite.lua" or script_name == "web_lite" or script_name == "wl") then
+    if script_name and (script_name == "weblite.lua" or script_name == "weblite" or script_name == "wl") then
         is_entry_point = true
     end
 end
