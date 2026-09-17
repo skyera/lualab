@@ -463,6 +463,25 @@ local function get_history_file()
     return get_cache_dir() .. (is_windows and "\\" or "/") .. "history.json"
 end
 
+local function get_mpv_cc_script()
+    local script_file = get_cache_dir() .. (is_windows and "\\" or "/") .. "yt_cc.lua"
+    local f, err = io.open(script_file, "w")
+    if not f then
+        return nil, "Unable to create MPV CC helper: " .. tostring(err)
+    end
+    f:write([[
+local mp = require "mp"
+
+mp.observe_property("sub-text", "string", function(_, value)
+    value = value or ""
+    value = value:gsub("[\r\n]+", " "):gsub("^%s*>>%s*", "")
+    mp.set_property("user-data/yt-cc", value)
+end)
+]])
+    f:close()
+    return script_file
+end
+
 local function codepoint_to_utf8(cp)
     if cp < 0x80 then
         return string.char(cp)
@@ -938,13 +957,13 @@ local function build_mpv_status_msg(mode, show_cc)
     if mode == "music" then
         local msg = "  ${media-title}  [${playback-time} / ${duration}]  Vol: ${volume}%"
         if show_cc then
-            msg = msg .. "${?sub-text:\\n  >> CC/Lyrics: ${sub-text}}"
+            msg = msg .. "${?user-data/yt-cc:\\n  >> CC/Lyrics: ${user-data/yt-cc}}"
         end
         return msg
     else
         -- Move CC one row below the tct frame without embedding newlines, which leaves stale rows.
         if show_cc then
-            return "\27[s\27[1B\27[2K\27[1B\27[2K\27[1B\27[2K\27[2A\27[1B${?sub-text:  >> CC: ${sub-text}}\27[1B[${playback-time} / ${duration}]\27[u"
+            return "\27[s\27[1B\27[2K\27[1B\27[2K\27[1B\27[2K\27[2A\27[1B${?user-data/yt-cc:  >> CC: ${user-data/yt-cc}}\27[1B[${playback-time} / ${duration}]\27[u"
         end
         return "\27[s\27[1B\27[2K\27[1B\27[2K\27[1B\27[2K\27[2A\27[1B\27[1B[${playback-time} / ${duration}]\27[u"
     end
@@ -1195,6 +1214,16 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     end
     if proxy and #proxy > 0 then
         extra_mpv_opts = extra_mpv_opts .. string.format(" --http-proxy=%q", proxy)
+    end
+    local cc_script
+    if show_cc or mode == "video" then
+        local script_err
+        cc_script, script_err = get_mpv_cc_script()
+        if not cc_script then
+            io.stderr:write(script_err .. "\n")
+            return 1
+        end
+        extra_mpv_opts = extra_mpv_opts .. string.format(" --script=%q", cc_script)
     end
     if show_cc or mode == "video" then
         -- Terminal video uses the status line for CC; GUI video uses normal subtitle rendering.
@@ -2109,7 +2138,7 @@ local function run_self_tests()
 
     -- 8. CC / Lyrics status message formatting
     local status_music = build_mpv_status_msg("music", true)
-    assert(status_music:find("${?sub-text:", 1, true), "Music CC status format missing conditional sub-text")
+    assert(status_music:find("${?user-data/yt-cc:", 1, true), "Music CC status format missing conditional CC property")
     assert(status_music:find("CC/Lyrics:", 1, true), "Music CC status format missing label")
     local status_video = build_mpv_status_msg("video", true)
     assert(status_video:find("\27[1B", 1, true), "Video CC status must move below the video frame")
@@ -2117,7 +2146,7 @@ local function run_self_tests()
     assert(status_video:find("\27[2K", 1, true), "Video status must clear each dedicated output row")
     assert(status_video:find("\27[1A", 1, true) == nil, "Video status must not use embedded newlines")
     assert(status_video:find("\27%[u") or status_video:find("\27[u", 1, true), "Video CC status must restore the original cursor")
-    assert(status_video:find("${?sub-text:", 1, true), "Video CC status format missing conditional sub-text")
+    assert(status_video:find("${?user-data/yt-cc:", 1, true), "Video CC status format missing conditional CC property")
     assert(status_video:find("CC:", 1, true), "Video CC status format missing label")
     assert(status_video:find("${playback-time}", 1, true), "Video status format missing playback time")
     assert(status_video:find("${duration}", 1, true), "Video status format missing duration")
