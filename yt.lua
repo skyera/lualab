@@ -777,12 +777,27 @@ local function scrape_youtube_search(query, max_results, proxy, insecure)
     return items
 end
 
-local function fetch_youtube_results(query, mode, browser, cookies_file, max_results, is_liked, proxy, insecure, filters)
+local SITE_SEARCH_PREFIXES = {
+    youtube = "ytsearch",
+    soundcloud = "scsearch",
+    twitch = "twsearch",
+}
+
+local function normalize_site(site)
+    site = (site or "youtube"):lower():gsub("^https?://", ""):gsub("^www%.", "")
+    if site == "youtube.com" or site == "music.youtube.com" then return "youtube" end
+    if site == "soundcloud.com" then return "soundcloud" end
+    if site == "twitch.tv" then return "twitch" end
+    return site
+end
+
+local function fetch_youtube_results(query, mode, browser, cookies_file, max_results, is_liked, proxy, insecure, filters, site)
     max_results = max_results or 20
+    site = normalize_site(site)
     local is_direct_url = query:match("^https?://") or query:match("^www%.") or query:match("^youtu%.be/")
     local term = query
 
-    if not is_liked and not is_direct_url then
+    if not is_liked and not is_direct_url and site == "youtube" then
         if mode == "music" and not query:lower():find("music") and not query:lower():find("song") and not query:lower():find("audio") then
             term = query .. " music"
         end
@@ -801,6 +816,8 @@ local function fetch_youtube_results(query, mode, browser, cookies_file, max_res
             end
         elseif is_direct_url then
             search_spec = string.format("%q", query)
+        elseif SITE_SEARCH_PREFIXES[site] then
+            search_spec = string.format('"%s%d:%s"', SITE_SEARCH_PREFIXES[site], max_results, term:gsub('"', '\\"'))
         elseif filters and filters.sort and filters.sort ~= "relevance" then
             local sp_map = {
                 views = "CAM%253D",
@@ -818,7 +835,11 @@ local function fetch_youtube_results(query, mode, browser, cookies_file, max_res
             search_spec = string.format('"ytsearch%d:%s"', max_results, term:gsub('"', '\\"'))
         end
 
-        local extra_opts = " --extractor-args=\"youtube:player_client=android\""
+        if not is_direct_url and not SITE_SEARCH_PREFIXES[site] and not is_liked then
+            return nil, "Text search is not supported for site '" .. site .. "'. Use a direct URL or a supported site (youtube, soundcloud, twitch).", insecure
+        end
+
+        local extra_opts = site == "youtube" and " --extractor-args=\"youtube:player_client=android\"" or ""
         if browser and #browser > 0 then
             extra_opts = extra_opts .. string.format(" --cookies-from-browser %s", browser)
         elseif cookies_file and #cookies_file > 0 then
@@ -844,18 +865,24 @@ local function fetch_youtube_results(query, mode, browser, cookies_file, max_res
                     local id = parse_json_field(line, "id")
                     local title = parse_json_field(line, "title")
                     if id and title then
-                        local uploader = parse_json_field(line, "uploader") or parse_json_field(line, "channel") or "YouTube"
+                        local uploader = parse_json_field(line, "uploader") or parse_json_field(line, "channel") or site
                         local duration = parse_json_field(line, "duration") or 0
                         local thumb = parse_json_field(line, "thumbnail")
-                        table.insert(items, {
-                            id = id,
-                            url = "https://www.youtube.com/watch?v=" .. id,
-                            title = title,
-                            uploader = uploader,
-                            duration = duration,
-                            duration_str = format_duration(duration),
-                            thumbnail = thumb,
-                        })
+                        local item_url = parse_json_field(line, "webpage_url") or parse_json_field(line, "url")
+                        if not item_url and site == "youtube" then
+                            item_url = "https://www.youtube.com/watch?v=" .. id
+                        end
+                        if item_url then
+                            table.insert(items, {
+                                id = id,
+                                url = item_url,
+                                title = title,
+                                uploader = uploader,
+                                duration = duration,
+                                duration_str = format_duration(duration),
+                                thumbnail = thumb,
+                            })
+                        end
                     end
                 else
                     if line:find("ERROR") or line:find("WARNING") or line:find("SSL") or line:find("bot") then
@@ -890,7 +917,7 @@ local function fetch_youtube_results(query, mode, browser, cookies_file, max_res
     local err_text = table.concat(err_lines, "\n")
     if not insecure and (err_text:find("CERTIFICATE_VERIFY_FAILED") or err_text:find("certificate verify failed") or err_text:find("SSL") or err_text:find("certificate problem")) then
         io.stderr:write("\n\27[33m[yt] Corporate SSL inspection detected -- retrying in insecure mode...\27[0m\n")
-        local retry_items, retry_err = fetch_youtube_results(query, mode, browser, cookies_file, max_results, is_liked, proxy, true, filters)
+        local retry_items, retry_err = fetch_youtube_results(query, mode, browser, cookies_file, max_results, is_liked, proxy, true, filters, site)
         if retry_items and #retry_items > 0 then
             return retry_items, nil, true
         end
@@ -898,7 +925,7 @@ local function fetch_youtube_results(query, mode, browser, cookies_file, max_res
     end
 
     -- Automatic Fallback: Direct Web Scrape via curl (works even if yt-dlp is blocked or broken)
-    if not is_liked and not is_direct_url then
+    if site == "youtube" and not is_liked and not is_direct_url then
         local fallback_items = scrape_youtube_search(term, max_results, proxy, insecure)
         if fallback_items and #fallback_items > 0 then
             return fallback_items, nil, insecure
@@ -925,6 +952,8 @@ local function fetch_youtube_results(query, mode, browser, cookies_file, max_res
         return nil, "yt-dlp error: " .. first_err:sub(1, 70), insecure
     elseif not HAS_YTDLP then
         return nil, "yt-dlp is not installed and web fallback returned 0 items.", insecure
+    elseif not is_direct_url and not SITE_SEARCH_PREFIXES[site] then
+        return nil, "Text search is not supported for site '" .. site .. "'. Use a direct URL or a supported site (youtube, soundcloud, twitch).", insecure
     end
 
     return nil, "No results found for '" .. query .. "'.", insecure
@@ -1674,11 +1703,12 @@ end
 -- =========================================================================
 -- 7. Main Interactive TUI Application
 -- =========================================================================
-local function run_app(init_query, init_mode, browser, cookies_file, is_liked, use_window, proxy, insecure, init_show_cc, init_sub_lang, init_filters)
+local function run_app(init_query, init_mode, browser, cookies_file, is_liked, use_window, proxy, insecure, init_show_cc, init_sub_lang, init_filters, init_site)
     local current_query = init_query or ""
     local mode = init_mode or "music"
     local show_cc = (init_show_cc ~= nil) and init_show_cc or true
     local sub_lang = init_sub_lang or "en.*"
+    local site = normalize_site(init_site)
     local selected_idx = 1
     local scroll_offset = 0
     local auto_play = false
@@ -1704,11 +1734,11 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         if active_filters.sort ~= "relevance" or active_filters.duration ~= "all" then
             filter_tag = string.format(" [Sort: %s, Dur: %s]", active_filters.sort, active_filters.duration)
         end
-        io.write(string.format("\n  \27[1;36m* Searching YouTube (%s mode%s): \27[1;93m%s\27[0m ...\n",
-            mode:upper(), filter_tag, is_liked and "Liked Songs" or current_query))
+        io.write(string.format("\n  \27[1;36m* Searching %s (%s mode%s): \27[1;93m%s\27[0m ...\n",
+            site:upper(), mode:upper(), filter_tag, is_liked and "Liked Songs" or current_query))
         io.flush()
 
-        local res, err, used_insecure = fetch_youtube_results(current_query, mode, browser, cookies_file, 25, is_liked, proxy, insecure, active_filters)
+        local res, err, used_insecure = fetch_youtube_results(current_query, mode, browser, cookies_file, 25, is_liked, proxy, insecure, active_filters, site)
         if used_insecure then
             insecure = true
         end
@@ -2211,7 +2241,16 @@ local function run_self_tests()
     assert(#short_items == 1 and short_items[1].id == "1", "Duration filter short logic failed")
     print("  [✓] Search Filters & Sorting validation passed")
 
-    -- 12. Win32 Named Pipe FFI bindings
+    -- 12. Site search adapters
+    assert(normalize_site(nil) == "youtube", "Default site normalization failed")
+    assert(normalize_site("youtube.com") == "youtube", "YouTube site normalization failed")
+    assert(normalize_site("https://soundcloud.com") == "soundcloud", "SoundCloud site normalization failed")
+    assert(SITE_SEARCH_PREFIXES.youtube == "ytsearch", "YouTube search adapter missing")
+    assert(SITE_SEARCH_PREFIXES.soundcloud == "scsearch", "SoundCloud search adapter missing")
+    assert(SITE_SEARCH_PREFIXES.twitch == "twsearch", "Twitch search adapter missing")
+    print("  [✓] Site search adapters passed")
+
+    -- 13. Win32 Named Pipe FFI bindings
     if is_windows then
         assert(kernel32 ~= nil, "kernel32 library handle must be initialized")
         assert(kernel32.CreateFileA ~= nil, "kernel32.CreateFileA must be defined")
@@ -2245,6 +2284,7 @@ local function print_help()
     print("  -d, --download <q|url> Download track offline to ./downloads/ (MP3 for music, MP4 for video)")
     print("  --sort <type>         Sort search results (relevance, views, date, rating)")
     print("  --duration <type>     Filter results by duration (all, short, medium, long)")
+    print("  --site <name>         Search site: youtube, soundcloud, or twitch (default: youtube)")
     print("  -c, --cc, --lyrics    Show Closed Captions (CC) / lyrics (enabled by default)")
     print("  --no-cc               Disable Closed Captions (CC) / lyrics")
     print("  --sub-lang <lang>     Preferred subtitle/lyrics language pattern (default: en.*)")
@@ -2286,6 +2326,9 @@ local function print_help()
     print("  luajit yt.lua -d \"https://www.youtube.com/watch?v=dQw4w9WgXcQ\"")
     print("  luajit yt.lua --sort views --duration short \"piano relax\"")
     print("  luajit yt.lua --music --lyrics \"never gonna give you up\"")
+    print("  luajit yt.lua --site soundcloud --music \"jazz\"")
+    print("  luajit yt.lua --site twitch --video \"developer stream\"")
+    print("  luajit yt.lua --site vimeo --video \"https://vimeo.com/123456789\"")
     print("  luajit yt.lua --music --browser firefox")
     print("  luajit yt.lua --insecure \"lofi hip hop\"")
     print("  luajit yt.lua --proxy http://proxy:8080 \"jazz lounge\"")
@@ -2304,6 +2347,7 @@ local function main()
     local sub_lang = "en.*"
     local download_target = nil
     local active_filters = { sort = "relevance", duration = "all" }
+    local site = "youtube"
 
     local env_proxy = os.getenv("YT_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")
     local proxy = (env_proxy and #env_proxy > 0) and env_proxy or nil
@@ -2345,6 +2389,9 @@ local function main()
         elseif a == "--duration" then
             i = i + 1
             active_filters.duration = (arg[i] or "all"):lower()
+        elseif a == "--site" then
+            i = i + 1
+            site = normalize_site(arg[i])
         elseif a == "--liked" then
             is_liked = true
         elseif a == "--no-interactive" then
@@ -2382,9 +2429,9 @@ local function main()
                 uploader = "YouTube",
             }
         else
-            io.write(string.format("\27[1;36m* Searching YouTube for download (%s mode): \27[1;93m%s\27[0m ...\n", mode:upper(), download_target))
+            io.write(string.format("\27[1;36m* Searching %s for download (%s mode): \27[1;93m%s\27[0m ...\n", site:upper(), mode:upper(), download_target))
             io.flush()
-            local res, err = fetch_youtube_results(download_target, mode, browser, cookies_file, 1, false, proxy, insecure, active_filters)
+            local res, err = fetch_youtube_results(download_target, mode, browser, cookies_file, 1, false, proxy, insecure, active_filters, site)
             if res and #res > 0 then
                 target_item = res[1]
             else
@@ -2398,14 +2445,14 @@ local function main()
 
     if non_interactive or (not is_stdin_tty()) then
         local q = query or "lofi hip hop"
-        local res, err, used_insecure = fetch_youtube_results(q, mode, browser, cookies_file, max_results, is_liked, proxy, insecure, active_filters)
+        local res, err, used_insecure = fetch_youtube_results(q, mode, browser, cookies_file, max_results, is_liked, proxy, insecure, active_filters, site)
         if not res then
             io.stderr:write("Error: " .. tostring(err) .. "\n")
             os.exit(1)
         end
         local sec_note = (used_insecure or insecure) and " [CORP SSL/INSECURE]" or ""
         local filter_note = (active_filters.sort ~= "relevance" or active_filters.duration ~= "all") and string.format(" [Sort: %s, Dur: %s]", active_filters.sort, active_filters.duration) or ""
-        print(string.format("\27[1;36m=== YouTube Results for '%s' (%s mode)%s%s ===\27[0m", q, mode:upper(), filter_note, sec_note))
+        print(string.format("\27[1;36m=== %s Results for '%s' (%s mode)%s%s ===\27[0m", site:upper(), q, mode:upper(), filter_note, sec_note))
         for idx, item in ipairs(res) do
             local t_disp = utf8_truncate(item.title, 50)
             local t_pad = string.rep(" ", math.max(0, 50 - display_width(t_disp)))
@@ -2416,7 +2463,7 @@ local function main()
         return
     end
 
-    run_app(query, mode, browser, cookies_file, is_liked, use_window, proxy, insecure, show_cc, sub_lang, active_filters)
+    run_app(query, mode, browser, cookies_file, is_liked, use_window, proxy, insecure, show_cc, sub_lang, active_filters, site)
 end
 
 main()
