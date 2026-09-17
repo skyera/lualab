@@ -69,6 +69,8 @@ if is_windows then
         BOOL GetConsoleScreenBufferInfo(HANDLE hConsoleOutput, CONSOLE_SCREEN_BUFFER_INFO* lpConsoleScreenBufferInfo);
         BOOL GetConsoleMode(HANDLE hConsoleHandle, DWORD* lpMode);
         BOOL SetConsoleMode(HANDLE hConsoleHandle, DWORD dwMode);
+        BOOL SetConsoleOutputCP(DWORD wCodePageID);
+        BOOL SetConsoleCP(DWORD wCodePageID);
         DWORD GetTickCount(void);
         void Sleep(DWORD dwMilliseconds);
 
@@ -83,6 +85,18 @@ if is_windows then
 
     local orig_in_mode = ffi.new("DWORD[1]")
     local raw_mode_enabled = false
+
+    -- Initialize Windows UTF-8 console output and ANSI Virtual Terminal Processing
+    pcall(function()
+        kernel32.SetConsoleOutputCP(65001)
+        kernel32.SetConsoleCP(65001)
+        local hOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        local out_mode = ffi.new("DWORD[1]")
+        if kernel32.GetConsoleMode(hOut, out_mode) ~= 0 then
+            local ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+            kernel32.SetConsoleMode(hOut, bit.bor(out_mode[0], ENABLE_VIRTUAL_TERMINAL_PROCESSING))
+        end
+    end)
 
     is_stdin_tty = function()
         return ffi.C._isatty(0) ~= 0
@@ -378,6 +392,20 @@ local function unescape_unicode(s)
     return s
 end
 
+local function sanitize_display_text(s)
+    if not s or type(s) ~= "string" then return "" end
+    -- 1. Strip SMP 4-byte UTF-8 emojis (U+1F000 - U+1FFFF: e.g. 🎧, 🔥, 🚀)
+    s = s:gsub("[\240-\244][\128-\191][\128-\191][\128-\191]", "")
+    -- 2. Strip Dingbats, Misc Symbols (U+2600 - U+27BF: 3-byte UTF-8 e.g. ✨ \u2728, 🎵, ❤, ⚡, ★)
+    s = s:gsub("[\226][\152-\158][\128-\191]", "")
+    -- 3. Strip Variation Selectors (U+FE00 - U+FE0F)
+    s = s:gsub("[\239][\184][\128-\143]", "")
+    -- 4. Strip zero-width spaces (\226\128[\139-\141])
+    s = s:gsub("[\226][\128][\139-\141]", "")
+    -- 5. Normalize whitespace
+    return s:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
 local function parse_json_field(line, key)
     local pat = '"' .. key .. '"%s*:%s*"'
     local s, e = line:find(pat)
@@ -401,7 +429,11 @@ local function parse_json_field(line, key)
                     pos = pos + 4
                 else table.insert(chars, next_b) end
             elseif b == '"' then
-                return unescape_unicode(table.concat(chars))
+                local res = unescape_unicode(table.concat(chars))
+                if key == "title" or key == "uploader" or key == "channel" then
+                    res = sanitize_display_text(res)
+                end
+                return res
             else
                 table.insert(chars, b)
             end
@@ -527,8 +559,8 @@ local function scrape_youtube_search(query, max_results, proxy, insecure)
             table.insert(items, {
                 id = id,
                 url = "https://www.youtube.com/watch?v=" .. id,
-                title = unescape_unicode(title),
-                uploader = unescape_unicode(channel),
+                title = sanitize_display_text(unescape_unicode(title)),
+                uploader = sanitize_display_text(unescape_unicode(channel)),
                 duration = 0,
                 duration_str = duration_str,
                 thumbnail = string.format("https://i.ytimg.com/vi/%s/hqdefault.jpg", id),
@@ -623,7 +655,7 @@ local function fetch_youtube_results(query, mode, browser, cookies_file, max_res
     -- Check if SSL verification failed and auto-retry in insecure mode
     local err_text = table.concat(err_lines, "\n")
     if not insecure and (err_text:find("CERTIFICATE_VERIFY_FAILED") or err_text:find("certificate verify failed") or err_text:find("SSL") or err_text:find("certificate problem")) then
-        io.stderr:write("\n\27[33m[yt] Corporate SSL inspection detected — retrying in insecure mode...\27[0m\n")
+        io.stderr:write("\n\27[33m[yt] Corporate SSL inspection detected -- retrying in insecure mode...\27[0m\n")
         local retry_items, retry_err = fetch_youtube_results(query, mode, browser, cookies_file, max_results, is_liked, proxy, true)
         if retry_items and #retry_items > 0 then
             return retry_items, nil, true
@@ -639,7 +671,7 @@ local function fetch_youtube_results(query, mode, browser, cookies_file, max_res
         elseif not insecure then
             local fallback_insecure = scrape_youtube_search(term, max_results, proxy, true)
             if fallback_insecure and #fallback_insecure > 0 then
-                io.stderr:write("\n\27[33m[yt] Corporate SSL inspection detected (curl) — retrying in insecure mode...\27[0m\n")
+                io.stderr:write("\n\27[33m[yt] Corporate SSL inspection detected (curl) -- retrying in insecure mode...\27[0m\n")
                 return fallback_insecure, nil, true
             end
         end
@@ -757,7 +789,7 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     end
 
     disable_raw_mode()
-    io.write("\27[H\27[2J\27[1;36m▶ Connecting to YouTube stream: \27[1;33m" .. item.title .. "\27[0m\n\n")
+    io.write("\27[H\27[2J\27[1;36m> Connecting to YouTube stream: \27[1;33m" .. item.title .. "\27[0m\n\n")
     io.flush()
 
     local exit_code = os.execute(mpv_cmd)
@@ -778,8 +810,8 @@ local function prompt_search_query(current_query)
     local input_str = ""
 
     local function draw_modal()
-        io.write(string.format("\27[%d;%dH\27[1;36m┌%s┐\27[0m", box_y, box_x, string.rep("─", box_w - 2)))
-        io.write(string.format("\27[%d;%dH\27[1;36m│ \27[1;37mSearch YouTube / URL:\27[0m%s\27[1;36m│\27[0m",
+        io.write(string.format("\27[%d;%dH\27[1;36m+%s+\27[0m", box_y, box_x, string.rep("-", box_w - 2)))
+        io.write(string.format("\27[%d;%dH\27[1;36m| \27[1;37mSearch YouTube / URL:\27[0m%s\27[1;36m|\27[0m",
             box_y + 1, box_x, string.rep(" ", box_w - 24)))
         
         local display_input = input_str
@@ -787,11 +819,11 @@ local function prompt_search_query(current_query)
             display_input = display_input:sub(#display_input - (box_w - 9))
         end
         local pad = math.max(0, box_w - 6 - #display_input)
-        io.write(string.format("\27[%d;%dH\27[1;36m│ \27[93m> %s\27[7m \27[0m%s\27[1;36m│\27[0m",
+        io.write(string.format("\27[%d;%dH\27[1;36m| \27[93m> %s\27[7m \27[0m%s\27[1;36m|\27[0m",
             box_y + 2, box_x, display_input, string.rep(" ", pad)))
-        io.write(string.format("\27[%d;%dH\27[1;36m│ \27[90m[Enter] Search   [Esc] Cancel\27[0m%s\27[1;36m│\27[0m",
+        io.write(string.format("\27[%d;%dH\27[1;36m| \27[90m[Enter] Search   [Esc] Cancel\27[0m%s\27[1;36m|\27[0m",
             box_y + 3, box_x, string.rep(" ", box_w - 32)))
-        io.write(string.format("\27[%d;%dH\27[1;36m└%s┘\27[0m", box_y + 4, box_x, string.rep("─", box_w - 2)))
+        io.write(string.format("\27[%d;%dH\27[1;36m+%s+\27[0m", box_y + 4, box_x, string.rep("-", box_w - 2)))
         io.flush()
     end
 
@@ -827,31 +859,31 @@ local function show_help_modal()
 
     local function line_pad(text, visual_len)
         local pad = math.max(0, box_w - 2 - visual_len)
-        return text .. string.rep(" ", pad) .. "│"
+        return text .. string.rep(" ", pad) .. "|"
     end
 
     local help_lines = {
-        "┌" .. string.rep("─", box_w - 2) .. "┐",
-        line_pad("│  \27[1;36mYouTube Terminal Viewer — Shortcut Cheat Sheet\27[0m", 47),
-        "├" .. string.rep("─", box_w - 2) .. "┤",
-        line_pad("│  \27[1;33mTerminal Navigation & Controls:\27[0m", 32),
-        line_pad("│    \27[93m[Enter]\27[0m       Play selected video or music track", 45),
-        line_pad("│    \27[93m[/]\27[0m           Open search modal or paste direct URL", 48),
-        line_pad("│    \27[93m[a]\27[0m           Toggle continuous Auto-Play (Radio mode)", 51),
-        line_pad("│    \27[93m[h]\27[0m           Toggle Playback History (recent tracks)", 50),
-        line_pad("│    \27[93m[m]\27[0m           Toggle between Music and Video mode", 46),
-        line_pad("│    \27[93m[L]\27[0m           Toggle Liked Songs playlist", 38),
-        line_pad("│    \27[93m[↑/↓, k/j]\27[0m    Navigate results list", 33),
-        line_pad("│    \27[93m[PgUp/PgDn]\27[0m   Scroll 10 tracks up or down", 38),
-        line_pad("│  \27[1;33mIn-Playback Controls (mpv):\27[0m", 28),
-        line_pad("│    \27[93m[Space]\27[0m       Pause / Resume playback", 34),
-        line_pad("│    \27[93m[← / →]\27[0m       Seek backward / forward 5 seconds", 44),
-        line_pad("│    \27[93m[9 / 0]\27[0m       Volume down / Volume up", 34),
-        line_pad("│    \27[93m[[ / ]]\27[0m       Speed down / Speed up (±10%)", 39),
-        line_pad("│    \27[93m[q]\27[0m           Stop playing and return to browser", 45),
-        "├" .. string.rep("─", box_w - 2) .. "┤",
-        line_pad("│  \27[90mPress any key to close this help modal...\27[0m", 41),
-        "└" .. string.rep("─", box_w - 2) .. "┘",
+        "+" .. string.rep("-", box_w - 2) .. "+",
+        line_pad("|  \27[1;36mYouTube Terminal Viewer -- Shortcut Cheat Sheet\27[0m", 47),
+        "+" .. string.rep("-", box_w - 2) .. "+",
+        line_pad("|  \27[1;33mTerminal Navigation & Controls:\27[0m", 32),
+        line_pad("|    \27[93m[Enter]\27[0m       Play selected video or music track", 45),
+        line_pad("|    \27[93m[/]\27[0m           Open search modal or paste direct URL", 48),
+        line_pad("|    \27[93m[a]\27[0m           Toggle continuous Auto-Play (Radio mode)", 51),
+        line_pad("|    \27[93m[h]\27[0m           Toggle Playback History (recent tracks)", 50),
+        line_pad("|    \27[93m[m]\27[0m           Toggle between Music and Video mode", 46),
+        line_pad("|    \27[93m[L]\27[0m           Toggle Liked Songs playlist", 38),
+        line_pad("|    \27[93m[Up/Dn, k/j]\27[0m  Navigate results list", 33),
+        line_pad("|    \27[93m[PgUp/PgDn]\27[0m   Scroll 10 tracks up or down", 38),
+        line_pad("|  \27[1;33mIn-Playback Controls (mpv):\27[0m", 28),
+        line_pad("|    \27[93m[Space]\27[0m       Pause / Resume playback", 34),
+        line_pad("|    \27[93m[<- / ->]\27[0m     Seek backward / forward 5 seconds", 44),
+        line_pad("|    \27[93m[9 / 0]\27[0m       Volume down / Volume up", 34),
+        line_pad("|    \27[93m[[ / ]]\27[0m       Speed down / Speed up (+/-10%)", 39),
+        line_pad("|    \27[93m[q]\27[0m           Stop playing and return to browser", 45),
+        "+" .. string.rep("-", box_w - 2) .. "+",
+        line_pad("|  \27[90mPress any key to close this help modal...\27[0m", 41),
+        "+" .. string.rep("-", box_w - 2) .. "+",
     }
 
     for idx, line in ipairs(help_lines) do
@@ -886,7 +918,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
 
         local term_w, term_h = get_terminal_size()
         io.write("\27[H\27[2J")
-        io.write(string.format("\n  \27[1;36m⟳ Searching YouTube (%s mode): \27[1;93m%s\27[0m ...\n",
+        io.write(string.format("\n  \27[1;36m* Searching YouTube (%s mode): \27[1;93m%s\27[0m ...\n",
             mode:upper(), is_liked and "Liked Songs" or current_query))
         io.flush()
 
@@ -928,20 +960,20 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         local auto_badge = auto_play and "\27[1;92m[AUTO: ON]\27[0m" or "\27[90m[AUTO: OFF]\27[0m"
         local sec_badge = insecure and " | \27[1;33m[CORP SSL]\27[0m" or ""
         local header = string.format(" \27[1;36mYouTube Terminal Viewer\27[0m | %s | %s | \27[90m%s\27[0m%s", mode_badge, auto_badge, auth_label, sec_badge)
-        table.insert(buf, "\27[1;34m" .. string.rep("═", term_w) .. "\27[0m\n")
+        table.insert(buf, "\27[1;34m" .. string.rep("=", term_w) .. "\27[0m\n")
         table.insert(buf, header .. "\27[K\n")
 
         -- 2. Query / Search Subheader
         local q_display
         if is_history then
-            q_display = "\27[1;95m🕒 Playback History\27[0m"
+            q_display = "\27[1;95m[History] Playback History\27[0m"
         elseif is_liked then
-            q_display = "\27[1;95m★ Liked Songs Playlist\27[0m"
+            q_display = "\27[1;95m[Liked] Liked Songs Playlist\27[0m"
         else
             q_display = '"' .. current_query .. '"'
         end
         table.insert(buf, string.format("  \27[90mSearch:\27[0m %s  \27[90m(%s)\27[0m\27[K\n", q_display, status_msg))
-        table.insert(buf, "\27[1;34m" .. string.rep("─", term_w) .. "\27[0m\n")
+        table.insert(buf, "\27[1;34m" .. string.rep("-", term_w) .. "\27[0m\n")
 
         -- 3. Results List
         if #items == 0 then
@@ -953,19 +985,19 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                 if idx <= #items then
                     local it = items[idx]
                     local is_sel = (idx == selected_idx)
-                    local cursor = is_sel and "\27[1;92m❯ " or "  "
+                    local cursor = is_sel and "\27[1;92m> " or "  "
                     
                     local max_title_w = math.max(15, term_w - 38)
                     local t = it.title
                     if #t > max_title_w then
-                        t = t:sub(1, max_title_w - 1) .. "…"
+                        t = t:sub(1, max_title_w - 2) .. ".."
                     end
                     local title_pad = string.rep(" ", math.max(0, max_title_w - #t))
 
                     local max_up_w = 18
                     local up = it.uploader
                     if #up > max_up_w then
-                        up = up:sub(1, max_up_w - 1) .. "…"
+                        up = up:sub(1, max_up_w - 2) .. ".."
                     end
                     local up_pad = string.rep(" ", math.max(0, max_up_w - #up))
 
@@ -986,7 +1018,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
 
         -- 4. Footer Help
         local auto_footer = auto_play and "\27[1;92mON\27[0m" or "\27[90mOFF\27[0m"
-        table.insert(buf, "\27[1;34m" .. string.rep("─", term_w) .. "\27[0m\n")
+        table.insert(buf, "\27[1;34m" .. string.rep("-", term_w) .. "\27[0m\n")
         table.insert(buf, string.format(" \27[93m[Enter]\27[0m Play  \27[93m[/]\27[0m Search  \27[93m[a]\27[0m Auto:%s  \27[93m[h]\27[0m History  \27[93m[m]\27[0m Mode  \27[93m[?]\27[0m Help  \27[91m[q]\27[0m Quit\27[K", auto_footer))
         
         io.write(table.concat(buf))
@@ -1100,7 +1132,15 @@ local function run_self_tests()
     assert(format_duration(3661) == "1:01:01", "format_duration h:mm:ss failed")
     print("  [✓] format_duration passed")
 
-    -- 5. save_history_item & load_history_items
+    -- 5. sanitize_display_text
+    local raw_title = "Best of lofi hip hop 2021 \226\156\168 [beats to relax/study to]" -- contains ✨
+    local sanitized = sanitize_display_text(raw_title)
+    assert(sanitized == "Best of lofi hip hop 2021 [beats to relax/study to]", "sanitize_display_text failed: " .. sanitized)
+    local emoji_title = "\240\159\148\165 HOT HITS \240\159\142\167 Pop" -- 🔥, 🎧
+    assert(sanitize_display_text(emoji_title) == "HOT HITS Pop", "sanitize_display_text failed on emojis")
+    print("  [✓] sanitize_display_text passed")
+
+    -- 6. save_history_item & load_history_items
     local test_item = {
         id = "selftest_" .. tostring(os.time()),
         title = "Self Test Video - " .. tostring(os.time()),
@@ -1130,7 +1170,7 @@ local function run_self_tests()
 end
 
 local function print_help()
-    print("\27[1;36myt.lua — Cross-Platform YouTube & Music Terminal Player (LuaJIT FFI)\27[0m")
+    print("\27[1;36myt.lua -- Cross-Platform YouTube & Music Terminal Player (LuaJIT FFI)\27[0m")
     print("\nUsage:")
     print("  ./LuaJIT/src/luajit yt.lua [query | url] [options]")
     print("\nOptions:")
