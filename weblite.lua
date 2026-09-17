@@ -581,11 +581,12 @@ local function smart_resolve_input(input)
     input = input:match("^%s*(.-)%s*$")
     input = input:gsub("^(https):/+://", "%1://")
     input = input:gsub("^(http):/+://", "%1://")
-    if input == "about:home" or input == "about:blank" or input == "about:help" or input == "about:bookmarks" or input == "about:history" or input == "home" or input == "help" or input == "bookmarks" or input == "b" or input == "history" or input == "hist" then
+    if input == "about:home" or input == "about:blank" or input == "about:help" or input == "about:bookmarks" or input == "about:history" or input == "about:links" or input == "home" or input == "help" or input == "bookmarks" or input == "b" or input == "history" or input == "hist" or input == "links" then
         if input == "home" then return "about:home", "about" end
         if input == "help" then return "about:help", "about" end
         if input == "bookmarks" or input == "b" then return "about:bookmarks", "about" end
         if input == "history" or input == "hist" then return "about:history", "about" end
+        if input == "links" then return "about:links", "about" end
         return input, "about"
     end
 
@@ -624,6 +625,8 @@ local function fetch_url(url, insecure)
         return M.get_bookmarks_page_html(), 200, "text/html"
     elseif url == "about:history" then
         return M.get_history_page_html(), 200, "text/html"
+    elseif url == "about:links" then
+        return M.get_home_page_html(), 200, "text/html"
     end
 
     if url:match("^file://") or url:match("^[A-Za-z]:[\\/]") or (is_windows and url:match("^[A-Za-z]:")) then
@@ -646,8 +649,9 @@ local function fetch_url(url, insecure)
     local tmp_dir = os.getenv("TEMP") or os.getenv("TMP") or "/tmp"
     local cookie_file = tmp_dir:gsub("\\", "/") .. "/weblite_cookies.txt"
     local error_file = tmp_dir:gsub("\\", "/") .. "/weblite_curl_error.txt"
+    local header_file = tmp_dir:gsub("\\", "/") .. "/weblite_curl_headers.txt"
     local insecure_opt = insecure and " -k" or ""
-    local cmd = string.format("%s -sSL%s --connect-timeout 10 --max-time 15 -b \"%s\" -c \"%s\" -H \"Accept-Language: en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7\" -H \"Accept-Charset: utf-8, *;q=0.8\" -A \"%s\" \"%s\" 2>\"%s\"", curl_cmd, insecure_opt, cookie_file, cookie_file, user_agent, escaped_url, error_file)
+    local cmd = string.format("%s -sSL%s --connect-timeout 10 --max-time 15 -D \"%s\" -b \"%s\" -c \"%s\" -H \"Accept-Language: en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7\" -H \"Accept-Charset: utf-8, *;q=0.8\" -A \"%s\" \"%s\" 2>\"%s\"", curl_cmd, insecure_opt, header_file, cookie_file, cookie_file, user_agent, escaped_url, error_file)
 
     local pipe = io.popen(cmd, is_windows and "rb" or "r")
     if not pipe then
@@ -660,7 +664,17 @@ local function fetch_url(url, insecure)
     local error_handle = io.open(error_file, "rb")
     local error_text = error_handle and error_handle:read("*a") or ""
     if error_handle then error_handle:close() end
+    local header_handle = io.open(header_file, "rb")
+    local headers = header_handle and header_handle:read("*a") or ""
+    if header_handle then header_handle:close() end
     os.remove(error_file)
+    os.remove(header_file)
+    local content_type = headers:match("[Cc]ontent%-[Tt]ype:%s*([^;\r\n]+)") or "text/html"
+    local final_url = headers:match("[Ll]ocation:%s*([^\r\n]+)") or url
+    if M.debug then
+        io.stderr:write(string.format("[weblite] %s -> %s (%s)%s\n", url, final_url, content_type, insecure and " [insecure]" or ""))
+        if error_text ~= "" then io.stderr:write("[weblite] curl: " .. error_text) end
+    end
 
     -- Auto-solve Reddit client challenge if encountered
     if body and body:find('name="jsc_token"') then
@@ -693,10 +707,14 @@ local function fetch_url(url, insecure)
         return string.format("<html><body><h1>Connection Failed</h1><p>Could not connect to: %s</p>%s<p>Please check your internet connection or URL.</p></body></html>", url, detail), 502, "text/html"
     end
 
-    return body, 200, "text/html"
+    return body, 200, content_type, false, final_url
 end
 
 M.fetch_url = fetch_url
+M.get_content_type = function(content_type)
+    local value = (content_type or ""):lower():match("^%s*([^;]+)") or ""
+    return value:match("^%s*(.-)%s*$") or ""
+end
 
 -- =========================================================================
 -- 6. Built-in Pages & Bookmarks Management
@@ -844,6 +862,10 @@ local function add_history_entry(url, title, custom_path)
     if not url or url == "" or url:match("^about:") then return false end
     title = title or url
     local path = custom_path or get_history_file_path()
+    local existing = load_history(1, path)
+    if existing[1] and existing[1].url == url then
+        return true, "duplicate"
+    end
     local f, err = io.open(path, "a")
     if not f then return false, err end
     local ts = os.date("%Y-%m-%d %H:%M")
@@ -949,12 +971,13 @@ function M.get_home_page_html()
   <tr><td><b>m / :mark</b></td><td>Bookmark Page</td><td>Save current page to ~/.weblite_bookmarks.txt</td></tr>
   <tr><td><b>gb / :b</b></td><td>Bookmarks Page</td><td>Open your saved bookmarks list (about:bookmarks)</td></tr>
   <tr><td><b>gH / :history</b></td><td>History Page</td><td>Open your session browsing history (about:history)</td></tr>
+  <tr><td><b>gl / :links</b></td><td>Links Page</td><td>Show every link extracted from the current page</td></tr>
   <tr><td><b>:toc</b></td><td>Table of Contents</td><td>View outline of all document headings</td></tr>
   <tr><td><b>o / O</b></td><td><b>Open URL / Search</b></td><td>Open the Omnibox prompt to enter website or search query</td></tr>
   <tr><td><b>H / L</b></td><td>History Back / Fwd</td><td>Navigate back and forward in browsing history (instant cache)</td></tr>
   <tr><td><b>/</b></td><td>Search in Page</td><td>Search text (press 'n' for next, 'N' for previous)</td></tr>
   <tr><td><b>:w &lt;file&gt;</b></td><td>Export Page</td><td>Save rendered text (or raw HTML if .html) to local file</td></tr>
-  <tr><td><b>:</b></td><td>Command Mode</td><td>Type :open, :reload, :reader, :toc, :help, or :q</td></tr>
+  <tr><td><b>:</b></td><td>Command Mode</td><td>Type :open, :back, :forward, :links, :reload, :reader, :toc, :help, or :q</td></tr>
   <tr><td><b>q</b></td><td>Quit</td><td>Exit weblite</td></tr>
 </table>
 <hr>
@@ -1026,6 +1049,7 @@ function M.get_help_page_html()
   <li><b>m</b> or <b>:mark [title]</b>: Bookmark current page to ~/.weblite_bookmarks.txt</li>
   <li><b>gb</b> or <b>:b</b> or <b>:bookmarks</b>: Open your Bookmarks page (about:bookmarks)</li>
   <li><b>gH</b> or <b>:history</b>: Open your full Browsing History page (about:history)</li>
+  <li><b>gl</b> or <b>:links</b>: List all links extracted from the current page</li>
   <li><b>:w &lt;filename&gt;</b>: Export rendered document lines (or raw HTML if .html) to local file</li>
 </ul>
 <h2>7. Browser Commands & History</h2>
@@ -1035,6 +1059,7 @@ function M.get_help_page_html()
   <li><b>r</b> or <b>R</b>: Reload current page (refetches fresh from network)</li>
   <li><b>yy</b>: Copy (yank) current page address to clipboard</li>
   <li><b>:open &lt;url&gt;</b>: Navigate to URL</li>
+  <li><b>:back</b> / <b>:forward</b>: Navigate browser history</li>
   <li><b>:help</b>: Display this help page</li>
   <li><b>:q</b>: Quit weblite</li>
 </ul>
@@ -1576,6 +1601,7 @@ function Browser.new(initial_url, insecure)
     self.hint_action = nil
     self.status_msg = "Ready. Press '?' or 'h' for help."
     self.needs_render = true
+    self.sync_updates = not is_windows or os.getenv("WT_SESSION") ~= nil or os.getenv("TERM_PROGRAM") == "vscode"
     self.running = true
     return self
 end
@@ -1624,20 +1650,24 @@ function Browser:load_url(target_url, from_history)
         self.selected_link_idx = cached.selected_link_idx or 1
         self.search_matches = {}
         self.status_msg = string.format("Restored from cache (%d lines, %d links)", #self.doc.lines, #self.doc.links)
+        self.needs_render = true
         return
     end
 
     self.status_msg = "Fetching " .. target_url .. "..."
-    local html, status_code, content_type, used_fallback = fetch_url(target_url, self.insecure)
+    local html, status_code, content_type, used_fallback, final_url = fetch_url(target_url, self.insecure)
 
     self.raw_html = html
-    self.doc = M.render_html_to_document(html, target_url, term_w - 4, self.reader_mode)
-    self.url = target_url
+    self.doc = M.render_html_to_document(html, final_url or target_url, term_w - 4, self.reader_mode)
+    self.url = final_url or target_url
     self.scroll_y = 1
     self.selected_link_idx = 1
     self.search_matches = {}
     local security_status = (self.insecure or used_fallback) and " [INSECURE TLS]" or ""
-    self.status_msg = string.format("Loaded (%d lines, %d links)%s", #self.doc.lines, #self.doc.links, security_status)
+    local type_label = M.get_content_type(content_type)
+    local type_suffix = type_label ~= "text/html" and " [" .. type_label .. "]" or ""
+    self.status_msg = string.format("Loaded (%d lines, %d links)%s%s",
+        #self.doc.lines, #self.doc.links, type_suffix, security_status)
     self.needs_render = true
 
     M.add_history_entry(target_url, self.doc and self.doc.title or target_url)
@@ -1763,6 +1793,7 @@ function Browser:show_toc()
         self.status_msg = "No headings on current page for TOC."
         return
     end
+
     local prev_url = self.url
     local buf = {}
     table.insert(buf, "<!DOCTYPE html><html><head><title>Table of Contents</title></head><body>")
@@ -1798,6 +1829,40 @@ function Browser:show_toc()
     self.scroll_y = 1
     self.selected_link_idx = 1
     self.status_msg = string.format("Table of Contents (%d headings). Press 'H' to return.", #self.doc.headings)
+end
+
+function Browser:show_links()
+    if not self.doc or not self.doc.links or #self.doc.links == 0 then
+        self.status_msg = "No links on current page."
+        return
+    end
+    local buf = {
+        "<!DOCTYPE html><html><head><title>Links</title></head><body>",
+        "<h1>Links</h1>",
+        string.format("<p>Links from: <b>%s</b></p><hr><ol>", (self.doc.title or self.url):gsub("<", "&lt;"):gsub(">", "&gt;"))
+    }
+    for _, link in ipairs(self.doc.links) do
+        local text = (link.text or link.href):gsub("<", "&lt;"):gsub(">", "&gt;")
+        local href = (link.href or ""):gsub("&", "&amp;"):gsub('"', "&quot;")
+        table.insert(buf, string.format("<li><a href=\"%s\"><b>[%d]</b> %s</a><br><code>%s</code></li>",
+            href, link.id, text, href))
+    end
+    table.insert(buf, "</ol><hr><p><a href=\"about:home\">Home</a> | <a href=\"about:help\">Help</a></p></body></html>")
+
+    self.page_cache[self.url] = {
+        doc = self.doc, raw_html = self.raw_html, scroll_y = self.scroll_y,
+        selected_link_idx = self.selected_link_idx, last_term_w = self.last_term_w,
+        reader_mode = self.reader_mode
+    }
+    table.insert(self.history, self.url)
+    self.history_idx = #self.history
+    local term_w = get_terminal_size()
+    self.url = "about:links"
+    self.raw_html = table.concat(buf, "\n")
+    self.doc = M.render_html_to_document(self.raw_html, self.url, term_w - 4)
+    self.scroll_y = 1
+    self.selected_link_idx = 1
+    self.status_msg = string.format("Links (%d). Press 'H' to return.", #self.doc.links)
 end
 
 function Browser:toggle_reader_mode()
@@ -1956,7 +2021,12 @@ function Browser:render()
         emit(status_left .. string.rep(" ", pad) .. right_info)
     end
 
-    io.write("\27[?2026h" .. table.concat(buf) .. "\27[?2026l")
+    local frame = table.concat(buf)
+    if self.sync_updates then
+        io.write("\27[?2026h" .. frame .. "\27[?2026l")
+    else
+        io.write(frame)
+    end
     io.flush()
 end
 
@@ -1991,6 +2061,14 @@ function Browser:handle_key(k)
                 self:navigate_to("about:bookmarks")
             elseif cmd == "history" or cmd == "hist" then
                 self:navigate_to("about:history")
+            elseif cmd == "links" then
+                self:show_links()
+            elseif cmd == "back" then
+                self:history_back()
+            elseif cmd == "forward" then
+                self:history_forward()
+            elseif cmd == "stop" then
+                self.status_msg = "No active request."
             elseif cmd == "toc" then
                 self:show_toc()
             elseif cmd == "reader" or cmd == "rdr" then
@@ -2164,6 +2242,9 @@ function Browser:handle_key(k)
             return
         elseif k == "t" or k == "T" then
             self:show_toc()
+            return
+        elseif k == "l" or k == "L" then
+            self:show_links()
             return
         elseif k == "]" then
             self:jump_heading_next()
@@ -2391,19 +2472,24 @@ function Browser:run()
         return 1
     end
 
-    self:load_url(self.url)
+    local ok, err = pcall(function()
+        self:load_url(self.url)
 
-    while self.running do
-        if self.needs_render then
-            self:render()
+        while self.running do
+            if self.needs_render then
+                self:render()
+            end
+            local k = read_key(50)
+            if k then
+                self:handle_key(k)
+            end
         end
-        local k = read_key(50)
-        if k then
-            self:handle_key(k)
-        end
-    end
-
+    end)
     disable_raw_mode()
+    if not ok then
+        io.stderr:write("weblite error: " .. tostring(err) .. "\n")
+        return 1
+    end
     return 0
 end
 
@@ -2437,6 +2523,7 @@ local function main(args)
     local dump_target = nil
     local target_url = "about:home"
     local insecure = false
+    M.debug = false
 
     local i = 1
     while i <= #args do
@@ -2446,12 +2533,15 @@ local function main(args)
             dump_target = args[i] or "about:home"
         elseif a == "--insecure" or a == "--no-check-certificates" then
             insecure = true
+        elseif a == "--debug" then
+            M.debug = true
         elseif a == "--help" or a == "-h" then
             print("weblite: Modern Vim-Driven Terminal Web Browser for LuaJIT FFI")
             print("Usage:")
             print("  weblite [URL or Search Query]")
             print("  weblite --dump <URL>    (print rendered text to stdout)")
             print("  weblite --insecure      (skip HTTPS certificate verification)")
+            print("  weblite --debug         (log network requests and curl errors)")
             print("  weblite --test          (run unit test suite)")
             return 0
         elseif a == "--test" or a == "-t" then

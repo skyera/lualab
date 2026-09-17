@@ -102,6 +102,27 @@ TestRunner.describe("2. URL Resolution & Smart Omnibox Input", function()
         local u5, mode5 = web.smart_resolve_input("r/programming")
         assert_eq(u5, "https://www.reddit.com/r/programming", "r/<subname> must resolve to reddit")
         assert_eq(mode5, "url")
+
+        local u6, mode6 = web.smart_resolve_input("links")
+        assert_eq(u6, "about:links")
+        assert_eq(mode6, "about")
+    end)
+end)
+
+TestRunner.describe("2b. Response Metadata & Link Tools", function()
+    TestRunner.it("should normalize content types", function()
+        assert_eq(web.get_content_type("text/html; charset=UTF-8"), "text/html")
+        assert_eq(web.get_content_type(" application/json "), "application/json")
+    end)
+
+    TestRunner.it("should build a navigable links page", function()
+        local b = web.Browser.new("about:home")
+        b.doc = web.render_html_to_document("<h1>Test</h1><a href='https://example.com'>Example</a>", "about:home", 80)
+        b.raw_html = "<h1>Test</h1><a href='https://example.com'>Example</a>"
+        b:show_links()
+        assert_eq(b.url, "about:links")
+        assert_true(b.doc and #b.doc.links > 0, "links page should contain links")
+        assert_true(b.raw_html:find("https://example.com"), "links page should include target URLs")
     end)
 end)
 
