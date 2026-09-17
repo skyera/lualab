@@ -890,10 +890,26 @@ local function render_thumbnail_art(thumb_url, box_w, box_h)
     return nil
 end
 
+local function build_mpv_status_msg(mode, show_cc)
+    if mode == "music" then
+        local msg = "  ${media-title}  [${playback-time} / ${duration}]  Vol: ${volume}%"
+        if show_cc then
+            msg = msg .. "${sub-text?\\n  >> CC/Lyrics: ${sub-text}}"
+        end
+        return msg
+    else
+        local msg = "  ${media-title}  [${playback-time} / ${duration}]"
+        if show_cc then
+            msg = msg .. "${sub-text?\\n  >> CC: ${sub-text}}"
+        end
+        return msg
+    end
+end
+
 -- =========================================================================
 -- 5. Playback Controller
 -- =========================================================================
-local function play_item(item, mode, browser, cookies_file, use_external_window, proxy, insecure)
+local function play_item(item, mode, browser, cookies_file, use_external_window, proxy, insecure, show_cc, sub_lang)
     if not HAS_MPV then
         io.write("\27[H\27[2J\27[1;31mError: mpv is not installed.\27[0m\n\nPlease install mpv to play audio/video streams.\nPress any key to return...")
         io.flush()
@@ -902,6 +918,11 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     end
 
     local raw_opts = { "extractor-args=youtube:player_client=android" }
+    if show_cc then
+        table.insert(raw_opts, "write-subs=")
+        table.insert(raw_opts, "write-auto-subs=")
+        table.insert(raw_opts, string.format("sub-langs=%s", sub_lang or "en.*"))
+    end
     if browser and #browser > 0 then
         table.insert(raw_opts, string.format("cookies-from-browser=%s", browser))
     elseif cookies_file and #cookies_file > 0 then
@@ -922,30 +943,37 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     if proxy and #proxy > 0 then
         extra_mpv_opts = extra_mpv_opts .. string.format(" --http-proxy=%q", proxy)
     end
+    if show_cc then
+        local lang_pref = sub_lang or "en,eng"
+        extra_mpv_opts = extra_mpv_opts .. string.format(" --sub-auto=all --sub-visibility=yes --slang=%s", lang_pref)
+    end
 
     local term_w, term_h = get_terminal_size()
+    local status_msg = build_mpv_status_msg(mode, show_cc)
     local mpv_cmd
 
     if mode == "music" then
         -- Audio-only streaming with OSD status
         mpv_cmd = string.format(
             'mpv --no-video --hwdec=auto --term-osd-bar --ytdl-format="bestaudio/best" '
-            .. '--term-status-msg="  ${media-title}  [${playback-time} / ${duration}]  Vol: ${volume}%%" '
+            .. '--term-status-msg="%s" '
             .. '%s%s %q',
-            ytdl_raw_opts, extra_mpv_opts, item.url
+            status_msg, ytdl_raw_opts, extra_mpv_opts, item.url
         )
     else
         -- Video playback
         if use_external_window then
-            mpv_cmd = string.format('mpv --hwdec=auto %s%s %q', ytdl_raw_opts, extra_mpv_opts, item.url)
+            mpv_cmd = string.format('mpv --hwdec=auto --term-status-msg="%s" %s%s %q', status_msg, ytdl_raw_opts, extra_mpv_opts, item.url)
         else
             -- Terminal ASCII/Half-block video (capped to 480p for performance & bandwidth efficiency)
+            local h_offset = show_cc and 2 or 1
             mpv_cmd = string.format(
                 'mpv --vo=tct --vo-tct-width=%d --vo-tct-height=%d --hwdec=auto --term-osd-bar '
                 .. '--ytdl-format="bestvideo[height<=480]+bestaudio/best[height<=480]/best" '
-                .. '--term-status-msg="  ${media-title}  [${playback-time} / ${duration}]" '
+                .. '--term-status-msg="%s" '
                 .. '%s%s %q',
-                math.max(10, term_w), math.max(6, term_h - 1),
+                math.max(10, term_w), math.max(6, term_h - h_offset),
+                status_msg,
                 ytdl_raw_opts, extra_mpv_opts, item.url
             )
         end
@@ -1033,6 +1061,7 @@ local function show_help_modal()
         line_pad("|    \27[93m[Enter]\27[0m       Play selected video or music track", 45),
         line_pad("|    \27[93m[/]\27[0m           Open search modal or paste direct URL", 48),
         line_pad("|    \27[93m[a]\27[0m           Toggle continuous Auto-Play (Radio mode)", 51),
+        line_pad("|    \27[93m[c]\27[0m           Toggle Closed Captions (CC / Lyrics)", 48),
         line_pad("|    \27[93m[h]\27[0m           Toggle Playback History (recent tracks)", 50),
         line_pad("|    \27[93m[m]\27[0m           Toggle between Music and Video mode", 46),
         line_pad("|    \27[93m[L]\27[0m           Toggle Liked Songs playlist", 38),
@@ -1043,6 +1072,8 @@ local function show_help_modal()
         line_pad("|    \27[93m[<- / ->]\27[0m     Seek backward / forward 5 seconds", 44),
         line_pad("|    \27[93m[9 / 0]\27[0m       Volume down / Volume up", 34),
         line_pad("|    \27[93m[[ / ]]\27[0m       Speed down / Speed up (+/-10%)", 39),
+        line_pad("|    \27[93m[j / J]\27[0m       Cycle next / prev subtitle track", 43),
+        line_pad("|    \27[93m[v]\27[0m           Toggle subtitle visibility on/off", 44),
         line_pad("|    \27[93m[q]\27[0m           Stop playing and return to browser", 45),
         "+" .. string.rep("-", box_w - 2) .. "+",
         line_pad("|  \27[90mPress any key to close this help modal...\27[0m", 41),
@@ -1059,9 +1090,11 @@ end
 -- =========================================================================
 -- 7. Main Interactive TUI Application
 -- =========================================================================
-local function run_app(init_query, init_mode, browser, cookies_file, is_liked, use_window, proxy, insecure)
+local function run_app(init_query, init_mode, browser, cookies_file, is_liked, use_window, proxy, insecure, init_show_cc, init_sub_lang)
     local current_query = init_query or "lofi beats"
     local mode = init_mode or "music"
+    local show_cc = init_show_cc or false
+    local sub_lang = init_sub_lang or "en.*"
     local selected_idx = 1
     local scroll_offset = 0
     local auto_play = false
@@ -1121,8 +1154,9 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         local auth_label = browser and ("Logged in: " .. browser) or (cookies_file and "Cookies file" or "Guest / Public")
         local mode_badge = (mode == "music") and "\27[1;92m[MUSIC / AUDIO]\27[0m" or "\27[1;93m[VIDEO]\27[0m"
         local auto_badge = auto_play and "\27[1;92m[AUTO: ON]\27[0m" or "\27[90m[AUTO: OFF]\27[0m"
+        local cc_badge = show_cc and "\27[1;92m[CC: ON]\27[0m" or "\27[90m[CC: OFF]\27[0m"
         local sec_badge = insecure and " | \27[1;33m[CORP SSL]\27[0m" or ""
-        local header = string.format(" \27[1;36mYouTube Terminal Viewer\27[0m | %s | %s | \27[90m%s\27[0m%s", mode_badge, auto_badge, auth_label, sec_badge)
+        local header = string.format(" \27[1;36mYouTube Terminal Viewer\27[0m | %s | %s | %s | \27[90m%s\27[0m%s", mode_badge, auto_badge, cc_badge, auth_label, sec_badge)
         table.insert(buf, "\27[1;34m" .. string.rep("=", term_w) .. "\27[0m\n")
         table.insert(buf, header .. "\27[K\n")
 
@@ -1175,8 +1209,9 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
 
         -- 4. Footer Help
         local auto_footer = auto_play and "\27[1;92mON\27[0m" or "\27[90mOFF\27[0m"
+        local cc_footer = show_cc and "\27[1;92mON\27[0m" or "\27[90mOFF\27[0m"
         table.insert(buf, "\27[1;34m" .. string.rep("-", term_w) .. "\27[0m\n")
-        table.insert(buf, string.format(" \27[93m[Enter]\27[0m Play  \27[93m[/]\27[0m Search  \27[93m[a]\27[0m Auto:%s  \27[93m[h]\27[0m History  \27[93m[m]\27[0m Mode  \27[93m[?]\27[0m Help  \27[91m[q]\27[0m Quit\27[K", auto_footer))
+        table.insert(buf, string.format(" \27[93m[Enter]\27[0m Play  \27[93m[/]\27[0m Search  \27[93m[a]\27[0m Auto:%s  \27[93m[c]\27[0m CC:%s  \27[93m[h]\27[0m History  \27[93m[m]\27[0m Mode  \27[93m[?]\27[0m Help  \27[91m[q]\27[0m Quit\27[K", auto_footer, cc_footer))
         
         io.write(table.concat(buf))
         io.flush()
@@ -1216,6 +1251,9 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         elseif k == "a" or k == "A" then
             auto_play = not auto_play
             draw_tui()
+        elseif k == "c" or k == "C" then
+            show_cc = not show_cc
+            draw_tui()
         elseif k == "h" or k == "H" then
             is_history = not is_history
             if is_history then
@@ -1244,7 +1282,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
             while #items > 0 and selected_idx >= 1 and selected_idx <= #items do
                 local sel = items[selected_idx]
                 save_history_item(sel)
-                local exit_code = play_item(sel, mode, browser, cookies_file, use_window, proxy, insecure)
+                local exit_code = play_item(sel, mode, browser, cookies_file, use_window, proxy, insecure, show_cc, sub_lang)
                 draw_tui()
                 if auto_play and (exit_code == 0 or exit_code == true) and selected_idx < #items then
                     selected_idx = selected_idx + 1
@@ -1330,6 +1368,17 @@ local function run_self_tests()
     assert(found_test_item, "Saved history item not found in loaded history items")
     print("  [✓] save_history_item & load_history_items passed")
 
+    -- 8. CC / Lyrics status message formatting
+    local status_music = build_mpv_status_msg("music", true)
+    assert(status_music:find("sub-text", 1, true), "Music CC status format missing sub-text")
+    assert(status_music:find("CC/Lyrics:", 1, true), "Music CC status format missing label")
+    local status_video = build_mpv_status_msg("video", true)
+    assert(status_video:find("sub-text", 1, true), "Video CC status format missing sub-text")
+    assert(status_video:find("CC:", 1, true), "Video CC status format missing label")
+    local status_no_cc = build_mpv_status_msg("music", false)
+    assert(not status_no_cc:find("sub-text", 1, true), "Non-CC status should not contain sub-text")
+    print("  [✓] CC / Lyrics status formatting passed")
+
     print("=== All Internal Self-Tests Passed Successfully ===")
     return true
 end
@@ -1342,6 +1391,8 @@ local function print_help()
     print("  -m, --music           Music mode: audio-only streaming via mpv (default)")
     print("  -v, --video           Video mode: video streaming in terminal via mpv --vo=tct")
     print("  --window              In video mode, play in external MPV GUI window instead of terminal")
+    print("  -c, --cc, --lyrics    Show Closed Captions (CC) / lyrics in terminal characters")
+    print("  --sub-lang <lang>     Preferred subtitle/lyrics language pattern (default: en.*)")
     print("  --browser <name>      Extract session cookies from browser (firefox, chrome, brave, edge)")
     print("  --no-interactive      Non-interactive script/batch mode (print results and exit)")
     print("  --cookies <file>      Use Netscape format cookies.txt file")
@@ -1358,6 +1409,7 @@ local function print_help()
     print(string.format("  deno:      %s", HAS_DENO and "\27[32m[Installed - Fast JS solver for yt-dlp]\27[0m" or "\27[90m[Not Detected - Optional for yt-dlp]\27[0m"))
     print("\nExamples:")
     print("  luajit yt.lua \"synthwave radio\"")
+    print("  luajit yt.lua --music --lyrics \"never gonna give you up\"")
     print("  luajit yt.lua --music --browser firefox")
     print("  luajit yt.lua --insecure \"lofi hip hop\"")
     print("  luajit yt.lua --proxy http://proxy:8080 \"jazz lounge\"")
@@ -1372,6 +1424,8 @@ local function main()
     local is_liked = false
     local use_window = false
     local non_interactive = false
+    local show_cc = false
+    local sub_lang = "en.*"
 
     local env_proxy = os.getenv("YT_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")
     local proxy = (env_proxy and #env_proxy > 0) and env_proxy or nil
@@ -1397,6 +1451,11 @@ local function main()
             mode = "video"
         elseif a == "--window" then
             use_window = true
+        elseif a == "-c" or a == "--cc" or a == "--lyrics" or a == "--subtitles" then
+            show_cc = true
+        elseif a == "--sub-lang" or a == "--sub-langs" or a == "--slang" then
+            i = i + 1
+            sub_lang = arg[i]
         elseif a == "--liked" then
             is_liked = true
         elseif a == "--no-interactive" then
@@ -1442,7 +1501,7 @@ local function main()
         return
     end
 
-    run_app(query, mode, browser, cookies_file, is_liked, use_window, proxy, insecure)
+    run_app(query, mode, browser, cookies_file, is_liked, use_window, proxy, insecure, show_cc, sub_lang)
 end
 
 main()

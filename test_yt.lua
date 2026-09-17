@@ -113,7 +113,24 @@ assert(test_out:find("parse_json_field passed", 1, true), "parse_json_field unit
 assert(test_out:find("sanitize_display_text passed", 1, true), "sanitize_display_text unit test failed")
 assert(test_out:find("display_width & utf8_truncate passed", 1, true), "display_width & utf8_truncate unit test failed")
 assert(test_out:find("save_history_item & load_history_items passed", 1, true), "History save/load test failed")
+assert(test_out:find("CC / Lyrics status formatting passed", 1, true), "CC/Lyrics status formatting unit test failed")
 assert(test_out:find("All Internal Self-Tests Passed Successfully", 1, true), "Self-tests summary missing")
 print("  [✓] Test 9 passed: yt.lua --test verified JSON parsing, CJK width, and history save/load without errors.")
+
+-- Test 10: CC / Lyrics CLI Options & Help verification
+local p_help = io.popen(luajit .. " yt.lua --help", "r")
+assert(p_help, "Failed to run yt.lua --help for CC options")
+local h_out = p_help:read("*a")
+p_help:close()
+assert(h_out:find("--cc", 1, true), "Help output missing --cc option")
+assert(h_out:find("--lyrics", 1, true), "Help output missing --lyrics option")
+assert(h_out:find("--sub-lang", 1, true), "Help output missing --sub-lang option")
+
+local p_cc_run = io.popen(luajit .. ' yt.lua --lyrics --sub-lang en.* --no-interactive --max-results 1 "lofi" ' .. null_dev, "r")
+assert(p_cc_run, "Failed to run yt.lua with --lyrics flag")
+local cc_run_out = p_cc_run:read("*a")
+p_cc_run:close()
+assert(cc_run_out:find("01.", 1, true), "Non-interactive run with --lyrics failed to produce results")
+print("  [✓] Test 10 passed: --cc, --lyrics, and --sub-lang options parse and execute successfully.")
 
 print("=== All Backend Verification Tests Completed Successfully ===")
