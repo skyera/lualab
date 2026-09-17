@@ -414,6 +414,229 @@ TestRunner.describe("5. Chinese (CJK) Text Processing, Word Wrapping & Input", f
     end)
 end)
 
+-- 6. Page Cache & Navigation History Memory
+TestRunner.describe("6. Page Cache & Navigation History Memory", function()
+    TestRunner.it("should restore previous page scroll position and doc from cache on history back", function()
+        local b = web.Browser.new("about:home")
+        b:load_url("about:home")
+        assert_eq(b.url, "about:home")
+
+        -- Scroll down on home page
+        b.scroll_y = 12
+        b.selected_link_idx = 3
+
+        -- Navigate to about:help
+        b:navigate_to("about:help")
+        assert_eq(b.url, "about:help")
+        assert_eq(b.scroll_y, 1, "new page starts at top")
+
+        -- Go back to about:home via 'H'
+        b:handle_key("H")
+        assert_eq(b.url, "about:home", "history back should return to about:home")
+        assert_eq(b.scroll_y, 12, "cached page should restore exact scroll position")
+        assert_eq(b.selected_link_idx, 3, "cached page should restore focused link index")
+
+        -- Go forward to about:help via 'L'
+        b:handle_key("L")
+        assert_eq(b.url, "about:help", "history forward should return to about:help")
+    end)
+
+    TestRunner.it("should invalidate cache on reload (r)", function()
+        local b = web.Browser.new("about:home")
+        b:load_url("about:home")
+        assert_true(b.page_cache ~= nil)
+        b.scroll_y = 15
+
+        -- Trigger reload
+        b:handle_key("r")
+        assert_eq(b.scroll_y, 1, "reloading page resets scroll to line 1")
+    end)
+end)
+
+-- 7. Local Bookmarks Management
+TestRunner.describe("7. Local Bookmarks Management", function()
+    local test_url = "https://example.com/test-bookmark-" .. os.time()
+    local test_title = "Test Bookmark Title"
+
+    TestRunner.it("should resolve 'b' and 'bookmarks' to about:bookmarks", function()
+        local r1, m1 = web.smart_resolve_input("b")
+        assert_eq(r1, "about:bookmarks")
+        assert_eq(m1, "about")
+
+        local r2, m2 = web.smart_resolve_input("bookmarks")
+        assert_eq(r2, "about:bookmarks")
+        assert_eq(m2, "about")
+    end)
+
+    TestRunner.it("should add, persist, and load bookmarks", function()
+        local ok, action = web.add_bookmark(test_url, test_title)
+        assert_true(ok, "bookmark should be added successfully")
+
+        local bms = web.load_bookmarks()
+        local found = false
+        for _, b in ipairs(bms) do
+            if b.url == test_url and b.title == test_title then
+                found = true
+                break
+            end
+        end
+        assert_true(found, "added bookmark must be retrieved from saved file")
+    end)
+
+    TestRunner.it("should render bookmarks into about:bookmarks HTML page", function()
+        local html = web.get_bookmarks_page_html()
+        assert_true(html:find(test_url, 1, true) ~= nil, "bookmarks HTML should contain added URL")
+        assert_true(html:find(test_title, 1, true) ~= nil, "bookmarks HTML should contain added title")
+    end)
+
+    TestRunner.it("should bookmark current page via 'm' key in Normal mode", function()
+        local b = web.Browser.new("about:help")
+        b:load_url("about:help")
+        b:handle_key("m")
+        assert_true(b.status_msg:find("Bookmarked:"), "status should confirm bookmark")
+
+        local bms = web.load_bookmarks()
+        local found = false
+        for _, bm in ipairs(bms) do
+            if bm.url == "about:help" then
+                found = true
+                break
+            end
+        end
+        assert_true(found, "about:help should be saved in bookmarks")
+    end)
+
+    TestRunner.it("should navigate to bookmarks via 'gb'", function()
+        local b = web.Browser.new("about:help")
+        b:load_url("about:help")
+        b:handle_key("g")
+        b:handle_key("b")
+        assert_eq(b.url, "about:bookmarks", "'gb' must navigate to about:bookmarks")
+    end)
+
+    TestRunner.it("should clean up test bookmark", function()
+        local removed = web.remove_bookmark(test_url)
+        assert_true(removed, "remove_bookmark should remove the test entry")
+    end)
+end)
+
+-- 8. Document Export (:w)
+TestRunner.describe("8. Document Export (:w)", function()
+    local text_export_file = "test_export_dump.txt"
+    local html_export_file = "test_export_dump.html"
+
+    TestRunner.it("should export formatted document to plain text file via :w <file>", function()
+        local b = web.Browser.new("about:home")
+        b:load_url("about:home")
+
+        b:handle_key(":")
+        local cmd = "w " .. text_export_file
+        for c in cmd:gmatch(".") do b:handle_key(c) end
+        b:handle_key("ENTER")
+
+        local f = io.open(text_export_file, "r")
+        assert_true(f ~= nil, "exported text file must exist")
+        local content = f:read("*a")
+        f:close()
+        os.remove(text_export_file)
+
+        assert_true(content:find("web_lite"), "exported file should contain document text")
+        assert_true(content:find("Hacker News"), "exported file should contain link names")
+    end)
+
+    TestRunner.it("should export raw HTML when filename ends with .html", function()
+        local b = web.Browser.new("about:home")
+        b:load_url("about:home")
+
+        b:handle_key(":")
+        local cmd = "w " .. html_export_file
+        for c in cmd:gmatch(".") do b:handle_key(c) end
+        b:handle_key("ENTER")
+
+        local f = io.open(html_export_file, "r")
+        assert_true(f ~= nil, "exported html file must exist")
+        local content = f:read("*a")
+        f:close()
+        os.remove(html_export_file)
+
+        assert_true(content:find("<!DOCTYPE html>") or content:find("<html"), "exported html file should contain HTML tags")
+    end)
+end)
+
+-- 9. Numeric Link Jump & View Centering
+TestRunner.describe("9. Numeric Link Jump & View Centering", function()
+    TestRunner.it("should follow link directly via <number> ENTER", function()
+        local b = web.Browser.new("about:home")
+        b:load_url("about:home")
+
+        -- Link [2] on home page is Hacker News
+        local target_href = b.doc.links[2].href
+        assert_true(target_href ~= nil)
+
+        -- Type '2' then ENTER
+        b:handle_key("2")
+        assert_eq(b.count_prefix, 2)
+        b:handle_key("ENTER")
+
+        assert_eq(b.url, target_href, "typing 2+ENTER must follow link 2")
+    end)
+
+    TestRunner.it("should follow link directly via :<number> command", function()
+        local b = web.Browser.new("about:home")
+        b:load_url("about:home")
+
+        local target_href = b.doc.links[1].href
+        b:handle_key(":")
+        b:handle_key("1")
+        b:handle_key("ENTER")
+
+        assert_eq(b.url, target_href, "command :1 must navigate to link 1")
+    end)
+
+    TestRunner.it("should center view vertically via 'zz'", function()
+        local b = web.Browser.new("about:home")
+        b:load_url("about:home")
+        b.scroll_y = 20
+
+        b:handle_key("z")
+        b:handle_key("z")
+        assert_true(b.status_msg:find("Centered"), "'zz' should set status message Centered")
+    end)
+
+    TestRunner.it("should center search results with vertical offset", function()
+        local b = web.Browser.new("about:home")
+        b:load_url("about:home")
+
+        b:handle_key("/")
+        for c in string.gmatch("Hacker", ".") do b:handle_key(c) end
+        b:handle_key("ENTER")
+
+        assert_true(#b.search_matches > 0)
+        local match_line = b.search_matches[1]
+        assert_true(b.scroll_y <= match_line, "search centering scroll_y must be at or above match line")
+    end)
+end)
+
+-- 10. Dynamic Terminal Resize Reflow
+TestRunner.describe("10. Dynamic Terminal Resize Reflow", function()
+    TestRunner.it("should reflow document when terminal width changes", function()
+        local b = web.Browser.new("about:home")
+        b:load_url("about:home")
+
+        local orig_line_count = #b.doc.lines
+        -- Reflow to a narrow 40-column width
+        b:reflow(40)
+        local narrow_line_count = #b.doc.lines
+
+        -- Narrower width should cause more wrapped lines
+        assert_true(narrow_line_count > orig_line_count, "narrower width should increase total wrapped lines")
+
+        -- Reflow back to 100 columns
+        b:reflow(100)
+        assert_true(#b.doc.lines < narrow_line_count, "wider width should decrease total wrapped lines")
+    end)
+end)
+
 print(string.format("\n========================================="))
 print(string.format("Test Results: %d passed, %d failed", TestRunner.passed, TestRunner.failed))
 print(string.format("=========================================\n"))

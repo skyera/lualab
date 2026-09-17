@@ -571,9 +571,10 @@ local function smart_resolve_input(input)
     end
 
     input = input:match("^%s*(.-)%s*$")
-    if input == "about:home" or input == "about:blank" or input == "about:help" or input == "home" or input == "help" then
+    if input == "about:home" or input == "about:blank" or input == "about:help" or input == "about:bookmarks" or input == "home" or input == "help" or input == "bookmarks" or input == "b" then
         if input == "home" then return "about:home", "about" end
         if input == "help" then return "about:help", "about" end
+        if input == "bookmarks" or input == "b" then return "about:bookmarks", "about" end
         return input, "about"
     end
 
@@ -608,6 +609,8 @@ local function fetch_url(url)
         return M.get_home_page_html(), 200, "text/html"
     elseif url == "about:help" then
         return M.get_help_page_html(), 200, "text/html"
+    elseif url == "about:bookmarks" then
+        return M.get_bookmarks_page_html(), 200, "text/html"
     end
 
     if url:match("^file://") or url:match("^[A-Za-z]:[\\/]") or (is_windows and url:match("^[A-Za-z]:")) then
@@ -668,8 +671,124 @@ end
 M.fetch_url = fetch_url
 
 -- =========================================================================
--- 6. Built-in Pages: Home & Help
+-- 6. Built-in Pages & Bookmarks Management
 -- =========================================================================
+local function open_in_external_browser(url)
+    if not url or url == "" then return false end
+    local escaped = url:gsub('"', '\\"')
+    if is_windows then
+        os.execute(string.format('start "" "%s"', escaped))
+        return true
+    else
+        os.execute(string.format('xdg-open "%s" 2>/dev/null || open "%s" 2>/dev/null &', escaped, escaped))
+        return true
+    end
+end
+
+local function get_bookmarks_file_path()
+    local home = os.getenv("USERPROFILE") or os.getenv("HOME") or os.getenv("TEMP") or "."
+    return home:gsub("\\", "/") .. "/.web_lite_bookmarks.txt"
+end
+
+local function load_bookmarks()
+    local path = get_bookmarks_file_path()
+    local f = io.open(path, "r")
+    local bookmarks = {}
+    if not f then return bookmarks end
+    for line in f:lines() do
+        line = line:match("^%s*(.-)%s*$")
+        if #line > 0 and not line:match("^#") then
+            local u, t = line:match("^(%S+)\t+(.*)$")
+            if not u then
+                u, t = line:match("^(%S+)%s+(.*)$")
+            end
+            if u then
+                table.insert(bookmarks, { url = u, title = (t and #t > 0) and t or u })
+            else
+                table.insert(bookmarks, { url = line, title = line })
+            end
+        end
+    end
+    f:close()
+    return bookmarks
+end
+
+local function save_bookmarks(bookmarks)
+    local path = get_bookmarks_file_path()
+    local f, err = io.open(path, "w")
+    if not f then return false, err end
+    for _, b in ipairs(bookmarks) do
+        f:write(string.format("%s\t%s\n", b.url, b.title or b.url))
+    end
+    f:close()
+    return true
+end
+
+local function add_bookmark(url, title)
+    if not url or url == "" then return false end
+    title = title or url
+    local bms = load_bookmarks()
+    for _, b in ipairs(bms) do
+        if b.url == url then
+            b.title = title
+            save_bookmarks(bms)
+            return true, "updated"
+        end
+    end
+    table.insert(bms, { url = url, title = title })
+    save_bookmarks(bms)
+    return true, "added"
+end
+
+local function remove_bookmark(url)
+    if not url or url == "" then return false end
+    local bms = load_bookmarks()
+    local new_bms = {}
+    local removed = false
+    for _, b in ipairs(bms) do
+        if b.url == url then
+            removed = true
+        else
+            table.insert(new_bms, b)
+        end
+    end
+    if removed then
+        save_bookmarks(new_bms)
+    end
+    return removed
+end
+
+local function get_bookmarks_page_html()
+    local bms = load_bookmarks()
+    local buf = {}
+    table.insert(buf, "<!DOCTYPE html><html><head><title>web_lite: Bookmarks</title></head><body>")
+    table.insert(buf, "<h1>Bookmarks / 我的书签</h1>")
+    table.insert(buf, "<p>Saved pages from your browsing sessions. Press <b>m</b> on any page to bookmark it!</p><hr>")
+    if #bms == 0 then
+        table.insert(buf, "<p><i>No bookmarks saved yet. Press <b>m</b> while viewing any page to bookmark it, or type <b>:mark</b>!</i></p>")
+    else
+        table.insert(buf, "<table>")
+        table.insert(buf, "<tr><th>#</th><th>Title</th><th>URL</th></tr>")
+        for i, b in ipairs(bms) do
+            local safe_title = b.title:gsub("<", "&lt;"):gsub(">", "&gt;")
+            local safe_url = b.url:gsub("<", "&lt;"):gsub(">", "&gt;")
+            table.insert(buf, string.format("<tr><td>%d</td><td><a href=\"%s\"><b>%s</b></a></td><td>%s</td></tr>", i, b.url, safe_title, safe_url))
+        end
+        table.insert(buf, "</table>")
+    end
+    table.insert(buf, "<hr><p><a href=\"about:home\">Back to Home</a> | <a href=\"about:help\">Help & Keybindings</a></p>")
+    table.insert(buf, "</body></html>")
+    return table.concat(buf, "\n")
+end
+
+M.open_in_external_browser = open_in_external_browser
+M.get_bookmarks_file_path  = get_bookmarks_file_path
+M.load_bookmarks           = load_bookmarks
+M.save_bookmarks           = save_bookmarks
+M.add_bookmark             = add_bookmark
+M.remove_bookmark          = remove_bookmark
+M.get_bookmarks_page_html  = get_bookmarks_page_html
+
 function M.get_home_page_html()
     return [[
 <!DOCTYPE html>
@@ -682,6 +801,7 @@ function M.get_home_page_html()
 <hr>
 <h2>Quick Bookmarks / 热门书签</h2>
 <ul>
+  <li><a href="about:bookmarks">My Bookmarks / 我的书签</a> - Your saved bookmarks list</li>
   <li><a href="https://news.ycombinator.com">Hacker News</a> - Tech, startups, and programming discussions</li>
   <li><a href="https://www.reddit.com/r/programming">Reddit Programming</a> - News, articles, and discussions for software developers</li>
   <li><a href="https://luajit.org">LuaJIT Official Site</a> - Just-In-Time Compiler for Lua</li>
@@ -696,16 +816,22 @@ function M.get_home_page_html()
 <h2>Essential Vim Navigation Keys</h2>
 <table>
   <tr><th>Key</th><th>Action</th><th>Description</th></tr>
-  <tr><td><b>j / k</b></td><td>Scroll 1 line</td><td>Move viewport down / up</td></tr>
+  <tr><td><b>j / k</b></td><td>Scroll 1 line</td><td>Move viewport down / up (supports counts, e.g. 5j)</td></tr>
   <tr><td><b>d / u</b></td><td>Half-page scroll</td><td>Standard Vim Ctrl-d / Ctrl-u</td></tr>
   <tr><td><b>gg / G</b></td><td>Top / Bottom</td><td>Jump directly to beginning or end of page</td></tr>
+  <tr><td><b>zz</b></td><td>Center View</td><td>Center focused link or reading position vertically</td></tr>
   <tr><td><b>f</b></td><td><b>Follow Link Hint</b></td><td>Overlays letters [A], [B] on links; press key to open!</td></tr>
   <tr><td><b>Tab / Enter</b></td><td>Link Focus</td><td>Cycle between links and press Enter to follow</td></tr>
+  <tr><td><b>&lt;N&gt; Enter / :&lt;N&gt;</b></td><td>Link Jump</td><td>Directly follow link by number ID (e.g. 5 Enter or :5)</td></tr>
+  <tr><td><b>m / :mark</b></td><td>Bookmark Page</td><td>Save current page to ~/.web_lite_bookmarks.txt</td></tr>
+  <tr><td><b>gb / :b</b></td><td>Bookmarks Page</td><td>Open your saved bookmarks list (about:bookmarks)</td></tr>
+  <tr><td><b>gx</b></td><td>GUI Browser</td><td>Open current page or focused link in system browser</td></tr>
   <tr><td><b>o / O</b></td><td><b>Open URL / Search</b></td><td>Open the Omnibox prompt to enter website or search query</td></tr>
-  <tr><td><b>H / L</b></td><td>History Back / Fwd</td><td>Navigate back and forward in browsing history</td></tr>
+  <tr><td><b>H / L</b></td><td>History Back / Fwd</td><td>Navigate back and forward in browsing history (instant cache)</td></tr>
   <tr><td><b>/</b></td><td>Search in Page</td><td>Search text (press 'n' for next, 'N' for previous)</td></tr>
   <tr><td><b>yy</b></td><td>Yank URL</td><td>Copy current website URL to system clipboard</td></tr>
-  <tr><td><b>:</b></td><td>Command Mode</td><td>Type :open &lt;url&gt;, :reload, :help, or :q</td></tr>
+  <tr><td><b>:w &lt;file&gt;</b></td><td>Export Page</td><td>Save rendered text (or raw HTML if .html) to local file</td></tr>
+  <tr><td><b>:</b></td><td>Command Mode</td><td>Type :open &lt;url&gt;, :reload, :help, :b, :w, or :q</td></tr>
   <tr><td><b>q</b></td><td>Quit</td><td>Exit web_lite</td></tr>
 </table>
 <hr>
@@ -734,6 +860,7 @@ function M.get_help_page_html()
   <li><b>Ctrl-b</b> or <b>PageUp</b>: Scroll up full page</li>
   <li><b>gg</b>: Jump to the very top of document</li>
   <li><b>G</b>: Jump to the very bottom of document</li>
+  <li><b>zz</b>: Center viewport vertically around current focused link or reading line</li>
   <li><b>gh</b>: <b>Go Home</b> (jump directly to about:home)</li>
 </ul>
 <h2>2. Links & Vimium Hint Mode</h2>
@@ -742,6 +869,8 @@ function M.get_help_page_html()
   <li><b>Tab</b> or <b>]</b>: Highlight and scroll to next hyperlink on page</li>
   <li><b>Shift-Tab</b> or <b>[</b>: Highlight and scroll to previous hyperlink on page</li>
   <li><b>Enter</b>: Open the currently highlighted link</li>
+  <li><b>&lt;number&gt; Enter</b> or <b>:&lt;number&gt;</b>: Jump directly to hyperlink by ID number</li>
+  <li><b>gx</b>: Open the focused hyperlink (or current page) in your system GUI browser</li>
 </ul>
 <h2>3. URL Input & Omnibox</h2>
 <ul>
@@ -754,22 +883,28 @@ function M.get_help_page_html()
 </ul>
 <h2>4. Page Search</h2>
 <ul>
-  <li><b>/</b>: Prompt for search string. Matches are highlighted in yellow</li>
-  <li><b>n</b>: Jump to next occurrence</li>
-  <li><b>N</b>: Jump to previous occurrence</li>
+  <li><b>/</b>: Prompt for search string. Matches are highlighted in yellow and centered</li>
+  <li><b>n</b>: Jump to next occurrence (vertically centered with context)</li>
+  <li><b>N</b>: Jump to previous occurrence (vertically centered with context)</li>
   <li><b>Esc</b>: Clear search highlights</li>
 </ul>
-<h2>5. Browser Commands & History</h2>
+<h2>5. Bookmarks & Local File Operations</h2>
 <ul>
-  <li><b>H</b>: Go Back in history</li>
-  <li><b>L</b>: Go Forward in history</li>
-  <li><b>r</b> or <b>R</b>: Reload current page</li>
+  <li><b>m</b> or <b>:mark [title]</b>: Bookmark current page to ~/.web_lite_bookmarks.txt</li>
+  <li><b>gb</b> or <b>:b</b> or <b>:bookmarks</b>: Open your Bookmarks page</li>
+  <li><b>:w &lt;filename&gt;</b>: Export rendered document lines (or raw HTML if .html) to local file</li>
+</ul>
+<h2>6. Browser Commands & History</h2>
+<ul>
+  <li><b>H</b>: Go Back in history (instant 0ms page cache with scroll memory)</li>
+  <li><b>L</b>: Go Forward in history (instant 0ms page cache with scroll memory)</li>
+  <li><b>r</b> or <b>R</b>: Reload current page (refetches fresh from network)</li>
   <li><b>yy</b>: Copy (yank) current page URL to clipboard</li>
   <li><b>:open &lt;url&gt;</b>: Navigate to URL</li>
   <li><b>:help</b>: Display this help page</li>
   <li><b>:q</b>: Quit web_lite</li>
 </ul>
-<p><a href="about:home">Back to Home Page</a></p>
+<p><a href="about:home">Back to Home Page</a> | <a href="about:bookmarks">Bookmarks</a></p>
 </body>
 </html>
 ]]
@@ -1239,6 +1374,9 @@ function Browser.new(initial_url)
     self.url = initial_url or "about:home"
     self.history = { self.url }
     self.history_idx = 1
+    self.page_cache = {}
+    self.raw_html = ""
+    self.last_term_w = 0
     self.doc = nil
     self.scroll_y = 1
     self.selected_link_idx = 1
@@ -1257,11 +1395,54 @@ function Browser.new(initial_url)
     return self
 end
 
-function Browser:load_url(target_url)
-    self.status_msg = "Fetching " .. target_url .. "..."
+function Browser:reflow(new_w)
+    if not self.raw_html or #self.raw_html == 0 then return end
+    local total_lines = (self.doc and #self.doc.lines) or 1
+    local scroll_pct = math.min(1.0, math.max(0.0, (self.scroll_y - 1) / math.max(1, total_lines - 1)))
+
+    self.doc = M.render_html_to_document(self.raw_html, self.url, new_w - 4)
+    local new_total = #self.doc.lines
+    self.scroll_y = math.max(1, math.min(new_total, math.floor(scroll_pct * (new_total - 1)) + 1))
+    self.last_term_w = new_w
+    self.status_msg = string.format("Reflowed (%d cols, %d lines)", new_w, new_total)
+end
+
+function Browser:load_url(target_url, from_history)
+    -- Cache outgoing page state if doc exists
+    if self.url and self.doc then
+        self.page_cache[self.url] = {
+            doc = self.doc,
+            raw_html = self.raw_html,
+            scroll_y = self.scroll_y,
+            selected_link_idx = self.selected_link_idx,
+            last_term_w = self.last_term_w
+        }
+    end
+
     local term_w, _ = get_terminal_size()
+    self.last_term_w = term_w
+
+    -- If navigating via history back/forward and cached, restore instantly without network hit!
+    if from_history and self.page_cache[target_url] then
+        local cached = self.page_cache[target_url]
+        self.url = target_url
+        self.raw_html = cached.raw_html or ""
+        if cached.last_term_w and cached.last_term_w ~= term_w and #self.raw_html > 0 then
+            self.doc = M.render_html_to_document(self.raw_html, target_url, term_w - 4)
+        else
+            self.doc = cached.doc
+        end
+        self.scroll_y = cached.scroll_y or 1
+        self.selected_link_idx = cached.selected_link_idx or 1
+        self.search_matches = {}
+        self.status_msg = string.format("Restored from cache (%d lines, %d links)", #self.doc.lines, #self.doc.links)
+        return
+    end
+
+    self.status_msg = "Fetching " .. target_url .. "..."
     local html, status_code, content_type = fetch_url(target_url)
 
+    self.raw_html = html
     self.doc = M.render_html_to_document(html, target_url, term_w - 4)
     self.url = target_url
     self.scroll_y = 1
@@ -1285,7 +1466,7 @@ end
 function Browser:history_back()
     if self.history_idx > 1 then
         self.history_idx = self.history_idx - 1
-        self:load_url(self.history[self.history_idx])
+        self:load_url(self.history[self.history_idx], true)
     else
         self.status_msg = "Already at oldest history entry."
     end
@@ -1294,14 +1475,15 @@ end
 function Browser:history_forward()
     if self.history_idx < #self.history then
         self.history_idx = self.history_idx + 1
-        self:load_url(self.history[self.history_idx])
+        self:load_url(self.history[self.history_idx], true)
     else
         self.status_msg = "Already at newest history entry."
     end
 end
 
 function Browser:reload()
-    self:load_url(self.url)
+    self.page_cache[self.url] = nil
+    self:load_url(self.url, false)
     self.status_msg = "Page reloaded."
 end
 
@@ -1360,6 +1542,9 @@ end
 -- =========================================================================
 function Browser:render()
     local term_w, term_h = get_terminal_size()
+    if self.last_term_w and self.last_term_w > 0 and term_w ~= self.last_term_w and self.raw_html and #self.raw_html > 0 then
+        self:reflow(term_w)
+    end
     local view_h = term_h - 4
     if view_h < 5 then view_h = 5 end
 
@@ -1457,7 +1642,7 @@ function Browser:render()
         emit("\27[1;30;43m " .. hint_prompt .. " \27[0m" .. string.rep(" ", pad))
     else
         local mode_tag = "\27[1;30;46m NORMAL \27[0m"
-        local shortcuts = "\27[90m[j/k] Move [Tab/]] Link [gh] Home [f] Hint [o] Open [H/L] Hist [/] Find [:] Cmd\27[0m"
+        local shortcuts = "\27[90m[j/k] Move [Tab] Link [f] Hint [m] Mark [gx] GUI [o] Open [H/L] Hist [/] Find [:] Cmd\27[0m"
         local status_left = string.format("%s  \27[1;37m%s\27[0m", mode_tag, truncate(self.status_msg, 40))
         local right_info = string.format("%s  %s", shortcuts, pos_info)
         local pad = math.max(1, term_w - visual_len(status_left) - visual_len(right_info) - 1)
@@ -1494,6 +1679,53 @@ function Browser:handle_key(k)
                 self:navigate_to("about:home")
             elseif cmd == "help" or cmd == "h" then
                 self:navigate_to("about:help")
+            elseif cmd == "b" or cmd == "bookmarks" then
+                self:navigate_to("about:bookmarks")
+            elseif cmd == "mark" or cmd:match("^mark%s*(.*)") or cmd == "bookmark" or cmd:match("^bookmark%s*(.*)") then
+                local custom_title = cmd:match("^mark%s+(.+)") or cmd:match("^bookmark%s+(.+)")
+                local title = custom_title or (self.doc and self.doc.title and self.doc.title ~= "" and self.doc.title or self.url)
+                M.add_bookmark(self.url, title)
+                self.status_msg = "Bookmarked: " .. truncate(title, 40)
+            elseif cmd == "gx" or cmd == "gui" or cmd == "browse" or cmd:match("^gx%s+(.+)") then
+                local url_override = cmd:match("^gx%s+(.+)")
+                local target_link = (self.doc and self.doc.links and self.doc.links[self.selected_link_idx])
+                local target_url = url_override or ((target_link and target_link.href) and target_link.href or self.url)
+                M.open_in_external_browser(target_url)
+                self.status_msg = "Opened in external browser: " .. truncate(target_url, 40)
+            elseif cmd:match("^w%s+(.+)") or cmd:match("^write%s+(.+)") then
+                local filepath = cmd:match("^w%s+(.+)") or cmd:match("^write%s+(.+)")
+                filepath = filepath:match("^%s*(.-)%s*$")
+                local f, err = io.open(filepath, "w")
+                if not f then
+                    self.status_msg = string.format("Error saving file: %s", tostring(err))
+                else
+                    if filepath:match("%.html?$") and self.raw_html and #self.raw_html > 0 then
+                        f:write(self.raw_html)
+                    elseif self.doc and self.doc.lines then
+                        for _, line in ipairs(self.doc.lines) do
+                            f:write(line .. "\n")
+                        end
+                    end
+                    f:close()
+                    self.status_msg = string.format("Saved document to: %s", filepath)
+                end
+            elseif cmd:match("^%d+$") then
+                local lid = tonumber(cmd)
+                local target_link = nil
+                if self.doc and #self.doc.links > 0 then
+                    for idx, l in ipairs(self.doc.links) do
+                        if l.id == lid then
+                            target_link = l
+                            self.selected_link_idx = idx
+                            break
+                        end
+                    end
+                end
+                if target_link and target_link.href then
+                    self:navigate_to(target_link.href)
+                else
+                    self.status_msg = string.format("Link [%d] not found.", lid)
+                end
             elseif cmd == "r" or cmd == "reload" then
                 self:reload()
             elseif cmd:match("^open%s+(.+)") or cmd:match("^o%s+(.+)") then
@@ -1535,7 +1767,8 @@ function Browser:handle_key(k)
             end
             if #self.search_matches > 0 then
                 self.search_match_idx = 1
-                self.scroll_y = math.min(max_scroll, self.search_matches[1])
+                local target_line = self.search_matches[1]
+                self.scroll_y = math.max(1, math.min(max_scroll, target_line - math.floor(view_h / 3)))
                 self.status_msg = string.format("Match 1/%d for '%s'", #self.search_matches, self.search_query)
             else
                 self.status_msg = string.format("Pattern not found: '%s'", self.search_query)
@@ -1580,7 +1813,8 @@ function Browser:handle_key(k)
         return
     end
 
-    local count = (self.count_prefix > 0) and self.count_prefix or 1
+    local has_count = (self.count_prefix > 0)
+    local count = has_count and self.count_prefix or 1
     self.count_prefix = 0
 
     if self.pending_key == "g" then
@@ -1592,6 +1826,30 @@ function Browser:handle_key(k)
         elseif k == "h" then
             self:navigate_to("about:home")
             self.status_msg = "Navigated to Home."
+            return
+        elseif k == "x" then
+            local target_link = (self.doc and self.doc.links and self.doc.links[self.selected_link_idx])
+            local target_url = (target_link and target_link.href) and target_link.href or self.url
+            M.open_in_external_browser(target_url)
+            self.status_msg = "Opened in external browser: " .. truncate(target_url, 40)
+            return
+        elseif k == "b" then
+            self:navigate_to("about:bookmarks")
+            self.status_msg = "Navigated to Bookmarks."
+            return
+        end
+    end
+
+    if self.pending_key == "z" then
+        self.pending_key = nil
+        if k == "z" then
+            local target_line = self.scroll_y
+            local l = self.doc and self.doc.links and self.doc.links[self.selected_link_idx]
+            if l and l.line_idx and l.line_idx > 0 then
+                target_line = l.line_idx
+            end
+            self.scroll_y = math.max(1, math.min(max_scroll, target_line - math.floor(view_h / 2)))
+            self.status_msg = string.format("Centered at line %d.", self.scroll_y)
             return
         end
     end
@@ -1610,6 +1868,8 @@ function Browser:handle_key(k)
         self.scroll_y = math.max(1, self.scroll_y - view_h + 1)
     elseif k == "g" then
         self.pending_key = "g"
+    elseif k == "z" then
+        self.pending_key = "z"
     elseif k == "G" then
         self.scroll_y = max_scroll
         self.status_msg = "Jumped to bottom."
@@ -1619,6 +1879,15 @@ function Browser:handle_key(k)
         self:history_forward()
     elseif k == "r" or k == "R" then
         self:reload()
+    elseif k == "m" then
+        local title = (self.doc and self.doc.title and self.doc.title ~= "") and self.doc.title or self.url
+        M.add_bookmark(self.url, title)
+        self.status_msg = "Bookmarked: " .. truncate(title, 40)
+    elseif k == "x" then
+        local target_link = (self.doc and self.doc.links and self.doc.links[self.selected_link_idx])
+        local target_url = (target_link and target_link.href) and target_link.href or self.url
+        M.open_in_external_browser(target_url)
+        self.status_msg = "Opened in external browser: " .. truncate(target_url, 40)
     elseif k == "y" then
         if self.pending_key == "y" then
             self.pending_key = nil
@@ -1691,7 +1960,21 @@ function Browser:handle_key(k)
             self.status_msg = string.format("Focused link [%d]: %s", l.id, truncate(l.href, 50))
         end
     elseif k == "ENTER" then
-        if self.doc and #self.doc.links >= self.selected_link_idx then
+        if has_count and self.doc and #self.doc.links > 0 then
+            local target_link = nil
+            for idx, l in ipairs(self.doc.links) do
+                if l.id == count then
+                    target_link = l
+                    self.selected_link_idx = idx
+                    break
+                end
+            end
+            if target_link and target_link.href then
+                self:navigate_to(target_link.href)
+            else
+                self.status_msg = string.format("Link [%d] not found.", count)
+            end
+        elseif self.doc and #self.doc.links >= self.selected_link_idx then
             local l = self.doc.links[self.selected_link_idx]
             if l and l.href then
                 self:navigate_to(l.href)
@@ -1716,7 +1999,7 @@ function Browser:handle_key(k)
         if #self.search_matches > 0 then
             self.search_match_idx = (self.search_match_idx % #self.search_matches) + 1
             local target_line = self.search_matches[self.search_match_idx]
-            self.scroll_y = math.min(max_scroll, target_line)
+            self.scroll_y = math.max(1, math.min(max_scroll, target_line - math.floor(view_h / 3)))
             self.status_msg = string.format("Match %d/%d for '%s'", self.search_match_idx, #self.search_matches, self.search_query)
         end
     elseif k == "N" then
@@ -1724,13 +2007,14 @@ function Browser:handle_key(k)
             self.search_match_idx = self.search_match_idx - 1
             if self.search_match_idx < 1 then self.search_match_idx = #self.search_matches end
             local target_line = self.search_matches[self.search_match_idx]
-            self.scroll_y = math.min(max_scroll, target_line)
+            self.scroll_y = math.max(1, math.min(max_scroll, target_line - math.floor(view_h / 3)))
             self.status_msg = string.format("Match %d/%d for '%s'", self.search_match_idx, #self.search_matches, self.search_query)
         end
     elseif k == "ESC" then
         self.search_query = ""
         self.search_matches = {}
         self.pending_key = nil
+        self.count_prefix = 0
         self.status_msg = "Cleared search."
     elseif k == "q" then
         self.running = false
