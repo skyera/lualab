@@ -267,6 +267,10 @@ if is_windows then
                     return "BACKSPACE"
                 elseif ch == 9 then
                     return "TAB"
+                elseif ch == 4 then
+                    return "CTRL_D"
+                elseif ch == 21 then
+                    return "CTRL_U"
                 elseif ch >= 32 and ch <= 126 then
                     return string.char(ch)
                 end
@@ -423,6 +427,10 @@ else
                     return "TAB"
                 elseif c0 == 127 or c0 == 8 then
                     return "BACKSPACE"
+                elseif c0 == 4 then
+                    return "CTRL_D"
+                elseif c0 == 21 then
+                    return "CTRL_U"
                 elseif c0 >= 32 and c0 <= 126 then
                     return string.char(c0)
                 end
@@ -1638,6 +1646,7 @@ local function show_help_modal()
         line_pad("\27[1;36m|    \27[93m[m]\27[0m           Toggle between Music and Video mode"),
         line_pad("\27[1;36m|    \27[93m[L]\27[0m           Toggle Liked Songs playlist"),
         line_pad("\27[1;36m|    \27[93m[Up/Dn, k/j]\27[0m  Navigate results list"),
+        line_pad("\27[1;36m|    \27[93m[g/G]\27[0m         First / last result   \27[93m[Ctrl-U/D]\27[0m Page up / down"),
         line_pad("\27[1;36m|    \27[93m[PgUp/PgDn]\27[0m   Scroll 10 tracks up or down"),
         line_pad("\27[1;36m|  \27[1;33mIn-Playback / Mini-Player Controls:\27[0m"),
         line_pad("\27[1;36m|    \27[93m[Space]\27[0m       Pause / Resume playback"),
@@ -1912,6 +1921,19 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                 draw_tui()
             elseif k == "PAGE_DOWN" then
                 selected_idx = math.min(#items, selected_idx + 10)
+                draw_tui()
+            elseif k == "CTRL_U" then
+                selected_idx = math.max(1, selected_idx - max_list_h)
+                draw_tui()
+            elseif k == "CTRL_D" then
+                selected_idx = math.min(#items, selected_idx + max_list_h)
+                draw_tui()
+            elseif k == "g" then
+                selected_idx = 1
+                scroll_offset = 0
+                draw_tui()
+            elseif k == "G" then
+                selected_idx = math.max(1, #items)
                 draw_tui()
             elseif k == "TAB" then
                 if #items > 0 and selected_idx >= 1 and selected_idx <= #items then
