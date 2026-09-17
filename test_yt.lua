@@ -20,6 +20,8 @@ local help_out = p:read("*a")
 p:close()
 assert(help_out:find("yt.lua", 1, true), "Help output missing header")
 assert(help_out:find("System Status:", 1, true), "Help output missing status")
+assert(help_out:find("--proxy", 1, true), "Help output missing --proxy option")
+assert(help_out:find("--insecure", 1, true), "Help output missing --insecure option")
 print("  [✓] Test 1 passed: yt.lua --help renders properly.")
 
 local is_win = (package.config:sub(1,1) == '\\')
@@ -64,9 +66,23 @@ print("  [✓] Test 4 passed: yt.lua --video --no-interactive successfully extra
 
 -- Test 5: Stream playback verification (verify player_client=android avoids 403 Forbidden)
 local test_stream_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-local mpv_check_cmd = string.format('mpv --no-video --end=2 --ytdl-raw-options="extractor-args=youtube:player_client=android" %q %s', test_stream_url, null_dev)
+local mpv_check_cmd = string.format('mpv --no-video --ao=null --end=2 --ytdl-raw-options="extractor-args=youtube:player_client=android" %q %s', test_stream_url, null_dev)
 local exit_code = os.execute(mpv_check_cmd)
 assert(exit_code == 0, "mpv stream playback verification failed (unexpected exit code " .. tostring(exit_code) .. ")")
 print("  [✓] Test 5 passed: Stream playback connected and played cleanly without 403 Forbidden.")
+
+-- Test 6: Direct Web Search Fallback (tests curl scraping directly)
+local curl_check = io.popen('curl -s -L --max-time 6 -A "Mozilla/5.0" "https://www.youtube.com/results?search_query=piano" ' .. null_dev, "rb")
+if curl_check then
+    local html = curl_check:read("*a")
+    curl_check:close()
+    local found = 0
+    for _ in html:gmatch('"videoRenderer":%b{}') do
+        found = found + 1
+        if found >= 2 then break end
+    end
+    assert(found >= 1, "Direct web search fallback returned 0 items")
+    print("  [✓] Test 6 passed: Direct web search fallback extracted video entries.")
+end
 
 print("=== All Backend Verification Tests Completed Successfully ===")

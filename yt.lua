@@ -424,69 +424,157 @@ local function parse_json_field(line, key)
     return nil
 end
 
-local function fetch_youtube_results(query, mode, browser, cookies_file, max_results, is_liked)
-    if not HAS_YTDLP then
-        return nil, "yt-dlp is not installed. Please install it with 'sudo pacman -S yt-dlp' or 'winget install yt-dlp'."
-    end
-
+local function scrape_youtube_search(query, max_results, proxy, insecure)
     max_results = max_results or 20
-    local search_spec
-
-    if is_liked then
-        if mode == "music" then
-            search_spec = '"https://music.youtube.com/playlist?list=LM"'
-        else
-            search_spec = '":ytfavorites"'
-        end
-    elseif query:match("^https?://") or query:match("^www%.") or query:match("^youtu%.be/") then
-        search_spec = string.format("%q", query)
-    else
-        local term = query
-        if mode == "music" and not query:lower():find("music") and not query:lower():find("song") and not query:lower():find("audio") then
-            term = query .. " music"
-        end
-        search_spec = string.format('"ytsearch%d:%s"', max_results, term:gsub('"', '\\"'))
-    end
-
-    local cookie_opts = ""
-    if browser and #browser > 0 then
-        cookie_opts = string.format(" --cookies-from-browser %s", browser)
-    elseif cookies_file and #cookies_file > 0 then
-        cookie_opts = string.format(" --cookies %q", cookies_file)
-    end
-
-    local null_err = is_windows and "2>nul" or "2>/dev/null"
-    local cmd = string.format(
-        'yt-dlp --dump-json --flat-playlist --skip-download --ignore-errors%s %s %s',
-        cookie_opts, search_spec, null_err
-    )
-
+    local encoded = query:gsub("([^%w%-%_%.%~])", function(c)
+        return string.format("%%%02X", string.byte(c))
+    end)
+    local proxy_opt = (proxy and #proxy > 0) and string.format(" -x %q", proxy) or ""
+    local sec_opt = insecure and " -k" or ""
+    local url = "https://www.youtube.com/results?search_query=" .. encoded
+    local cmd = string.format('curl -s -L --max-time 8%s%s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" %q',
+        sec_opt, proxy_opt, url)
     local p = io.popen(cmd, POPEN_READ_BIN)
-    if not p then
-        return nil, "Failed to execute yt-dlp process"
-    end
+    if not p then return nil end
+    local html = p:read("*a")
+    p:close()
+    if not html or #html < 500 then return nil end
 
     local items = {}
-    for line in p:lines() do
-        local id = parse_json_field(line, "id")
-        local title = parse_json_field(line, "title")
-        if id and title then
-            local uploader = parse_json_field(line, "uploader") or parse_json_field(line, "channel") or "YouTube"
-            local duration = parse_json_field(line, "duration") or 0
-            local thumb = parse_json_field(line, "thumbnail")
+    local seen = {}
+    for block in html:gmatch('"videoRenderer":%b{}') do
+        local id = block:match('"videoId"%s*:%s*"([%w%-_]+)"')
+        local title_part = block:match('"title"%s*:%s*%b{}')
+        local title = title_part and title_part:match('"text"%s*:%s*"(.-)"')
+        local owner_part = block:match('"ownerText"%s*:%s*%b{}') or block:match('"longBylineText"%s*:%s*%b{}')
+        local channel = owner_part and owner_part:match('"text"%s*:%s*"(.-)"') or "YouTube"
+        local len_part = block:match('"lengthText"%s*:%s*%b{}')
+        local duration_str = len_part and len_part:match('"simpleText"%s*:%s*"(.-)"') or "--:--"
+
+        if id and title and not seen[id] then
+            seen[id] = true
             table.insert(items, {
                 id = id,
                 url = "https://www.youtube.com/watch?v=" .. id,
-                title = title,
-                uploader = uploader,
-                duration = duration,
-                duration_str = format_duration(duration),
-                thumbnail = thumb,
+                title = unescape_unicode(title),
+                uploader = unescape_unicode(channel),
+                duration = 0,
+                duration_str = duration_str,
+                thumbnail = string.format("https://i.ytimg.com/vi/%s/hqdefault.jpg", id),
             })
+            if #items >= max_results then break end
         end
     end
-    p:close()
     return items
+end
+
+local function fetch_youtube_results(query, mode, browser, cookies_file, max_results, is_liked, proxy, insecure)
+    max_results = max_results or 20
+    local is_direct_url = query:match("^https?://") or query:match("^www%.") or query:match("^youtu%.be/")
+    local term = query
+
+    if not is_liked and not is_direct_url then
+        if mode == "music" and not query:lower():find("music") and not query:lower():find("song") and not query:lower():find("audio") then
+            term = query .. " music"
+        end
+    end
+
+    local items = {}
+    local err_lines = {}
+
+    if HAS_YTDLP then
+        local search_spec
+        if is_liked then
+            if mode == "music" then
+                search_spec = '"https://music.youtube.com/playlist?list=LM"'
+            else
+                search_spec = '":ytfavorites"'
+            end
+        elseif is_direct_url then
+            search_spec = string.format("%q", query)
+        else
+            search_spec = string.format('"ytsearch%d:%s"', max_results, term:gsub('"', '\\"'))
+        end
+
+        local extra_opts = " --extractor-args=\"youtube:player_client=android\""
+        if browser and #browser > 0 then
+            extra_opts = extra_opts .. string.format(" --cookies-from-browser %s", browser)
+        elseif cookies_file and #cookies_file > 0 then
+            extra_opts = extra_opts .. string.format(" --cookies %q", cookies_file)
+        end
+        if insecure then
+            extra_opts = extra_opts .. " --no-check-certificates"
+        end
+        if proxy and #proxy > 0 then
+            extra_opts = extra_opts .. string.format(" --proxy %q", proxy)
+        end
+
+        local redirect = "2>&1"
+        local cmd = string.format(
+            'yt-dlp --dump-json --flat-playlist --skip-download%s %s %s',
+            extra_opts, search_spec, redirect
+        )
+
+        local p = io.popen(cmd, POPEN_READ_BIN)
+        if p then
+            for line in p:lines() do
+                if line:sub(1, 1) == "{" then
+                    local id = parse_json_field(line, "id")
+                    local title = parse_json_field(line, "title")
+                    if id and title then
+                        local uploader = parse_json_field(line, "uploader") or parse_json_field(line, "channel") or "YouTube"
+                        local duration = parse_json_field(line, "duration") or 0
+                        local thumb = parse_json_field(line, "thumbnail")
+                        table.insert(items, {
+                            id = id,
+                            url = "https://www.youtube.com/watch?v=" .. id,
+                            title = title,
+                            uploader = uploader,
+                            duration = duration,
+                            duration_str = format_duration(duration),
+                            thumbnail = thumb,
+                        })
+                    end
+                else
+                    if line:find("ERROR") or line:find("WARNING") or line:find("SSL") or line:find("bot") then
+                        table.insert(err_lines, line)
+                    end
+                end
+            end
+            p:close()
+        end
+    end
+
+    if #items > 0 then
+        return items
+    end
+
+    -- Automatic Fallback: Direct Web Scrape via curl (works even if yt-dlp is blocked or broken)
+    if not is_liked and not is_direct_url then
+        local fallback_items = scrape_youtube_search(term, max_results, proxy, insecure)
+        if fallback_items and #fallback_items > 0 then
+            return fallback_items
+        end
+    end
+
+    -- If both engines failed, produce helpful actionable error
+    local err_text = table.concat(err_lines, "\n")
+    if err_text:find("CERTIFICATE_VERIFY_FAILED") or err_text:find("certificate verify failed") then
+        return nil, "SSL certificate failed (corporate network?). Try: --insecure"
+    elseif err_text:find("Sign in to confirm") or err_text:find("bot") then
+        return nil, "YouTube blocked request (anti-bot). Try: --browser <chrome|edge|firefox> or --cookies <file>"
+    elseif err_text:find("429") or err_text:find("Too Many Requests") then
+        return nil, "Rate limited by YouTube (429). Try: --browser or --proxy <url>"
+    elseif err_text:find("ProxyError") or err_text:find("Connection refused") or err_text:find("timed out") then
+        return nil, "Connection failed. Check network or try: --proxy <url>"
+    elseif #err_lines > 0 then
+        local first_err = err_lines[1]:gsub("^ERROR:%s*", ""):gsub("^%[.-%]%s*", "")
+        return nil, "yt-dlp error: " .. first_err:sub(1, 70)
+    elseif not HAS_YTDLP then
+        return nil, "yt-dlp is not installed and web fallback returned 0 items."
+    end
+
+    return nil, "No results found for '" .. query .. "'."
 end
 
 -- =========================================================================
@@ -523,7 +611,7 @@ end
 -- =========================================================================
 -- 5. Playback Controller
 -- =========================================================================
-local function play_item(item, mode, browser, cookies_file, use_external_window)
+local function play_item(item, mode, browser, cookies_file, use_external_window, proxy, insecure)
     if not HAS_MPV then
         io.write("\27[H\27[2J\27[1;31mError: mpv is not installed.\27[0m\n\nPlease install mpv to play audio/video streams.\nPress any key to return...")
         io.flush()
@@ -537,7 +625,21 @@ local function play_item(item, mode, browser, cookies_file, use_external_window)
     elseif cookies_file and #cookies_file > 0 then
         table.insert(raw_opts, string.format("cookies=%s", cookies_file))
     end
+    if insecure then
+        table.insert(raw_opts, "no-check-certificates=")
+    end
+    if proxy and #proxy > 0 then
+        table.insert(raw_opts, string.format("proxy=%s", proxy))
+    end
     local ytdl_raw_opts = string.format(' --ytdl-raw-options=%q', table.concat(raw_opts, ","))
+
+    local extra_mpv_opts = ""
+    if insecure then
+        extra_mpv_opts = extra_mpv_opts .. " --tls-verify=no"
+    end
+    if proxy and #proxy > 0 then
+        extra_mpv_opts = extra_mpv_opts .. string.format(" --http-proxy=%q", proxy)
+    end
 
     local term_w, term_h = get_terminal_size()
     local mpv_cmd
@@ -547,21 +649,21 @@ local function play_item(item, mode, browser, cookies_file, use_external_window)
         mpv_cmd = string.format(
             'mpv --no-video --term-osd-bar --ytdl-format="bestaudio/best" '
             .. '--term-status-msg="  ${media-title}  [${playback-time} / ${duration}]  Vol: ${volume}%%" '
-            .. '%s %q',
-            ytdl_raw_opts, item.url
+            .. '%s%s %q',
+            ytdl_raw_opts, extra_mpv_opts, item.url
         )
     else
         -- Video playback
         if use_external_window then
-            mpv_cmd = string.format('mpv %s %q', ytdl_raw_opts, item.url)
+            mpv_cmd = string.format('mpv %s%s %q', ytdl_raw_opts, extra_mpv_opts, item.url)
         else
             -- Terminal ASCII/Half-block video
             mpv_cmd = string.format(
                 'mpv --vo=tct --vo-tct-width=%d --vo-tct-height=%d --term-osd-bar '
                 .. '--term-status-msg="  ${media-title}  [${playback-time} / ${duration}]" '
-                .. '%s %q',
+                .. '%s%s %q',
                 math.max(10, term_w), math.max(6, term_h - 1),
-                ytdl_raw_opts, item.url
+                ytdl_raw_opts, extra_mpv_opts, item.url
             )
         end
     end
@@ -631,7 +733,7 @@ end
 -- =========================================================================
 -- 7. Main Interactive TUI Application
 -- =========================================================================
-local function run_app(init_query, init_mode, browser, cookies_file, is_liked, use_window)
+local function run_app(init_query, init_mode, browser, cookies_file, is_liked, use_window, proxy, insecure)
     local current_query = init_query or "lofi beats"
     local mode = init_mode or "music"
     local selected_idx = 1
@@ -655,7 +757,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
             mode:upper(), is_liked and "Liked Songs" or current_query))
         io.flush()
 
-        local res, err = fetch_youtube_results(current_query, mode, browser, cookies_file, 25, is_liked)
+        local res, err = fetch_youtube_results(current_query, mode, browser, cookies_file, 25, is_liked, proxy, insecure)
         is_loading = false
         if res and #res > 0 then
             items = res
@@ -786,7 +888,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         elseif k == "ENTER" then
             if #items > 0 and selected_idx >= 1 and selected_idx <= #items then
                 local sel = items[selected_idx]
-                play_item(sel, mode, browser, cookies_file, use_window)
+                play_item(sel, mode, browser, cookies_file, use_window, proxy, insecure)
                 draw_tui()
             end
         end
@@ -809,6 +911,8 @@ local function print_help()
     print("  --browser <name>      Extract session cookies from browser (firefox, chrome, brave, edge)")
     print("  --no-interactive      Non-interactive script/batch mode (print results and exit)")
     print("  --cookies <file>      Use Netscape format cookies.txt file")
+    print("  --proxy <url>         Use HTTP/HTTPS/SOCKS proxy for search and streaming")
+    print("  --insecure            Disable SSL certificate checks (useful for corporate proxy SSL inspection)")
     print("  --liked               Load user's Liked Music or Liked Videos playlist")
     print("  -h, --help            Show this help message")
     print("\nSystem Status:")
@@ -819,6 +923,8 @@ local function print_help()
     print("\nExamples:")
     print("  luajit yt.lua \"synthwave radio\"")
     print("  luajit yt.lua --music --browser firefox")
+    print("  luajit yt.lua --insecure \"lofi hip hop\"")
+    print("  luajit yt.lua --proxy http://proxy:8080 \"jazz lounge\"")
     print("  luajit yt.lua --liked --browser chrome")
     print("  luajit yt.lua \"https://www.youtube.com/watch?v=dQw4w9WgXcQ\"")
 end
@@ -830,6 +936,8 @@ local function main()
     local is_liked = false
     local use_window = false
     local non_interactive = false
+    local proxy = nil
+    local insecure = false
     local max_results = 20
     local query_parts = {}
 
@@ -849,6 +957,11 @@ local function main()
             is_liked = true
         elseif a == "--no-interactive" then
             non_interactive = true
+        elseif a == "--insecure" or a == "--no-check-certificates" or a == "--no-check-certificate" then
+            insecure = true
+        elseif a == "--proxy" then
+            i = i + 1
+            proxy = arg[i]
         elseif a == "--max-results" then
             i = i + 1
             max_results = tonumber(arg[i]) or 20
@@ -868,7 +981,7 @@ local function main()
 
     if non_interactive or (not is_stdin_tty()) then
         local q = query or "lofi hip hop"
-        local res, err = fetch_youtube_results(q, mode, browser, cookies_file, max_results, is_liked)
+        local res, err = fetch_youtube_results(q, mode, browser, cookies_file, max_results, is_liked, proxy, insecure)
         if not res then
             io.stderr:write("Error: " .. tostring(err) .. "\n")
             os.exit(1)
@@ -880,7 +993,7 @@ local function main()
         return
     end
 
-    run_app(query, mode, browser, cookies_file, is_liked, use_window)
+    run_app(query, mode, browser, cookies_file, is_liked, use_window, proxy, insecure)
 end
 
 main()
