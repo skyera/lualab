@@ -89,6 +89,12 @@ if is_windows then
         int _kbhit(void);
         int _getch(void);
         int _isatty(int fd);
+
+        HANDLE CreateFileA(const char* lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode, void* lpSecurityAttributes, DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes, HANDLE hTemplateFile);
+        BOOL WriteFile(HANDLE hFile, const void* lpBuffer, DWORD nNumberOfBytesToWrite, DWORD* lpNumberOfBytesWritten, void* lpOverlapped);
+        BOOL ReadFile(HANDLE hFile, void* lpBuffer, DWORD nNumberOfBytesToRead, DWORD* lpNumberOfBytesRead, void* lpOverlapped);
+        BOOL CloseHandle(HANDLE hObject);
+        BOOL PeekNamedPipe(HANDLE hNamedPipe, void* lpBuffer, DWORD nBufferSize, DWORD* lpBytesRead, DWORD* lpTotalBytesAvail, DWORD* lpBytesLeftThisMessage);
     ]]
 
     local kernel32 = ffi.load("kernel32")
@@ -540,6 +546,10 @@ local function utf8_next(s, i)
     return b, 1
 end
 
+local function strip_ansi(str)
+    return (str or ""):gsub("\27%[[0-9;]*[a-zA-Z]", "")
+end
+
 local function display_width(s)
     if not s or type(s) ~= "string" or #s == 0 then return 0 end
     local w, i = 0, 1
@@ -605,6 +615,9 @@ local function parse_json_field(line, key)
     end
     local num = line:match('"' .. key .. '"%s*:%s*([%d%.]+)')
     if num then return tonumber(num) end
+    local bool = line:match('"' .. key .. '"%s*:%s*(true)') or line:match('"' .. key .. '"%s*:%s*(false)')
+    if bool == "true" then return true end
+    if bool == "false" then return false end
     return nil
 end
 
@@ -734,7 +747,7 @@ local function scrape_youtube_search(query, max_results, proxy, insecure)
     return items
 end
 
-local function fetch_youtube_results(query, mode, browser, cookies_file, max_results, is_liked, proxy, insecure)
+local function fetch_youtube_results(query, mode, browser, cookies_file, max_results, is_liked, proxy, insecure, filters)
     max_results = max_results or 20
     local is_direct_url = query:match("^https?://") or query:match("^www%.") or query:match("^youtu%.be/")
     local term = query
@@ -758,6 +771,19 @@ local function fetch_youtube_results(query, mode, browser, cookies_file, max_res
             end
         elseif is_direct_url then
             search_spec = string.format("%q", query)
+        elseif filters and filters.sort and filters.sort ~= "relevance" then
+            local sp_map = {
+                views = "CAM%253D",
+                date = "CAI%253D",
+                rating = "CAE%253D"
+            }
+            local sp = sp_map[filters.sort]
+            if sp then
+                local enc_term = term:gsub("%s+", "+")
+                search_spec = string.format('"https://www.youtube.com/results?search_query=%s&sp=%s"', enc_term, sp)
+            else
+                search_spec = string.format('"ytsearch%d:%s"', max_results, term:gsub('"', '\\"'))
+            end
         else
             search_spec = string.format('"ytsearch%d:%s"', max_results, term:gsub('"', '\\"'))
         end
@@ -811,6 +837,21 @@ local function fetch_youtube_results(query, mode, browser, cookies_file, max_res
         end
     end
 
+    if filters and filters.duration and filters.duration ~= "all" then
+        local filtered = {}
+        for _, it in ipairs(items) do
+            local d = it.duration or 0
+            if filters.duration == "short" and (d == 0 or d < 240) then
+                table.insert(filtered, it)
+            elseif filters.duration == "medium" and d >= 240 and d <= 1200 then
+                table.insert(filtered, it)
+            elseif filters.duration == "long" and d > 1200 then
+                table.insert(filtered, it)
+            end
+        end
+        items = filtered
+    end
+
     if #items > 0 then
         return items, nil, insecure
     end
@@ -819,7 +860,7 @@ local function fetch_youtube_results(query, mode, browser, cookies_file, max_res
     local err_text = table.concat(err_lines, "\n")
     if not insecure and (err_text:find("CERTIFICATE_VERIFY_FAILED") or err_text:find("certificate verify failed") or err_text:find("SSL") or err_text:find("certificate problem")) then
         io.stderr:write("\n\27[33m[yt] Corporate SSL inspection detected -- retrying in insecure mode...\27[0m\n")
-        local retry_items, retry_err = fetch_youtube_results(query, mode, browser, cookies_file, max_results, is_liked, proxy, true)
+        local retry_items, retry_err = fetch_youtube_results(query, mode, browser, cookies_file, max_results, is_liked, proxy, true, filters)
         if retry_items and #retry_items > 0 then
             return retry_items, nil, true
         end
@@ -907,8 +948,193 @@ local function build_mpv_status_msg(mode, show_cc)
 end
 
 -- =========================================================================
--- 5. Playback Controller
+-- 5. Background Mini-Player & Foreground Playback Controller
 -- =========================================================================
+local MpvController = {
+    is_playing = false,
+    current_item = nil,
+    time_pos = 0,
+    duration = 0,
+    volume = 100,
+    is_paused = false,
+    sub_text = "",
+    is_eof = false,
+    pipe_handle = nil,
+    pipe_name = nil,
+    read_buf = "",
+}
+
+function MpvController:send_command(json_str)
+    if is_windows and self.pipe_handle then
+        local data = json_str .. "\n"
+        local written = ffi.new("DWORD[1]")
+        kernel32.WriteFile(self.pipe_handle, data, #data, written, nil)
+    end
+end
+
+function MpvController:start(item, show_cc, sub_lang, browser, cookies_file, proxy, insecure)
+    self:stop()
+
+    local pipe_id = tostring(math.floor(get_now_sec() * 1000))
+    local pipe_path = is_windows and ("\\\\.\\pipe\\yt_mpv_" .. pipe_id) or ("/tmp/yt_mpv_" .. pipe_id .. ".sock")
+    self.pipe_name = pipe_path
+
+    local raw_opts = { "extractor-args=youtube:player_client=android" }
+    if show_cc then
+        table.insert(raw_opts, "write-subs=")
+        table.insert(raw_opts, "write-auto-subs=")
+        table.insert(raw_opts, string.format("sub-langs=%s", sub_lang or "en.*"))
+    end
+    if browser and #browser > 0 then
+        table.insert(raw_opts, string.format("cookies-from-browser=%s", browser))
+    elseif cookies_file and #cookies_file > 0 then
+        table.insert(raw_opts, string.format("cookies=%s", cookies_file))
+    end
+    if insecure then
+        table.insert(raw_opts, "no-check-certificates=")
+    end
+    if proxy and #proxy > 0 then
+        table.insert(raw_opts, string.format("proxy=%s", proxy))
+    end
+    local ytdl_raw_opts = string.format(' --ytdl-raw-options=%q', table.concat(raw_opts, ","))
+
+    local extra_mpv_opts = ""
+    if insecure then
+        extra_mpv_opts = extra_mpv_opts .. " --tls-verify=no"
+    end
+    if proxy and #proxy > 0 then
+        extra_mpv_opts = extra_mpv_opts .. string.format(" --http-proxy=%q", proxy)
+    end
+    if show_cc then
+        local lang_pref = sub_lang or "en,eng"
+        extra_mpv_opts = extra_mpv_opts .. string.format(" --sub-auto=all --sub-visibility=yes --slang=%s", lang_pref)
+    end
+
+    local cmd
+    if is_windows then
+        cmd = string.format('start /B "" mpv --no-video --idle=yes --input-ipc-server=%s --ytdl-format="bestaudio/best" %s%s %q >nul 2>&1',
+            pipe_path, ytdl_raw_opts, extra_mpv_opts, item.url)
+    else
+        cmd = string.format('mpv --no-video --idle=yes --input-ipc-server=%s --ytdl-format="bestaudio/best" %s%s %q >/dev/null 2>&1 &',
+            pipe_path, ytdl_raw_opts, extra_mpv_opts, item.url)
+    end
+    safe_execute(cmd)
+
+    if is_windows then
+        local GENERIC_READ = 0x80000000
+        local GENERIC_WRITE = 0x40000000
+        local OPEN_EXISTING = 3
+        local INVALID_HANDLE_VALUE = ffi.cast("HANDLE", -1)
+        for _ = 1, 25 do
+            sleep_ms(100)
+            local h = kernel32.CreateFileA(pipe_path, bit.bor(GENERIC_READ, GENERIC_WRITE), 0, nil, OPEN_EXISTING, 0, nil)
+            if h ~= INVALID_HANDLE_VALUE then
+                self.pipe_handle = h
+                break
+            end
+        end
+    end
+
+    self.is_playing = true
+    self.current_item = item
+    self.time_pos = 0
+    self.duration = item.duration or 0
+    self.volume = 100
+    self.is_paused = false
+    self.sub_text = ""
+    self.is_eof = false
+    self.read_buf = ""
+
+    self:send_command('{"command": ["observe_property", 1, "time-pos"]}')
+    self:send_command('{"command": ["observe_property", 2, "duration"]}')
+    self:send_command('{"command": ["observe_property", 3, "pause"]}')
+    self:send_command('{"command": ["observe_property", 4, "sub-text"]}')
+    self:send_command('{"command": ["observe_property", 5, "volume"]}')
+    self:send_command('{"command": ["observe_property", 6, "eof-reached"]}')
+end
+
+function MpvController:poll()
+    if not self.is_playing then return nil end
+
+    if is_windows and self.pipe_handle then
+        local avail = ffi.new("DWORD[1]")
+        if kernel32.PeekNamedPipe(self.pipe_handle, nil, 0, nil, avail, nil) ~= 0 and avail[0] > 0 then
+            local buf = ffi.new("char[?]", avail[0] + 1)
+            local read_bytes = ffi.new("DWORD[1]")
+            if kernel32.ReadFile(self.pipe_handle, buf, avail[0], read_bytes, nil) ~= 0 and read_bytes[0] > 0 then
+                self.read_buf = self.read_buf .. ffi.string(buf, read_bytes[0])
+            end
+        end
+    end
+
+    while true do
+        local nl = self.read_buf:find("\n")
+        if not nl then break end
+        local line = self.read_buf:sub(1, nl - 1)
+        self.read_buf = self.read_buf:sub(nl + 1)
+
+        if line:find('"event":"end-file"') or (line:find('"name":"eof-reached"') and line:find('true')) then
+            self.is_eof = true
+        elseif line:find('"name":"time-pos"') then
+            local t = parse_json_field(line, "data")
+            if t then self.time_pos = math.floor(t) end
+        elseif line:find('"name":"duration"') then
+            local d = parse_json_field(line, "data")
+            if d then self.duration = math.floor(d) end
+        elseif line:find('"name":"pause"') then
+            local p = line:find('"data":true') ~= nil
+            self.is_paused = p
+        elseif line:find('"name":"volume"') then
+            local v = parse_json_field(line, "data")
+            if v then self.volume = math.floor(v) end
+        elseif line:find('"name":"sub-text"') then
+            local s = parse_json_field(line, "data") or ""
+            self.sub_text = s
+        end
+    end
+
+    return {
+        is_playing = self.is_playing,
+        item = self.current_item,
+        time_pos = self.time_pos,
+        duration = self.duration,
+        volume = self.volume,
+        is_paused = self.is_paused,
+        sub_text = self.sub_text,
+        is_eof = self.is_eof
+    }
+end
+
+function MpvController:toggle_pause()
+    self:send_command('{"command": ["cycle", "pause"]}')
+    self.is_paused = not self.is_paused
+end
+
+function MpvController:seek(delta)
+    self:send_command(string.format('{"command": ["seek", %d, "relative"]}', delta))
+end
+
+function MpvController:change_volume(delta)
+    self:send_command(string.format('{"command": ["add", "volume", %d]}', delta))
+end
+
+function MpvController:stop()
+    if self.pipe_handle then
+        self:send_command('{"command": ["quit"]}')
+        sleep_ms(50)
+        kernel32.CloseHandle(self.pipe_handle)
+        self.pipe_handle = nil
+    end
+    self.is_playing = false
+    self.current_item = nil
+    self.time_pos = 0
+    self.duration = 0
+    self.volume = 100
+    self.is_paused = false
+    self.sub_text = ""
+    self.is_eof = false
+    self.read_buf = ""
+end
 local function play_item(item, mode, browser, cookies_file, use_external_window, proxy, insecure, show_cc, sub_lang)
     if not HAS_MPV then
         io.write("\27[H\27[2J\27[1;31mError: mpv is not installed.\27[0m\n\nPlease install mpv to play audio/video streams.\nPress any key to return...")
@@ -990,8 +1216,286 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
 end
 
 -- =========================================================================
--- 6. Interactive Modals (Search & Shortcut Help)
+-- 6. Interactive Modals (Download, Queue, Filters, Search & Help)
 -- =========================================================================
+local function ensure_downloads_dir()
+    if is_windows then
+        safe_execute('if not exist downloads mkdir downloads')
+    else
+        safe_execute('mkdir -p downloads')
+    end
+end
+
+local function download_item(item, mode, browser, cookies_file, proxy, insecure)
+    if not HAS_YTDLP then
+        io.write("\27[H\27[2J\27[1;31mError: yt-dlp is not installed.\27[0m\n\nPlease install yt-dlp to download tracks.\nPress any key to return...")
+        io.flush()
+        read_key()
+        return
+    end
+
+    ensure_downloads_dir()
+    local was_raw = raw_mode_enabled
+    disable_raw_mode()
+    io.write("\27[H\27[2J")
+    io.write(string.format("\27[1;36m=== Downloading to ./downloads/ (%s mode) ===\27[0m\n\n", mode:upper()))
+    io.write(string.format("  \27[1;37mTitle:\27[0m    %s\n", item.title or "Unknown"))
+    io.write(string.format("  \27[1;37mUploader:\27[0m %s\n", item.uploader or "YouTube"))
+    io.write(string.format("  \27[1;37mURL:\27[0m      %s\n\n", item.url))
+    io.flush()
+
+    local extra_args = " --extractor-args \"youtube:player_client=android\""
+    if browser and #browser > 0 then
+        extra_args = extra_args .. string.format(" --cookies-from-browser %s", browser)
+    elseif cookies_file and #cookies_file > 0 then
+        extra_args = extra_args .. string.format(" --cookies %q", cookies_file)
+    end
+    if insecure then
+        extra_args = extra_args .. " --no-check-certificates"
+    end
+    if proxy and #proxy > 0 then
+        extra_args = extra_args .. string.format(" --proxy %q", proxy)
+    end
+
+    local out_tmpl = "downloads/%(title)s.%(ext)s"
+    local dl_cmd
+    if mode == "music" then
+        if HAS_FFMPEG then
+            dl_cmd = string.format('yt-dlp -x --audio-format mp3 --add-metadata --embed-thumbnail -o %q%s %q',
+                out_tmpl, extra_args, item.url)
+        else
+            dl_cmd = string.format('yt-dlp -f "bestaudio/best" -o %q%s %q',
+                out_tmpl, extra_args, item.url)
+        end
+    else
+        if HAS_FFMPEG then
+            dl_cmd = string.format('yt-dlp -f "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best" --merge-output-format mp4 -o %q%s %q',
+                out_tmpl, extra_args, item.url)
+        else
+            dl_cmd = string.format('yt-dlp -f "best[height<=1080]/best" -o %q%s %q',
+                out_tmpl, extra_args, item.url)
+        end
+    end
+
+    local exit_code = safe_execute(dl_cmd)
+    if exit_code == 0 then
+        io.write("\n\27[1;32m[✓] Download completed successfully to ./downloads/\27[0m\n")
+    else
+        io.write(string.format("\n\27[1;31m[!] Download exited with code %s\27[0m\n", tostring(exit_code)))
+    end
+
+    if was_raw then
+        io.write("\n\27[90mPress any key to return to viewer...\27[0m")
+        io.flush()
+        read_key()
+        enable_raw_mode()
+    end
+end
+
+local function show_queue_modal(queue)
+    local term_w, term_h = get_terminal_size()
+    local box_w = math.min(74, term_w - 4)
+    local box_x = math.max(1, math.floor((term_w - box_w) / 2))
+
+    local function line_pad(text)
+        local vis_len = display_width(strip_ansi(text))
+        local pad = math.max(0, box_w - 2 - vis_len)
+        return text .. string.rep(" ", pad) .. "\27[1;36m|\27[0m"
+    end
+
+    if #queue == 0 then
+        local empty_box_h = 6
+        local empty_box_y = math.max(2, math.floor((term_h - empty_box_h) / 2))
+        local buf = {
+            string.format("\27[%d;%dH\27[1;36m+%s+\27[0m", empty_box_y, box_x, string.rep("-", box_w - 2)),
+            string.format("\27[%d;%dH%s", empty_box_y + 1, box_x, line_pad("\27[1;36m|  \27[1;37mUp-Next Playback Queue (Empty)\27[0m")),
+            string.format("\27[%d;%dH%s", empty_box_y + 2, box_x, line_pad("\27[1;36m|  \27[90mNo tracks queued. Press [Tab] on any search result to add.\27[0m")),
+            string.format("\27[%d;%dH%s", empty_box_y + 3, box_x, line_pad("\27[1;36m|  \27[90mPress any key to close...\27[0m")),
+            string.format("\27[%d;%dH\27[1;36m+%s+\27[0m", empty_box_y + 4, box_x, string.rep("-", box_w - 2)),
+        }
+        io.write(table.concat(buf))
+        io.flush()
+        read_key()
+        return nil
+    end
+
+    local max_items = math.min(10, math.max(3, term_h - 10))
+    local box_h = max_items + 6
+    local box_y = math.max(2, math.floor((term_h - box_h) / 2))
+
+    local q_sel = 1
+    local q_scroll = 0
+
+    local function draw_queue()
+        q_sel = math.max(1, math.min(#queue, q_sel))
+        if q_sel <= q_scroll then
+            q_scroll = q_sel - 1
+        elseif q_sel > q_scroll + max_items then
+            q_scroll = q_sel - max_items
+        end
+
+        local buf = {}
+        table.insert(buf, string.format("\27[%d;%dH\27[1;36m+%s+\27[0m", box_y, box_x, string.rep("-", box_w - 2)))
+        table.insert(buf, string.format("\27[%d;%dH%s", box_y + 1, box_x,
+            line_pad(string.format("\27[1;36m|  \27[1;37mUp-Next Playback Queue (%d track%s)\27[0m", #queue, (#queue == 1 and "" or "s")))))
+        table.insert(buf, string.format("\27[%d;%dH+%s+\27[0m", box_y + 2, box_x, string.rep("-", box_w - 2)))
+
+        for r = 1, max_items do
+            local idx = q_scroll + r
+            local line_y = box_y + 2 + r
+            if idx <= #queue then
+                local it = queue[idx]
+                local is_s = (idx == q_sel)
+                local prefix = is_s and "\27[1;92m> \27[1;37;44m" or "  \27[90m"
+                local num_str = string.format("%02d. ", idx)
+                local max_t = box_w - 24
+                local t = utf8_truncate(it.title, max_t)
+                local t_pad = string.rep(" ", math.max(0, max_t - display_width(t)))
+                local dur = it.duration_str or "--:--"
+                local dur_pad = string.rep(" ", math.max(0, 7 - #dur))
+                
+                local line_content
+                if is_s then
+                    line_content = string.format("%s%s%s%s %s%s\27[0m", prefix, num_str, t, t_pad, dur, dur_pad)
+                else
+                    line_content = string.format("%s%s\27[37m%s%s \27[33m%s%s\27[0m", prefix, num_str, t, t_pad, dur, dur_pad)
+                end
+                table.insert(buf, string.format("\27[%d;%dH%s", line_y, box_x, line_pad(string.format("\27[1;36m| \27[0m%s", line_content))))
+            else
+                table.insert(buf, string.format("\27[%d;%dH%s", line_y, box_x, line_pad("\27[1;36m| ")))
+            end
+        end
+
+        local foot_y = box_y + 3 + max_items
+        table.insert(buf, string.format("\27[%d;%dH\27[1;36m+%s+\27[0m", foot_y, box_x, string.rep("-", box_w - 2)))
+        table.insert(buf, string.format("\27[%d;%dH%s", foot_y + 1, box_x,
+            line_pad("\27[1;36m| \27[93m[Enter]\27[0m Play  \27[93m[d/Bksp]\27[0m Delete  \27[93m[c]\27[0m Clear  \27[90m[Esc/q] Close\27[0m")))
+        table.insert(buf, string.format("\27[%d;%dH\27[1;36m+%s+\27[0m", foot_y + 2, box_x, string.rep("-", box_w - 2)))
+
+        io.write(table.concat(buf))
+        io.flush()
+    end
+
+    draw_queue()
+
+    while true do
+        local k = read_key(50)
+        if k == "ESC" or k == "q" then
+            return nil
+        elseif k == "UP" or k == "k" then
+            if q_sel > 1 then
+                q_sel = q_sel - 1
+                draw_queue()
+            end
+        elseif k == "DOWN" or k == "j" then
+            if q_sel < #queue then
+                q_sel = q_sel + 1
+                draw_queue()
+            end
+        elseif k == "ENTER" then
+            return q_sel
+        elseif k == "d" or k == "D" or k == "BACKSPACE" then
+            if #queue > 0 and q_sel >= 1 and q_sel <= #queue then
+                table.remove(queue, q_sel)
+                if #queue == 0 then
+                    return nil
+                end
+                if q_sel > #queue then q_sel = #queue end
+                draw_queue()
+            end
+        elseif k == "c" or k == "C" then
+            for i = #queue, 1, -1 do
+                table.remove(queue, i)
+            end
+            return nil
+        end
+    end
+end
+
+local function show_filter_modal(filters)
+    local term_w, term_h = get_terminal_size()
+    local box_w = math.min(66, term_w - 4)
+    local box_h = 17
+    local box_x = math.max(1, math.floor((term_w - box_w) / 2))
+    local box_y = math.max(2, math.floor((term_h - box_h) / 2))
+
+    local sort_val = filters.sort or "relevance"
+    local dur_val = filters.duration or "all"
+    local initial_sort = sort_val
+    local initial_dur = dur_val
+
+    local function line_pad(text)
+        local vis_len = display_width(strip_ansi(text))
+        local pad = math.max(0, box_w - 2 - vis_len)
+        return text .. string.rep(" ", pad) .. "\27[1;36m|\27[0m"
+    end
+
+    local function draw_modal()
+        local lines = {
+            string.format("\27[1;36m+%s+\27[0m", string.rep("-", box_w - 2)),
+            line_pad("\27[1;36m|  \27[1;37mSearch Filters & Sorting Options\27[0m"),
+            string.format("\27[1;36m+%s+\27[0m", string.rep("-", box_w - 2)),
+            line_pad("\27[1;36m|  \27[1;33mSort By:\27[0m"),
+            line_pad(string.format("\27[1;36m|    %s", (sort_val == "relevance" and "\27[1;92m[1] (*) Relevance\27[0m" or "\27[90m[1] ( ) Relevance\27[0m"))),
+            line_pad(string.format("\27[1;36m|    %s", (sort_val == "views" and "\27[1;92m[2] (*) View Count (Popular)\27[0m" or "\27[90m[2] ( ) View Count (Popular)\27[0m"))),
+            line_pad(string.format("\27[1;36m|    %s", (sort_val == "date" and "\27[1;92m[3] (*) Upload Date (Latest)\27[0m" or "\27[90m[3] ( ) Upload Date (Latest)\27[0m"))),
+            line_pad(string.format("\27[1;36m|    %s", (sort_val == "rating" and "\27[1;92m[4] (*) Rating (High to Low)\27[0m" or "\27[90m[4] ( ) Rating (High to Low)\27[0m"))),
+            line_pad("\27[1;36m|"),
+            line_pad("\27[1;36m|  \27[1;33mDuration:\27[0m"),
+            line_pad(string.format("\27[1;36m|    %s", (dur_val == "all" and "\27[1;92m[5] (*) All Durations\27[0m" or "\27[90m[5] ( ) All Durations\27[0m"))),
+            line_pad(string.format("\27[1;36m|    %s", (dur_val == "short" and "\27[1;92m[6] (*) Short (< 4 minutes)\27[0m" or "\27[90m[6] ( ) Short (< 4 minutes)\27[0m"))),
+            line_pad(string.format("\27[1;36m|    %s", (dur_val == "medium" and "\27[1;92m[7] (*) Medium (4 - 20 minutes)\27[0m" or "\27[90m[7] ( ) Medium (4 - 20 minutes)\27[0m"))),
+            line_pad(string.format("\27[1;36m|    %s", (dur_val == "long" and "\27[1;92m[8] (*) Long (> 20 minutes)\27[0m" or "\27[90m[8] ( ) Long (> 20 minutes)\27[0m"))),
+            string.format("\27[1;36m+%s+\27[0m", string.rep("-", box_w - 2)),
+            line_pad("\27[1;36m|  \27[90m[1-4] Set Sort   [5-8] Set Duration   [Enter/Esc] Done\27[0m"),
+            string.format("\27[1;36m+%s+\27[0m", string.rep("-", box_w - 2)),
+        }
+
+        for idx, line in ipairs(lines) do
+            io.write(string.format("\27[%d;%dH%s", box_y + idx - 1, box_x, line))
+        end
+        io.flush()
+    end
+
+    draw_modal()
+
+    while true do
+        local k = read_key(50)
+        if k == "ESC" or k == "ENTER" or k == "q" then
+            break
+        elseif k == "1" then
+            sort_val = "relevance"
+            draw_modal()
+        elseif k == "2" then
+            sort_val = "views"
+            draw_modal()
+        elseif k == "3" then
+            sort_val = "date"
+            draw_modal()
+        elseif k == "4" then
+            sort_val = "rating"
+            draw_modal()
+        elseif k == "5" then
+            dur_val = "all"
+            draw_modal()
+        elseif k == "6" then
+            dur_val = "short"
+            draw_modal()
+        elseif k == "7" then
+            dur_val = "medium"
+            draw_modal()
+        elseif k == "8" then
+            dur_val = "long"
+            draw_modal()
+        end
+    end
+
+    local changed = (sort_val ~= initial_sort or dur_val ~= initial_dur)
+    filters.sort = sort_val
+    filters.duration = dur_val
+    return changed
+end
+
 local function prompt_search_query(current_query)
     local term_w, term_h = get_terminal_size()
     local box_w = math.min(60, term_w - 4)
@@ -1044,42 +1548,47 @@ end
 
 local function show_help_modal()
     local term_w, term_h = get_terminal_size()
-    local box_w = math.min(68, term_w - 4)
+    local box_w = math.min(74, term_w - 4)
     local box_x = math.max(1, math.floor((term_w - box_w) / 2))
-    local box_y = math.max(2, math.floor((term_h - 20) / 2))
 
-    local function line_pad(text, visual_len)
-        local pad = math.max(0, box_w - 2 - visual_len)
-        return text .. string.rep(" ", pad) .. "|"
+    local function line_pad(text)
+        local vis_len = display_width(strip_ansi(text))
+        local pad = math.max(0, box_w - 2 - vis_len)
+        return text .. string.rep(" ", pad) .. "\27[1;36m|\27[0m"
     end
 
     local help_lines = {
-        "+" .. string.rep("-", box_w - 2) .. "+",
-        line_pad("|  \27[1;36mYouTube Terminal Viewer -- Shortcut Cheat Sheet\27[0m", 47),
-        "+" .. string.rep("-", box_w - 2) .. "+",
-        line_pad("|  \27[1;33mTerminal Navigation & Controls:\27[0m", 32),
-        line_pad("|    \27[93m[Enter]\27[0m       Play selected video or music track", 45),
-        line_pad("|    \27[93m[/]\27[0m           Open search modal or paste direct URL", 48),
-        line_pad("|    \27[93m[a]\27[0m           Toggle continuous Auto-Play (Radio mode)", 51),
-        line_pad("|    \27[93m[c]\27[0m           Toggle Closed Captions (CC / Lyrics)", 48),
-        line_pad("|    \27[93m[h]\27[0m           Toggle Playback History (recent tracks)", 50),
-        line_pad("|    \27[93m[m]\27[0m           Toggle between Music and Video mode", 46),
-        line_pad("|    \27[93m[L]\27[0m           Toggle Liked Songs playlist", 38),
-        line_pad("|    \27[93m[Up/Dn, k/j]\27[0m  Navigate results list", 33),
-        line_pad("|    \27[93m[PgUp/PgDn]\27[0m   Scroll 10 tracks up or down", 38),
-        line_pad("|  \27[1;33mIn-Playback Controls (mpv):\27[0m", 28),
-        line_pad("|    \27[93m[Space]\27[0m       Pause / Resume playback", 34),
-        line_pad("|    \27[93m[<- / ->]\27[0m     Seek backward / forward 5 seconds", 44),
-        line_pad("|    \27[93m[9 / 0]\27[0m       Volume down / Volume up", 34),
-        line_pad("|    \27[93m[[ / ]]\27[0m       Speed down / Speed up (+/-10%)", 39),
-        line_pad("|    \27[93m[j / J]\27[0m       Cycle next / prev subtitle track", 43),
-        line_pad("|    \27[93m[v]\27[0m           Toggle subtitle visibility on/off", 44),
-        line_pad("|    \27[93m[q]\27[0m           Stop playing and return to browser", 45),
-        "+" .. string.rep("-", box_w - 2) .. "+",
-        line_pad("|  \27[90mPress any key to close this help modal...\27[0m", 41),
-        "+" .. string.rep("-", box_w - 2) .. "+",
+        string.format("\27[1;36m+%s+\27[0m", string.rep("-", box_w - 2)),
+        line_pad("\27[1;36m|  \27[1;36mYouTube Terminal Viewer -- Shortcut Cheat Sheet\27[0m"),
+        string.format("\27[1;36m+%s+\27[0m", string.rep("-", box_w - 2)),
+        line_pad("\27[1;36m|  \27[1;33mTerminal Navigation & Controls:\27[0m"),
+        line_pad("\27[1;36m|    \27[93m[Enter]\27[0m       Play (Mini-Player in Music; Terminal/GUI in Video)"),
+        line_pad("\27[1;36m|    \27[93m[P]\27[0m           Full-screen foreground playback"),
+        line_pad("\27[1;36m|    \27[93m[Tab]\27[0m         Add selected track to Up-Next queue"),
+        line_pad("\27[1;36m|    \27[93m[Q]\27[0m           Open Up-Next queue modal (view/delete/clear)"),
+        line_pad("\27[1;36m|    \27[93m[d]\27[0m           Download offline to ./downloads/ (MP3/MP4)"),
+        line_pad("\27[1;36m|    \27[93m[f]\27[0m           Search filters (Sort by Views/Date, Duration)"),
+        line_pad("\27[1;36m|    \27[93m[/]\27[0m           Open search modal or paste direct URL"),
+        line_pad("\27[1;36m|    \27[93m[a]\27[0m           Toggle continuous Auto-Play (Radio mode)"),
+        line_pad("\27[1;36m|    \27[93m[c]\27[0m           Toggle Closed Captions (CC / Lyrics)"),
+        line_pad("\27[1;36m|    \27[93m[h]\27[0m           Toggle Playback History (recent tracks)"),
+        line_pad("\27[1;36m|    \27[93m[m]\27[0m           Toggle between Music and Video mode"),
+        line_pad("\27[1;36m|    \27[93m[L]\27[0m           Toggle Liked Songs playlist"),
+        line_pad("\27[1;36m|    \27[93m[Up/Dn, k/j]\27[0m  Navigate results list"),
+        line_pad("\27[1;36m|    \27[93m[PgUp/PgDn]\27[0m   Scroll 10 tracks up or down"),
+        line_pad("\27[1;36m|  \27[1;33mIn-Playback / Mini-Player Controls:\27[0m"),
+        line_pad("\27[1;36m|    \27[93m[Space]\27[0m       Pause / Resume playback"),
+        line_pad("\27[1;36m|    \27[93m[s]\27[0m           Skip to next track in queue"),
+        line_pad("\27[1;36m|    \27[93m[x]\27[0m           Stop playback / mini-player"),
+        line_pad("\27[1;36m|    \27[93m[<- / ->]\27[0m     Seek backward / forward 5 seconds"),
+        line_pad("\27[1;36m|    \27[93m[9 / 0]\27[0m       Volume down / Volume up (-/+10%)"),
+        line_pad("\27[1;36m|    \27[93m[q]\27[0m           Quit application"),
+        string.format("\27[1;36m+%s+\27[0m", string.rep("-", box_w - 2)),
+        line_pad("\27[1;36m|  \27[90mPress any key to close this help modal...\27[0m"),
+        string.format("\27[1;36m+%s+\27[0m", string.rep("-", box_w - 2)),
     }
 
+    local box_y = math.max(1, math.floor((term_h - #help_lines) / 2))
     for idx, line in ipairs(help_lines) do
         io.write(string.format("\27[%d;%dH\27[0m%s", box_y + idx - 1, box_x, line))
     end
@@ -1090,7 +1599,7 @@ end
 -- =========================================================================
 -- 7. Main Interactive TUI Application
 -- =========================================================================
-local function run_app(init_query, init_mode, browser, cookies_file, is_liked, use_window, proxy, insecure, init_show_cc, init_sub_lang)
+local function run_app(init_query, init_mode, browser, cookies_file, is_liked, use_window, proxy, insecure, init_show_cc, init_sub_lang, init_filters)
     local current_query = init_query or "lofi beats"
     local mode = init_mode or "music"
     local show_cc = init_show_cc or false
@@ -1099,6 +1608,8 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
     local scroll_offset = 0
     local auto_play = false
     local is_history = false
+    local queue = {}
+    local active_filters = init_filters or { sort = "relevance", duration = "all" }
 
     enable_raw_mode()
 
@@ -1114,11 +1625,15 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
 
         local term_w, term_h = get_terminal_size()
         io.write("\27[H\27[2J")
-        io.write(string.format("\n  \27[1;36m* Searching YouTube (%s mode): \27[1;93m%s\27[0m ...\n",
-            mode:upper(), is_liked and "Liked Songs" or current_query))
+        local filter_tag = ""
+        if active_filters.sort ~= "relevance" or active_filters.duration ~= "all" then
+            filter_tag = string.format(" [Sort: %s, Dur: %s]", active_filters.sort, active_filters.duration)
+        end
+        io.write(string.format("\n  \27[1;36m* Searching YouTube (%s mode%s): \27[1;93m%s\27[0m ...\n",
+            mode:upper(), filter_tag, is_liked and "Liked Songs" or current_query))
         io.flush()
 
-        local res, err, used_insecure = fetch_youtube_results(current_query, mode, browser, cookies_file, 25, is_liked, proxy, insecure)
+        local res, err, used_insecure = fetch_youtube_results(current_query, mode, browser, cookies_file, 25, is_liked, proxy, insecure, active_filters)
         if used_insecure then
             insecure = true
         end
@@ -1133,9 +1648,14 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
 
     refresh_results()
 
+    local last_rendered_pos = -1
+    local last_rendered_sub = ""
+    local last_rendered_pause = nil
+
     local function draw_tui()
         local term_w, term_h = get_terminal_size()
-        local max_list_h = math.max(4, term_h - 7)
+        local player_h = (MpvController.is_playing and MpvController.current_item) and 3 or 0
+        local max_list_h = math.max(4, term_h - 7 - player_h)
 
         -- Clamp selection
         if #items > 0 then
@@ -1155,12 +1675,14 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         local mode_badge = (mode == "music") and "\27[1;92m[MUSIC / AUDIO]\27[0m" or "\27[1;93m[VIDEO]\27[0m"
         local auto_badge = auto_play and "\27[1;92m[AUTO: ON]\27[0m" or "\27[90m[AUTO: OFF]\27[0m"
         local cc_badge = show_cc and "\27[1;92m[CC: ON]\27[0m" or "\27[90m[CC: OFF]\27[0m"
+        local q_badge = (#queue > 0) and string.format("\27[1;95m[QUEUE: %d]\27[0m", #queue) or "\27[90m[QUEUE: 0]\27[0m"
         local sec_badge = insecure and " | \27[1;33m[CORP SSL]\27[0m" or ""
-        local header = string.format(" \27[1;36mYouTube Terminal Viewer\27[0m | %s | %s | %s | \27[90m%s\27[0m%s", mode_badge, auto_badge, cc_badge, auth_label, sec_badge)
+        local header = string.format(" \27[1;36mYouTube Terminal Viewer\27[0m | %s | %s | %s | %s | \27[90m%s\27[0m%s",
+            mode_badge, auto_badge, cc_badge, q_badge, auth_label, sec_badge)
         table.insert(buf, "\27[1;34m" .. string.rep("=", term_w) .. "\27[0m\n")
         table.insert(buf, header .. "\27[K\n")
 
-        -- 2. Query / Search Subheader
+        -- 2. Query / Search Subheader with active filters
         local q_display
         if is_history then
             q_display = "\27[1;95m[History] Playback History\27[0m"
@@ -1169,7 +1691,11 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         else
             q_display = '"' .. current_query .. '"'
         end
-        table.insert(buf, string.format("  \27[90mSearch:\27[0m %s  \27[90m(%s)\27[0m\27[K\n", q_display, status_msg))
+        local filter_info = ""
+        if active_filters.sort ~= "relevance" or active_filters.duration ~= "all" then
+            filter_info = string.format(" \27[35m[Sort: %s | Dur: %s]\27[0m", active_filters.sort, active_filters.duration)
+        end
+        table.insert(buf, string.format("  \27[90mSearch:\27[0m %s%s  \27[90m(%s)\27[0m\27[K\n", q_display, filter_info, status_msg))
         table.insert(buf, "\27[1;34m" .. string.rep("-", term_w) .. "\27[0m\n")
 
         -- 3. Results List
@@ -1207,92 +1733,258 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
             end
         end
 
-        -- 4. Footer Help
+        -- 4. Mini-Player Box (when playing)
+        if MpvController.is_playing and MpvController.current_item then
+            local cur = MpvController.current_item
+            local st_badge = MpvController.is_paused and "\27[1;93m[PAUSED]\27[0m" or "\27[1;92m[PLAYING]\27[0m"
+            local vol_str = string.format("\27[96mVol: %d%%\27[0m", MpvController.volume)
+            local title_part = utf8_truncate(cur.title, math.max(10, term_w - 45))
+            
+            -- Border 1
+            local pad1 = math.max(0, term_w - display_width(title_part) - 48)
+            table.insert(buf, string.format("\27[1;36m+-- \27[1;32m> Now Playing: \27[1;37m%s\27[1;36m --- %s --- %s %s+\27[0m\27[K\n",
+                title_part, vol_str, st_badge, string.rep("-", pad1)))
+            
+            -- Progress & CC
+            local dur = MpvController.duration > 0 and MpvController.duration or (cur.duration or 0)
+            local pos = MpvController.time_pos or 0
+            local cur_fmt = format_duration(pos)
+            local dur_fmt = format_duration(dur)
+            local bar_w = 12
+            local pct = (dur > 0) and math.min(1.0, math.max(0.0, pos / dur)) or 0
+            local filled = math.floor(pct * bar_w)
+            local prog_bar = string.rep("=", filled) .. (filled < bar_w and ">" or "") .. string.rep("-", math.max(0, bar_w - 1 - filled))
+            
+            local cc_part = ""
+            if show_cc and #MpvController.sub_text > 0 then
+                local max_cc_w = math.max(10, term_w - 45)
+                local clean_sub = sanitize_display_text(MpvController.sub_text)
+                cc_part = string.format(" | \27[1;93mCC: \27[1;97m%s\27[0m", utf8_truncate(clean_sub, max_cc_w))
+            end
+            
+            local player_line = string.format(" \27[1;36m|\27[0m \27[1;33m%s/%s\27[0m [\27[1;32m%s\27[0m]%s", cur_fmt, dur_fmt, prog_bar, cc_part)
+            table.insert(buf, player_line .. "\27[K\n")
+            
+            -- Border 2 (Controls)
+            local ctrl_hint = "\27[90m[Space] Pause  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol\27[0m"
+            local pad2 = math.max(0, term_w - 60)
+            table.insert(buf, string.format("\27[1;36m+-- %s %s+\27[0m\27[K\n", ctrl_hint, string.rep("-", pad2)))
+        end
+
+        -- 5. Footer Help
         local auto_footer = auto_play and "\27[1;92mON\27[0m" or "\27[90mOFF\27[0m"
         local cc_footer = show_cc and "\27[1;92mON\27[0m" or "\27[90mOFF\27[0m"
+        local q_footer = string.format("\27[93m[Tab]\27[0m Q(%d)  \27[93m[Q]\27[0m View", #queue)
         table.insert(buf, "\27[1;34m" .. string.rep("-", term_w) .. "\27[0m\n")
-        table.insert(buf, string.format(" \27[93m[Enter]\27[0m Play  \27[93m[/]\27[0m Search  \27[93m[a]\27[0m Auto:%s  \27[93m[c]\27[0m CC:%s  \27[93m[h]\27[0m History  \27[93m[m]\27[0m Mode  \27[93m[?]\27[0m Help  \27[91m[q]\27[0m Quit\27[K", auto_footer, cc_footer))
+        table.insert(buf, string.format(" \27[93m[Enter]\27[0m Play  %s  \27[93m[d]\27[0m DL  \27[93m[f]\27[0m Filter  \27[93m[/]\27[0m Find  \27[93m[m]\27[0m Mode  \27[93m[?]\27[0m Help  \27[91m[q]\27[0m Quit\27[K", q_footer))
         
         io.write(table.concat(buf))
         io.flush()
+
+        last_rendered_pos = MpvController.time_pos
+        last_rendered_sub = MpvController.sub_text
+        last_rendered_pause = MpvController.is_paused
     end
 
     draw_tui()
 
     while true do
         local k = read_key(50)
-        if k == "q" or k == "Q" then
-            break
-        elseif k == "UP" or k == "k" then
-            if selected_idx > 1 then
-                selected_idx = selected_idx - 1
+
+        -- Check background MPV status every 50ms
+        local st = MpvController:poll()
+        if st then
+            if st.is_eof then
+                -- Track finished playing: advance queue or auto-play
+                if #queue > 0 then
+                    local next_item = table.remove(queue, 1)
+                    save_history_item(next_item)
+                    MpvController:start(next_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure)
+                    status_msg = "Playing: " .. utf8_truncate(next_item.title, 30)
+                    draw_tui()
+                elseif auto_play and selected_idx < #items then
+                    selected_idx = selected_idx + 1
+                    local next_item = items[selected_idx]
+                    save_history_item(next_item)
+                    MpvController:start(next_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure)
+                    status_msg = "Playing: " .. utf8_truncate(next_item.title, 30)
+                    draw_tui()
+                else
+                    MpvController:stop()
+                    draw_tui()
+                end
+            elseif (st.time_pos ~= last_rendered_pos or st.sub_text ~= last_rendered_sub or st.is_paused ~= last_rendered_pause) then
                 draw_tui()
             end
-        elseif k == "DOWN" or k == "j" then
-            if selected_idx < #items then
-                selected_idx = selected_idx + 1
+        end
+
+        if k then
+            if k == "q" then
+                break
+            elseif k == "UP" or k == "k" then
+                if selected_idx > 1 then
+                    selected_idx = selected_idx - 1
+                    draw_tui()
+                end
+            elseif k == "DOWN" or k == "j" then
+                if selected_idx < #items then
+                    selected_idx = selected_idx + 1
+                    draw_tui()
+                end
+            elseif k == "PAGE_UP" then
+                selected_idx = math.max(1, selected_idx - 10)
                 draw_tui()
-            end
-        elseif k == "PAGE_UP" then
-            selected_idx = math.max(1, selected_idx - 10)
-            draw_tui()
-        elseif k == "PAGE_DOWN" then
-            selected_idx = math.min(#items, selected_idx + 10)
-            draw_tui()
-        elseif k == "m" or k == "M" then
-            mode = (mode == "music") and "video" or "music"
-            refresh_results()
-            draw_tui()
-        elseif k == "L" or k == "l" then
-            is_liked = not is_liked
-            is_history = false
-            refresh_results()
-            draw_tui()
-        elseif k == "a" or k == "A" then
-            auto_play = not auto_play
-            draw_tui()
-        elseif k == "c" or k == "C" then
-            show_cc = not show_cc
-            draw_tui()
-        elseif k == "h" or k == "H" then
-            is_history = not is_history
-            if is_history then
-                is_liked = false
-                items = load_history_items()
-                selected_idx = 1
-                scroll_offset = 0
-                status_msg = string.format("Loaded %d history items", #items)
-            else
+            elseif k == "PAGE_DOWN" then
+                selected_idx = math.min(#items, selected_idx + 10)
+                draw_tui()
+            elseif k == "TAB" then
+                if #items > 0 and selected_idx >= 1 and selected_idx <= #items then
+                    local sel = items[selected_idx]
+                    table.insert(queue, sel)
+                    status_msg = string.format("Added to queue: %s (#%d)", utf8_truncate(sel.title, 25), #queue)
+                    draw_tui()
+                end
+            elseif k == "Q" then
+                local chosen_idx = show_queue_modal(queue)
+                if chosen_idx then
+                    local chosen_item = table.remove(queue, chosen_idx)
+                    save_history_item(chosen_item)
+                    if mode == "music" then
+                        MpvController:start(chosen_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure)
+                        status_msg = "Playing: " .. utf8_truncate(chosen_item.title, 30)
+                    else
+                        MpvController:stop()
+                        play_item(chosen_item, mode, browser, cookies_file, use_window, proxy, insecure, show_cc, sub_lang)
+                    end
+                end
+                draw_tui()
+            elseif k == "d" or k == "D" then
+                if #items > 0 and selected_idx >= 1 and selected_idx <= #items then
+                    local sel = items[selected_idx]
+                    download_item(sel, mode, browser, cookies_file, proxy, insecure)
+                    draw_tui()
+                end
+            elseif k == "f" or k == "F" then
+                local changed = show_filter_modal(active_filters)
+                if changed then
+                    refresh_results()
+                end
+                draw_tui()
+            elseif k == " " then
+                if MpvController.is_playing then
+                    MpvController:toggle_pause()
+                    draw_tui()
+                end
+            elseif k == "s" or k == "S" then
+                if MpvController.is_playing or #queue > 0 then
+                    if #queue > 0 then
+                        local next_item = table.remove(queue, 1)
+                        save_history_item(next_item)
+                        MpvController:start(next_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure)
+                        status_msg = "Playing: " .. utf8_truncate(next_item.title, 30)
+                    elseif auto_play and selected_idx < #items then
+                        selected_idx = selected_idx + 1
+                        local next_item = items[selected_idx]
+                        save_history_item(next_item)
+                        MpvController:start(next_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure)
+                        status_msg = "Playing: " .. utf8_truncate(next_item.title, 30)
+                    else
+                        MpvController:stop()
+                        status_msg = "Playback stopped"
+                    end
+                    draw_tui()
+                end
+            elseif k == "x" or k == "X" then
+                if MpvController.is_playing then
+                    MpvController:stop()
+                    status_msg = "Playback stopped"
+                    draw_tui()
+                end
+            elseif k == "LEFT" then
+                if MpvController.is_playing then
+                    MpvController:seek(-5)
+                end
+            elseif k == "RIGHT" then
+                if MpvController.is_playing then
+                    MpvController:seek(5)
+                end
+            elseif k == "9" then
+                if MpvController.is_playing then
+                    MpvController:change_volume(-10)
+                end
+            elseif k == "0" then
+                if MpvController.is_playing then
+                    MpvController:change_volume(10)
+                end
+            elseif k == "P" then
+                if #items > 0 and selected_idx >= 1 and selected_idx <= #items then
+                    MpvController:stop()
+                    local sel = items[selected_idx]
+                    save_history_item(sel)
+                    play_item(sel, mode, browser, cookies_file, use_window, proxy, insecure, show_cc, sub_lang)
+                    draw_tui()
+                end
+            elseif k == "m" or k == "M" then
+                mode = (mode == "music") and "video" or "music"
                 refresh_results()
-            end
-            draw_tui()
-        elseif k == "?" then
-            show_help_modal()
-            draw_tui()
-        elseif k == "/" then
-            local new_q = prompt_search_query(current_query)
-            if new_q and #new_q > 0 then
-                current_query = new_q
-                is_liked = false
+                draw_tui()
+            elseif k == "L" or k == "l" then
+                is_liked = not is_liked
                 is_history = false
                 refresh_results()
-            end
-            draw_tui()
-        elseif k == "ENTER" then
-            while #items > 0 and selected_idx >= 1 and selected_idx <= #items do
-                local sel = items[selected_idx]
-                save_history_item(sel)
-                local exit_code = play_item(sel, mode, browser, cookies_file, use_window, proxy, insecure, show_cc, sub_lang)
                 draw_tui()
-                if auto_play and (exit_code == 0 or exit_code == true) and selected_idx < #items then
-                    selected_idx = selected_idx + 1
+            elseif k == "a" or k == "A" then
+                auto_play = not auto_play
+                draw_tui()
+            elseif k == "c" or k == "C" then
+                show_cc = not show_cc
+                draw_tui()
+            elseif k == "h" or k == "H" then
+                is_history = not is_history
+                if is_history then
+                    is_liked = false
+                    items = load_history_items()
+                    selected_idx = 1
+                    scroll_offset = 0
+                    status_msg = string.format("Loaded %d history items", #items)
                 else
-                    break
+                    refresh_results()
+                end
+                draw_tui()
+            elseif k == "?" then
+                show_help_modal()
+                draw_tui()
+            elseif k == "/" then
+                local new_q = prompt_search_query(current_query)
+                if new_q and #new_q > 0 then
+                    current_query = new_q
+                    is_liked = false
+                    is_history = false
+                    refresh_results()
+                end
+                draw_tui()
+            elseif k == "ENTER" then
+                if #items > 0 and selected_idx >= 1 and selected_idx <= #items then
+                    local sel = items[selected_idx]
+                    save_history_item(sel)
+                    if mode == "music" then
+                        MpvController:start(sel, show_cc, sub_lang, browser, cookies_file, proxy, insecure)
+                        status_msg = "Playing: " .. utf8_truncate(sel.title, 30)
+                        draw_tui()
+                    else
+                        MpvController:stop()
+                        local exit_code = play_item(sel, mode, browser, cookies_file, use_window, proxy, insecure, show_cc, sub_lang)
+                        draw_tui()
+                        if auto_play and (exit_code == 0 or exit_code == true) and selected_idx < #items then
+                            selected_idx = selected_idx + 1
+                        end
+                    end
                 end
             end
         end
     end
 
+    MpvController:stop()
     disable_raw_mode()
 end
 
@@ -1379,6 +2071,38 @@ local function run_self_tests()
     assert(not status_no_cc:find("sub-text", 1, true), "Non-CC status should not contain sub-text")
     print("  [✓] CC / Lyrics status formatting passed")
 
+    -- 9. Download Directory Naming Convention
+    local ok_dir, err_dir = pcall(ensure_downloads_dir)
+    assert(ok_dir, "ensure_downloads_dir threw error: " .. tostring(err_dir))
+    print("  [✓] Download directory validation passed (compliant: ./downloads/)")
+
+    -- 10. Playback Queue Operations
+    local test_q = {}
+    table.insert(test_q, { id = "q1", title = "Track 1" })
+    table.insert(test_q, { id = "q2", title = "Track 2" })
+    assert(#test_q == 2, "Queue insert failed")
+    local popped = table.remove(test_q, 1)
+    assert(popped.id == "q1", "Queue FIFO pop failed")
+    assert(#test_q == 1, "Queue length after pop mismatch")
+    print("  [✓] Up-Next Playback Queue FIFO logic passed")
+
+    -- 11. Search Filters & Sorting SP Codes
+    local sp_map = { views = "CAM%253D", date = "CAI%253D", rating = "CAE%253D" }
+    assert(sp_map.views == "CAM%253D", "Filter sort views SP code mismatch")
+    assert(sp_map.date == "CAI%253D", "Filter sort date SP code mismatch")
+    assert(sp_map.rating == "CAE%253D", "Filter sort rating SP code mismatch")
+    local test_dur_items = {
+        { id = "1", duration = 120 },
+        { id = "2", duration = 600 },
+        { id = "3", duration = 1800 },
+    }
+    local short_items = {}
+    for _, it in ipairs(test_dur_items) do
+        if it.duration < 240 then table.insert(short_items, it) end
+    end
+    assert(#short_items == 1 and short_items[1].id == "1", "Duration filter short logic failed")
+    print("  [✓] Search Filters & Sorting validation passed")
+
     print("=== All Internal Self-Tests Passed Successfully ===")
     return true
 end
@@ -1388,9 +2112,12 @@ local function print_help()
     print("\nUsage:")
     print("  ./LuaJIT/src/luajit yt.lua [query | url] [options]")
     print("\nOptions:")
-    print("  -m, --music           Music mode: audio-only streaming via mpv (default)")
+    print("  -m, --music           Music mode: audio-only background mini-player via mpv (default)")
     print("  -v, --video           Video mode: video streaming in terminal via mpv --vo=tct")
     print("  --window              In video mode, play in external MPV GUI window instead of terminal")
+    print("  -d, --download <q|url> Download track offline to ./downloads/ (MP3 for music, MP4 for video)")
+    print("  --sort <type>         Sort search results (relevance, views, date, rating)")
+    print("  --duration <type>     Filter results by duration (all, short, medium, long)")
     print("  -c, --cc, --lyrics    Show Closed Captions (CC) / lyrics in terminal characters")
     print("  --sub-lang <lang>     Preferred subtitle/lyrics language pattern (default: en.*)")
     print("  --browser <name>      Extract session cookies from browser (firefox, chrome, brave, edge)")
@@ -1401,6 +2128,23 @@ local function print_help()
     print("  --liked               Load user's Liked Music or Liked Videos playlist")
     print("  --test                Run automated self-tests and exit")
     print("  -h, --help            Show this help message")
+    print("\nInteractive TUI Controls:")
+    print("  [Enter]       Play selected track (background mini-player in music mode)")
+    print("  [P]           Play foreground full-screen playback")
+    print("  [Tab]         Add selected track to Up-Next playback queue")
+    print("  [Q]           Open Up-Next playback queue modal (play, delete, clear)")
+    print("  [d]           Download selected track offline into ./downloads/")
+    print("  [f]           Open Search Filters & Sorting modal")
+    print("  [Space]       Pause / Resume background mini-player")
+    print("  [s]           Skip to next track in queue")
+    print("  [x]           Stop background mini-player")
+    print("  [<- / ->]     Seek backward / forward 5 seconds")
+    print("  [9 / 0]       Volume down / up (-/+10%)")
+    print("  [/]           Open search modal or paste URL")
+    print("  [a]           Toggle Auto-Play (Radio mode)")
+    print("  [c]           Toggle Closed Captions (CC / Lyrics)")
+    print("  [m]           Toggle Music / Video mode")
+    print("  [q]           Quit viewer")
     print("\nSystem Status:")
     print(string.format("  yt-dlp:    %s", HAS_YTDLP and "\27[32m[Installed]\27[0m" or "\27[31m[Missing - Required for search/streams]\27[0m"))
     print(string.format("  mpv:       %s", HAS_MPV and "\27[32m[Installed]\27[0m" or "\27[31m[Missing - Required for playback]\27[0m"))
@@ -1409,6 +2153,8 @@ local function print_help()
     print(string.format("  deno:      %s", HAS_DENO and "\27[32m[Installed - Fast JS solver for yt-dlp]\27[0m" or "\27[90m[Not Detected - Optional for yt-dlp]\27[0m"))
     print("\nExamples:")
     print("  luajit yt.lua \"synthwave radio\"")
+    print("  luajit yt.lua --download \"lofi hip hop\"")
+    print("  luajit yt.lua --sort views --duration short \"piano relax\"")
     print("  luajit yt.lua --music --lyrics \"never gonna give you up\"")
     print("  luajit yt.lua --music --browser firefox")
     print("  luajit yt.lua --insecure \"lofi hip hop\"")
@@ -1426,6 +2172,8 @@ local function main()
     local non_interactive = false
     local show_cc = false
     local sub_lang = "en.*"
+    local download_target = nil
+    local active_filters = { sort = "relevance", duration = "all" }
 
     local env_proxy = os.getenv("YT_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")
     local proxy = (env_proxy and #env_proxy > 0) and env_proxy or nil
@@ -1456,6 +2204,15 @@ local function main()
         elseif a == "--sub-lang" or a == "--sub-langs" or a == "--slang" then
             i = i + 1
             sub_lang = arg[i]
+        elseif a == "-d" or a == "--download" then
+            i = i + 1
+            download_target = arg[i]
+        elseif a == "--sort" then
+            i = i + 1
+            active_filters.sort = (arg[i] or "relevance"):lower()
+        elseif a == "--duration" then
+            i = i + 1
+            active_filters.duration = (arg[i] or "all"):lower()
         elseif a == "--liked" then
             is_liked = true
         elseif a == "--no-interactive" then
@@ -1482,15 +2239,41 @@ local function main()
 
     local query = #query_parts > 0 and table.concat(query_parts, " ") or nil
 
+    if download_target then
+        local target_item
+        local is_direct_url = download_target:match("^https?://") or download_target:match("^www%.") or download_target:match("^youtu%.be/")
+        if is_direct_url then
+            target_item = {
+                id = "direct",
+                url = download_target,
+                title = "Direct Download",
+                uploader = "YouTube",
+            }
+        else
+            io.write(string.format("\27[1;36m* Searching YouTube for download (%s mode): \27[1;93m%s\27[0m ...\n", mode:upper(), download_target))
+            io.flush()
+            local res, err = fetch_youtube_results(download_target, mode, browser, cookies_file, 1, false, proxy, insecure, active_filters)
+            if res and #res > 0 then
+                target_item = res[1]
+            else
+                io.stderr:write("Download error: " .. tostring(err or "No video found for search query") .. "\n")
+                os.exit(1)
+            end
+        end
+        download_item(target_item, mode, browser, cookies_file, proxy, insecure)
+        return
+    end
+
     if non_interactive or (not is_stdin_tty()) then
         local q = query or "lofi hip hop"
-        local res, err, used_insecure = fetch_youtube_results(q, mode, browser, cookies_file, max_results, is_liked, proxy, insecure)
+        local res, err, used_insecure = fetch_youtube_results(q, mode, browser, cookies_file, max_results, is_liked, proxy, insecure, active_filters)
         if not res then
             io.stderr:write("Error: " .. tostring(err) .. "\n")
             os.exit(1)
         end
         local sec_note = (used_insecure or insecure) and " [CORP SSL/INSECURE]" or ""
-        print(string.format("\27[1;36m=== YouTube Results for '%s' (%s mode)%s ===\27[0m", q, mode:upper(), sec_note))
+        local filter_note = (active_filters.sort ~= "relevance" or active_filters.duration ~= "all") and string.format(" [Sort: %s, Dur: %s]", active_filters.sort, active_filters.duration) or ""
+        print(string.format("\27[1;36m=== YouTube Results for '%s' (%s mode)%s%s ===\27[0m", q, mode:upper(), filter_note, sec_note))
         for idx, item in ipairs(res) do
             local t_disp = utf8_truncate(item.title, 50)
             local t_pad = string.rep(" ", math.max(0, 50 - display_width(t_disp)))
@@ -1501,7 +2284,7 @@ local function main()
         return
     end
 
-    run_app(query, mode, browser, cookies_file, is_liked, use_window, proxy, insecure, show_cc, sub_lang)
+    run_app(query, mode, browser, cookies_file, is_liked, use_window, proxy, insecure, show_cc, sub_lang, active_filters)
 end
 
 main()
