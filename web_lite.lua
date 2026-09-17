@@ -146,6 +146,7 @@ if is_windows then
                     elseif c1 == 81 then return "PAGE_DOWN"
                     elseif c1 == 71 then return "HOME"
                     elseif c1 == 79 then return "END"
+                    elseif c1 == 15 then return "SHIFT_TAB"
                     end
                 elseif c0 == 27 then
                     return "ESC"
@@ -678,8 +679,8 @@ function M.get_help_page_html()
 <h2>2. Links & Vimium Hint Mode</h2>
 <ul>
   <li><b>f</b>: Activate <b>Vimium Hint Mode</b>. Visible links are assigned badges [A], [B], [C]... Type the letter to navigate!</li>
-  <li><b>Tab</b>: Highlight next hyperlink on page</li>
-  <li><b>Shift-Tab</b>: Highlight previous hyperlink on page</li>
+  <li><b>Tab</b> or <b>]</b>: Highlight and scroll to next hyperlink on page</li>
+  <li><b>Shift-Tab</b> or <b>[</b>: Highlight and scroll to previous hyperlink on page</li>
   <li><b>Enter</b>: Open the currently highlighted link</li>
 </ul>
 <h2>3. URL Input & Omnibox</h2>
@@ -788,11 +789,21 @@ local function word_wrap(text, max_width, first_prefix, rest_prefix)
     return lines
 end
 
-local function format_html_table(table_html, max_width)
+local function format_html_table(table_html, max_width, links, base_url)
     local rows = {}
     for tr in table_html:gmatch("<[tT][rR][^>]*>(.-)</[tT][rR]>") do
         local row = {}
         for cell in tr:gmatch("<[tT][hHdD][^>]*>(.-)</[tT][hHdD]>") do
+            if links then
+                cell = cell:gsub("<[aA][^>]*href=[\"'](.-)[\"'][^>]*>(.-)</[aA]>", function(href, txt)
+                    local clean_txt = decode_entities(txt:gsub("<[^>]+>", " "):gsub("%s+", " "):match("^%s*(.-)%s*$") or "")
+                    if #clean_txt == 0 then clean_txt = "link" end
+                    local l_id = #links + 1
+                    local full_href = base_url and resolve_relative_url(base_url, href) or href
+                    table.insert(links, { id = l_id, href = full_href, text = clean_txt, line_idx = 0 })
+                    return string.format("%s [%d]", clean_txt, l_id)
+                end)
+            end
             local clean_cell = decode_entities(cell:gsub("<[^>]+>", " "):gsub("%s+", " "):match("^%s*(.-)%s*$") or "")
             table.insert(row, clean_cell)
         end
@@ -928,10 +939,15 @@ function M.render_html_to_document(html_text, base_url, max_width)
 
     local table_blocks = {}
     local table_idx = 0
-    body = body:gsub("(<[tT][aA][bB][lL][eE][^>]*>.-</[tT][aA][bB][lL][eE]>)", function(tbl_content)
-        table_idx = table_idx + 1
-        table_blocks[table_idx] = tbl_content
-        return string.format("___TABLE_BLOCK_%d___", table_idx)
+    -- Only treat standalone tables with <th> headers as boxed data tables
+    body = body:gsub("(<[tT][aA][bB][lL][eE][^>]*>(.-)</[tT][aA][bB][lL][eE]>)", function(full_tbl, tbl_inner)
+        local lower_inner = tbl_inner:lower()
+        if lower_inner:find("<th") and not lower_inner:find("<table") then
+            table_idx = table_idx + 1
+            table_blocks[table_idx] = full_tbl
+            return string.format("___TABLE_BLOCK_%d___", table_idx)
+        end
+        return full_tbl
     end)
 
     local pre_blocks = {}
@@ -964,7 +980,7 @@ function M.render_html_to_document(html_text, base_url, max_width)
                 local tbl_content = table_blocks[tonumber(tbl_id)]
                 if tbl_content then
                     add_blank_line()
-                    local t_lines = format_html_table(tbl_content, max_width)
+                    local t_lines = format_html_table(tbl_content, max_width, links, base_url)
                     for _, tl in ipairs(t_lines) do add_line(tl) end
                     add_blank_line()
                 end
@@ -997,11 +1013,13 @@ function M.render_html_to_document(html_text, base_url, max_width)
         local is_closing = (slash == "/")
 
         if is_closing then
-            if lower_tag == "p" or lower_tag == "div" or lower_tag == "li" or lower_tag == "ul" or lower_tag == "ol" or lower_tag == "table" or lower_tag == "blockquote" or lower_tag:match("^h[1-6]$") or lower_tag == "pre" or lower_tag == "section" or lower_tag == "article" then
+            if lower_tag == "p" or lower_tag == "div" or lower_tag == "li" or lower_tag == "ul" or lower_tag == "ol" or lower_tag == "table" or lower_tag == "blockquote" or lower_tag:match("^h[1-6]$") or lower_tag == "pre" or lower_tag == "section" or lower_tag == "article" or lower_tag == "tr" then
                 flush_inline()
                 if lower_tag == "p" or lower_tag == "div" or lower_tag == "ul" or lower_tag == "ol" or lower_tag == "table" or lower_tag == "blockquote" then
                     add_blank_line()
                 end
+            elseif lower_tag == "td" or lower_tag == "th" then
+                table.insert(inline_buf, " ")
             end
             pos = tag_end + 1
         elseif lower_tag:match("^h[1-3]$") then
@@ -1032,18 +1050,30 @@ function M.render_html_to_document(html_text, base_url, max_width)
             add_line(string.rep("─", max_width))
             add_blank_line()
             pos = tag_end + 1
+        elseif lower_tag == "tr" then
+            flush_inline()
+            pos = tag_end + 1
+        elseif lower_tag == "td" or lower_tag == "th" then
+            table.insert(inline_buf, " ")
+            pos = tag_end + 1
         elseif lower_tag == "a" then
             local href = full_tag:match("[hH][rR][eE][fF]=[\"'](.-)[\"']") or full_tag:match("[hH][rR][eE][fF]=([^%s>]+)")
             local close_start, close_end = body:find("</%s*[aA]%s*>", tag_end + 1)
-            local link_text = ""
+            local a_inner = ""
             if close_start then
-                link_text = body:sub(tag_end + 1, close_start - 1)
+                a_inner = body:sub(tag_end + 1, close_start - 1)
                 pos = close_end + 1
             else
                 pos = tag_end + 1
             end
-            link_text = decode_entities(link_text:gsub("<[^>]+>", " "):gsub("%s+", " "):match("^%s*(.-)%s*$") or "")
-            if #link_text == 0 then link_text = href or "link" end
+            local link_text = decode_entities(a_inner:gsub("<[^>]+>", " "):gsub("%s+", " "):match("^%s*(.-)%s*$") or "")
+            if #link_text == 0 then
+                if full_tag:find("vote") or a_inner:find("vote") or a_inner:find("votearrow") then
+                    link_text = "▲"
+                else
+                    link_text = href or "link"
+                end
+            end
 
             if href and not href:match("^javascript:") then
                 link_counter = link_counter + 1
@@ -1318,7 +1348,14 @@ function Browser:render()
                     end
                 end
             else
-                display_line = display_line:gsub("%[(%d+)%]", "\27[1;36m[%1]\27[0m")
+                display_line = display_line:gsub("%[(%d+)%]", function(id_str)
+                    local id = tonumber(id_str)
+                    if id and id == self.selected_link_idx then
+                        return string.format("\27[7;1;33m[▶ %d ◀]\27[0m", id)
+                    else
+                        return string.format("\27[1;36m[%d]\27[0m", id)
+                    end
+                end)
             end
 
             local clean_len = visual_len(display_line)
@@ -1360,7 +1397,7 @@ function Browser:render()
         emit("\27[1;30;43m " .. hint_prompt .. " \27[0m" .. string.rep(" ", pad))
     else
         local mode_tag = "\27[1;30;46m NORMAL \27[0m"
-        local shortcuts = "\27[90m[j/k] Scroll [gh] Home [f] Hint [o] Open [H/L] Hist [/] Find [:] Cmd [q] Quit\27[0m"
+        local shortcuts = "\27[90m[j/k] Move [Tab/]] Link [gh] Home [f] Hint [o] Open [H/L] Hist [/] Find [:] Cmd\27[0m"
         local status_left = string.format("%s  \27[1;37m%s\27[0m", mode_tag, truncate(self.status_msg, 40))
         local right_info = string.format("%s  %s", shortcuts, pos_info)
         local pad = math.max(1, term_w - visual_len(status_left) - visual_len(right_info) - 1)
@@ -1536,17 +1573,61 @@ function Browser:handle_key(k)
         else
             self.status_msg = "No links on current page."
         end
-    elseif k == "TAB" then
+    elseif k == "TAB" or k == "]" then
         if self.doc and #self.doc.links > 0 then
-            self.selected_link_idx = (self.selected_link_idx % #self.doc.links) + 1
+            local cur = self.doc.links[self.selected_link_idx]
+            if not cur or cur.line_idx < self.scroll_y or cur.line_idx >= self.scroll_y + view_h then
+                local found = false
+                for idx, l in ipairs(self.doc.links) do
+                    if l.line_idx >= self.scroll_y and l.line_idx < self.scroll_y + view_h then
+                        self.selected_link_idx = idx
+                        found = true
+                        break
+                    end
+                end
+                if not found then
+                    self.selected_link_idx = (self.selected_link_idx % #self.doc.links) + 1
+                end
+            else
+                self.selected_link_idx = (self.selected_link_idx % #self.doc.links) + 1
+            end
+
             local l = self.doc.links[self.selected_link_idx]
+            if l and l.line_idx > 0 then
+                if l.line_idx < self.scroll_y or l.line_idx >= self.scroll_y + view_h then
+                    self.scroll_y = math.max(1, l.line_idx - math.floor(view_h / 3))
+                end
+            end
             self.status_msg = string.format("Focused link [%d]: %s", l.id, truncate(l.href, 50))
         end
-    elseif k == "SHIFT_TAB" then
+    elseif k == "SHIFT_TAB" or k == "[" then
         if self.doc and #self.doc.links > 0 then
-            self.selected_link_idx = self.selected_link_idx - 1
-            if self.selected_link_idx < 1 then self.selected_link_idx = #self.doc.links end
+            local cur = self.doc.links[self.selected_link_idx]
+            if not cur or cur.line_idx < self.scroll_y or cur.line_idx >= self.scroll_y + view_h then
+                local found = false
+                for idx = #self.doc.links, 1, -1 do
+                    local l = self.doc.links[idx]
+                    if l.line_idx >= self.scroll_y and l.line_idx < self.scroll_y + view_h then
+                        self.selected_link_idx = idx
+                        found = true
+                        break
+                    end
+                end
+                if not found then
+                    self.selected_link_idx = self.selected_link_idx - 1
+                    if self.selected_link_idx < 1 then self.selected_link_idx = #self.doc.links end
+                end
+            else
+                self.selected_link_idx = self.selected_link_idx - 1
+                if self.selected_link_idx < 1 then self.selected_link_idx = #self.doc.links end
+            end
+
             local l = self.doc.links[self.selected_link_idx]
+            if l and l.line_idx > 0 then
+                if l.line_idx < self.scroll_y or l.line_idx >= self.scroll_y + view_h then
+                    self.scroll_y = math.max(1, l.line_idx - math.floor(view_h / 3))
+                end
+            end
             self.status_msg = string.format("Focused link [%d]: %s", l.id, truncate(l.href, 50))
         end
     elseif k == "ENTER" then

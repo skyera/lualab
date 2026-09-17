@@ -144,6 +144,40 @@ TestRunner.describe("3. Document Reflow, Formatting & Tables", function()
         assert_eq(doc.links[1].href, "https://luajit.org")
         assert_eq(doc.links[2].href, "https://example.com/docs")
     end)
+
+    TestRunner.it("should preserve all hyperlinks in layout tables (e.g. Hacker News)", function()
+        local hn_sample = [[
+            <html><body>
+            <table border="0" id="hnmain">
+                <tr><td>
+                    <table class="itemlist">
+                        <tr class="athing">
+                            <td>1.</td>
+                            <td><a href="vote?id=101"><div class="votearrow" title="upvote"></div></a></td>
+                            <td><a href="https://example.com/story1">First Story Title</a></td>
+                        </tr>
+                        <tr>
+                            <td></td>
+                            <td>100 points by user | <a href="item?id=101">42 comments</a></td>
+                        </tr>
+                        <tr class="athing">
+                            <td>2.</td>
+                            <td><a href="https://example.com/story2">Second Story Title</a></td>
+                        </tr>
+                    </table>
+                </td></tr>
+            </table>
+            </body></html>
+        ]]
+        local doc = web.render_html_to_document(hn_sample, "https://news.ycombinator.com", 80)
+        assert_true(#doc.links >= 3, "must extract story, vote, and comments links from layout table")
+        assert_eq(doc.links[1].text, "▲", "vote link should render clean arrow symbol")
+        assert_eq(doc.links[2].text, "First Story Title")
+        assert_eq(doc.links[2].href, "https://example.com/story1")
+        assert_eq(doc.links[3].text, "42 comments")
+        assert_eq(doc.links[3].href, "https://news.ycombinator.com/item?id=101")
+        assert_eq(doc.links[4].text, "Second Story Title")
+    end)
 end)
 
 -- 4. Browser State Machine & Vim Navigation
@@ -254,6 +288,37 @@ TestRunner.describe("4. Browser State Machine & Vim Navigation", function()
         b:handle_key("ENTER")
         assert_eq(b.mode, "NORMAL")
         assert_eq(b.url, "about:home", "':home' command must navigate to about:home")
+    end)
+
+    TestRunner.it("should navigate and focus links via TAB, ], SHIFT_TAB, and [", function()
+        b:navigate_to("about:home")
+        assert_true(#b.doc.links >= 4, "home page has multiple links")
+
+        b.selected_link_idx = 1
+        -- Test TAB moving forward
+        b:handle_key("TAB")
+        assert_eq(b.selected_link_idx, 2, "TAB should advance to link 2")
+
+        -- Test ']' alias moving forward
+        b:handle_key("]")
+        assert_eq(b.selected_link_idx, 3, "']' should advance to link 3")
+
+        -- Test SHIFT_TAB moving backward
+        b:handle_key("SHIFT_TAB")
+        assert_eq(b.selected_link_idx, 2, "SHIFT_TAB should return to link 2")
+
+        -- Test '[' alias moving backward
+        b:handle_key("[")
+        assert_eq(b.selected_link_idx, 1, "'[' should return to link 1")
+
+        -- Test wrapping around backwards
+        b:handle_key("[")
+        assert_eq(b.selected_link_idx, #b.doc.links, "'[' at link 1 should wrap to last link")
+
+        -- Test ENTER opening focused link
+        local target_href = b.doc.links[b.selected_link_idx].href
+        b:handle_key("ENTER")
+        assert_eq(b.url, target_href, "ENTER should open the focused link")
     end)
 end)
 
