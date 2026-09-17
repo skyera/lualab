@@ -944,9 +944,9 @@ local function build_mpv_status_msg(mode, show_cc)
     else
         -- Move CC one row below the tct frame without embedding newlines, which leaves stale rows.
         if show_cc then
-            return "\27[s\27[1B\27[2K\27[1B\27[2K\27[1B\27[2K\27[2A${?sub-text:  >> CC: ${sub-text}}\27[u"
+            return "\27[s\27[1B\27[2K\27[1B\27[2K\27[1B\27[2K\27[2A${?sub-text:  >> CC: ${sub-text}  }[${playback-time} / ${duration}]\27[u"
         end
-        return ""
+        return "\27[s\27[1B\27[2K\27[1B\27[2K\27[1B\27[2K\27[2A[${playback-time} / ${duration}]\27[u"
     end
 end
 
@@ -2117,6 +2117,8 @@ local function run_self_tests()
     assert(status_video:find("\27%[u") or status_video:find("\27[u", 1, true), "Video CC status must restore the original cursor")
     assert(status_video:find("${?sub-text:", 1, true), "Video CC status format missing conditional sub-text")
     assert(status_video:find("CC:", 1, true), "Video CC status format missing label")
+    assert(status_video:find("${playback-time}", 1, true), "Video status format missing playback time")
+    assert(status_video:find("${duration}", 1, true), "Video status format missing duration")
     local status_no_cc = build_mpv_status_msg("music", false)
     assert(not status_no_cc:find("sub-text", 1, true), "Non-CC status should not contain sub-text")
     print("  [✓] CC / Lyrics status formatting passed")
