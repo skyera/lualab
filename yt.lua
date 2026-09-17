@@ -942,10 +942,10 @@ local function build_mpv_status_msg(mode, show_cc)
         end
         return msg
     else
-        -- Video mode: keep CC on its own line with blank rows above it so it cannot touch the frame.
-        local msg = "\\n\\n"
+        -- Video mode: keep status to one line so mpv can redraw it without leaving stale rows.
+        local msg = ""
         if show_cc then
-            msg = msg .. "${sub-text?  >> CC: ${sub-text}  |  }"
+            msg = "${sub-text?  >> CC: ${sub-text}  |  }"
         end
         msg = msg .. "  ${media-title}  [${playback-time} / ${duration}]"
         return msg
@@ -2105,7 +2105,7 @@ local function run_self_tests()
     assert(status_music:find("sub-text", 1, true), "Music CC status format missing sub-text")
     assert(status_music:find("CC/Lyrics:", 1, true), "Music CC status format missing label")
     local status_video = build_mpv_status_msg("video", true)
-    assert(status_video:sub(1, 4) == "\\n\\n", "Video CC status should start below two blank terminal lines")
+    assert(not status_video:find("\\n", 1, true), "Video CC status must remain on one terminal line")
     assert(status_video:find("sub-text", 1, true), "Video CC status format missing sub-text")
     assert(status_video:find("CC:", 1, true), "Video CC status format missing label")
     local status_no_cc = build_mpv_status_msg("music", false)
