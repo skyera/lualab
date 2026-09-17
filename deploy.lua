@@ -1,40 +1,60 @@
 #!/usr/bin/env luajit
 --[[
     deploy.lua
-    Installs pix.lua (Terminal Directory Image Viewer) plus a thin launcher, so the viewer can be
-    started by simply typing `pix`:
+    Installs lualab tools (pix.lua, yt.lua) plus thin launchers, so they can be
+    started by simply typing `pix` or `yt`:
 
-      Linux / macOS : ~/bin/pix.lua  + ~/bin/pix      (POSIX sh, made executable)
-      Windows       : C:\app\bin\pix.lua + pix.cmd    (cmd.exe / PowerShell)
-                      C:\app\bin\pix     (Git Bash / MSYS sh)
+      Linux / macOS : ~/bin/<app>.lua  + ~/bin/<app>      (POSIX sh, made executable)
+      Windows       : C:\app\bin\<app>.lua + <app>.cmd    (cmd.exe / PowerShell)
+                      C:\app\bin\<app>     (Git Bash / MSYS sh)
 
     Usage:
-      luajit deploy.lua                     Install for the current OS
+      luajit deploy.lua                     Install all tools for the current OS
+      luajit deploy.lua --app <pix|yt|all>  Select specific tool (default: all)
       luajit deploy.lua --dir <path>        Install into a custom directory
       luajit deploy.lua --os windows        Generate the Windows layout (e.g. from Linux/CI)
       luajit deploy.lua --check             Report only, write nothing
       luajit deploy.lua -h                  Show usage
 
-    The launcher prefers the `luajit` found on PATH ($PIX_LUAJIT overrides it) and falls back to the
-    absolute luajit that ran this deploy, so `pix` keeps working when luajit is not on PATH.
+    The launcher prefers the `luajit` found on PATH ($<APP>_LUAJIT overrides it) and falls back to the
+    absolute luajit that ran this deploy, so launchers keep working when luajit is not on PATH.
 ]]
 
 local ffi = require("ffi")
 
 -- =========================================================================
--- 1. Options
+-- 1. Options & Registry
 -- =========================================================================
+local APPS = {
+    pix = {
+        id = "pix",
+        name = "pix",
+        script = "pix.lua",
+        desc = "Terminal Directory Image Viewer",
+        env_var = "PIX_LUAJIT",
+    },
+    yt = {
+        id = "yt",
+        name = "yt",
+        script = "yt.lua",
+        desc = "YouTube & YouTube Music Terminal Player",
+        env_var = "YT_LUAJIT",
+    },
+}
+
 local opts = {
+    app = "all",
     dir = nil,
     os = nil,
     check = false,
 }
 
 local function print_usage()
-    print("pix deploy — Terminal Directory Image Viewer (LuaJIT FFI)")
+    print("lualab deploy — Cross-Platform Tools Deployer (LuaJIT FFI)")
     print("Usage:")
-    print("  luajit deploy.lua [--dir <path>] [--os linux|windows] [--check]")
+    print("  luajit deploy.lua [--app all|pix|yt] [--dir <path>] [--os linux|windows] [--check]")
     print("")
+    print("  --app <name>    App to deploy: all (default), pix, or yt")
     print("  --dir <path>    Target directory (default: C:\\app\\bin on Windows, ~/bin elsewhere)")
     print("  --os <name>     Force the target layout: linux (POSIX) or windows")
     print("  --check         Show what would be installed without writing anything")
@@ -45,7 +65,12 @@ do
     local argv = arg or {}
     while i <= #argv do
         local a = argv[i]
-        if a == "--dir" then
+        if a == "--app" then
+            i = i + 1
+            opts.app = (argv[i] or "all"):lower()
+        elseif a:match("^%-%-app=") then
+            opts.app = a:sub(7):lower()
+        elseif a == "--dir" then
             i = i + 1
             opts.dir = argv[i]
         elseif a:match("^%-%-dir=") then
@@ -67,6 +92,11 @@ do
         end
         i = i + 1
     end
+end
+
+if opts.app ~= "all" and opts.app ~= "pix" and opts.app ~= "yt" then
+    io.stderr:write("deploy: unknown --app '" .. tostring(opts.app) .. "' (use all, pix, or yt)\n")
+    os.exit(2)
 end
 
 local target_os = (opts.os or (ffi.os == "Windows" and "windows") or "linux"):lower()
@@ -244,18 +274,18 @@ end
 -- =========================================================================
 -- 3. Launcher templates
 -- =========================================================================
-local function posix_launcher(luajit_path, script_path)
+local function posix_launcher(app, luajit_path, script_path)
     return table.concat({
         "#!/bin/sh",
-        "# pix - Terminal Directory Image Viewer (installed by deploy.lua)",
-        "# Prefers luajit from PATH ($PIX_LUAJIT overrides it); falls back to the luajit used to deploy.",
-        'PIX_FALLBACK_LUAJIT="' .. luajit_path .. '"',
-        'LUAJIT="${PIX_LUAJIT:-}"',
+        "# " .. app.name .. " - " .. app.desc .. " (installed by deploy.lua)",
+        "# Prefers luajit from PATH ($" .. app.env_var .. " overrides it); falls back to the luajit used to deploy.",
+        app.name:upper() .. '_FALLBACK_LUAJIT="' .. luajit_path .. '"',
+        'LUAJIT="${' .. app.env_var .. ':-}"',
         'if [ -z "$LUAJIT" ]; then',
-        '    if command -v luajit >/dev/null 2>&1; then LUAJIT=luajit; else LUAJIT="$PIX_FALLBACK_LUAJIT"; fi',
+        '    if command -v luajit >/dev/null 2>&1; then LUAJIT=luajit; else LUAJIT="$' .. app.name:upper() .. '_FALLBACK_LUAJIT"; fi',
         'fi',
         'if ! command -v "$LUAJIT" >/dev/null 2>&1 && [ ! -x "$LUAJIT" ]; then',
-        '    echo "pix: luajit not found - set PIX_LUAJIT=/path/to/luajit" >&2',
+        '    echo "' .. app.name .. ': luajit not found - set ' .. app.env_var .. '=/path/to/luajit" >&2',
         '    exit 127',
         'fi',
         'exec "$LUAJIT" "' .. script_path .. '" "$@"',
@@ -263,22 +293,22 @@ local function posix_launcher(luajit_path, script_path)
     }, "\n")
 end
 
--- cmd.exe needs CRLF line endings; pix.lua is located through %~dp0 so any target dir works.
-local function windows_cmd_launcher(luajit_path)
+-- cmd.exe needs CRLF line endings; script is located through %~dp0 so any target dir works.
+local function windows_cmd_launcher(app, luajit_path)
     return table.concat({
         "@echo off",
-        "rem pix - Terminal Directory Image Viewer (installed by deploy.lua)",
-        'set "PIX_FALLBACK_LUAJIT=' .. luajit_path .. '"',
-        'set "LUAJIT=%PIX_LUAJIT%"',
+        "rem " .. app.name .. " - " .. app.desc .. " (installed by deploy.lua)",
+        'set "' .. app.name:upper() .. '_FALLBACK_LUAJIT=' .. luajit_path .. '"',
+        'set "LUAJIT=%' .. app.env_var .. '%"',
         'if not defined LUAJIT set "LUAJIT=luajit"',
         'where "%LUAJIT%" >nul 2>nul',
-        'if errorlevel 1 set "LUAJIT=%PIX_FALLBACK_LUAJIT%"',
+        'if errorlevel 1 set "LUAJIT=%' .. app.name:upper() .. '_FALLBACK_LUAJIT%"',
         'where "%LUAJIT%" >nul 2>nul',
         'if errorlevel 1 (',
-        '    echo pix: luajit not found - set PIX_LUAJIT to the luajit executable 1>&2',
+        '    echo ' .. app.name .. ': luajit not found - set ' .. app.env_var .. ' to the luajit executable 1>&2',
         '    exit /b 127',
         ')',
-        '"%LUAJIT%" "%~dp0pix.lua" %*',
+        '"%LUAJIT%" "%~dp0' .. app.script .. '" %*',
         "",
     }, "\r\n")
 end
@@ -288,34 +318,50 @@ end
 -- =========================================================================
 local kind = target_is_windows and "Windows" or "Linux/POSIX"
 local script_dir = get_script_dir()
-local source_path = script_dir .. SEP .. "pix.lua"
 local target_dir = normalize_dir(opts.dir or default_target_dir())
-local installed_lua = target_dir .. SEP .. "pix.lua"
 local luajit_path = resolve_luajit()
 
-print("pix deploy - Terminal Directory Image Viewer (LuaJIT FFI)")
-print("  Source : " .. source_path .. " (" .. format_size(file_size(source_path)) .. ")")
+local apps_to_deploy = {}
+if opts.app == "all" then
+    table.insert(apps_to_deploy, APPS.pix)
+    table.insert(apps_to_deploy, APPS.yt)
+elseif opts.app == "pix" then
+    table.insert(apps_to_deploy, APPS.pix)
+elseif opts.app == "yt" then
+    table.insert(apps_to_deploy, APPS.yt)
+end
+
+print("lualab deploy — Cross-Platform Suite (LuaJIT FFI)")
 print("  Target : " .. target_dir .. "   (" .. kind .. ")")
 print("  Runtime: " .. luajit_path)
 print("")
 
-if not file_exists(source_path) then
-    io.stderr:write("deploy: pix.lua not found next to deploy.lua (" .. source_path .. ")\n")
-    os.exit(1)
+for _, app in ipairs(apps_to_deploy) do
+    app.source_path = script_dir .. SEP .. app.script
+    app.installed_lua = target_dir .. SEP .. app.script
+    if not file_exists(app.source_path) then
+        io.stderr:write("deploy: " .. app.script .. " not found next to deploy.lua (" .. app.source_path .. ")\n")
+        os.exit(1)
+    end
 end
 
 -- -------------------------------------------------------------------------
 -- --check: report the planned actions and stop
 -- -------------------------------------------------------------------------
 if opts.check then
-    local existing = file_size(installed_lua)
-    local verb = existing and "overwrite" or "create"
-    print(string.format("  [check] would %s %s (%s)", verb, display_path(installed_lua),
-        existing and (format_size(existing) .. " -> " .. format_size(file_size(source_path))) or format_size(file_size(source_path))))
-    print(string.format("  [check] would write  %s", display_path(target_dir .. SEP .. "pix")))
-    if target_is_windows then
-        print(string.format("  [check] would write  %s", display_path(target_dir .. SEP .. "pix.cmd")))
+    for _, app in ipairs(apps_to_deploy) do
+        print(string.format("[%s] %s", app.name, app.desc))
+        local existing = file_size(app.installed_lua)
+        local verb = existing and "overwrite" or "create"
+        print(string.format("  [check] would %s %s (%s)", verb, display_path(app.installed_lua),
+            existing and (format_size(existing) .. " -> " .. format_size(file_size(app.source_path))) or format_size(file_size(app.source_path))))
+        print(string.format("  [check] would write     %s", display_path(target_dir .. SEP .. app.name)))
+        if target_is_windows then
+            print(string.format("  [check] would write     %s", display_path(target_dir .. SEP .. app.name .. ".cmd")))
+        end
+        print("")
     end
+
     if dir_in_path(target_dir) then
         print(string.format("  [check] %s is in PATH", display_path(target_dir)))
     else
@@ -329,65 +375,69 @@ end
 ensure_dir(target_dir)
 
 local written = 0
+local deployed_names = {}
 
--- -------------------------------------------------------------------------
--- 1. pix.lua
--- -------------------------------------------------------------------------
-local ok, copy_result = copy_file(source_path, installed_lua)
-if not ok then
-    io.stderr:write("deploy: failed to install pix.lua: " .. tostring(copy_result) .. "\n")
-    os.exit(1)
-end
-written = written + 1
-print(string.format("  [ok] copied  pix.lua -> %s (%s)", display_path(installed_lua), format_size(copy_result)))
+for _, app in ipairs(apps_to_deploy) do
+    table.insert(deployed_names, app.name)
+    print(string.format("[%s] %s", app.name, app.desc))
 
--- -------------------------------------------------------------------------
--- 2. Launchers  (built with host separators, reported in the target OS style)
--- -------------------------------------------------------------------------
-if target_is_windows then
-    -- cmd.exe / PowerShell
-    local cmd_path = target_dir .. SEP .. "pix.cmd"
-    if not write_file(cmd_path, windows_cmd_launcher(luajit_path)) then
-        io.stderr:write("deploy: failed to write " .. display_path(cmd_path) .. "\n")
+    -- 1. Copy lua script
+    local ok, copy_result = copy_file(app.source_path, app.installed_lua)
+    if not ok then
+        io.stderr:write("deploy: failed to install " .. app.script .. ": " .. tostring(copy_result) .. "\n")
         os.exit(1)
     end
     written = written + 1
-    print(string.format("  [ok] wrote   %s (cmd.exe / PowerShell)", display_path(cmd_path)))
+    print(string.format("  [ok] copied  %s -> %s (%s)", app.script, display_path(app.installed_lua), format_size(copy_result)))
 
-    -- Git Bash / MSYS shell (POSIX launcher; forward slashes when the host is Windows)
-    local sh_path = target_dir .. SEP .. "pix"
-    local sh_lua = host_is_windows and luajit_path:gsub("\\", "/") or luajit_path
-    local sh_target = host_is_windows and installed_lua:gsub("\\", "/") or installed_lua
-    if not write_file(sh_path, posix_launcher(sh_lua, sh_target)) then
-        io.stderr:write("deploy: failed to write " .. display_path(sh_path) .. "\n")
-        os.exit(1)
+    -- 2. Launchers
+    if target_is_windows then
+        -- cmd.exe / PowerShell
+        local cmd_path = target_dir .. SEP .. app.name .. ".cmd"
+        if not write_file(cmd_path, windows_cmd_launcher(app, luajit_path)) then
+            io.stderr:write("deploy: failed to write " .. display_path(cmd_path) .. "\n")
+            os.exit(1)
+        end
+        written = written + 1
+        print(string.format("  [ok] wrote   %s (cmd.exe / PowerShell)", display_path(cmd_path)))
+
+        -- Git Bash / MSYS shell (POSIX launcher; forward slashes when host is Windows)
+        local sh_path = target_dir .. SEP .. app.name
+        local sh_lua = host_is_windows and luajit_path:gsub("\\", "/") or luajit_path
+        local sh_target = host_is_windows and app.installed_lua:gsub("\\", "/") or app.installed_lua
+        if not write_file(sh_path, posix_launcher(app, sh_lua, sh_target)) then
+            io.stderr:write("deploy: failed to write " .. display_path(sh_path) .. "\n")
+            os.exit(1)
+        end
+        written = written + 1
+        print(string.format("  [ok] wrote   %s (Git Bash / MSYS sh)", display_path(sh_path)))
+    else
+        local sh_path = target_dir .. SEP .. app.name
+        if not write_file(sh_path, posix_launcher(app, luajit_path, app.installed_lua)) then
+            io.stderr:write("deploy: failed to write " .. display_path(sh_path) .. "\n")
+            os.exit(1)
+        end
+        os.execute(string.format('chmod +x "%s"', sh_path))
+        written = written + 1
+        print(string.format("  [ok] wrote   %s (executable)", display_path(sh_path)))
     end
-    written = written + 1
-    print(string.format("  [ok] wrote   %s (Git Bash / MSYS sh)", display_path(sh_path)))
-else
-    local sh_path = target_dir .. SEP .. "pix"
-    if not write_file(sh_path, posix_launcher(luajit_path, installed_lua)) then
-        io.stderr:write("deploy: failed to write " .. display_path(sh_path) .. "\n")
-        os.exit(1)
-    end
-    os.execute(string.format('chmod +x "%s"', sh_path))
-    written = written + 1
-    print(string.format("  [ok] wrote   %s (executable)", display_path(sh_path)))
+    print("")
 end
 
 -- -------------------------------------------------------------------------
 -- 3. PATH advice
 -- -------------------------------------------------------------------------
+local try_apps = table.concat(deployed_names, "  or  ")
 if dir_in_path(target_dir) then
-    print(string.format("  [ok] %s is in PATH - try:  pix", display_path(target_dir)))
+    print(string.format("  [ok] %s is in PATH - try:  %s", display_path(target_dir), try_apps))
 elseif target_is_windows then
     print(string.format("  [!]  %s is not in PATH. Add it permanently with:", display_path(target_dir)))
     print(string.format('         setx PATH "%%PATH%%;%s"', display_path(target_dir)))
-    print("       (or run: " .. display_path(target_dir) .. "\\pix.cmd)")
+    print("       (or run directly from: " .. display_path(target_dir) .. ")")
 else
     print(string.format("  [!]  %s is not in PATH. Add it with:", display_path(target_dir)))
     print("         echo 'export PATH=\"$HOME/bin:$PATH\"' >> ~/.profile")
-    print("       then restart your shell, or run: " .. display_path(target_dir) .. "/pix")
+    print("       then restart your shell, or run directly from: " .. display_path(target_dir))
 end
 
 print("")
