@@ -1204,6 +1204,8 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
 
     local term_w, term_h = get_terminal_size()
     local status_msg = build_mpv_status_msg(mode, show_cc or mode == "video")
+    -- Unix shells expand ${...} before mpv sees it; preserve MPV property syntax.
+    local command_status_msg = is_windows and status_msg or status_msg:gsub("%$", "\\$")
     local mpv_cmd
 
     if mode == "music" then
@@ -1212,13 +1214,13 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
             'mpv --no-video --load-scripts=no --hwdec=auto --term-osd-bar --ytdl-format="bestaudio/best" '
             .. '--term-status-msg="%s" '
             .. '%s%s %q',
-            status_msg, ytdl_raw_opts, extra_mpv_opts, item.url
+            command_status_msg, ytdl_raw_opts, extra_mpv_opts, item.url
         )
     else
         -- Video playback
         if use_external_window then
             -- GUI window mode: keep scripts enabled (mpv-cut, shaders, OSC, etc. work in GUI window)
-            mpv_cmd = string.format('mpv --hwdec=auto --term-status-msg="%s" %s%s %q', status_msg, ytdl_raw_opts, extra_mpv_opts, item.url)
+            mpv_cmd = string.format('mpv --hwdec=auto --term-status-msg="%s" %s%s %q', command_status_msg, ytdl_raw_opts, extra_mpv_opts, item.url)
         else
             -- Terminal ASCII/Half-block video:
             -- 1. vo-tct-buffering=frame eliminates redraw tearing
@@ -1231,7 +1233,7 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
                 .. '--term-status-msg="%s" '
                 .. '%s%s %q',
                 math.max(10, term_w), math.max(6, term_h - h_offset),
-                status_msg,
+                command_status_msg,
                 ytdl_raw_opts, extra_mpv_opts, item.url
             )
         end
