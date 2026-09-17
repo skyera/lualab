@@ -104,4 +104,14 @@ if p_sec then
     print("  [✓] Test 8 passed: YT_INSECURE=1 environment variable correctly activates corporate SSL bypass.")
 end
 
+-- Test 9: Self-Test Mode (--test) including History Save/Load and parse_json_field verification
+local p_test = io.popen(luajit .. " yt.lua --test", "r")
+assert(p_test, "Failed to run yt.lua --test")
+local test_out = p_test:read("*a")
+p_test:close()
+assert(test_out:find("parse_json_field passed", 1, true), "parse_json_field unit test failed")
+assert(test_out:find("save_history_item & load_history_items passed", 1, true), "History save/load test failed")
+assert(test_out:find("All Internal Self-Tests Passed Successfully", 1, true), "Self-tests summary missing")
+print("  [✓] Test 9 passed: yt.lua --test verified JSON parsing and history save/load without errors.")
+
 print("=== All Backend Verification Tests Completed Successfully ===")

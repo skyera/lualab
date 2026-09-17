@@ -348,6 +348,71 @@ local function get_history_file()
     return get_cache_dir() .. (is_windows and "\\" or "/") .. "history.json"
 end
 
+local function codepoint_to_utf8(cp)
+    if cp < 0x80 then
+        return string.char(cp)
+    elseif cp < 0x800 then
+        return string.char(bit.bor(0xC0, bit.rshift(cp, 6)), bit.bor(0x80, bit.band(cp, 0x3F)))
+    elseif cp < 0x10000 then
+        return string.char(bit.bor(0xE0, bit.rshift(cp, 12)), bit.bor(0x80, bit.band(bit.rshift(cp, 6), 0x3F)), bit.bor(0x80, bit.band(cp, 0x3F)))
+    elseif cp < 0x110000 then
+        return string.char(bit.bor(0xF0, bit.rshift(cp, 18)), bit.bor(0x80, bit.band(bit.rshift(cp, 12), 0x3F)), bit.bor(0x80, bit.band(bit.rshift(cp, 6), 0x3F)), bit.bor(0x80, bit.band(cp, 0x3F)))
+    end
+    return ""
+end
+
+local function unescape_unicode(s)
+    if not s or not s:find("\\u") then return s end
+    -- Handle surrogate pairs: \uD8xx\uDCxx
+    s = s:gsub("\\u([dD][89a-bA-B]%x%x)\\u([dD][c-fC-F]%x%x)", function(hi_hex, lo_hex)
+        local hi = tonumber(hi_hex, 16)
+        local lo = tonumber(lo_hex, 16)
+        local cp = 0x10000 + bit.lshift(bit.band(hi, 0x3FF), 10) + bit.band(lo, 0x3FF)
+        return codepoint_to_utf8(cp)
+    end)
+    -- Handle standard \uXXXX
+    s = s:gsub("\\u(%x%x%x%x)", function(hex)
+        local cp = tonumber(hex, 16)
+        return codepoint_to_utf8(cp)
+    end)
+    return s
+end
+
+local function parse_json_field(line, key)
+    local pat = '"' .. key .. '"%s*:%s*"'
+    local s, e = line:find(pat)
+    if s then
+        local pos = e + 1
+        local chars = {}
+        local len = #line
+        while pos <= len do
+            local b = line:sub(pos, pos)
+            if b == "\\" then
+                pos = pos + 1
+                local next_b = line:sub(pos, pos)
+                if next_b == '"' then table.insert(chars, '"')
+                elseif next_b == "\\" then table.insert(chars, "\\")
+                elseif next_b == "/" then table.insert(chars, "/")
+                elseif next_b == "n" then table.insert(chars, " ")
+                elseif next_b == "u" then
+                    -- Keep \uXXXX intact for unescape_unicode to parse
+                    local u_part = line:sub(pos - 1, pos + 4)
+                    table.insert(chars, u_part)
+                    pos = pos + 4
+                else table.insert(chars, next_b) end
+            elseif b == '"' then
+                return unescape_unicode(table.concat(chars))
+            else
+                table.insert(chars, b)
+            end
+            pos = pos + 1
+        end
+    end
+    local num = line:match('"' .. key .. '"%s*:%s*([%d%.]+)')
+    if num then return tonumber(num) end
+    return nil
+end
+
 local function save_history_item(item)
     if not item or not item.id then return end
     local hfile = get_history_file()
@@ -430,71 +495,6 @@ end
 -- =========================================================================
 -- 3. YouTube Search & Extraction Engine
 -- =========================================================================
-local function codepoint_to_utf8(cp)
-    if cp < 0x80 then
-        return string.char(cp)
-    elseif cp < 0x800 then
-        return string.char(bit.bor(0xC0, bit.rshift(cp, 6)), bit.bor(0x80, bit.band(cp, 0x3F)))
-    elseif cp < 0x10000 then
-        return string.char(bit.bor(0xE0, bit.rshift(cp, 12)), bit.bor(0x80, bit.band(bit.rshift(cp, 6), 0x3F)), bit.bor(0x80, bit.band(cp, 0x3F)))
-    elseif cp < 0x110000 then
-        return string.char(bit.bor(0xF0, bit.rshift(cp, 18)), bit.bor(0x80, bit.band(bit.rshift(cp, 12), 0x3F)), bit.bor(0x80, bit.band(bit.rshift(cp, 6), 0x3F)), bit.bor(0x80, bit.band(cp, 0x3F)))
-    end
-    return ""
-end
-
-local function unescape_unicode(s)
-    if not s or not s:find("\\u") then return s end
-    -- Handle surrogate pairs: \uD8xx\uDCxx
-    s = s:gsub("\\u([dD][89a-bA-B]%x%x)\\u([dD][c-fC-F]%x%x)", function(hi_hex, lo_hex)
-        local hi = tonumber(hi_hex, 16)
-        local lo = tonumber(lo_hex, 16)
-        local cp = 0x10000 + bit.lshift(bit.band(hi, 0x3FF), 10) + bit.band(lo, 0x3FF)
-        return codepoint_to_utf8(cp)
-    end)
-    -- Handle standard \uXXXX
-    s = s:gsub("\\u(%x%x%x%x)", function(hex)
-        local cp = tonumber(hex, 16)
-        return codepoint_to_utf8(cp)
-    end)
-    return s
-end
-
-local function parse_json_field(line, key)
-    local pat = '"' .. key .. '"%s*:%s*"'
-    local s, e = line:find(pat)
-    if s then
-        local pos = e + 1
-        local chars = {}
-        local len = #line
-        while pos <= len do
-            local b = line:sub(pos, pos)
-            if b == "\\" then
-                pos = pos + 1
-                local next_b = line:sub(pos, pos)
-                if next_b == '"' then table.insert(chars, '"')
-                elseif next_b == "\\" then table.insert(chars, "\\")
-                elseif next_b == "/" then table.insert(chars, "/")
-                elseif next_b == "n" then table.insert(chars, " ")
-                elseif next_b == "u" then
-                    -- Keep \uXXXX intact for unescape_unicode to parse
-                    local u_part = line:sub(pos - 1, pos + 4)
-                    table.insert(chars, u_part)
-                    pos = pos + 4
-                else table.insert(chars, next_b) end
-            elseif b == '"' then
-                return unescape_unicode(table.concat(chars))
-            else
-                table.insert(chars, b)
-            end
-            pos = pos + 1
-        end
-    end
-    local num = line:match('"' .. key .. '"%s*:%s*([%d%.]+)')
-    if num then return tonumber(num) end
-    return nil
-end
-
 local function scrape_youtube_search(query, max_results, proxy, insecure)
     max_results = max_results or 20
     local encoded = query:gsub("([^%w%-%_%.%~])", function(c)
@@ -1072,6 +1072,63 @@ end
 -- =========================================================================
 -- 8. CLI Entrypoint & Argument Parsing
 -- =========================================================================
+local function run_self_tests()
+    print("=== Running yt.lua Internal Self-Tests ===")
+    -- 1. codepoint_to_utf8
+    assert(codepoint_to_utf8(65) == "A", "codepoint_to_utf8 ASCII failed")
+    assert(codepoint_to_utf8(0x4E2D) == "\228\184\173", "codepoint_to_utf8 CJK failed")
+    print("  [✓] codepoint_to_utf8 passed")
+
+    -- 2. unescape_unicode
+    assert(unescape_unicode("Hello \\u0057orld") == "Hello World", "unescape_unicode basic failed")
+    assert(unescape_unicode("\\ud83d\\ude00") == "\240\159\152\128", "unescape_unicode surrogate pair failed")
+    print("  [✓] unescape_unicode passed")
+
+    -- 3. parse_json_field
+    local sample_json = '{"id":"test12345","title":"Test \\u0026 Demo \\"Video\\"","uploader":"Test Artist","duration":185,"duration_str":"03:05"}'
+    assert(parse_json_field(sample_json, "id") == "test12345", "parse_json_field id failed")
+    assert(parse_json_field(sample_json, "title") == 'Test & Demo "Video"', "parse_json_field title unescape failed")
+    assert(parse_json_field(sample_json, "uploader") == "Test Artist", "parse_json_field uploader failed")
+    assert(parse_json_field(sample_json, "duration") == 185, "parse_json_field duration failed")
+    assert(parse_json_field(sample_json, "duration_str") == "03:05", "parse_json_field duration_str failed")
+    print("  [✓] parse_json_field passed")
+
+    -- 4. format_duration
+    assert(format_duration(nil) == "--:--", "format_duration nil failed")
+    assert(format_duration(0) == "--:--", "format_duration 0 failed")
+    assert(format_duration(75) == "01:15", "format_duration mm:ss failed")
+    assert(format_duration(3661) == "1:01:01", "format_duration h:mm:ss failed")
+    print("  [✓] format_duration passed")
+
+    -- 5. save_history_item & load_history_items
+    local test_item = {
+        id = "selftest_" .. tostring(os.time()),
+        title = "Self Test Video - " .. tostring(os.time()),
+        uploader = "SelfTest Channel",
+        duration = 120,
+        duration_str = "02:00",
+    }
+    local ok_save, err_save = pcall(save_history_item, test_item)
+    assert(ok_save, "save_history_item threw error: " .. tostring(err_save))
+    local ok_load, loaded = pcall(load_history_items)
+    assert(ok_load, "load_history_items threw error: " .. tostring(loaded))
+    assert(type(loaded) == "table", "load_history_items returned non-table")
+    local found_test_item = false
+    for _, it in ipairs(loaded) do
+        if it.id == test_item.id then
+            found_test_item = true
+            assert(it.title == test_item.title, "History item title mismatch")
+            assert(it.uploader == test_item.uploader, "History item uploader mismatch")
+            break
+        end
+    end
+    assert(found_test_item, "Saved history item not found in loaded history items")
+    print("  [✓] save_history_item & load_history_items passed")
+
+    print("=== All Internal Self-Tests Passed Successfully ===")
+    return true
+end
+
 local function print_help()
     print("\27[1;36myt.lua — Cross-Platform YouTube & Music Terminal Player (LuaJIT FFI)\27[0m")
     print("\nUsage:")
@@ -1086,6 +1143,7 @@ local function print_help()
     print("  --proxy <url>         Use HTTP/HTTPS/SOCKS proxy for search and streaming (or $HTTPS_PROXY)")
     print("  --insecure            Disable SSL certificate checks (or $YT_INSECURE=1; auto-retried on SSL fail)")
     print("  --liked               Load user's Liked Music or Liked Videos playlist")
+    print("  --test                Run automated self-tests and exit")
     print("  -h, --help            Show this help message")
     print("\nSystem Status:")
     print(string.format("  yt-dlp:    %s", HAS_YTDLP and "\27[32m[Installed]\27[0m" or "\27[31m[Missing - Required for search/streams]\27[0m"))
@@ -1124,6 +1182,9 @@ local function main()
         local a = arg[i]
         if a == "-h" or a == "--help" then
             print_help()
+            return
+        elseif a == "--test" then
+            run_self_tests()
             return
         elseif a == "-m" or a == "--music" then
             mode = "music"
