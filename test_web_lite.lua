@@ -637,6 +637,246 @@ TestRunner.describe("10. Dynamic Terminal Resize Reflow", function()
     end)
 end)
 
+-- 11. Hyperlink Yanking & Yank Hint Mode (yl, yf, :yl)
+TestRunner.describe("11. Hyperlink Yanking & Yank Hint Mode", function()
+    TestRunner.it("should yank focused hyperlink URL via 'yl'", function()
+        local b = web.Browser.new("about:home")
+        b:load_url("about:home")
+        b.selected_link_idx = 2
+        local target_href = b.doc.links[2].href
+        assert_true(target_href ~= nil)
+
+        b:handle_key("y")
+        b:handle_key("l")
+        assert_true(b.status_msg:find("Yanked link to clipboard"), "'yl' must report yanking link to clipboard")
+        assert_true(b.status_msg:find(target_href:sub(1, 15), 1, true), "status msg must contain target URL prefix")
+    end)
+
+    TestRunner.it("should activate Yank Hint mode via 'yf' and copy chosen link", function()
+        local b = web.Browser.new("about:home")
+        b:load_url("about:home")
+
+        b:handle_key("y")
+        b:handle_key("f")
+        assert_eq(b.mode, "HINT", "'yf' must enter HINT mode")
+        assert_eq(b.hint_action, "YANK", "hint_action must be set to YANK")
+
+        b:build_hints(25)
+        assert_true(b.hint_map["A"] ~= nil, "hint 'A' must be available")
+        local chosen_link_idx = b.hint_map["A"]
+        local chosen_href = b.doc.links[chosen_link_idx].href
+
+        b:handle_key("A")
+        assert_eq(b.mode, "NORMAL", "after selecting hint, mode returns to NORMAL")
+        assert_true(b.status_msg:find("Yanked link to clipboard"))
+        assert_true(b.status_msg:find(chosen_href:sub(1, 15), 1, true))
+    end)
+
+    TestRunner.it("should yank focused link via ':yl' command", function()
+        local b = web.Browser.new("about:home")
+        b:load_url("about:home")
+        b.selected_link_idx = 1
+
+        b:handle_key(":")
+        b:handle_key("y")
+        b:handle_key("l")
+        b:handle_key("ENTER")
+        assert_true(b.status_msg:find("Yanked link to clipboard"), "':yl' must yank focused link")
+    end)
+end)
+
+-- 12. Heading Jump Navigation & Table of Contents (}, {, ]], [[, :toc)
+TestRunner.describe("12. Heading Jump Navigation & Table of Contents", function()
+    TestRunner.it("should extract headings hierarchy and line positions into doc.headings", function()
+        local html = "<h1>Main Heading</h1><p>Para 1</p><p>Para 2</p><h2>Section One</h2><p>Content</p><h3>Subsection</h3>"
+        local doc = web.render_html_to_document(html, "https://example.com/test", 80)
+
+        assert_eq(#doc.headings, 3, "should extract 3 headings")
+        assert_eq(doc.headings[1].level, 1)
+        assert_eq(doc.headings[1].text, "Main Heading")
+        assert_eq(doc.headings[2].level, 2)
+        assert_eq(doc.headings[2].text, "Section One")
+        assert_eq(doc.headings[3].level, 3)
+        assert_eq(doc.headings[3].text, "Subsection")
+        assert_true(doc.headings[1].line_idx < doc.headings[2].line_idx, "h1 must appear before h2")
+        assert_true(doc.headings[2].line_idx < doc.headings[3].line_idx, "h2 must appear before h3")
+    end)
+
+    TestRunner.it("should jump between headings using '}' and '{'", function()
+        local b = web.Browser.new("about:home")
+        b:load_url("about:home")
+        assert_true(#b.doc.headings >= 2, "about:home should have multiple headings")
+
+        b.scroll_y = 1
+        b:handle_key("}")
+        assert_true(b.scroll_y > 1, "'}' should advance scroll_y to next heading")
+        local first_heading_scroll = b.scroll_y
+
+        b:handle_key("}")
+        assert_true(b.scroll_y > first_heading_scroll, "subsequent '}' should advance to next heading")
+
+        b:handle_key("{")
+        assert_eq(b.scroll_y, first_heading_scroll, "'{' should jump backward to previous heading")
+    end)
+
+    TestRunner.it("should jump between headings using ']]' and '[['", function()
+        local b = web.Browser.new("about:home")
+        b:load_url("about:home")
+
+        b.scroll_y = 1
+        b:handle_key("]]")
+        assert_true(b.scroll_y > 1, "']]' should jump to next heading")
+        b:handle_key("[[")
+        assert_eq(b.scroll_y, 1, "'[[' should jump back to top heading")
+    end)
+
+    TestRunner.it("should display Table of Contents via ':toc' and return via 'H'", function()
+        local b = web.Browser.new("about:home")
+        b:load_url("about:home")
+
+        b:handle_key(":")
+        b:handle_key("t")
+        b:handle_key("o")
+        b:handle_key("c")
+        b:handle_key("ENTER")
+
+        assert_eq(b.url, "about:toc", "':toc' must navigate to about:toc")
+        assert_true(b.doc.title:find("Table of Contents"), "doc title must be Table of Contents")
+        assert_true(#b.doc.links > 0, "TOC should contain return links")
+
+        -- Press 'H' to return to previous page
+        b:handle_key("H")
+        assert_eq(b.url, "about:home", "'H' from TOC must restore original page")
+    end)
+end)
+
+-- 13. Image Link Extraction & Media Inspection
+TestRunner.describe("13. Image Link Extraction & Media Inspection", function()
+    TestRunner.it("should parse <img> tags into hyperlinks with [IMG: alt] badges", function()
+        local html = "<p>Architecture diagram:</p><img src=\"system_arch.png\" alt=\"System Architecture\"><p><img src=\"https://example.com/badge.svg\"></p>"
+        local doc = web.render_html_to_document(html, "https://skyera.org/docs/index.html", 80)
+
+        assert_true(#doc.links >= 2, "must extract image tags as hyperlinks")
+        assert_eq(doc.links[1].text, "[IMG: System Architecture]")
+        assert_eq(doc.links[1].href, "https://skyera.org/docs/system_arch.png", "relative image path must be resolved")
+        assert_eq(doc.links[1].is_image, true, "is_image flag must be true")
+
+        assert_eq(doc.links[2].text, "[IMG: Image 2]", "empty alt attribute should fallback to Image N")
+        assert_eq(doc.links[2].href, "https://example.com/badge.svg")
+        assert_eq(doc.links[2].is_image, true)
+    end)
+
+    TestRunner.it("should allow focusing image links with TAB and opening with gx", function()
+        local b = web.Browser.new("https://skyera.org/demo")
+        local html = "<h1>Title</h1><p><img src=\"https://example.com/diagram.png\" alt=\"Workflow\"></p>"
+        b.raw_html = html
+        b.doc = web.render_html_to_document(html, "https://skyera.org/demo", 80)
+        assert_eq(#b.doc.links, 1)
+
+        b:handle_key("TAB")
+        assert_eq(b.selected_link_idx, 1)
+        assert_eq(b.doc.links[1].text, "[IMG: Workflow]")
+    end)
+end)
+
+-- 14. Persistent Browsing History (about:history, :history, gH)
+TestRunner.describe("14. Persistent Browsing History", function()
+    local test_hist_file = web.get_history_file_path() .. ".test_suite.txt"
+
+    TestRunner.it("should persist and load browsing history records", function()
+        os.remove(test_hist_file)
+        web.add_history_entry("https://news.ycombinator.com", "Hacker News", test_hist_file)
+        web.add_history_entry("https://luajit.org", "LuaJIT Site", test_hist_file)
+
+        local items = web.load_history(10, test_hist_file)
+        assert_true(#items >= 2, "must load at least 2 history records")
+        assert_eq(items[1].url, "https://luajit.org", "most recent history item must be first")
+        assert_eq(items[1].title, "LuaJIT Site")
+        assert_eq(items[2].url, "https://news.ycombinator.com")
+        os.remove(test_hist_file)
+    end)
+
+    TestRunner.it("should render about:history page with clickable hyperlinks", function()
+        os.remove(test_hist_file)
+        web.add_history_entry("https://example.com/article", "Example Article", test_hist_file)
+
+        local html = web.get_history_page_html(test_hist_file)
+        assert_true(html:find("Browsing History"), "HTML must contain history title")
+        local doc = web.render_html_to_document(html, "about:history", 80)
+        assert_true(doc.title:find("History"))
+        assert_true(#doc.links > 0, "about:history must contain extracted links")
+        os.remove(test_hist_file)
+    end)
+
+    TestRunner.it("should navigate to about:history via 'gH' and ':history'", function()
+        local b = web.Browser.new("about:home")
+        b:load_url("about:home")
+
+        b:handle_key("g")
+        b:handle_key("H")
+        assert_eq(b.url, "about:history", "'gH' shortcut must navigate to about:history")
+
+        b:navigate_to("about:home")
+        b:handle_key(":")
+        for c in string.gmatch("history", ".") do b:handle_key(c) end
+        b:handle_key("ENTER")
+        assert_eq(b.url, "about:history", "':history' command must navigate to about:history")
+    end)
+end)
+
+-- 15. Distraction-Free Reader Mode (gr, :reader)
+TestRunner.describe("15. Distraction-Free Reader Mode", function()
+    local noisy_html = [[
+<!DOCTYPE html>
+<html>
+<head><title>Clean News Article</title></head>
+<body>
+  <header><h1>Site Logo</h1><nav><a href="/home">Home</a> | <a href="/login">Login</a></nav></header>
+  <aside><div class="ad">Buy our product now!</div></aside>
+  <article>
+    <h1>The Power of Minimalist Terminal Browsers</h1>
+    <p>This is the core article content that readers truly care about without any distracting ads.</p>
+  </article>
+  <footer><p>Copyright 2026 Corporation. All rights reserved.</p></footer>
+</body>
+</html>
+]]
+
+    TestRunner.it("should filter out header, nav, aside, footer in reader mode", function()
+        local doc_normal = web.render_html_to_document(noisy_html, "https://news.com/post/1", 80, false)
+        local normal_str = table.concat(doc_normal.lines, " ")
+        assert_true(normal_str:find("Buy our product"), "normal mode must contain ads and aside")
+        assert_true(normal_str:find("Site Logo"), "normal mode must contain header")
+
+        local doc_reader = web.render_html_to_document(noisy_html, "https://news.com/post/1", 80, true)
+        local reader_str = table.concat(doc_reader.lines, " ")
+        assert_true(reader_str:find("The Power of Minimalist Terminal Browsers"), "reader mode must preserve article title")
+        assert_true(reader_str:find("core article content"), "reader mode must preserve article body")
+        assert_true(not reader_str:find("Buy our product"), "reader mode must filter aside/ads")
+        assert_true(not reader_str:find("Site Logo"), "reader mode must filter header")
+    end)
+
+    TestRunner.it("should toggle reader mode in Browser via 'gr' and ':reader'", function()
+        local b = web.Browser.new("https://news.com/post/1")
+        b.raw_html = noisy_html
+        b.doc = web.render_html_to_document(noisy_html, "https://news.com/post/1", 80, false)
+        assert_eq(b.reader_mode, false)
+
+        -- Toggle ON with 'gr'
+        b:handle_key("g")
+        b:handle_key("r")
+        assert_eq(b.reader_mode, true, "'gr' must toggle reader_mode to true")
+        assert_true(b.status_msg:find("Reader mode: ON"))
+
+        -- Toggle OFF with ':reader'
+        b:handle_key(":")
+        for c in string.gmatch("reader", ".") do b:handle_key(c) end
+        b:handle_key("ENTER")
+        assert_eq(b.reader_mode, false, "':reader' must toggle reader_mode back to false")
+        assert_true(b.status_msg:find("Reader mode: OFF"))
+    end)
+end)
+
 print(string.format("\n========================================="))
 print(string.format("Test Results: %d passed, %d failed", TestRunner.passed, TestRunner.failed))
 print(string.format("=========================================\n"))

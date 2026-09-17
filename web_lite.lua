@@ -571,10 +571,11 @@ local function smart_resolve_input(input)
     end
 
     input = input:match("^%s*(.-)%s*$")
-    if input == "about:home" or input == "about:blank" or input == "about:help" or input == "about:bookmarks" or input == "home" or input == "help" or input == "bookmarks" or input == "b" then
+    if input == "about:home" or input == "about:blank" or input == "about:help" or input == "about:bookmarks" or input == "about:history" or input == "home" or input == "help" or input == "bookmarks" or input == "b" or input == "history" or input == "hist" then
         if input == "home" then return "about:home", "about" end
         if input == "help" then return "about:help", "about" end
         if input == "bookmarks" or input == "b" then return "about:bookmarks", "about" end
+        if input == "history" or input == "hist" then return "about:history", "about" end
         return input, "about"
     end
 
@@ -611,6 +612,8 @@ local function fetch_url(url)
         return M.get_help_page_html(), 200, "text/html"
     elseif url == "about:bookmarks" then
         return M.get_bookmarks_page_html(), 200, "text/html"
+    elseif url == "about:history" then
+        return M.get_history_page_html(), 200, "text/html"
     end
 
     if url:match("^file://") or url:match("^[A-Za-z]:[\\/]") or (is_windows and url:match("^[A-Za-z]:")) then
@@ -781,6 +784,73 @@ local function get_bookmarks_page_html()
     return table.concat(buf, "\n")
 end
 
+local function get_history_file_path()
+    local home = os.getenv("USERPROFILE") or os.getenv("HOME") or os.getenv("TEMP") or "."
+    return home:gsub("\\", "/") .. "/.web_lite_history.txt"
+end
+
+local function load_history(limit, custom_path)
+    limit = limit or 100
+    local path = custom_path or get_history_file_path()
+    local f = io.open(path, "r")
+    local history = {}
+    if not f then return history end
+    local all = {}
+    for line in f:lines() do
+        line = line:match("^%s*(.-)%s*$")
+        if #line > 0 and not line:match("^#") then
+            local u, t, ts = line:match("^(%S+)\t+([^\t]+)\t*(.*)$")
+            if not u then
+                u, t = line:match("^(%S+)\t+(.*)$")
+            end
+            if u then
+                table.insert(all, { url = u, title = (t and #t > 0) and t or u, time = ts or "" })
+            end
+        end
+    end
+    f:close()
+    for i = #all, math.max(1, #all - limit + 1), -1 do
+        table.insert(history, all[i])
+    end
+    return history
+end
+
+local function add_history_entry(url, title, custom_path)
+    if not url or url == "" or url:match("^about:") then return false end
+    title = title or url
+    local path = custom_path or get_history_file_path()
+    local f, err = io.open(path, "a")
+    if not f then return false, err end
+    local ts = os.date("%Y-%m-%d %H:%M")
+    f:write(string.format("%s\t%s\t%s\n", url, title:gsub("[\t\r\n]", " "), ts))
+    f:close()
+    return true
+end
+
+local function get_history_page_html(custom_path)
+    local hist = load_history(50, custom_path)
+    local buf = {}
+    table.insert(buf, "<!DOCTYPE html><html><head><title>web_lite: Browsing History</title></head><body>")
+    table.insert(buf, "<h1>Browsing History / 浏览历史</h1>")
+    table.insert(buf, "<p>Recent sites and pages visited in web_lite. Press link numbers or <b>f</b> to open any past page!</p><hr>")
+    if #hist == 0 then
+        table.insert(buf, "<p><i>No browsing history recorded yet. As you visit websites, they will appear here!</i></p>")
+    else
+        table.insert(buf, "<table>")
+        table.insert(buf, "<tr><th>#</th><th>Visited</th><th>Title</th><th>URL</th></tr>")
+        for i, h in ipairs(hist) do
+            local safe_title = h.title:gsub("<", "&lt;"):gsub(">", "&gt;")
+            local safe_url = h.url:gsub("<", "&lt;"):gsub(">", "&gt;")
+            local safe_time = (h.time and #h.time > 0) and h.time or "recently"
+            table.insert(buf, string.format("<tr><td>%d</td><td>%s</td><td><a href=\"%s\"><b>%s</b></a></td><td>%s</td></tr>", i, safe_time, h.url, safe_title, safe_url))
+        end
+        table.insert(buf, "</table>")
+    end
+    table.insert(buf, "<hr><p><a href=\"about:home\">Back to Home</a> | <a href=\"about:bookmarks\">Bookmarks</a> | <a href=\"about:help\">Help</a></p>")
+    table.insert(buf, "</body></html>")
+    return table.concat(buf, "\n")
+end
+
 M.open_in_external_browser = open_in_external_browser
 M.get_bookmarks_file_path  = get_bookmarks_file_path
 M.load_bookmarks           = load_bookmarks
@@ -788,9 +858,13 @@ M.save_bookmarks           = save_bookmarks
 M.add_bookmark             = add_bookmark
 M.remove_bookmark          = remove_bookmark
 M.get_bookmarks_page_html  = get_bookmarks_page_html
+M.get_history_file_path    = get_history_file_path
+M.load_history             = load_history
+M.add_history_entry        = add_history_entry
+M.get_history_page_html    = get_history_page_html
 
 function M.get_home_page_html()
-    return [[
+    return [=[
 <!DOCTYPE html>
 <html>
 <head><title>web_lite: Modern Terminal Browser</title></head>
@@ -802,6 +876,7 @@ function M.get_home_page_html()
 <h2>Quick Bookmarks / 热门书签</h2>
 <ul>
   <li><a href="about:bookmarks">My Bookmarks / 我的书签</a> - Your saved bookmarks list</li>
+  <li><a href="about:history">Browsing History / 浏览历史</a> - Recent visited sites trail</li>
   <li><a href="https://news.ycombinator.com">Hacker News</a> - Tech, startups, and programming discussions</li>
   <li><a href="https://www.reddit.com/r/programming">Reddit Programming</a> - News, articles, and discussions for software developers</li>
   <li><a href="https://luajit.org">LuaJIT Official Site</a> - Just-In-Time Compiler for Lua</li>
@@ -818,31 +893,36 @@ function M.get_home_page_html()
   <tr><th>Key</th><th>Action</th><th>Description</th></tr>
   <tr><td><b>j / k</b></td><td>Scroll 1 line</td><td>Move viewport down / up (supports counts, e.g. 5j)</td></tr>
   <tr><td><b>d / u</b></td><td>Half-page scroll</td><td>Standard Vim Ctrl-d / Ctrl-u</td></tr>
+  <tr><td><b>} / {</b></td><td>Next / Prev Heading</td><td>Jump directly to next / previous section heading (also ]] / [[)</td></tr>
   <tr><td><b>gg / G</b></td><td>Top / Bottom</td><td>Jump directly to beginning or end of page</td></tr>
   <tr><td><b>zz</b></td><td>Center View</td><td>Center focused link or reading position vertically</td></tr>
   <tr><td><b>f</b></td><td><b>Follow Link Hint</b></td><td>Overlays letters [A], [B] on links; press key to open!</td></tr>
   <tr><td><b>Tab / Enter</b></td><td>Link Focus</td><td>Cycle between links and press Enter to follow</td></tr>
   <tr><td><b>&lt;N&gt; Enter / :&lt;N&gt;</b></td><td>Link Jump</td><td>Directly follow link by number ID (e.g. 5 Enter or :5)</td></tr>
+  <tr><td><b>yl / yf</b></td><td>Yank Link</td><td>Copy focused link URL (yl) or hint link (yf) to clipboard</td></tr>
+  <tr><td><b>yy</b></td><td>Yank Page URL</td><td>Copy current website address to system clipboard</td></tr>
+  <tr><td><b>gx</b></td><td>GUI Browser</td><td>Open current page, focused link, or image in system browser</td></tr>
+  <tr><td><b>gr / :reader</b></td><td>Reader Mode</td><td>Toggle distraction-free article reader view</td></tr>
   <tr><td><b>m / :mark</b></td><td>Bookmark Page</td><td>Save current page to ~/.web_lite_bookmarks.txt</td></tr>
   <tr><td><b>gb / :b</b></td><td>Bookmarks Page</td><td>Open your saved bookmarks list (about:bookmarks)</td></tr>
-  <tr><td><b>gx</b></td><td>GUI Browser</td><td>Open current page or focused link in system browser</td></tr>
+  <tr><td><b>gH / :history</b></td><td>History Page</td><td>Open your session browsing history (about:history)</td></tr>
+  <tr><td><b>:toc</b></td><td>Table of Contents</td><td>View outline of all document headings</td></tr>
   <tr><td><b>o / O</b></td><td><b>Open URL / Search</b></td><td>Open the Omnibox prompt to enter website or search query</td></tr>
   <tr><td><b>H / L</b></td><td>History Back / Fwd</td><td>Navigate back and forward in browsing history (instant cache)</td></tr>
   <tr><td><b>/</b></td><td>Search in Page</td><td>Search text (press 'n' for next, 'N' for previous)</td></tr>
-  <tr><td><b>yy</b></td><td>Yank URL</td><td>Copy current website URL to system clipboard</td></tr>
   <tr><td><b>:w &lt;file&gt;</b></td><td>Export Page</td><td>Save rendered text (or raw HTML if .html) to local file</td></tr>
-  <tr><td><b>:</b></td><td>Command Mode</td><td>Type :open &lt;url&gt;, :reload, :help, :b, :w, or :q</td></tr>
+  <tr><td><b>:</b></td><td>Command Mode</td><td>Type :open, :reload, :reader, :toc, :help, or :q</td></tr>
   <tr><td><b>q</b></td><td>Quit</td><td>Exit web_lite</td></tr>
 </table>
 <hr>
 <p><i>Tip: Press 'o' right now to enter any URL or search terms!</i></p>
 </body>
 </html>
-]]
+]=]
 end
 
 function M.get_help_page_html()
-    return [[
+    return [=[
 <!DOCTYPE html>
 <html>
 <head><title>web_lite: Help & Keybindings</title></head>
@@ -858,21 +938,31 @@ function M.get_help_page_html()
   <li><b>u</b>: Scroll up half a page</li>
   <li><b>Ctrl-f</b> or <b>Space</b> or <b>PageDown</b>: Scroll down full page</li>
   <li><b>Ctrl-b</b> or <b>PageUp</b>: Scroll up full page</li>
+  <li><b>}</b> or <b>]]</b>: Jump directly to the next section heading (&lt;h1&gt; - &lt;h6&gt;)</li>
+  <li><b>{</b> or <b>[[</b>: Jump directly to the previous section heading</li>
   <li><b>gg</b>: Jump to the very top of document</li>
   <li><b>G</b>: Jump to the very bottom of document</li>
   <li><b>zz</b>: Center viewport vertically around current focused link or reading line</li>
   <li><b>gh</b>: <b>Go Home</b> (jump directly to about:home)</li>
 </ul>
-<h2>2. Links & Vimium Hint Mode</h2>
+<h2>2. Links, Hints & Media Inspection</h2>
 <ul>
   <li><b>f</b>: Activate <b>Vimium Hint Mode</b>. Visible links are assigned badges [A], [B], [C]... Type the letter to navigate!</li>
-  <li><b>Tab</b> or <b>]</b>: Highlight and scroll to next hyperlink on page</li>
-  <li><b>Shift-Tab</b> or <b>[</b>: Highlight and scroll to previous hyperlink on page</li>
+  <li><b>Tab</b> or <b>]</b>: Highlight and scroll to next hyperlink or image on page</li>
+  <li><b>Shift-Tab</b> or <b>[</b>: Highlight and scroll to previous hyperlink or image on page</li>
   <li><b>Enter</b>: Open the currently highlighted link</li>
   <li><b>&lt;number&gt; Enter</b> or <b>:&lt;number&gt;</b>: Jump directly to hyperlink by ID number</li>
-  <li><b>gx</b>: Open the focused hyperlink (or current page) in your system GUI browser</li>
+  <li><b>yl</b>: Copy (yank) the currently focused hyperlink URL to system clipboard</li>
+  <li><b>yf</b>: Yank Hint mode: overlay badges on links, press letter to copy that link URL to clipboard</li>
+  <li><b>gx</b>: Open the focused hyperlink (or image) in your system GUI browser / image viewer</li>
+  <li><b>[IMG: alt]</b>: Images on page are preserved as interactive links with [IMG: alt] badges</li>
 </ul>
-<h2>3. URL Input & Omnibox</h2>
+<h2>3. Reader Mode & Document Outline</h2>
+<ul>
+  <li><b>gr</b> or <b>:reader</b>: Toggle distraction-free <b>Reader Mode</b> (strips sidebars, navbars, headers)</li>
+  <li><b>:toc</b>: Display document Table of Contents with all section headings</li>
+</ul>
+<h2>4. URL Input & Omnibox</h2>
 <ul>
   <li><b>o</b>: Open URL input bar. Type domain (e.g. news.ycombinator.com) or search query</li>
   <li><b>O</b>: Open URL input bar pre-filled with current address</li>
@@ -881,33 +971,34 @@ function M.get_help_page_html()
   <li><b>Ctrl-W</b>: Delete the previous word</li>
   <li><b>Esc</b>: Cancel input and return to Normal mode</li>
 </ul>
-<h2>4. Page Search</h2>
+<h2>5. Page Search</h2>
 <ul>
   <li><b>/</b>: Prompt for search string. Matches are highlighted in yellow and centered</li>
   <li><b>n</b>: Jump to next occurrence (vertically centered with context)</li>
   <li><b>N</b>: Jump to previous occurrence (vertically centered with context)</li>
   <li><b>Esc</b>: Clear search highlights</li>
 </ul>
-<h2>5. Bookmarks & Local File Operations</h2>
+<h2>6. Bookmarks, History & Local Export</h2>
 <ul>
   <li><b>m</b> or <b>:mark [title]</b>: Bookmark current page to ~/.web_lite_bookmarks.txt</li>
-  <li><b>gb</b> or <b>:b</b> or <b>:bookmarks</b>: Open your Bookmarks page</li>
+  <li><b>gb</b> or <b>:b</b> or <b>:bookmarks</b>: Open your Bookmarks page (about:bookmarks)</li>
+  <li><b>gH</b> or <b>:history</b>: Open your full Browsing History page (about:history)</li>
   <li><b>:w &lt;filename&gt;</b>: Export rendered document lines (or raw HTML if .html) to local file</li>
 </ul>
-<h2>6. Browser Commands & History</h2>
+<h2>7. Browser Commands & History</h2>
 <ul>
   <li><b>H</b>: Go Back in history (instant 0ms page cache with scroll memory)</li>
   <li><b>L</b>: Go Forward in history (instant 0ms page cache with scroll memory)</li>
   <li><b>r</b> or <b>R</b>: Reload current page (refetches fresh from network)</li>
-  <li><b>yy</b>: Copy (yank) current page URL to clipboard</li>
+  <li><b>yy</b>: Copy (yank) current page address to clipboard</li>
   <li><b>:open &lt;url&gt;</b>: Navigate to URL</li>
   <li><b>:help</b>: Display this help page</li>
   <li><b>:q</b>: Quit web_lite</li>
 </ul>
-<p><a href="about:home">Back to Home Page</a> | <a href="about:bookmarks">Bookmarks</a></p>
+<p><a href="about:home">Back to Home Page</a> | <a href="about:bookmarks">Bookmarks</a> | <a href="about:history">History</a></p>
 </body>
 </html>
-]]
+]=]
 end
 
 -- =========================================================================
@@ -1080,16 +1171,30 @@ end
 M.word_wrap         = word_wrap
 M.format_html_table = format_html_table
 
-function M.render_html_to_document(html_text, base_url, max_width)
+function M.render_html_to_document(html_text, base_url, max_width, reader_mode)
     max_width = max_width or 80
     if max_width < 40 then max_width = 40 end
 
     local clean_html = strip_scripts_and_styles(html_text)
 
+    if reader_mode then
+        local article_content = clean_html:match("<[aA][rR][tT][iI][cC][lL][eE][^>]*>(.-)</[aA][rR][tT][iI][cC][lL][eE]>")
+            or clean_html:match("<[mM][aA][iI][nN][^>]*>(.-)</[mM][aA][iI][nN]>")
+        if article_content and #article_content > 200 then
+            clean_html = article_content
+        else
+            clean_html = clean_html:gsub("<[nN][aA][vV][^>]*>.-</[nN][aA][vV]>", "")
+            clean_html = clean_html:gsub("<[fF][oO][oO][tT][eE][rR][^>]*>.-</[fF][oO][oO][tT][eE][rR]>", "")
+            clean_html = clean_html:gsub("<[aA][sS][iI][dD][eE][^>]*>.-</[aA][sS][iI][dD][eE]>", "")
+            clean_html = clean_html:gsub("<[hH][eE][aA][dD][eE][rR][^>]*>.-</[hH][eE][aA][dD][eE][rR]>", "")
+        end
+    end
+
     local doc = {
         title = "Untitled",
         lines = {},
         links = {},
+        headings = {},
         url = base_url
     }
 
@@ -1102,6 +1207,7 @@ function M.render_html_to_document(html_text, base_url, max_width)
 
     local current_lines = {}
     local links = {}
+    local headings = {}
     local link_counter = 0
 
     local function add_line(str)
@@ -1217,7 +1323,7 @@ function M.render_html_to_document(html_text, base_url, max_width)
                 table.insert(inline_buf, " ")
             end
             pos = tag_end + 1
-        elseif lower_tag:match("^h[1-3]$") then
+        elseif lower_tag:match("^h[1-6]$") then
             flush_inline()
             local close_pat = "</%s*" .. tag_name .. "%s*>"
             local close_start, close_end = body:find(close_pat, tag_end + 1)
@@ -1231,10 +1337,12 @@ function M.render_html_to_document(html_text, base_url, max_width)
             heading_text = decode_entities(heading_text:gsub("<[^>]+>", " "):gsub("%s+", " "):match("^%s*(.-)%s*$") or "")
             if #heading_text > 0 then
                 add_blank_line()
+                local h_level = tonumber(lower_tag:sub(2, 2)) or 1
+                table.insert(headings, { level = h_level, text = heading_text, line_idx = #current_lines + 1 })
                 add_line(heading_text)
                 if lower_tag == "h1" then
                     add_line(string.rep("═", math.min(visual_len(heading_text), max_width)))
-                else
+                elseif lower_tag == "h2" then
                     add_line(string.rep("─", math.min(visual_len(heading_text), max_width)))
                 end
                 add_blank_line()
@@ -1329,6 +1437,25 @@ function M.render_html_to_document(html_text, base_url, max_width)
                 end
                 add_blank_line()
             end
+        elseif lower_tag == "img" then
+            local src = full_tag:match("[sS][rR][cC]=[\"'](.-)[\"']") or full_tag:match("[sS][rR][cC]=([^%s>]+)")
+            local alt = full_tag:match("[aA][lL][tT]=[\"'](.-)[\"']") or full_tag:match("[tT][iI][tT][lL][eE]=[\"'](.-)[\"']")
+            if src and not src:match("^data:") then
+                link_counter = link_counter + 1
+                local full_src = resolve_relative_url(base_url, src)
+                local clean_alt = alt and decode_entities(alt:gsub("<[^>]+>", " "):gsub("%s+", " "):match("^%s*(.-)%s*$") or "") or ""
+                local img_label = (#clean_alt > 0) and ("[IMG: " .. clean_alt .. "]") or string.format("[IMG: Image %d]", link_counter)
+                local display_link = string.format("%s [%d]", img_label, link_counter)
+                table.insert(inline_buf, display_link)
+                table.insert(links, {
+                    id = link_counter,
+                    href = full_src,
+                    text = img_label,
+                    line_idx = 0,
+                    is_image = true
+                })
+            end
+            pos = tag_end + 1
         elseif lower_tag == "p" or lower_tag == "div" or lower_tag == "br" then
             flush_inline()
             if lower_tag == "p" or lower_tag == "div" then add_blank_line() end
@@ -1358,8 +1485,19 @@ function M.render_html_to_document(html_text, base_url, max_width)
         end
     end
 
+    -- Accurately associate line_idx for all headings by scanning rendered lines
+    for _, h in ipairs(headings) do
+        for l_idx, line in ipairs(current_lines) do
+            if line == h.text then
+                h.line_idx = l_idx
+                break
+            end
+        end
+    end
+
     doc.lines = current_lines
     doc.links = links
+    doc.headings = headings
     return doc
 end
 
@@ -1377,6 +1515,7 @@ function Browser.new(initial_url)
     self.page_cache = {}
     self.raw_html = ""
     self.last_term_w = 0
+    self.reader_mode = false
     self.doc = nil
     self.scroll_y = 1
     self.selected_link_idx = 1
@@ -1390,6 +1529,7 @@ function Browser.new(initial_url)
     self.pending_key = nil
     self.count_prefix = 0
     self.hint_map = {}
+    self.hint_action = nil
     self.status_msg = "Ready. Press '?' or 'h' for help."
     self.running = true
     return self
@@ -1400,7 +1540,7 @@ function Browser:reflow(new_w)
     local total_lines = (self.doc and #self.doc.lines) or 1
     local scroll_pct = math.min(1.0, math.max(0.0, (self.scroll_y - 1) / math.max(1, total_lines - 1)))
 
-    self.doc = M.render_html_to_document(self.raw_html, self.url, new_w - 4)
+    self.doc = M.render_html_to_document(self.raw_html, self.url, new_w - 4, self.reader_mode)
     local new_total = #self.doc.lines
     self.scroll_y = math.max(1, math.min(new_total, math.floor(scroll_pct * (new_total - 1)) + 1))
     self.last_term_w = new_w
@@ -1415,7 +1555,8 @@ function Browser:load_url(target_url, from_history)
             raw_html = self.raw_html,
             scroll_y = self.scroll_y,
             selected_link_idx = self.selected_link_idx,
-            last_term_w = self.last_term_w
+            last_term_w = self.last_term_w,
+            reader_mode = self.reader_mode
         }
     end
 
@@ -1427,8 +1568,9 @@ function Browser:load_url(target_url, from_history)
         local cached = self.page_cache[target_url]
         self.url = target_url
         self.raw_html = cached.raw_html or ""
+        self.reader_mode = cached.reader_mode or false
         if cached.last_term_w and cached.last_term_w ~= term_w and #self.raw_html > 0 then
-            self.doc = M.render_html_to_document(self.raw_html, target_url, term_w - 4)
+            self.doc = M.render_html_to_document(self.raw_html, target_url, term_w - 4, self.reader_mode)
         else
             self.doc = cached.doc
         end
@@ -1443,12 +1585,14 @@ function Browser:load_url(target_url, from_history)
     local html, status_code, content_type = fetch_url(target_url)
 
     self.raw_html = html
-    self.doc = M.render_html_to_document(html, target_url, term_w - 4)
+    self.doc = M.render_html_to_document(html, target_url, term_w - 4, self.reader_mode)
     self.url = target_url
     self.scroll_y = 1
     self.selected_link_idx = 1
     self.search_matches = {}
     self.status_msg = string.format("Loaded (%d lines, %d links)", #self.doc.lines, #self.doc.links)
+
+    M.add_history_entry(target_url, self.doc and self.doc.title or target_url)
 end
 
 function Browser:navigate_to(new_url)
@@ -1503,6 +1647,118 @@ function Browser:yank_url()
         end
     end
     self.status_msg = "Yanked URL to clipboard: " .. truncate(text, 40)
+end
+
+function Browser:yank_link(target_url)
+    local text = target_url
+    if not text then
+        local l = (self.doc and self.doc.links and self.doc.links[self.selected_link_idx])
+        text = (l and l.href) and l.href or self.url
+    end
+    if is_windows then
+        local p = io.popen("clip", "w")
+        if p then
+            p:write(text)
+            p:close()
+        end
+    else
+        local p = io.popen("xclip -selection clipboard 2>/dev/null || pbcopy 2>/dev/null", "w")
+        if p then
+            p:write(text)
+            p:close()
+        end
+    end
+    self.status_msg = "Yanked link to clipboard: " .. truncate(text, 40)
+end
+
+function Browser:jump_heading_next()
+    if not self.doc or not self.doc.headings or #self.doc.headings == 0 then
+        self.status_msg = "No headings on this page."
+        return
+    end
+    local term_w, term_h = get_terminal_size()
+    local view_h = math.max(5, term_h - 4)
+    local max_scroll = math.max(1, #self.doc.lines - view_h + 1)
+
+    for _, h in ipairs(self.doc.headings) do
+        if h.line_idx > self.scroll_y then
+            self.scroll_y = math.min(max_scroll, h.line_idx)
+            self.status_msg = string.format("Heading [H%d]: %s", h.level, truncate(h.text, 40))
+            return
+        end
+    end
+    self.status_msg = "Already at the last heading."
+end
+
+function Browser:jump_heading_prev()
+    if not self.doc or not self.doc.headings or #self.doc.headings == 0 then
+        self.status_msg = "No headings on this page."
+        return
+    end
+    local term_w, term_h = get_terminal_size()
+    local view_h = math.max(5, term_h - 4)
+    local max_scroll = math.max(1, #self.doc.lines - view_h + 1)
+
+    for i = #self.doc.headings, 1, -1 do
+        local h = self.doc.headings[i]
+        if h.line_idx < self.scroll_y then
+            self.scroll_y = math.max(1, math.min(max_scroll, h.line_idx))
+            self.status_msg = string.format("Heading [H%d]: %s", h.level, truncate(h.text, 40))
+            return
+        end
+    end
+    self.status_msg = "Already at the first heading."
+end
+
+function Browser:show_toc()
+    if not self.doc or not self.doc.headings or #self.doc.headings == 0 then
+        self.status_msg = "No headings on current page for TOC."
+        return
+    end
+    local prev_url = self.url
+    local buf = {}
+    table.insert(buf, "<!DOCTYPE html><html><head><title>Table of Contents</title></head><body>")
+    table.insert(buf, "<h1>Table of Contents</h1>")
+    table.insert(buf, "<p>Headings in: <b>" .. (self.doc.title or self.url) .. "</b></p><hr>")
+    table.insert(buf, "<ul>")
+    for _, h in ipairs(self.doc.headings) do
+        local indent = string.rep("&nbsp;&nbsp;", (h.level - 1) * 2)
+        table.insert(buf, string.format("<li>%s<b>[H%d]</b> %s (Line %d)</li>", indent, h.level, h.text:gsub("<", "&lt;"):gsub(">", "&gt;"), h.line_idx))
+    end
+    table.insert(buf, "</ul><hr>")
+    table.insert(buf, string.format("<p><a href=\"%s\">Back to Document</a> | <a href=\"about:home\">Home</a></p>", prev_url))
+    table.insert(buf, "</body></html>")
+
+    -- Cache current page state
+    if self.url and self.doc then
+        self.page_cache[self.url] = {
+            doc = self.doc,
+            raw_html = self.raw_html,
+            scroll_y = self.scroll_y,
+            selected_link_idx = self.selected_link_idx,
+            last_term_w = self.last_term_w,
+            reader_mode = self.reader_mode
+        }
+    end
+    table.insert(self.history, self.url)
+    self.history_idx = #self.history
+
+    local term_w, _ = get_terminal_size()
+    self.url = "about:toc"
+    self.raw_html = table.concat(buf, "\n")
+    self.doc = M.render_html_to_document(self.raw_html, "about:toc", term_w - 4)
+    self.scroll_y = 1
+    self.selected_link_idx = 1
+    self.status_msg = string.format("Table of Contents (%d headings). Press 'H' to return.", #self.doc.headings)
+end
+
+function Browser:toggle_reader_mode()
+    self.reader_mode = not self.reader_mode
+    local term_w, _ = get_terminal_size()
+    self.doc = M.render_html_to_document(self.raw_html, self.url, term_w - 4, self.reader_mode)
+    self.scroll_y = 1
+    self.selected_link_idx = 1
+    self.status_msg = string.format("Reader mode: %s (%d lines)", self.reader_mode and "ON" or "OFF", #self.doc.lines)
 end
 
 function Browser:build_hints(view_height)
@@ -1637,12 +1893,14 @@ function Browser:render()
         local pad = math.max(0, term_w - visual_len(prompt_disp) - 1)
         emit("\27[1;33m" .. prompt_disp .. "\27[7m \27[0m" .. string.rep(" ", pad))
     elseif self.mode == "HINT" then
-        local hint_prompt = "-- HINT MODE -- Type letter [A-Z] to follow link, or <Esc> to cancel."
+        local hint_prompt = (self.hint_action == "YANK")
+            and "-- YANK HINT MODE -- Type letter [A-Z] to copy link URL to clipboard, or <Esc> to cancel."
+            or "-- HINT MODE -- Type letter [A-Z] to follow link, or <Esc> to cancel."
         local pad = math.max(0, term_w - visual_len(hint_prompt) - 1)
         emit("\27[1;30;43m " .. hint_prompt .. " \27[0m" .. string.rep(" ", pad))
     else
         local mode_tag = "\27[1;30;46m NORMAL \27[0m"
-        local shortcuts = "\27[90m[j/k] Move [Tab] Link [f] Hint [m] Mark [gx] GUI [o] Open [H/L] Hist [/] Find [:] Cmd\27[0m"
+        local shortcuts = "\27[90m[j/k] Move [Tab] Link [f] Hint [m] Mark [yl] Yank [gx] GUI [/] Find [:] Cmd\27[0m"
         local status_left = string.format("%s  \27[1;37m%s\27[0m", mode_tag, truncate(self.status_msg, 40))
         local right_info = string.format("%s  %s", shortcuts, pos_info)
         local pad = math.max(1, term_w - visual_len(status_left) - visual_len(right_info) - 1)
@@ -1681,6 +1939,14 @@ function Browser:handle_key(k)
                 self:navigate_to("about:help")
             elseif cmd == "b" or cmd == "bookmarks" then
                 self:navigate_to("about:bookmarks")
+            elseif cmd == "history" or cmd == "hist" then
+                self:navigate_to("about:history")
+            elseif cmd == "toc" then
+                self:show_toc()
+            elseif cmd == "reader" or cmd == "rdr" then
+                self:toggle_reader_mode()
+            elseif cmd == "yl" or cmd == "yanklink" then
+                self:yank_link()
             elseif cmd == "mark" or cmd:match("^mark%s*(.*)") or cmd == "bookmark" or cmd:match("^bookmark%s*(.*)") then
                 local custom_title = cmd:match("^mark%s+(.+)") or cmd:match("^bookmark%s+(.+)")
                 local title = custom_title or (self.doc and self.doc.title and self.doc.title ~= "" and self.doc.title or self.url)
@@ -1783,10 +2049,11 @@ function Browser:handle_key(k)
         return
     end
 
-    -- C. VIMIUM HINT MODE (f)
+    -- C. VIMIUM HINT MODE (f / yf)
     if self.mode == "HINT" then
         if k == "ESC" then
             self.mode = "NORMAL"
+            self.hint_action = nil
             self.status_msg = "Hint mode cancelled."
             return
         end
@@ -1796,9 +2063,16 @@ function Browser:handle_key(k)
         if matched_link_idx and self.doc and self.doc.links[matched_link_idx] then
             local target = self.doc.links[matched_link_idx].href
             self.mode = "NORMAL"
-            self:navigate_to(target)
+            if self.hint_action == "YANK" then
+                self.hint_action = nil
+                self:yank_link(target)
+            else
+                self.hint_action = nil
+                self:navigate_to(target)
+            end
         else
             self.mode = "NORMAL"
+            self.hint_action = nil
             self.status_msg = "Invalid hint key."
         end
         return
@@ -1827,15 +2101,54 @@ function Browser:handle_key(k)
             self:navigate_to("about:home")
             self.status_msg = "Navigated to Home."
             return
+        elseif k == "H" then
+            self:navigate_to("about:history")
+            self.status_msg = "Navigated to History."
+            return
+        elseif k == "b" then
+            self:navigate_to("about:bookmarks")
+            self.status_msg = "Navigated to Bookmarks."
+            return
+        elseif k == "r" or k == "R" then
+            self:toggle_reader_mode()
+            return
+        elseif k == "t" or k == "T" then
+            self:show_toc()
+            return
+        elseif k == "]" then
+            self:jump_heading_next()
+            return
+        elseif k == "[" then
+            self:jump_heading_prev()
+            return
         elseif k == "x" then
             local target_link = (self.doc and self.doc.links and self.doc.links[self.selected_link_idx])
             local target_url = (target_link and target_link.href) and target_link.href or self.url
             M.open_in_external_browser(target_url)
             self.status_msg = "Opened in external browser: " .. truncate(target_url, 40)
             return
-        elseif k == "b" then
-            self:navigate_to("about:bookmarks")
-            self.status_msg = "Navigated to Bookmarks."
+        end
+    end
+
+    if self.pending_key == "y" then
+        self.pending_key = nil
+        if k == "y" then
+            self:yank_url()
+            return
+        elseif k == "l" then
+            self:yank_link()
+            return
+        elseif k == "f" then
+            if self.doc and #self.doc.links > 0 then
+                self.mode = "HINT"
+                self.hint_action = "YANK"
+                self.status_msg = "Yank Hint mode: Press letter to copy link URL."
+            else
+                self.status_msg = "No links on current page."
+            end
+            return
+        else
+            self.status_msg = "Unknown yank command: y" .. tostring(k)
             return
         end
     end
@@ -1889,12 +2202,11 @@ function Browser:handle_key(k)
         M.open_in_external_browser(target_url)
         self.status_msg = "Opened in external browser: " .. truncate(target_url, 40)
     elseif k == "y" then
-        if self.pending_key == "y" then
-            self.pending_key = nil
-            self:yank_url()
-        else
-            self.pending_key = "y"
-        end
+        self.pending_key = "y"
+    elseif k == "}" or k == "]]" then
+        self:jump_heading_next()
+    elseif k == "{" or k == "[[" then
+        self:jump_heading_prev()
     elseif k == "f" then
         if self.doc and #self.doc.links > 0 then
             self.mode = "HINT"
