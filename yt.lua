@@ -617,35 +617,51 @@ local function fetch_youtube_results(query, mode, browser, cookies_file, max_res
     end
 
     if #items > 0 then
-        return items
+        return items, nil, insecure
+    end
+
+    -- Check if SSL verification failed and auto-retry in insecure mode
+    local err_text = table.concat(err_lines, "\n")
+    if not insecure and (err_text:find("CERTIFICATE_VERIFY_FAILED") or err_text:find("certificate verify failed") or err_text:find("SSL") or err_text:find("certificate problem")) then
+        io.stderr:write("\n\27[33m[yt] Corporate SSL inspection detected — retrying in insecure mode...\27[0m\n")
+        local retry_items, retry_err = fetch_youtube_results(query, mode, browser, cookies_file, max_results, is_liked, proxy, true)
+        if retry_items and #retry_items > 0 then
+            return retry_items, nil, true
+        end
+        if retry_err then err_text = retry_err end
     end
 
     -- Automatic Fallback: Direct Web Scrape via curl (works even if yt-dlp is blocked or broken)
     if not is_liked and not is_direct_url then
         local fallback_items = scrape_youtube_search(term, max_results, proxy, insecure)
         if fallback_items and #fallback_items > 0 then
-            return fallback_items
+            return fallback_items, nil, insecure
+        elseif not insecure then
+            local fallback_insecure = scrape_youtube_search(term, max_results, proxy, true)
+            if fallback_insecure and #fallback_insecure > 0 then
+                io.stderr:write("\n\27[33m[yt] Corporate SSL inspection detected (curl) — retrying in insecure mode...\27[0m\n")
+                return fallback_insecure, nil, true
+            end
         end
     end
 
     -- If both engines failed, produce helpful actionable error
-    local err_text = table.concat(err_lines, "\n")
     if err_text:find("CERTIFICATE_VERIFY_FAILED") or err_text:find("certificate verify failed") then
-        return nil, "SSL certificate failed (corporate network?). Try: --insecure"
+        return nil, "SSL certificate failed (corporate network?). Try: --insecure or set YT_INSECURE=1", insecure
     elseif err_text:find("Sign in to confirm") or err_text:find("bot") then
-        return nil, "YouTube blocked request (anti-bot). Try: --browser <chrome|edge|firefox> or --cookies <file>"
+        return nil, "YouTube blocked request (anti-bot). Try: --browser <chrome|edge|firefox> or --cookies <file>", insecure
     elseif err_text:find("429") or err_text:find("Too Many Requests") then
-        return nil, "Rate limited by YouTube (429). Try: --browser or --proxy <url>"
+        return nil, "Rate limited by YouTube (429). Try: --browser or --proxy <url>", insecure
     elseif err_text:find("ProxyError") or err_text:find("Connection refused") or err_text:find("timed out") then
-        return nil, "Connection failed. Check network or try: --proxy <url>"
+        return nil, "Connection failed. Check network or try: --proxy <url>", insecure
     elseif #err_lines > 0 then
         local first_err = err_lines[1]:gsub("^ERROR:%s*", ""):gsub("^%[.-%]%s*", "")
-        return nil, "yt-dlp error: " .. first_err:sub(1, 70)
+        return nil, "yt-dlp error: " .. first_err:sub(1, 70), insecure
     elseif not HAS_YTDLP then
-        return nil, "yt-dlp is not installed and web fallback returned 0 items."
+        return nil, "yt-dlp is not installed and web fallback returned 0 items.", insecure
     end
 
-    return nil, "No results found for '" .. query .. "'."
+    return nil, "No results found for '" .. query .. "'.", insecure
 end
 
 -- =========================================================================
@@ -874,7 +890,10 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
             mode:upper(), is_liked and "Liked Songs" or current_query))
         io.flush()
 
-        local res, err = fetch_youtube_results(current_query, mode, browser, cookies_file, 25, is_liked, proxy, insecure)
+        local res, err, used_insecure = fetch_youtube_results(current_query, mode, browser, cookies_file, 25, is_liked, proxy, insecure)
+        if used_insecure then
+            insecure = true
+        end
         is_loading = false
         if res and #res > 0 then
             items = res
@@ -907,7 +926,8 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         local auth_label = browser and ("Logged in: " .. browser) or (cookies_file and "Cookies file" or "Guest / Public")
         local mode_badge = (mode == "music") and "\27[1;92m[MUSIC / AUDIO]\27[0m" or "\27[1;93m[VIDEO]\27[0m"
         local auto_badge = auto_play and "\27[1;92m[AUTO: ON]\27[0m" or "\27[90m[AUTO: OFF]\27[0m"
-        local header = string.format(" \27[1;36mYouTube Terminal Viewer\27[0m | %s | %s | \27[90m%s\27[0m", mode_badge, auto_badge, auth_label)
+        local sec_badge = insecure and " | \27[1;33m[CORP SSL]\27[0m" or ""
+        local header = string.format(" \27[1;36mYouTube Terminal Viewer\27[0m | %s | %s | \27[90m%s\27[0m%s", mode_badge, auto_badge, auth_label, sec_badge)
         table.insert(buf, "\27[1;34m" .. string.rep("═", term_w) .. "\27[0m\n")
         table.insert(buf, header .. "\27[K\n")
 
@@ -1063,8 +1083,8 @@ local function print_help()
     print("  --browser <name>      Extract session cookies from browser (firefox, chrome, brave, edge)")
     print("  --no-interactive      Non-interactive script/batch mode (print results and exit)")
     print("  --cookies <file>      Use Netscape format cookies.txt file")
-    print("  --proxy <url>         Use HTTP/HTTPS/SOCKS proxy for search and streaming")
-    print("  --insecure            Disable SSL certificate checks (useful for corporate proxy SSL inspection)")
+    print("  --proxy <url>         Use HTTP/HTTPS/SOCKS proxy for search and streaming (or $HTTPS_PROXY)")
+    print("  --insecure            Disable SSL certificate checks (or $YT_INSECURE=1; auto-retried on SSL fail)")
     print("  --liked               Load user's Liked Music or Liked Videos playlist")
     print("  -h, --help            Show this help message")
     print("\nSystem Status:")
@@ -1089,8 +1109,13 @@ local function main()
     local is_liked = false
     local use_window = false
     local non_interactive = false
-    local proxy = nil
-    local insecure = false
+
+    local env_proxy = os.getenv("YT_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")
+    local proxy = (env_proxy and #env_proxy > 0) and env_proxy or nil
+
+    local env_insecure = os.getenv("YT_INSECURE")
+    local insecure = (env_insecure == "1" or (env_insecure and env_insecure:lower() == "true"))
+
     local max_results = 20
     local query_parts = {}
 
@@ -1134,12 +1159,13 @@ local function main()
 
     if non_interactive or (not is_stdin_tty()) then
         local q = query or "lofi hip hop"
-        local res, err = fetch_youtube_results(q, mode, browser, cookies_file, max_results, is_liked, proxy, insecure)
+        local res, err, used_insecure = fetch_youtube_results(q, mode, browser, cookies_file, max_results, is_liked, proxy, insecure)
         if not res then
             io.stderr:write("Error: " .. tostring(err) .. "\n")
             os.exit(1)
         end
-        print(string.format("\27[1;36m=== YouTube Results for '%s' (%s mode) ===\27[0m", q, mode:upper()))
+        local sec_note = (used_insecure or insecure) and " [CORP SSL/INSECURE]" or ""
+        print(string.format("\27[1;36m=== YouTube Results for '%s' (%s mode)%s ===\27[0m", q, mode:upper(), sec_note))
         for idx, item in ipairs(res) do
             print(string.format("  %02d. %-50s | %-22s | %s", idx, item.title:sub(1, 50), item.uploader:sub(1, 22), item.duration_str))
         end

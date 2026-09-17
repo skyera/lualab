@@ -92,4 +92,16 @@ local v_code = os.execute(video_check_cmd)
 assert(v_code == 0, "Capped 480p video check failed (exit code " .. tostring(v_code) .. ")")
 print("  [✓] Test 7 passed: Capped 480p video format and hwdec=auto stream successfully.")
 
+-- Test 8: Corporate SSL / Insecure Environment Variable Check
+local test8_cmd = is_win
+    and ('cmd.exe /c "set YT_INSECURE=1&& ' .. luajit .. ' yt.lua --no-interactive --max-results 1 piano"')
+    or ('YT_INSECURE=1 ' .. luajit .. ' yt.lua --no-interactive --max-results 1 piano')
+local p_sec = io.popen(test8_cmd, "r")
+if p_sec then
+    local sec_out = p_sec:read("*a")
+    p_sec:close()
+    assert(sec_out:find("CORP SSL/INSECURE", 1, true), "Expected [CORP SSL/INSECURE] flag in output when YT_INSECURE=1")
+    print("  [✓] Test 8 passed: YT_INSECURE=1 environment variable correctly activates corporate SSL bypass.")
+end
+
 print("=== All Backend Verification Tests Completed Successfully ===")
