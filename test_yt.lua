@@ -22,6 +22,7 @@ assert(help_out:find("yt.lua", 1, true), "Help output missing header")
 assert(help_out:find("System Status:", 1, true), "Help output missing status")
 assert(help_out:find("--proxy", 1, true), "Help output missing --proxy option")
 assert(help_out:find("--insecure", 1, true), "Help output missing --insecure option")
+assert(help_out:find("deno:", 1, true), "Help output missing deno status")
 print("  [✓] Test 1 passed: yt.lua --help renders properly.")
 
 local is_win = (package.config:sub(1,1) == '\\')
@@ -84,5 +85,11 @@ if curl_check then
     assert(found >= 1, "Direct web search fallback returned 0 items")
     print("  [✓] Test 6 passed: Direct web search fallback extracted video entries.")
 end
+
+-- Test 7: Terminal Video 480p Stream Check
+local video_check_cmd = string.format('mpv --vo=null --ao=null --frames=1 --hwdec=auto --ytdl-format="bestvideo[height<=480]+bestaudio/best[height<=480]/best" --ytdl-raw-options="extractor-args=youtube:player_client=android" %q %s', test_stream_url, null_dev)
+local v_code = os.execute(video_check_cmd)
+assert(v_code == 0, "Capped 480p video check failed (exit code " .. tostring(v_code) .. ")")
+print("  [✓] Test 7 passed: Capped 480p video format and hwdec=auto stream successfully.")
 
 print("=== All Backend Verification Tests Completed Successfully ===")

@@ -330,6 +330,7 @@ local HAS_YTDLP = cmd_exists("yt-dlp")
 local HAS_MPV   = cmd_exists("mpv")
 local HAS_CHAFA = cmd_exists("chafa")
 local HAS_FFMPEG = cmd_exists("ffmpeg")
+local HAS_DENO  = cmd_exists("deno")
 
 local function get_cache_dir()
     local dir
@@ -341,6 +342,76 @@ local function get_cache_dir()
         os.execute('mkdir -p "' .. dir .. '" 2>/dev/null')
     end
     return dir
+end
+
+local function get_history_file()
+    return get_cache_dir() .. (is_windows and "\\" or "/") .. "history.json"
+end
+
+local function save_history_item(item)
+    if not item or not item.id then return end
+    local hfile = get_history_file()
+    local existing = {}
+    local f = io.open(hfile, "r")
+    if f then
+        for line in f:lines() do
+            local id = parse_json_field(line, "id")
+            local title = parse_json_field(line, "title")
+            if id and title and id ~= item.id then
+                local uploader = parse_json_field(line, "uploader") or "YouTube"
+                local duration = parse_json_field(line, "duration") or 0
+                local duration_str = parse_json_field(line, "duration_str") or "--:--"
+                table.insert(existing, {
+                    id = id,
+                    url = "https://www.youtube.com/watch?v=" .. id,
+                    title = title,
+                    uploader = uploader,
+                    duration = duration,
+                    duration_str = duration_str,
+                })
+                if #existing >= 40 then break end
+            end
+        end
+        f:close()
+    end
+
+    local out = io.open(hfile, "w")
+    if out then
+        local function esc(s) return (s or ""):gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', ' ') end
+        out:write(string.format('{"id":%q,"title":%q,"uploader":%q,"duration":%d,"duration_str":%q}\n',
+            item.id, esc(item.title), esc(item.uploader), item.duration or 0, esc(item.duration_str)))
+        for _, it in ipairs(existing) do
+            out:write(string.format('{"id":%q,"title":%q,"uploader":%q,"duration":%d,"duration_str":%q}\n',
+                it.id, esc(it.title), esc(it.uploader), it.duration or 0, esc(it.duration_str)))
+        end
+        out:close()
+    end
+end
+
+local function load_history_items()
+    local hfile = get_history_file()
+    local f = io.open(hfile, "r")
+    if not f then return {} end
+    local items = {}
+    for line in f:lines() do
+        local id = parse_json_field(line, "id")
+        local title = parse_json_field(line, "title")
+        if id and title then
+            local uploader = parse_json_field(line, "uploader") or "YouTube"
+            local duration = parse_json_field(line, "duration") or 0
+            local duration_str = parse_json_field(line, "duration_str") or "--:--"
+            table.insert(items, {
+                id = id,
+                url = "https://www.youtube.com/watch?v=" .. id,
+                title = title,
+                uploader = uploader,
+                duration = duration,
+                duration_str = duration_str,
+            })
+        end
+    end
+    f:close()
+    return items
 end
 
 local function format_duration(sec)
@@ -647,7 +718,7 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     if mode == "music" then
         -- Audio-only streaming with OSD status
         mpv_cmd = string.format(
-            'mpv --no-video --term-osd-bar --ytdl-format="bestaudio/best" '
+            'mpv --no-video --hwdec=auto --term-osd-bar --ytdl-format="bestaudio/best" '
             .. '--term-status-msg="  ${media-title}  [${playback-time} / ${duration}]  Vol: ${volume}%%" '
             .. '%s%s %q',
             ytdl_raw_opts, extra_mpv_opts, item.url
@@ -655,11 +726,12 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     else
         -- Video playback
         if use_external_window then
-            mpv_cmd = string.format('mpv %s%s %q', ytdl_raw_opts, extra_mpv_opts, item.url)
+            mpv_cmd = string.format('mpv --hwdec=auto %s%s %q', ytdl_raw_opts, extra_mpv_opts, item.url)
         else
-            -- Terminal ASCII/Half-block video
+            -- Terminal ASCII/Half-block video (capped to 480p for performance & bandwidth efficiency)
             mpv_cmd = string.format(
-                'mpv --vo=tct --vo-tct-width=%d --vo-tct-height=%d --term-osd-bar '
+                'mpv --vo=tct --vo-tct-width=%d --vo-tct-height=%d --hwdec=auto --term-osd-bar '
+                .. '--ytdl-format="bestvideo[height<=480]+bestaudio/best[height<=480]/best" '
                 .. '--term-status-msg="  ${media-title}  [${playback-time} / ${duration}]" '
                 .. '%s%s %q',
                 math.max(10, term_w), math.max(6, term_h - 1),
@@ -672,13 +744,14 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     io.write("\27[H\27[2J\27[1;36m▶ Connecting to YouTube stream: \27[1;33m" .. item.title .. "\27[0m\n\n")
     io.flush()
 
-    os.execute(mpv_cmd)
+    local exit_code = os.execute(mpv_cmd)
 
     enable_raw_mode()
+    return exit_code
 end
 
 -- =========================================================================
--- 6. Interactive Search Input Modal
+-- 6. Interactive Modals (Search & Shortcut Help)
 -- =========================================================================
 local function prompt_search_query(current_query)
     local term_w, term_h = get_terminal_size()
@@ -730,6 +803,48 @@ local function prompt_search_query(current_query)
     end
 end
 
+local function show_help_modal()
+    local term_w, term_h = get_terminal_size()
+    local box_w = math.min(68, term_w - 4)
+    local box_x = math.max(1, math.floor((term_w - box_w) / 2))
+    local box_y = math.max(2, math.floor((term_h - 20) / 2))
+
+    local function line_pad(text, visual_len)
+        local pad = math.max(0, box_w - 2 - visual_len)
+        return text .. string.rep(" ", pad) .. "│"
+    end
+
+    local help_lines = {
+        "┌" .. string.rep("─", box_w - 2) .. "┐",
+        line_pad("│  \27[1;36mYouTube Terminal Viewer — Shortcut Cheat Sheet\27[0m", 47),
+        "├" .. string.rep("─", box_w - 2) .. "┤",
+        line_pad("│  \27[1;33mTerminal Navigation & Controls:\27[0m", 32),
+        line_pad("│    \27[93m[Enter]\27[0m       Play selected video or music track", 45),
+        line_pad("│    \27[93m[/]\27[0m           Open search modal or paste direct URL", 48),
+        line_pad("│    \27[93m[a]\27[0m           Toggle continuous Auto-Play (Radio mode)", 51),
+        line_pad("│    \27[93m[h]\27[0m           Toggle Playback History (recent tracks)", 50),
+        line_pad("│    \27[93m[m]\27[0m           Toggle between Music and Video mode", 46),
+        line_pad("│    \27[93m[L]\27[0m           Toggle Liked Songs playlist", 38),
+        line_pad("│    \27[93m[↑/↓, k/j]\27[0m    Navigate results list", 33),
+        line_pad("│    \27[93m[PgUp/PgDn]\27[0m   Scroll 10 tracks up or down", 38),
+        line_pad("│  \27[1;33mIn-Playback Controls (mpv):\27[0m", 28),
+        line_pad("│    \27[93m[Space]\27[0m       Pause / Resume playback", 34),
+        line_pad("│    \27[93m[← / →]\27[0m       Seek backward / forward 5 seconds", 44),
+        line_pad("│    \27[93m[9 / 0]\27[0m       Volume down / Volume up", 34),
+        line_pad("│    \27[93m[[ / ]]\27[0m       Speed down / Speed up (±10%)", 39),
+        line_pad("│    \27[93m[q]\27[0m           Stop playing and return to browser", 45),
+        "├" .. string.rep("─", box_w - 2) .. "┤",
+        line_pad("│  \27[90mPress any key to close this help modal...\27[0m", 41),
+        "└" .. string.rep("─", box_w - 2) .. "┘",
+    }
+
+    for idx, line in ipairs(help_lines) do
+        io.write(string.format("\27[%d;%dH\27[0m%s", box_y + idx - 1, box_x, line))
+    end
+    io.flush()
+    read_key()
+end
+
 -- =========================================================================
 -- 7. Main Interactive TUI Application
 -- =========================================================================
@@ -738,6 +853,8 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
     local mode = init_mode or "music"
     local selected_idx = 1
     local scroll_offset = 0
+    local auto_play = false
+    local is_history = false
 
     enable_raw_mode()
 
@@ -789,12 +906,20 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         -- 1. Header Bar
         local auth_label = browser and ("Logged in: " .. browser) or (cookies_file and "Cookies file" or "Guest / Public")
         local mode_badge = (mode == "music") and "\27[1;92m[MUSIC / AUDIO]\27[0m" or "\27[1;93m[VIDEO]\27[0m"
-        local header = string.format(" \27[1;36mYouTube Terminal Viewer\27[0m | %s | \27[90m%s\27[0m", mode_badge, auth_label)
+        local auto_badge = auto_play and "\27[1;92m[AUTO: ON]\27[0m" or "\27[90m[AUTO: OFF]\27[0m"
+        local header = string.format(" \27[1;36mYouTube Terminal Viewer\27[0m | %s | %s | \27[90m%s\27[0m", mode_badge, auto_badge, auth_label)
         table.insert(buf, "\27[1;34m" .. string.rep("═", term_w) .. "\27[0m\n")
         table.insert(buf, header .. "\27[K\n")
 
         -- 2. Query / Search Subheader
-        local q_display = is_liked and "\27[1;95m★ Liked Songs Playlist\27[0m" or ('"' .. current_query .. '"')
+        local q_display
+        if is_history then
+            q_display = "\27[1;95m🕒 Playback History\27[0m"
+        elseif is_liked then
+            q_display = "\27[1;95m★ Liked Songs Playlist\27[0m"
+        else
+            q_display = '"' .. current_query .. '"'
+        end
         table.insert(buf, string.format("  \27[90mSearch:\27[0m %s  \27[90m(%s)\27[0m\27[K\n", q_display, status_msg))
         table.insert(buf, "\27[1;34m" .. string.rep("─", term_w) .. "\27[0m\n")
 
@@ -840,8 +965,9 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         end
 
         -- 4. Footer Help
+        local auto_footer = auto_play and "\27[1;92mON\27[0m" or "\27[90mOFF\27[0m"
         table.insert(buf, "\27[1;34m" .. string.rep("─", term_w) .. "\27[0m\n")
-        table.insert(buf, " \27[93m[Enter]\27[0m Play  \27[93m[/]\27[0m Search  \27[93m[m]\27[0m Toggle Mode  \27[93m[L]\27[0m Liked  \27[91m[q]\27[0m Quit\27[K")
+        table.insert(buf, string.format(" \27[93m[Enter]\27[0m Play  \27[93m[/]\27[0m Search  \27[93m[a]\27[0m Auto:%s  \27[93m[h]\27[0m History  \27[93m[m]\27[0m Mode  \27[93m[?]\27[0m Help  \27[91m[q]\27[0m Quit\27[K", auto_footer))
         
         io.write(table.concat(buf))
         io.flush()
@@ -875,21 +1001,47 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
             draw_tui()
         elseif k == "L" or k == "l" then
             is_liked = not is_liked
+            is_history = false
             refresh_results()
+            draw_tui()
+        elseif k == "a" or k == "A" then
+            auto_play = not auto_play
+            draw_tui()
+        elseif k == "h" or k == "H" then
+            is_history = not is_history
+            if is_history then
+                is_liked = false
+                items = load_history_items()
+                selected_idx = 1
+                scroll_offset = 0
+                status_msg = string.format("Loaded %d history items", #items)
+            else
+                refresh_results()
+            end
+            draw_tui()
+        elseif k == "?" then
+            show_help_modal()
             draw_tui()
         elseif k == "/" then
             local new_q = prompt_search_query(current_query)
             if new_q and #new_q > 0 then
                 current_query = new_q
                 is_liked = false
+                is_history = false
                 refresh_results()
             end
             draw_tui()
         elseif k == "ENTER" then
-            if #items > 0 and selected_idx >= 1 and selected_idx <= #items then
+            while #items > 0 and selected_idx >= 1 and selected_idx <= #items do
                 local sel = items[selected_idx]
-                play_item(sel, mode, browser, cookies_file, use_window, proxy, insecure)
+                save_history_item(sel)
+                local exit_code = play_item(sel, mode, browser, cookies_file, use_window, proxy, insecure)
                 draw_tui()
+                if auto_play and (exit_code == 0 or exit_code == true) and selected_idx < #items then
+                    selected_idx = selected_idx + 1
+                else
+                    break
+                end
             end
         end
     end
@@ -920,6 +1072,7 @@ local function print_help()
     print(string.format("  mpv:       %s", HAS_MPV and "\27[32m[Installed]\27[0m" or "\27[31m[Missing - Required for playback]\27[0m"))
     print(string.format("  chafa:     %s", HAS_CHAFA and "\27[32m[Installed]\27[0m" or "\27[90m[Not Detected - Optional for thumbnails]\27[0m"))
     print(string.format("  ffmpeg:    %s", HAS_FFMPEG and "\27[32m[Installed]\27[0m" or "\27[90m[Not Detected]\27[0m"))
+    print(string.format("  deno:      %s", HAS_DENO and "\27[32m[Installed - Fast JS solver for yt-dlp]\27[0m" or "\27[90m[Not Detected - Optional for yt-dlp]\27[0m"))
     print("\nExamples:")
     print("  luajit yt.lua \"synthwave radio\"")
     print("  luajit yt.lua --music --browser firefox")
