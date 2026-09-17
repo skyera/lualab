@@ -579,6 +579,8 @@ local function smart_resolve_input(input)
     end
 
     input = input:match("^%s*(.-)%s*$")
+    input = input:gsub("^(https):/+://", "%1://")
+    input = input:gsub("^(http):/+://", "%1://")
     if input == "about:home" or input == "about:blank" or input == "about:help" or input == "about:bookmarks" or input == "about:history" or input == "home" or input == "help" or input == "bookmarks" or input == "b" or input == "history" or input == "hist" then
         if input == "home" then return "about:home", "about" end
         if input == "help" then return "about:help", "about" end

@@ -87,6 +87,10 @@ TestRunner.describe("2. URL Resolution & Smart Omnibox Input", function()
         assert_eq(u2, "https://github.com/skyera")
         assert_eq(mode2, "url")
 
+        local u2b, mode2b = web.smart_resolve_input("https:/://bbs.wenxuecity.com")
+        assert_eq(u2b, "https://bbs.wenxuecity.com")
+        assert_eq(mode2b, "url")
+
         local u3, mode3 = web.smart_resolve_input("luajit ffi tutorial windows")
         assert_true(u3:find("duckduckgo%.com"), "search query must route to DuckDuckGo")
         assert_eq(mode3, "search")
