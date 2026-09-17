@@ -901,13 +901,28 @@ function M.get_home_page_html()
   <li><a href="about:bookmarks">My Bookmarks / 我的书签</a> - Your saved bookmarks list</li>
   <li><a href="about:history">Browsing History / 浏览历史</a> - Recent visited sites trail</li>
   <li><a href="https://news.ycombinator.com">Hacker News</a> - Tech, startups, and programming discussions</li>
+  <li><a href="https://lobste.rs">Lobsters</a> - Computing-focused community and discussions</li>
+  <li><a href="https://arstechnica.com">Ars Technica</a> - Technology news and analysis</li>
+  <li><a href="https://www.theverge.com">The Verge</a> - Technology and culture news</li>
+  <li><a href="https://www.xda-developers.com">XDA Developers</a> - Android, Linux, and device guides</li>
+  <li><a href="https://www.androidauthority.com">Android Authority</a> - Android news, reviews, and how-tos</li>
+  <li><a href="https://www.phoronix.com">Phoronix</a> - Linux and open-source technology news</li>
+  <li><a href="https://lwn.net">Linux Weekly News</a> - Linux kernel and free software news</li>
+  <li><a href="https://slashdot.org">Slashdot</a> - Technology news and community discussion</li>
+  <li><a href="https://distrowatch.com">DistroWatch</a> - Linux distribution news and rankings</li>
+  <li><a href="https://en.wikipedia.org">Wikipedia</a> - Free encyclopedia and reference articles</li>
+  <li><a href="https://www.gutenberg.org">Project Gutenberg</a> - Free public-domain ebooks</li>
+  <li><a href="https://stackoverflow.com">Stack Overflow</a> - Programming questions and answers</li>
+  <li><a href="https://stackexchange.com">Stack Exchange</a> - Community question-and-answer sites</li>
+  <li><a href="https://developer.mozilla.org">MDN Web Docs</a> - Web platform documentation</li>
+  <li><a href="https://docs.python.org">Python Documentation</a> - Official Python language documentation</li>
+  <li><a href="https://github.com/trending">GitHub Trending</a> - Today's trending open-source repositories</li>
   <li><a href="https://www.reddit.com/r/programming">Reddit Programming</a> - News, articles, and discussions for software developers</li>
   <li><a href="https://luajit.org">LuaJIT Official Site</a> - Just-In-Time Compiler for Lua</li>
   <li><a href="https://luajit.org/ext_ffi.html">LuaJIT FFI Library</a> - Direct C calls and performance bindings</li>
   <li><a href="https://zh.wikipedia.org">中文维基百科</a> - 自由的百科全书</li>
   <li><a href="https://v2ex.com">V2EX</a> - 创意工作者社区</li>
   <li><a href="https://lite.duckduckgo.com/lite">DuckDuckGo Lite</a> - Clean, distraction-free search engine</li>
-  <li><a href="https://github.com/trending">GitHub Trending</a> - Today's trending open-source repositories</li>
   <li><a href="about:help">Browser Help &amp; Vim Keybindings</a> - Complete command guide</li>
 </ul>
 <hr>
