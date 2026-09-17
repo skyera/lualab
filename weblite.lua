@@ -643,8 +643,9 @@ local function fetch_url(url, insecure)
     local escaped_url = url:gsub("\"", "\\\"")
     local tmp_dir = os.getenv("TEMP") or os.getenv("TMP") or "/tmp"
     local cookie_file = tmp_dir:gsub("\\", "/") .. "/weblite_cookies.txt"
+    local error_file = tmp_dir:gsub("\\", "/") .. "/weblite_curl_error.txt"
     local insecure_opt = insecure and " -k" or ""
-    local cmd = string.format("%s -sSL%s --max-time 15 -b \"%s\" -c \"%s\" -H \"Accept-Language: en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7\" -H \"Accept-Charset: utf-8, *;q=0.8\" -A \"%s\" \"%s\"", curl_cmd, insecure_opt, cookie_file, cookie_file, user_agent, escaped_url)
+    local cmd = string.format("%s -sSL%s --connect-timeout 10 --max-time 15 -b \"%s\" -c \"%s\" -H \"Accept-Language: en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7\" -H \"Accept-Charset: utf-8, *;q=0.8\" -A \"%s\" \"%s\" 2>\"%s\"", curl_cmd, insecure_opt, cookie_file, cookie_file, user_agent, escaped_url, error_file)
 
     local pipe = io.popen(cmd, is_windows and "rb" or "r")
     if not pipe then
@@ -652,7 +653,12 @@ local function fetch_url(url, insecure)
     end
 
     local body = pipe:read("*a")
-    pipe:close()
+    local close_ok, close_reason, close_code = pipe:close()
+    local request_failed = close_ok ~= true or (close_reason == "exit" and close_code ~= 0)
+    local error_handle = io.open(error_file, "rb")
+    local error_text = error_handle and error_handle:read("*a") or ""
+    if error_handle then error_handle:close() end
+    os.remove(error_file)
 
     -- Auto-solve Reddit client challenge if encountered
     if body and body:find('name="jsc_token"') then
@@ -673,8 +679,16 @@ local function fetch_url(url, insecure)
         end
     end
 
-    if not body or #body == 0 then
-        return string.format("<html><body><h1>Connection Failed</h1><p>Could not connect to: %s</p><p>Please check your internet connection or URL.</p></body></html>", url), 502, "text/html"
+    if (request_failed or not body or #body == 0) and url:match("^https://") and not insecure then
+        local fallback_body, fallback_code, fallback_type = fetch_url(url, true)
+        if fallback_code ~= 502 then
+            return fallback_body, fallback_code, fallback_type, true
+        end
+    end
+
+    if request_failed or not body or #body == 0 then
+        local detail = error_text ~= "" and string.format("<p>%s</p>", error_text:gsub("<", "&lt;"):gsub(">", "&gt;")) or ""
+        return string.format("<html><body><h1>Connection Failed</h1><p>Could not connect to: %s</p>%s<p>Please check your internet connection or URL.</p></body></html>", url, detail), 502, "text/html"
     end
 
     return body, 200, "text/html"
@@ -1541,6 +1555,7 @@ function Browser.new(initial_url, insecure)
     self.hint_map = {}
     self.hint_action = nil
     self.status_msg = "Ready. Press '?' or 'h' for help."
+    self.needs_render = true
     self.running = true
     return self
 end
@@ -1555,6 +1570,7 @@ function Browser:reflow(new_w)
     self.scroll_y = math.max(1, math.min(new_total, math.floor(scroll_pct * (new_total - 1)) + 1))
     self.last_term_w = new_w
     self.status_msg = string.format("Reflowed (%d cols, %d lines)", new_w, new_total)
+    self.needs_render = true
 end
 
 function Browser:load_url(target_url, from_history)
@@ -1592,7 +1608,7 @@ function Browser:load_url(target_url, from_history)
     end
 
     self.status_msg = "Fetching " .. target_url .. "..."
-    local html, status_code, content_type = fetch_url(target_url, self.insecure)
+    local html, status_code, content_type, used_fallback = fetch_url(target_url, self.insecure)
 
     self.raw_html = html
     self.doc = M.render_html_to_document(html, target_url, term_w - 4, self.reader_mode)
@@ -1600,8 +1616,9 @@ function Browser:load_url(target_url, from_history)
     self.scroll_y = 1
     self.selected_link_idx = 1
     self.search_matches = {}
-    self.status_msg = string.format("Loaded (%d lines, %d links)%s", #self.doc.lines, #self.doc.links,
-        self.insecure and " [INSECURE TLS]" or "")
+    local security_status = (self.insecure or used_fallback) and " [INSECURE TLS]" or ""
+    self.status_msg = string.format("Loaded (%d lines, %d links)%s", #self.doc.lines, #self.doc.links, security_status)
+    self.needs_render = true
 
     M.add_history_entry(target_url, self.doc and self.doc.title or target_url)
 end
@@ -1808,6 +1825,7 @@ end
 -- 9. Screen Buffer & Viewport Renderer
 -- =========================================================================
 function Browser:render()
+    self.needs_render = false
     local term_w, term_h = get_terminal_size()
     if self.last_term_w and self.last_term_w > 0 and term_w ~= self.last_term_w and self.raw_html and #self.raw_html > 0 then
         self:reflow(term_w)
@@ -1927,6 +1945,7 @@ end
 -- =========================================================================
 function Browser:handle_key(k)
     if not k then return end
+    self.needs_render = true
 
     local term_w, term_h = get_terminal_size()
     local view_h = term_h - 4
@@ -2355,7 +2374,9 @@ function Browser:run()
     self:load_url(self.url)
 
     while self.running do
-        self:render()
+        if self.needs_render then
+            self:render()
+        end
         local k = read_key(50)
         if k then
             self:handle_key(k)
