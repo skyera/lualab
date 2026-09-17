@@ -1635,7 +1635,7 @@ end
 -- 7. Main Interactive TUI Application
 -- =========================================================================
 local function run_app(init_query, init_mode, browser, cookies_file, is_liked, use_window, proxy, insecure, init_show_cc, init_sub_lang, init_filters)
-    local current_query = init_query or "lofi beats"
+    local current_query = init_query or ""
     local mode = init_mode or "music"
     local show_cc = (init_show_cc ~= nil) and init_show_cc or true
     local sub_lang = init_sub_lang or "en.*"
@@ -1681,7 +1681,17 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         end
     end
 
-    refresh_results()
+    if #current_query > 0 or is_liked then
+        refresh_results()
+    else
+        current_query = prompt_search_query(current_query)
+        if current_query and #current_query > 0 then
+            refresh_results()
+        else
+            current_query = ""
+            status_msg = "Enter a search query with [/]"
+        end
+    end
 
     local last_rendered_pos = -1
     local last_rendered_sub = ""
