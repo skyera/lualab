@@ -942,10 +942,16 @@ local function build_mpv_status_msg(mode, show_cc)
         end
         return msg
     else
-        local msg = "  ${media-title}  [${playback-time} / ${duration}]"
+        -- Terminal video mode:
+        -- 1. Leading \n creates an empty line of space between video and CC text
+        -- 2. CC text renders below the space, followed by title and duration
+        local msg = ""
         if show_cc then
-            msg = msg .. "${sub-text?\\n  >> CC: ${sub-text}}"
+            msg = "\\n${sub-text?  >> CC: ${sub-text}\\n}"
+        else
+            msg = "\\n"
         end
+        msg = msg .. "  ${media-title}  [${playback-time} / ${duration}]"
         return msg
     end
 end
@@ -1197,7 +1203,9 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
         extra_mpv_opts = extra_mpv_opts .. string.format(" --http-proxy=%q", proxy)
     end
     if show_cc or mode == "video" then
-        local sub_vis = show_cc and "yes" or "no"
+        -- In terminal ASCII mode, disable burning subs into video canvas (CC displayed as clean text below)
+        -- In GUI window mode, enable sub visibility for HD overlay on video
+        local sub_vis = (mode == "video" and not use_external_window) and "no" or (show_cc and "yes" or "no")
         extra_mpv_opts = extra_mpv_opts .. string.format(" --sub-auto=all --sub-visibility=%s --slang=%s", sub_vis, to_mpv_slang(sub_lang))
     end
 
@@ -1220,10 +1228,10 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
             mpv_cmd = string.format('mpv --hwdec=auto --term-status-msg="%s" %s%s %q', status_msg, ytdl_raw_opts, extra_mpv_opts, item.url)
         else
             -- Terminal ASCII/Half-block video:
-            -- 1. Budget 5 rows for footer (CC line + title + OSD bar) to prevent terminal scroll-flicker
+            -- 1. Budget 6 rows for footer (blank separator + CC line + title + OSD bar) to prevent terminal scroll-flicker
             -- 2. vo-tct-buffering=frame eliminates redraw tearing
             -- 3. sub-visibility=no keeps video frame clean without pixelated burnt-in text (CC rendered cleanly below)
-            local h_offset = 5
+            local h_offset = 6
             mpv_cmd = string.format(
                 'mpv --vo=tct --vo-tct-buffering=frame --sub-visibility=no --vo-tct-width=%d --vo-tct-height=%d --load-scripts=no --hwdec=auto --term-osd-bar '
                 .. '--ytdl-format="bestvideo[height<=480]+bestaudio/best[height<=480]/best" '
