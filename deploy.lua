@@ -1,8 +1,8 @@
 #!/usr/bin/env luajit
 --[[
     deploy.lua
-    Installs lualab tools (pix.lua, yt.lua) plus thin launchers, so they can be
-    started by simply typing `pix` or `yt`:
+    Installs lualab tools (pix.lua, yt.lua, weblite.lua) plus thin launchers, so they can be
+    started by simply typing `pix`, `yt`, or `weblite` / `wl`:
 
       Linux / macOS : ~/bin/<app>.lua  + ~/bin/<app>      (POSIX sh, made executable)
       Windows       : C:\app\bin\<app>.lua + <app>.cmd    (cmd.exe / PowerShell)
@@ -10,7 +10,7 @@
 
     Usage:
       luajit deploy.lua                     Install all tools for the current OS
-      luajit deploy.lua --app <pix|yt|all>  Select specific tool (default: all)
+      luajit deploy.lua --app <name|all>    Select specific tool: pix, yt, or weblite (default: all)
       luajit deploy.lua --dir <path>        Install into a custom directory
       luajit deploy.lua --os windows        Generate the Windows layout (e.g. from Linux/CI)
       luajit deploy.lua --check             Report only, write nothing
@@ -40,6 +40,14 @@ local APPS = {
         desc = "YouTube & YouTube Music Terminal Player",
         env_var = "YT_LUAJIT",
     },
+    weblite = {
+        id = "weblite",
+        name = "weblite",
+        script = "weblite.lua",
+        desc = "Vim-Driven Terminal Web Browser",
+        env_var = "WEBLITE_LUAJIT",
+        aliases = { "wl" },
+    },
 }
 
 local opts = {
@@ -52,9 +60,9 @@ local opts = {
 local function print_usage()
     print("lualab deploy — Cross-Platform Tools Deployer (LuaJIT FFI)")
     print("Usage:")
-    print("  luajit deploy.lua [--app all|pix|yt] [--dir <path>] [--os linux|windows] [--check]")
+    print("  luajit deploy.lua [--app all|pix|yt|weblite] [--dir <path>] [--os linux|windows] [--check]")
     print("")
-    print("  --app <name>    App to deploy: all (default), pix, or yt")
+    print("  --app <name>    App to deploy: all (default), pix, yt, or weblite (wl)")
     print("  --dir <path>    Target directory (default: C:\\app\\bin on Windows, ~/bin elsewhere)")
     print("  --os <name>     Force the target layout: linux (POSIX) or windows")
     print("  --check         Show what would be installed without writing anything")
@@ -94,8 +102,8 @@ do
     end
 end
 
-if opts.app ~= "all" and opts.app ~= "pix" and opts.app ~= "yt" then
-    io.stderr:write("deploy: unknown --app '" .. tostring(opts.app) .. "' (use all, pix, or yt)\n")
+if opts.app ~= "all" and not APPS[opts.app] and opts.app ~= "wl" then
+    io.stderr:write("deploy: unknown --app '" .. tostring(opts.app) .. "' (use all, pix, yt, or weblite)\n")
     os.exit(2)
 end
 
@@ -325,10 +333,11 @@ local apps_to_deploy = {}
 if opts.app == "all" then
     table.insert(apps_to_deploy, APPS.pix)
     table.insert(apps_to_deploy, APPS.yt)
-elseif opts.app == "pix" then
-    table.insert(apps_to_deploy, APPS.pix)
-elseif opts.app == "yt" then
-    table.insert(apps_to_deploy, APPS.yt)
+    table.insert(apps_to_deploy, APPS.weblite)
+elseif opts.app == "weblite" or opts.app == "wl" then
+    table.insert(apps_to_deploy, APPS.weblite)
+elseif APPS[opts.app] then
+    table.insert(apps_to_deploy, APPS[opts.app])
 end
 
 print("lualab deploy — Cross-Platform Suite (LuaJIT FFI)")
@@ -359,6 +368,14 @@ if opts.check then
         if target_is_windows then
             print(string.format("  [check] would write     %s", display_path(target_dir .. SEP .. app.name .. ".cmd")))
         end
+        if app.aliases then
+            for _, alias in ipairs(app.aliases) do
+                print(string.format("  [check] would write     %s (alias)", display_path(target_dir .. SEP .. alias)))
+                if target_is_windows then
+                    print(string.format("  [check] would write     %s (alias)", display_path(target_dir .. SEP .. alias .. ".cmd")))
+                end
+            end
+        end
         print("")
     end
 
@@ -379,6 +396,11 @@ local deployed_names = {}
 
 for _, app in ipairs(apps_to_deploy) do
     table.insert(deployed_names, app.name)
+    if app.aliases then
+        for _, alias in ipairs(app.aliases) do
+            table.insert(deployed_names, alias)
+        end
+    end
     print(string.format("[%s] %s", app.name, app.desc))
 
     -- 1. Copy lua script
@@ -390,36 +412,47 @@ for _, app in ipairs(apps_to_deploy) do
     written = written + 1
     print(string.format("  [ok] copied  %s -> %s (%s)", app.script, display_path(app.installed_lua), format_size(copy_result)))
 
-    -- 2. Launchers
-    if target_is_windows then
-        -- cmd.exe / PowerShell
-        local cmd_path = target_dir .. SEP .. app.name .. ".cmd"
-        if not write_file(cmd_path, windows_cmd_launcher(app, luajit_path)) then
-            io.stderr:write("deploy: failed to write " .. display_path(cmd_path) .. "\n")
-            os.exit(1)
+    -- 2. Launchers (primary name + aliases)
+    local names = { app.name }
+    if app.aliases then
+        for _, alias in ipairs(app.aliases) do
+            table.insert(names, alias)
         end
-        written = written + 1
-        print(string.format("  [ok] wrote   %s (cmd.exe / PowerShell)", display_path(cmd_path)))
+    end
 
-        -- Git Bash / MSYS shell (POSIX launcher; forward slashes when host is Windows)
-        local sh_path = target_dir .. SEP .. app.name
-        local sh_lua = host_is_windows and luajit_path:gsub("\\", "/") or luajit_path
-        local sh_target = host_is_windows and app.installed_lua:gsub("\\", "/") or app.installed_lua
-        if not write_file(sh_path, posix_launcher(app, sh_lua, sh_target)) then
-            io.stderr:write("deploy: failed to write " .. display_path(sh_path) .. "\n")
-            os.exit(1)
+    for _, n in ipairs(names) do
+        local is_alias = (n ~= app.name)
+        local alias_tag = is_alias and " (alias)" or ""
+        if target_is_windows then
+            -- cmd.exe / PowerShell
+            local cmd_path = target_dir .. SEP .. n .. ".cmd"
+            if not write_file(cmd_path, windows_cmd_launcher(app, luajit_path)) then
+                io.stderr:write("deploy: failed to write " .. display_path(cmd_path) .. "\n")
+                os.exit(1)
+            end
+            written = written + 1
+            print(string.format("  [ok] wrote   %s (cmd.exe / PowerShell)%s", display_path(cmd_path), alias_tag))
+
+            -- Git Bash / MSYS shell (POSIX launcher; forward slashes when host is Windows)
+            local sh_path = target_dir .. SEP .. n
+            local sh_lua = host_is_windows and luajit_path:gsub("\\", "/") or luajit_path
+            local sh_target = host_is_windows and app.installed_lua:gsub("\\", "/") or app.installed_lua
+            if not write_file(sh_path, posix_launcher(app, sh_lua, sh_target)) then
+                io.stderr:write("deploy: failed to write " .. display_path(sh_path) .. "\n")
+                os.exit(1)
+            end
+            written = written + 1
+            print(string.format("  [ok] wrote   %s (Git Bash / MSYS sh)%s", display_path(sh_path), alias_tag))
+        else
+            local sh_path = target_dir .. SEP .. n
+            if not write_file(sh_path, posix_launcher(app, luajit_path, app.installed_lua)) then
+                io.stderr:write("deploy: failed to write " .. display_path(sh_path) .. "\n")
+                os.exit(1)
+            end
+            os.execute(string.format('chmod +x "%s"', sh_path))
+            written = written + 1
+            print(string.format("  [ok] wrote   %s (executable)%s", display_path(sh_path), alias_tag))
         end
-        written = written + 1
-        print(string.format("  [ok] wrote   %s (Git Bash / MSYS sh)", display_path(sh_path)))
-    else
-        local sh_path = target_dir .. SEP .. app.name
-        if not write_file(sh_path, posix_launcher(app, luajit_path, app.installed_lua)) then
-            io.stderr:write("deploy: failed to write " .. display_path(sh_path) .. "\n")
-            os.exit(1)
-        end
-        os.execute(string.format('chmod +x "%s"', sh_path))
-        written = written + 1
-        print(string.format("  [ok] wrote   %s (executable)", display_path(sh_path)))
     end
     print("")
 end
