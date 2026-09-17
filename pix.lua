@@ -29,7 +29,7 @@
     4. Video Playback Engines:
        - Cycle play engines with [m] inside the video player: LuaJIT FFI (libavcodec) -> FFmpeg CLI -> mpv.
        - FFI and FFmpeg CLI decode in-process inside the TUI (seek, speed, loop, frame step, playlist).
-       - mpv (--vo=tct) is a hand-off engine with real audio; playback resumes in the TUI when it exits.
+       - mpv is a hand-off engine with real audio; plays in terminal via --vo=tct or external window with --window / -w (or toggle with [w]).
        - mpv dependency stderr (libvdpau/VA-API/mesa) is captured to a log and shown only on failure.
        - Default engine is the first available inline engine; override with --play-engine <auto|ffi|ffmpeg|mpv>.
 ]]
@@ -4590,7 +4590,12 @@ local function get_available_play_engines()
     return available
 end
 
+local use_mpv_window = false
+
 local function get_play_engine_name(engine_id)
+    if engine_id == "mpv" then
+        return use_mpv_window and "mpv (external GUI window, audio)" or "mpv --vo=tct (hand-off, audio)"
+    end
     for _, eng in ipairs(VIDEO_PLAY_ENGINES) do
         if eng.id == engine_id then return eng.name end
     end
@@ -4673,21 +4678,31 @@ local function show_mpv_failure(log_path, status)
     read_key()
 end
 
-local function launch_mpv_tct(filepath, seek_sec)
+local function launch_mpv(filepath, seek_sec, use_window)
+    if use_window == nil then use_window = use_mpv_window end
     io.write("\27[?25h\27[0m") -- show cursor, reset attrs
     io.flush()
     local term_w, term_h = get_terminal_size()
     local seek_part = (seek_sec and seek_sec > 0) and string.format(" --start=%.2f", seek_sec) or ""
     local mpv_log = get_mpv_stderr_log_path()
     local stderr_part = is_windows and " 2>nul" or (" 2>" .. string.format("%q", mpv_log))
-    local mpv_cmd = string.format(
-        'mpv --vo=tct --vo-tct-width=%d --vo-tct-height=%d'
-        .. ' --term-osd-bar'
-        .. ' --msg-level=all=no'
-        .. ' --term-status-msg="  ${filename}  ${playback-time} / ${duration} (${percent-pos}%%)  Speed: ${speed}x"'
-        .. '%s %q%s',
-        math.max(4, term_w), math.max(4, term_h - 1),
-        seek_part, filepath, stderr_part)
+    local mpv_cmd
+    if use_window then
+        io.write("\27[H\27[2J")
+        io.write("\27[1;36m> Launching MPV window: \27[1;33m" .. filepath .. "\27[0m\n")
+        io.write("  \27[90m(Playing in external window; control playback in MPV, close window or press 'q' to return)\27[0m\n\n")
+        io.flush()
+        mpv_cmd = string.format('mpv --hwdec=auto%s %q%s', seek_part, filepath, stderr_part)
+    else
+        mpv_cmd = string.format(
+            'mpv --vo=tct --vo-tct-width=%d --vo-tct-height=%d'
+            .. ' --term-osd-bar'
+            .. ' --msg-level=all=no'
+            .. ' --term-status-msg="  ${filename}  ${playback-time} / ${duration} (${percent-pos}%%)  Speed: ${speed}x"'
+            .. '%s %q%s',
+            math.max(4, term_w), math.max(4, term_h - 1),
+            seek_part, filepath, stderr_part)
+    end
 
     local ret
     if is_windows then
@@ -4708,13 +4723,14 @@ local function launch_mpv_tct(filepath, seek_sec)
         os.remove(mpv_log)
     end
 end
+local launch_mpv_tct = launch_mpv
 
 local function play_video_screen(img_entry, current_idx, total_count, protocol)
     local inline_engine = resolve_inline_play_engine()
 
     -- mpv is a hand-off engine: it owns the terminal while running, then we return to the list.
     if video_play_engine == "mpv" and get_has_mpv() then
-        launch_mpv_tct(img_entry.filepath, 0)
+        launch_mpv(img_entry.filepath, 0, use_mpv_window)
         video_play_engine = inline_engine or "mpv"
         return "back", protocol
     end
@@ -5092,6 +5108,10 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
                 protocol = cycle_next_engine(protocol)
                 cur_e, total_e = get_engine_position(protocol)
                 update_dynamic_header(current_fps)
+            elseif k == "w" or k == "W" then
+                use_mpv_window = not use_mpv_window
+                draw_static_header()
+                update_dynamic_header(current_fps)
             elseif k == "m" or k == "M" then
                 local next_engine = cycle_play_engine(video_play_engine)
                 if next_engine ~= video_play_engine then
@@ -5100,7 +5120,7 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
                         close_stream()
                         video_play_engine = "mpv"
                         draw_static_header()
-                        launch_mpv_tct(img_entry.filepath, cur_time)
+                        launch_mpv(img_entry.filepath, cur_time, use_mpv_window)
                         local resume_engine = cycle_play_engine("mpv")
                         video_play_engine = (resume_engine == "mpv") and "mpv" or resume_engine
                     else
@@ -5356,6 +5376,7 @@ local function render_help_modal(term_w, term_h, active_protocol)
         "│    Home / r, End       Restart from start / Seek to end     │",
         "│    o                   Toggle OSD / header visibility       │",
         "│    m                   Cycle play engine (FFI/FFmpeg/mpv)   │",
+        "│    w                   Toggle MPV window mode (GUI / TCT)   │",
         "│    q / b / Esc         Return to the file list              │",
         "│                                                             │",
         "│  Search & Sorting:                                          │",
@@ -5591,6 +5612,8 @@ local function main()
         elseif a == "--play-engine" or a == "--video-engine" then
             i = i + 1
             args["--play-engine"] = arg[i]
+        elseif a == "--window" or a == "-w" then
+            args["--window"] = true
         elseif a:sub(1, 2) == "--" or a:sub(1, 1) == "-" then
             args[a] = true
         else
@@ -5610,6 +5633,7 @@ local function main()
         print("  --sort <name|date|size> Initial sort order (default: name)")
         print("  --hidden, -a          Include hidden (dot) files and folders (toggle with [.])")
         print("  --play-engine <auto|ffi|ffmpeg|mpv> Video play engine (default: auto)")
+        print("  --window, -w          In MPV video mode, play in external MPV GUI window instead of terminal")
         print("  --nerd-icons          Use Nerd Font glyphs instead of standard Unicode")
         print("  --no-icons            Disable file icons")
         print("  --no-interactive      Non-interactive script/batch mode")
@@ -5631,7 +5655,7 @@ local function main()
         end
         print(string.format("  Default (auto):       %s", get_play_engine_name(video_play_engine)))
         local mpv_status = get_has_mpv() and "\27[32m[Available]\27[0m" or "\27[90m[Not Detected]\27[0m"
-        print("  mpv --vo=tct:         " .. mpv_status .. " mpv terminal player (hand-off, with audio)")
+        print("  mpv --vo=tct:         " .. mpv_status .. " mpv terminal player (hand-off, with audio; GUI with --window)")
         local ffplay_status = get_has_ffplay() and "\27[32m[Available]\27[0m" or "\27[90m[Not Detected]\27[0m"
         print("  ffplay audio:         " .. ffplay_status .. " synchronized companion audio for in-TUI player")
         print("\nSupported formats:")
@@ -5673,6 +5697,10 @@ local function main()
         icon_mode = "nerd"
     end
 
+    if args["--window"] or args["-w"] then
+        use_mpv_window = true
+    end
+
     -- Video play engine: auto (default) or an explicitly detected engine
     if args["--play-engine"] then
         local requested = tostring(args["--play-engine"]):lower()
@@ -5690,6 +5718,8 @@ local function main()
                     requested, get_play_engine_name(video_play_engine)))
             end
         end
+    elseif use_mpv_window and get_has_mpv() then
+        video_play_engine = "mpv"
     end
 
     local recursive = args["-r"] or args["--recursive"]
@@ -6149,6 +6179,9 @@ local function main()
                         if reload_directory(target_dir) then
                             current_msg = show_hidden and "Hidden: ON" or "Hidden: OFF"
                         end
+                    elseif k == "w" or k == "W" then
+                        use_mpv_window = not use_mpv_window
+                        current_msg = use_mpv_window and "MPV Window Mode: ON (GUI Window)" or "MPV Window Mode: OFF (Terminal TCT)"
                     elseif k == "r" then
                         sort_desc = not sort_desc
                         sort_images(raw_images, sort_mode, sort_desc)
