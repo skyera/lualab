@@ -629,7 +629,7 @@ local function fetch_url(url)
     local escaped_url = url:gsub("\"", "\\\"")
     local tmp_dir = os.getenv("TEMP") or os.getenv("TMP") or "/tmp"
     local cookie_file = tmp_dir:gsub("\\", "/") .. "/web_lite_cookies.txt"
-    local cmd = string.format("%s -sSL --max-time 15 -b \"%s\" -c \"%s\" -H \"Accept-Language: zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7\" -H \"Accept-Charset: utf-8, *;q=0.8\" -A \"%s\" \"%s\"", curl_cmd, cookie_file, cookie_file, user_agent, escaped_url)
+    local cmd = string.format("%s -sSL --max-time 15 -b \"%s\" -c \"%s\" -H \"Accept-Language: en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7\" -H \"Accept-Charset: utf-8, *;q=0.8\" -A \"%s\" \"%s\"", curl_cmd, cookie_file, cookie_file, user_agent, escaped_url)
 
     local pipe = io.popen(cmd, is_windows and "rb" or "r")
     if not pipe then
