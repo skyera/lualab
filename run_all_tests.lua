@@ -24,6 +24,7 @@ local test_suites = {
     { file = "test_ffi_image_defect_detector.lua", description = "LuaJIT FFI Optical Defect Inspection & Image Diff Suite" },
     { file = "test_ffi_wafer_d2d_inspector.lua", description = "Semiconductor 300mm Wafer Die-to-Die (D2D) Inspector Suite" },
     { file = "test_btop_lite.lua", description = "LuaJIT FFI System & Process Monitor Suite" },
+    { file = "test_web_lite.lua", description = "web_lite — Vim-Driven Terminal Web Browser Suite" },
 }
 
 local luajit_bin = "luajit"
