@@ -1932,13 +1932,7 @@ function Browser:load_url(target_url, from_history)
             self.needs_render = true
             return
         end
-        self.url = target_url
-        self.raw_html = image_error_html(target_url, err or "Image preview failed.")
-        self.doc = M.render_html_to_document(self.raw_html, target_url, term_w - 4, self.reader_mode)
-        self.scroll_y = 1
-        self.selected_link_idx = 1
-        self.search_matches = {}
-        self.status_msg = err
+        self.status_msg = err or "Image preview failed."
         self.needs_render = true
         return
     end
