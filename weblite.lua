@@ -449,12 +449,21 @@ local function url_encode(str)
     end):gsub(" ", "+"))
 end
 
+local function shell_quote(value)
+    if not value then return "''" end
+    if is_windows then
+        return '"' .. value:gsub('"', '""') .. '"'
+    end
+    return "'" .. value:gsub("'", "'\\''") .. "'"
+end
+
 M.strip_ansi     = strip_ansi
 M.visual_len     = visual_len
 M.truncate       = truncate
 M.pad_right      = pad_right
 M.utf8_pop_char  = utf8_pop_char
 M.url_encode     = url_encode
+M.shell_quote    = shell_quote
 
 -- =========================================================================
 -- 3. HTML Entity Decoder & Tag Cleaner
@@ -673,13 +682,16 @@ local function fetch_url(url, insecure)
 
     local curl_cmd = is_windows and "curl.exe" or "curl"
     local user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) weblite/1.0"
-    local escaped_url = url:gsub("\"", "\\\"")
     local tmp_dir = os.getenv("TEMP") or os.getenv("TMP") or "/tmp"
     local cookie_file = tmp_dir:gsub("\\", "/") .. "/weblite_cookies.txt"
     local error_file = tmp_dir:gsub("\\", "/") .. "/weblite_curl_error.txt"
     local header_file = tmp_dir:gsub("\\", "/") .. "/weblite_curl_headers.txt"
     local insecure_opt = insecure and " -k" or ""
-    local cmd = string.format("%s -sSL%s --connect-timeout 10 --max-time 15 -D \"%s\" -b \"%s\" -c \"%s\" -H \"Accept-Language: en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7\" -H \"Accept-Charset: utf-8, *;q=0.8\" -A \"%s\" \"%s\" 2>\"%s\"", curl_cmd, insecure_opt, header_file, cookie_file, cookie_file, user_agent, escaped_url, error_file)
+    local cmd = string.format("%s -sSL%s --connect-timeout 10 --max-time 15 -D %s -b %s -c %s -H %s -H %s -A %s %s 2>%s",
+        curl_cmd, insecure_opt, shell_quote(header_file), shell_quote(cookie_file), shell_quote(cookie_file),
+        shell_quote("Accept-Language: en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7"),
+        shell_quote("Accept-Charset: utf-8, *;q=0.8"),
+        shell_quote(user_agent), shell_quote(url), shell_quote(error_file))
 
     local pipe = io.popen(cmd, is_windows and "rb" or "r")
     if not pipe then
@@ -733,7 +745,7 @@ local function fetch_url(url, insecure)
         if token and seed then
             local delim = url:find("%?") and "&" or "?"
             local solve_url = string.format("%s%ssolution=%s&js_challenge=1&jsc_token=%s", url, delim, seed .. seed, token)
-            local solve_cmd = string.format("%s -sSL --max-time 15 -b \"%s\" -c \"%s\" -A \"%s\" \"%s\"", curl_cmd, cookie_file, cookie_file, user_agent, solve_url:gsub("\"", "\\\""))
+            local solve_cmd = string.format("%s -sSL --max-time 15 -b %s -c %s -A %s %s", curl_cmd, shell_quote(cookie_file), shell_quote(cookie_file), shell_quote(user_agent), shell_quote(solve_url))
             local p2 = io.popen(solve_cmd, is_windows and "rb" or "r")
             if p2 then
                 local solved_body = p2:read("*a")
@@ -783,12 +795,12 @@ end
 -- =========================================================================
 local function open_in_external_browser(url)
     if not url or url == "" then return false end
-    local escaped = url:gsub('"', '\\"')
     if is_windows then
-        os.execute(string.format('start "" "%s"', escaped))
+        os.execute(string.format('start "" %s', shell_quote(url)))
         return true
     else
-        os.execute(string.format('xdg-open "%s" 2>/dev/null || open "%s" 2>/dev/null &', escaped, escaped))
+        local quoted = shell_quote(url)
+        os.execute(string.format('xdg-open %s 2>/dev/null || open %s 2>/dev/null &', quoted, quoted))
         return true
     end
 end
@@ -842,13 +854,6 @@ local function find_image_renderer()
         end
     end
     return nil
-end
-
-local function shell_quote(value)
-    if is_windows then
-        return '"' .. value:gsub('"', '""') .. '"'
-    end
-    return "'" .. value:gsub("'", "'\\''") .. "'"
 end
 
 local function image_download_message(status, url)
@@ -1063,7 +1068,8 @@ end
 
 local function add_bookmark(url, title)
     if not url or url == "" then return false end
-    title = title or url
+    url = url:gsub("[\t\r\n]", "")
+    title = (title or url):gsub("[\t\r\n]", " ")
     local bms = load_bookmarks()
     for _, b in ipairs(bms) do
         if b.url == url then
@@ -1686,7 +1692,8 @@ function M.render_html_to_document(html_text, base_url, max_width, reader_mode)
             pos = tag_end + 1
         elseif lower_tag:match("^h[1-6]$") then
             flush_inline()
-            local close_pat = "</%s*" .. tag_name .. "%s*>"
+            local h_num = lower_tag:sub(2, 2)
+            local close_pat = "</%s*[hH]" .. h_num .. "%s*>"
             local close_start, close_end = body:find(close_pat, tag_end + 1)
             local heading_text = ""
             if close_start then
@@ -1695,6 +1702,19 @@ function M.render_html_to_document(html_text, base_url, max_width, reader_mode)
             else
                 pos = tag_end + 1
             end
+            heading_text = heading_text:gsub("<[aA][^>]*href=[\"'](.-)[\"'][^>]*>(.-)</[aA]>", function(a_href, a_txt)
+                link_counter = link_counter + 1
+                local full_href = resolve_relative_url(base_url, a_href)
+                local clean_txt = decode_entities(a_txt:gsub("<[^>]+>", " "):gsub("%s+", " "):match("^%s*(.-)%s*$") or "")
+                if #clean_txt == 0 then clean_txt = full_href end
+                table.insert(links, {
+                    id = link_counter,
+                    href = full_href,
+                    text = clean_txt,
+                    line_idx = 0
+                })
+                return string.format("%s [%d]", clean_txt, link_counter)
+            end)
             heading_text = decode_entities(heading_text:gsub("<[^>]+>", " "):gsub("%s+", " "):match("^%s*(.-)%s*$") or "")
             if #heading_text > 0 then
                 add_blank_line()

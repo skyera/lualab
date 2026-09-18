@@ -107,6 +107,13 @@ TestRunner.describe("2. URL Resolution & Smart Omnibox Input", function()
         assert_eq(u6, "about:links")
         assert_eq(mode6, "about")
     end)
+
+    TestRunner.it("should safely shell-quote arbitrary URLs", function()
+        local malicious_url = "https://example.com/search?q=$(calc)&param=`id`&x='\""
+        local quoted = web.shell_quote(malicious_url)
+        assert_true(quoted ~= nil and #quoted > 0, "shell_quote must return a quoted string")
+        assert_true(quoted:sub(1, 1) == "'" or quoted:sub(1, 1) == '"', "quoted string must start with quote")
+    end)
 end)
 
 TestRunner.describe("2b. Response Metadata & Link Tools", function()
@@ -587,6 +594,23 @@ TestRunner.describe("7. Local Bookmarks Management", function()
         local removed = web.remove_bookmark(test_url)
         assert_true(removed, "remove_bookmark should remove the test entry")
     end)
+
+    TestRunner.it("should sanitize bookmark titles with newlines and tabs", function()
+        local test_dirty_url = "https://example.com/dirty"
+        local test_dirty_title = "Dirty\tTitle\nWith\rNewlines"
+        web.add_bookmark(test_dirty_url, test_dirty_title)
+        local bms = web.load_bookmarks()
+        local matched = false
+        for _, bm in ipairs(bms) do
+            if bm.url == test_dirty_url then
+                assert_true(not bm.title:find("[\t\r\n]"), "bookmark title must not contain newlines or tabs")
+                matched = true
+                break
+            end
+        end
+        assert_true(matched, "sanitized bookmark must be found")
+        web.remove_bookmark(test_dirty_url)
+    end)
 end)
 
 -- 8. Document Export (:w)
@@ -816,6 +840,23 @@ TestRunner.describe("12. Heading Jump Navigation & Table of Contents", function(
         -- Press 'H' to return to previous page
         b:handle_key("H")
         assert_eq(b.url, "about:home", "'H' from TOC must restore original page")
+    end)
+
+    TestRunner.it("should match mixed-case heading tags", function()
+        local html = "<H1>Upper Heading</h1><H2>Second Upper</h2>"
+        local doc = web.render_html_to_document(html, "https://example.com/test", 80)
+        assert_eq(#doc.headings, 2, "must extract mixed-case headings")
+        assert_eq(doc.headings[1].text, "Upper Heading")
+        assert_eq(doc.headings[2].text, "Second Upper")
+    end)
+
+    TestRunner.it("should extract hyperlinks embedded inside heading tags", function()
+        local html = "<h2><a href=\"https://news.ycombinator.com/item?id=123\">Linked Heading Title</a></h2>"
+        local doc = web.render_html_to_document(html, "https://news.ycombinator.com", 80)
+        assert_eq(#doc.links, 1, "heading hyperlink must be extracted into doc.links")
+        assert_eq(doc.links[1].href, "https://news.ycombinator.com/item?id=123")
+        assert_eq(doc.links[1].text, "Linked Heading Title")
+        assert_true(doc.headings[1].text:find("Linked Heading Title %[1%]"), "heading text should display link badge [1]")
     end)
 end)
 
