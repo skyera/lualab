@@ -122,6 +122,13 @@ TestRunner.describe("2b. Response Metadata & Link Tools", function()
         assert_true(not web.is_cloudflare_challenge("HTTP/2 200\r\n", "<title>Normal page</title>"), "normal HTML must not be flagged")
     end)
 
+    TestRunner.it("should detect Reddit block responses", function()
+        local headers = "HTTP/2 403\r\ncontent-type: text/html\r\n"
+        local body = "<html><title>Blocked</title><body>You have been blocked</body></html>"
+        assert_true(web.is_reddit_block(headers, body, "https://www.reddit.com/r/programming"), "Reddit block must be detected")
+        assert_true(not web.is_reddit_block("HTTP/2 200\r\n", "<title>Reddit</title>", "https://www.reddit.com"), "normal Reddit HTML must not be flagged")
+    end)
+
     TestRunner.it("should render a useful Cloudflare challenge page", function()
         local b = web.Browser.new("about:home")
         b.raw_html = "<html><title>Cloudflare verification required</title><body><h1>Cloudflare verification required</h1><p>weblite uses curl and cannot execute the JavaScript challenge.</p><p>--insecure will not bypass this protection.</p></body></html>"

@@ -624,6 +624,15 @@ local function is_cloudflare_challenge(headers, body)
         or body:lower():find("challenges%.cloudflare%.com", 1, false) ~= nil
 end
 
+local function is_reddit_block(headers, body, url)
+    headers = headers or ""
+    body = body or ""
+    return url and url:match("^https?://[^/]*reddit%.com")
+        and (headers:match("^HTTP/%d+%.?%d*%s+403") or headers:match("[\r\n]HTTP/%d+%.?%d*%s+403")
+            or body:lower():find("<title>%s*blocked%s*</title>", 1, false)
+            or body:lower():find("you[%s%-]+have[%s%-]+been[%s%-]+blocked", 1, false))
+end
+
 local function get_http_status(headers)
     local status
     for code in headers:gmatch("[\r\n]HTTP/%d+%.?%d*%s+(%d%d%d)") do
@@ -633,6 +642,7 @@ local function get_http_status(headers)
 end
 
 M.is_cloudflare_challenge = is_cloudflare_challenge
+M.is_reddit_block = is_reddit_block
 
 local function fetch_url(url, insecure)
     if url == "about:home" or url == "about:blank" then
@@ -709,6 +719,13 @@ local function fetch_url(url, insecure)
         return challenge_html, http_status, "text/html", false, final_url
     end
 
+    if is_reddit_block(headers, body, url) and not insecure then
+        local retry_body, retry_code, retry_type, _, retry_url = fetch_url(url, true)
+        if not is_reddit_block("", retry_body, retry_url or url) and retry_code ~= 502 then
+            return retry_body, retry_code, retry_type, true, retry_url or url
+        end
+    end
+
     -- Auto-solve Reddit client challenge if encountered
     if body and body:find('name="jsc_token"') then
         local token = body:match('name="jsc_token"%s+value="([^"]+)"')
@@ -738,6 +755,18 @@ local function fetch_url(url, insecure)
     if request_failed or not body or #body == 0 then
         local detail = error_text ~= "" and string.format("<p>%s</p>", error_text:gsub("<", "&lt;"):gsub(">", "&gt;")) or ""
         return string.format("<html><body><h1>Connection Failed</h1><p>Could not connect to: %s</p>%s<p>Please check your internet connection or URL.</p></body></html>", url, detail), 502, "text/html"
+    end
+
+    if is_reddit_block(headers, body, url) then
+        local blocked_html = string.format([[
+<!DOCTYPE html><html><head><title>Reddit blocked this request</title></head><body>
+<h1>Reddit blocked this request</h1>
+<p>Reddit returned HTTP %d for:</p>
+<p><a href="%s">%s</a></p>
+<p>The site may be blocking this office, proxy, or IP address. <b>--insecure only changes certificate verification and cannot bypass Reddit blocking.</b></p>
+<p>Try opening the link with <b>gx</b>, using a different network, or visiting a specific subreddit URL.</p>
+</body></html>]], http_status, url, url)
+        return blocked_html, http_status, "text/html", false, final_url
     end
 
     return body, http_status, content_type, false, final_url
