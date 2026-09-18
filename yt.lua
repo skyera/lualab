@@ -1676,6 +1676,7 @@ local function show_help_modal()
         line_pad("\27[1;36m|    \27[93m[L]\27[0m           Toggle Liked Songs playlist"),
         line_pad("\27[1;36m|    \27[93m[Up/Dn, k/j]\27[0m  Navigate results list"),
         line_pad("\27[1;36m|    \27[93m[g/G]\27[0m         First / last result   \27[93m[Ctrl-U/D]\27[0m Page up / down"),
+        line_pad("\27[1;36m|    \27[93m[M]\27[0m           Load 25 more search results"),
         line_pad("\27[1;36m|    \27[93m[PgUp/PgDn]\27[0m   Scroll 10 tracks up or down"),
         line_pad("\27[1;36m|  \27[1;33mIn-Playback / Mini-Player Controls:\27[0m"),
         line_pad("\27[1;36m|    \27[93m[Space]\27[0m       Pause / Resume playback"),
@@ -1715,6 +1716,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
     local is_history = false
     local queue = {}
     local active_filters = init_filters or { sort = "relevance", duration = "all" }
+    local result_limit = 25
 
     enable_raw_mode()
 
@@ -1722,10 +1724,14 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
     local is_loading = true
     local status_msg = "Loading..."
 
-    local function refresh_results()
-        items = {}
-        selected_idx = 1
-        scroll_offset = 0
+    local function refresh_results(load_more)
+        local old_count = #items
+        if not load_more then
+            items = {}
+            selected_idx = 1
+            scroll_offset = 0
+            result_limit = 25
+        end
         is_loading = true
 
         local term_w, term_h = get_terminal_size()
@@ -1738,16 +1744,39 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
             site:upper(), mode:upper(), filter_tag, is_liked and "Liked Songs" or current_query))
         io.flush()
 
-        local res, err, used_insecure = fetch_youtube_results(current_query, mode, browser, cookies_file, 25, is_liked, proxy, insecure, active_filters, site)
+        local requested_limit = load_more and (result_limit + 25) or result_limit
+        local res, err, used_insecure = fetch_youtube_results(current_query, mode, browser, cookies_file, requested_limit, is_liked, proxy, insecure, active_filters, site)
         if used_insecure then
             insecure = true
         end
         is_loading = false
         if res and #res > 0 then
-            items = res
-            status_msg = string.format("Found %d results", #items)
+            if load_more then
+                local seen = {}
+                for _, item in ipairs(items) do
+                    seen[item.url or item.id] = true
+                end
+                local added = 0
+                for _, item in ipairs(res) do
+                    local key = item.url or item.id
+                    if not seen[key] then
+                        table.insert(items, item)
+                        seen[key] = true
+                        added = added + 1
+                    end
+                end
+                if added > 0 then
+                    result_limit = requested_limit
+                    status_msg = string.format("Loaded %d more (%d total)", added, #items)
+                else
+                    status_msg = string.format("No more results (%d loaded)", #items)
+                end
+            else
+                items = res
+                status_msg = string.format("Found %d results", #items)
+            end
         else
-            status_msg = err or "No results found."
+            status_msg = load_more and string.format("No more results (%d loaded)", old_count) or (err or "No results found.")
         end
     end
 
@@ -1891,7 +1920,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         local cc_footer = show_cc and "\27[1;92mON\27[0m" or "\27[90mOFF\27[0m"
         local q_footer = string.format("\27[93m[Tab]\27[0m Q(%d)  \27[93m[Q]\27[0m View", #queue)
         table.insert(buf, "\27[1;34m" .. string.rep("-", term_w) .. "\27[0m\n")
-        table.insert(buf, string.format(" \27[93m[Enter]\27[0m Play  %s  \27[93m[d]\27[0m DL  \27[93m[f]\27[0m Filter  \27[93m[/]\27[0m Find  \27[93m[m]\27[0m Mode  \27[93m[?]\27[0m Help  \27[91m[q]\27[0m Quit\27[K", q_footer))
+        table.insert(buf, string.format(" \27[93m[Enter]\27[0m Play  %s  \27[93m[d]\27[0m DL  \27[93m[f]\27[0m Filter  \27[93m[/]\27[0m Find  \27[93m[M]\27[0m More  \27[93m[m]\27[0m Mode  \27[93m[?]\27[0m Help  \27[91m[q]\27[0m Quit\27[K", q_footer))
         
         io.write(table.concat(buf))
         io.flush()
@@ -2052,9 +2081,16 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                     play_item(sel, mode, browser, cookies_file, use_window, proxy, insecure, show_cc, sub_lang)
                     draw_tui()
                 end
-            elseif k == "m" or k == "M" then
+            elseif k == "m" then
                 mode = (mode == "music") and "video" or "music"
                 refresh_results()
+                draw_tui()
+            elseif k == "M" then
+                if is_history or is_liked or #current_query == 0 then
+                    status_msg = "Load more is available for search results only."
+                else
+                    refresh_results(true)
+                end
                 draw_tui()
             elseif k == "L" or k == "l" then
                 is_liked = not is_liked
