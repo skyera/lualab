@@ -836,7 +836,44 @@ local function shell_quote(value)
     return "'" .. value:gsub("'", "'\\''") .. "'"
 end
 
-local function show_image_preview(url, max_width, max_height)
+local function image_download_message(status, url)
+    if status == 403 then
+        return string.format("Image server returned HTTP 403 Forbidden for %s. It may require a page referrer, block this network, or deny hotlinking; try gx or open the image URL directly.", url)
+    end
+    return string.format("Could not download image (HTTP %s): %s", status and tostring(status) or "request failed", url)
+end
+
+local function download_image(url, path, referer, insecure)
+    local tmp_dir = os.getenv("TEMP") or os.getenv("TMP") or "/tmp"
+    local suffix = image_cache_key(url)
+    local error_file = tmp_dir:gsub("\\", "/") .. "/weblite_image_error_" .. suffix .. ".txt"
+    local curl_cmd = is_windows and "curl.exe" or "curl"
+    local user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) weblite/1.0"
+    local insecure_opt = insecure and " -k" or ""
+    local referer_opt = referer and referer ~= "" and string.format(" -e %s", shell_quote(referer)) or ""
+    local command = string.format(
+        "%s -sSL%s --connect-timeout 10 --max-time 20 -A %s -H %s%s -o %s -w '%%{http_code}' %s 2>%s",
+        curl_cmd, insecure_opt, shell_quote(user_agent),
+        shell_quote("Accept: image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"),
+        referer_opt, shell_quote(path), shell_quote(url), shell_quote(error_file))
+    local pipe = io.popen(command, "r")
+    if not pipe then
+        return false, nil
+    end
+    local status_text = pipe:read("*a") or ""
+    local close_ok, close_reason, close_code = pipe:close()
+    local status = tonumber(status_text:match("(%d%d%d)$"))
+    local failed = close_ok ~= true or (close_reason == "exit" and close_code ~= 0)
+    if failed or not status or status >= 400 then
+        os.remove(path)
+        os.remove(error_file)
+        return false, status
+    end
+    os.remove(error_file)
+    return true, status
+end
+
+local function show_image_preview(url, max_width, max_height, referer, insecure)
     if not url or url == "" or url:match("^data:") then
         return false, "Image has no previewable URL."
     end
@@ -850,12 +887,12 @@ local function show_image_preview(url, max_width, max_height)
     if file then
         file:close()
     else
-        local null_out = is_windows and " >NUL 2>NUL" or " >/dev/null 2>&1"
-        local cmd = string.format("curl -sSL --max-time 20 -o %s %s%s", shell_quote(path), shell_quote(url), null_out)
-        local result = os.execute(cmd)
-        if result ~= true and result ~= 0 then
-            os.remove(path)
-            return false, "Could not download image."
+        local ok, status = download_image(url, path, referer, insecure)
+        if not ok and not insecure and url:match("^https://") then
+            ok, status = download_image(url, path, referer, true)
+        end
+        if not ok then
+            return false, image_download_message(status, url)
         end
     end
     local size = string.format("%dx%d", math.max(20, max_width - 4), math.max(8, max_height - 8))
@@ -878,6 +915,7 @@ end
 
 M.find_image_renderer = find_image_renderer
 M.show_image_preview = show_image_preview
+M.image_download_message = image_download_message
 
 local function get_bookmarks_file_path()
     local home = os.getenv("USERPROFILE") or os.getenv("HOME") or os.getenv("TEMP") or "."
@@ -2224,7 +2262,7 @@ function Browser:handle_key(k)
                 local target = self.doc and self.doc.links and self.doc.links[self.selected_link_idx]
                 if target and target.is_image then
                     local term_w, term_h = get_terminal_size()
-                    local ok, err = show_image_preview(target.href, term_w, term_h)
+                    local ok, err = show_image_preview(target.href, term_w, term_h, self.url, self.insecure)
                     self.status_msg = ok and "Image preview closed." or err
                 else
                     self.status_msg = "Focus an image link first."
@@ -2410,7 +2448,7 @@ function Browser:handle_key(k)
             local target = self.doc and self.doc.links and self.doc.links[self.selected_link_idx]
             if target and target.is_image then
                 local term_w, term_h = get_terminal_size()
-                local ok, err = show_image_preview(target.href, term_w, term_h)
+                local ok, err = show_image_preview(target.href, term_w, term_h, self.url, self.insecure)
                 self.status_msg = ok and "Image preview closed." or err
             else
                 self.status_msg = "Focus an image link first."

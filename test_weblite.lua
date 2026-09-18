@@ -154,6 +154,7 @@ TestRunner.describe("2b. Response Metadata & Link Tools", function()
         assert_true(doc.links[1].is_image, "image link should be marked as an image")
         local renderer = web.find_image_renderer()
         assert_true(renderer == nil or renderer == "chafa" or renderer == "viu", "renderer detection must be safe")
+        assert_true(web.image_download_message(403, "https://images.example/test.png"):find("403 Forbidden"), "403 image errors must be explicit")
     end)
 end)
 
