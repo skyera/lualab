@@ -811,6 +811,14 @@ local function image_cache_key(url)
     return string.format("%08x", hash)
 end
 
+local function is_image_url(url)
+    if not url or not url:match("^https?://") then return false end
+    local path = url:lower():match("^https?://[^?#]+") or ""
+    return path:match("%.avif$") or path:match("%.bmp$") or path:match("%.gif$")
+        or path:match("%.jpe?g$") or path:match("%.png$") or path:match("%.svg$")
+        or path:match("%.webp$") ~= nil
+end
+
 local function find_image_renderer()
     local candidates = is_windows and {
         { name = "chafa", command = "where chafa >NUL 2>NUL" },
@@ -841,6 +849,16 @@ local function image_download_message(status, url)
         return string.format("Image server returned HTTP 403 Forbidden for %s. It may require a page referrer, block this network, or deny hotlinking; try gx or open the image URL directly.", url)
     end
     return string.format("Could not download image (HTTP %s): %s", status and tostring(status) or "request failed", url)
+end
+
+local function image_error_html(url, message)
+    return string.format([[
+<!DOCTYPE html><html><head><title>Image unavailable</title></head><body>
+<h1>Image unavailable</h1>
+<p>%s</p>
+<p><a href="%s">%s</a></p>
+<p>Try <b>gx</b> to open the image in an external browser or image viewer.</p>
+</body></html>]], message, url, url)
 end
 
 local function download_image(url, path, referer, insecure)
@@ -916,6 +934,8 @@ end
 M.find_image_renderer = find_image_renderer
 M.show_image_preview = show_image_preview
 M.image_download_message = image_download_message
+M.is_image_url = is_image_url
+M.image_error_html = image_error_html
 
 local function get_bookmarks_file_path()
     local home = os.getenv("USERPROFILE") or os.getenv("HOME") or os.getenv("TEMP") or "."
@@ -1838,6 +1858,20 @@ function Browser:load_url(target_url, from_history)
         self.selected_link_idx = cached.selected_link_idx or 1
         self.search_matches = {}
         self.status_msg = string.format("Restored from cache (%d lines, %d links)", #self.doc.lines, #self.doc.links)
+        self.needs_render = true
+        return
+    end
+
+    if is_image_url(target_url) then
+        local term_h = select(2, get_terminal_size())
+        local ok, err = show_image_preview(target_url, term_w, term_h, self.url, self.insecure)
+        self.url = target_url
+        self.raw_html = image_error_html(target_url, err or "Image preview closed.")
+        self.doc = M.render_html_to_document(self.raw_html, target_url, term_w - 4, self.reader_mode)
+        self.scroll_y = 1
+        self.selected_link_idx = 1
+        self.search_matches = {}
+        self.status_msg = ok and "Image preview closed." or err
         self.needs_render = true
         return
     end
