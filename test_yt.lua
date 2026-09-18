@@ -114,8 +114,9 @@ assert(test_out:find("sanitize_display_text passed", 1, true), "sanitize_display
 assert(test_out:find("display_width & utf8_truncate passed", 1, true), "display_width & utf8_truncate unit test failed")
 assert(test_out:find("save_history_item & load_history_items passed", 1, true), "History save/load test failed")
 assert(test_out:find("CC / Lyrics status formatting passed", 1, true), "CC/Lyrics status formatting unit test failed")
+assert(test_out:find("CC rolling caption deduplication passed", 1, true), "CC rolling caption deduplication unit test failed")
 assert(test_out:find("All Internal Self-Tests Passed Successfully", 1, true), "Self-tests summary missing")
-print("  [✓] Test 9 passed: yt.lua --test verified JSON parsing, CJK width, and history save/load without errors.")
+print("  [✓] Test 9 passed: yt.lua --test verified JSON parsing, CJK width, history, and CC deduplication without errors.")
 
 -- Test 10: CC / Lyrics CLI Options & Help verification
 local p_help = io.popen(luajit .. " yt.lua --help", "r")

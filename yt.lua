@@ -471,6 +471,93 @@ local function get_history_file()
     return get_cache_dir() .. (is_windows and "\\" or "/") .. "history.json"
 end
 
+local function normalize_caption_token(w)
+    return (w or ""):lower():gsub("[%p%c%s]", "")
+end
+
+local function clean_rolling_caption(raw, state)
+    if not raw or raw == "" then
+        return ""
+    end
+    state = state or {}
+    local prev_last = state.prev_last_line or ""
+    local prev_disp = state.prev_displayed or ""
+
+    local lines = {}
+    for l in raw:gmatch("[^\r\n]+") do
+        l = l:gsub("<[^>]+>", ""):gsub("^%s*>>%s*", ""):gsub("%s+", " "):match("^%s*(.-)%s*$")
+        if #l > 0 then
+            table.insert(lines, l)
+        end
+    end
+    if #lines == 0 then return "" end
+
+    -- 1. Multi-line roll-up deduplication
+    local new_lines = {}
+    for i, line in ipairs(lines) do
+        local is_dup = false
+        if i == 1 and #lines > 1 then
+            local norm_line = normalize_caption_token(line)
+            local norm_last = normalize_caption_token(prev_last)
+            local norm_disp = normalize_caption_token(prev_disp)
+            if norm_line == norm_last or norm_line == norm_disp or (norm_disp ~= "" and norm_disp:sub(-#norm_line) == norm_line) then
+                is_dup = true
+            end
+        end
+        if not is_dup then
+            table.insert(new_lines, line)
+        end
+    end
+    if #new_lines == 0 then
+        return prev_disp
+    end
+
+    local candidate = table.concat(new_lines, " ")
+
+    -- 2. 1-line exact duplicate check (suppresses 10ms transition cues)
+    if #lines == 1 then
+        local norm_c = normalize_caption_token(candidate)
+        if norm_c == normalize_caption_token(prev_last) or norm_c == normalize_caption_token(prev_disp) then
+            return prev_disp
+        end
+    end
+
+    -- 3. Word-level prefix-suffix overlap deduplication (for sliding window / word-level roll-up)
+    if prev_disp ~= "" and #candidate > 0 then
+        local c_words = {}
+        for w in candidate:gmatch("%S+") do table.insert(c_words, w) end
+        local p_words = {}
+        for w in prev_disp:gmatch("%S+") do table.insert(p_words, w) end
+
+        local max_overlap = math.min(#c_words - 1, #p_words)
+        for k = max_overlap, 1, -1 do
+            if k >= 2 or (#candidate > 5 and #lines > 1) then
+                local match = true
+                for j = 1, k do
+                    if normalize_caption_token(p_words[#p_words - k + j]) ~= normalize_caption_token(c_words[j]) then
+                        match = false
+                        break
+                    end
+                end
+                if match then
+                    local stripped = {}
+                    for j = k + 1, #c_words do table.insert(stripped, c_words[j]) end
+                    candidate = table.concat(stripped, " ")
+                    break
+                end
+            end
+        end
+    end
+
+    if #candidate == 0 then
+        return prev_disp
+    end
+
+    state.prev_last_line = lines[#lines]
+    state.prev_displayed = candidate
+    return candidate
+end
+
 local function get_mpv_cc_script()
     local script_file = get_cache_dir() .. (is_windows and "\\" or "/") .. "yt_cc.lua"
     local f, err = io.open(script_file, "w")
@@ -480,10 +567,107 @@ local function get_mpv_cc_script()
     f:write([[
 local mp = require "mp"
 
+local function normalize_caption_token(w)
+    return (w or ""):lower():gsub("[%p%c%s]", "")
+end
+
+local cc_state = { prev_last_line = "", prev_displayed = "" }
+
+local function clean_rolling_caption(raw, state)
+    if not raw or raw == "" then
+        return ""
+    end
+    state = state or {}
+    local prev_last = state.prev_last_line or ""
+    local prev_disp = state.prev_displayed or ""
+
+    local lines = {}
+    for l in raw:gmatch("[^\r\n]+") do
+        l = l:gsub("<[^>]+>", ""):gsub("^%s*>>%s*", ""):gsub("%s+", " "):match("^%s*(.-)%s*$")
+        if #l > 0 then
+            table.insert(lines, l)
+        end
+    end
+    if #lines == 0 then return "" end
+
+    local new_lines = {}
+    for i, line in ipairs(lines) do
+        local is_dup = false
+        if i == 1 and #lines > 1 then
+            local norm_line = normalize_caption_token(line)
+            local norm_last = normalize_caption_token(prev_last)
+            local norm_disp = normalize_caption_token(prev_disp)
+            if norm_line == norm_last or norm_line == norm_disp or (norm_disp ~= "" and norm_disp:sub(-#norm_line) == norm_line) then
+                is_dup = true
+            end
+        end
+        if not is_dup then
+            table.insert(new_lines, line)
+        end
+    end
+    if #new_lines == 0 then
+        return prev_disp
+    end
+
+    local candidate = table.concat(new_lines, " ")
+
+    if #lines == 1 then
+        local norm_c = normalize_caption_token(candidate)
+        if norm_c == normalize_caption_token(prev_last) or norm_c == normalize_caption_token(prev_disp) then
+            return prev_disp
+        end
+    end
+
+    if prev_disp ~= "" and #candidate > 0 then
+        local c_words = {}
+        for w in candidate:gmatch("%S+") do table.insert(c_words, w) end
+        local p_words = {}
+        for w in prev_disp:gmatch("%S+") do table.insert(p_words, w) end
+
+        local max_overlap = math.min(#c_words - 1, #p_words)
+        for k = max_overlap, 1, -1 do
+            if k >= 2 or (#candidate > 5 and #lines > 1) then
+                local match = true
+                for j = 1, k do
+                    if normalize_caption_token(p_words[#p_words - k + j]) ~= normalize_caption_token(c_words[j]) then
+                        match = false
+                        break
+                    end
+                end
+                if match then
+                    local stripped = {}
+                    for j = k + 1, #c_words do table.insert(stripped, c_words[j]) end
+                    candidate = table.concat(stripped, " ")
+                    break
+                end
+            end
+        end
+    end
+
+    if #candidate == 0 then
+        return prev_disp
+    end
+
+    state.prev_last_line = lines[#lines]
+    state.prev_displayed = candidate
+    return candidate
+end
+
+mp.register_event("seek", function()
+    cc_state.prev_last_line = ""
+    cc_state.prev_displayed = ""
+    mp.set_property("user-data/yt-cc", "")
+end)
+
 mp.observe_property("sub-text", "string", function(_, value)
-    value = value or ""
-    value = value:gsub("[\r\n]+", " "):gsub("^%s*>>%s*", "")
-    mp.set_property("user-data/yt-cc", value)
+    if not value or value == "" then
+        mp.set_property("user-data/yt-cc", "")
+        return
+    end
+    local cleaned = clean_rolling_caption(value, cc_state)
+    if cleaned and #cleaned > 0 then
+        mp.set_property("user-data/yt-cc", cleaned)
+    end
 end)
 ]])
     f:close()
@@ -2245,6 +2429,32 @@ local function run_self_tests()
     local status_no_cc = build_mpv_status_msg("music", false)
     assert(not status_no_cc:find("sub-text", 1, true), "Non-CC status should not contain sub-text")
     print("  [✓] CC / Lyrics status formatting passed")
+
+    -- 8b. CC rolling caption deduplication
+    local s1 = {}
+    local u1 = clean_rolling_caption("France is now spending a\nthird of its national budget", s1)
+    assert(u1 == "France is now spending a third of its national budget", "User case cue 1 mismatch: " .. tostring(u1))
+    local u2 = clean_rolling_caption("third of its national budget\non defense", s1)
+    assert(u2 == "on defense", "User case cue 2 mismatch: " .. tostring(u2))
+
+    local s2 = {}
+    local t1 = clean_rolling_caption("love. You know the rules and so do", s2)
+    local t2 = clean_rolling_caption("love. You know the rules and so do\nI. I feel commitments from what I'm", s2)
+    assert(t2 == "I. I feel commitments from what I'm", "Transition cue line 2 mismatch: " .. tostring(t2))
+    local t3 = clean_rolling_caption("I. I feel commitments from what I'm", s2)
+    assert(t3 == "I. I feel commitments from what I'm", "Transition cue duplicate mismatch: " .. tostring(t3))
+
+    local s3 = {}
+    local m1 = clean_rolling_caption("To be, or not to be,\nthat is the question:", s3)
+    assert(m1 == "To be, or not to be, that is the question:", "Movie subtitle 1 mismatch: " .. tostring(m1))
+    local m2 = clean_rolling_caption("Whether 'tis nobler in the mind to suffer\nThe slings and arrows of outrageous fortune,", s3)
+    assert(m2 == "Whether 'tis nobler in the mind to suffer The slings and arrows of outrageous fortune,", "Movie subtitle 2 mismatch: " .. tostring(m2))
+
+    local s4 = {}
+    local w1 = clean_rolling_caption("France is now spending a third of its national budget", s4)
+    local w2 = clean_rolling_caption("third of its national budget on defense", s4)
+    assert(w2 == "on defense", "Sliding window overlap mismatch: " .. tostring(w2))
+    print("  [✓] CC rolling caption deduplication passed")
 
     -- 9. Download Directory Naming Convention
     local ok_dir, err_dir = pcall(ensure_downloads_dir)
