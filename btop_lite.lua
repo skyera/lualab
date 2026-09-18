@@ -321,6 +321,9 @@ else
         };
         int stat(const char *pathname, struct stat *statbuf);
         int __xstat(int ver, const char *pathname, struct stat *statbuf);
+
+        typedef void (*sighandler_t)(int);
+        sighandler_t signal(int signum, sighandler_t handler);
     ]]
 
     local TIOCGWINSZ   = 0x5413
@@ -332,6 +335,30 @@ else
 
     local orig_termios = ffi.new("struct termios")
     local raw_termios  = ffi.new("struct termios")
+    local sig_cb_anchor = nil
+
+    disable_raw_mode = function()
+        if in_raw_mode then
+            io.write("\27[?1049l\27[?25h\27[0m")
+            io.flush()
+            ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
+            in_raw_mode = false
+        end
+    end
+
+    local function install_signal_cleanup()
+        if sig_cb_anchor then return end
+        sig_cb_anchor = ffi.cast("sighandler_t", function(sig)
+            disable_raw_mode()
+            os.exit(128 + sig)
+        end)
+        pcall(function()
+            ffi.C.signal(1, sig_cb_anchor)  -- SIGHUP
+            ffi.C.signal(2, sig_cb_anchor)  -- SIGINT
+            ffi.C.signal(3, sig_cb_anchor)  -- SIGQUIT
+            ffi.C.signal(15, sig_cb_anchor) -- SIGTERM
+        end)
+    end
 
     enable_raw_mode = function()
         if ffi.C.isatty(STDIN_FILENO) ~= 1 then return false end
@@ -341,18 +368,10 @@ else
         ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
         in_raw_mode = true
 
+        install_signal_cleanup()
         io.write("\27[?1049h\27[?25l")
         io.flush()
         return true
-    end
-
-    disable_raw_mode = function()
-        if in_raw_mode then
-            io.write("\27[?1049l\27[?25h\27[0m")
-            io.flush()
-            ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
-            in_raw_mode = false
-        end
     end
 
     get_terminal_size = function()
@@ -964,16 +983,43 @@ else
 
     read_cpu_sensors = function()
         local temp_c = nil
-        -- Inspect thermal zones
-        for zone = 0, 5 do
-            local f = io.open("/sys/class/thermal/thermal_zone" .. zone .. "/temp", "r")
-            if f then
-                local raw = f:read("*l")
-                f:close()
-                local t = tonumber(raw)
-                if t and t > 0 then
-                    temp_c = (t > 1000) and (t / 1000.0) or t
-                    break
+        -- 1. Check /sys/class/hwmon for dedicated CPU temperature drivers (coretemp, k10temp, zenpower, cpu_thermal)
+        for h = 0, 8 do
+            local base = "/sys/class/hwmon/hwmon" .. h
+            local f_name = io.open(base .. "/name", "r")
+            if f_name then
+                local dname = (f_name:read("*l") or ""):lower()
+                f_name:close()
+                if dname:find("coretemp") or dname:find("k10temp") or dname:find("zenpower") or dname:find("cpu") then
+                    for t_idx = 1, 5 do
+                        local f_t = io.open(string.format("%s/temp%d_input", base, t_idx), "r")
+                        if f_t then
+                            local raw = f_t:read("*l")
+                            f_t:close()
+                            local t = tonumber(raw)
+                            if t and t > 0 then
+                                temp_c = (t > 1000) and (t / 1000.0) or t
+                                break
+                            end
+                        end
+                    end
+                    if temp_c then break end
+                end
+            end
+        end
+
+        -- 2. Fallback to /sys/class/thermal zones if hwmon yielded no CPU sensor
+        if not temp_c then
+            for zone = 0, 5 do
+                local f = io.open("/sys/class/thermal/thermal_zone" .. zone .. "/temp", "r")
+                if f then
+                    local raw = f:read("*l")
+                    f:close()
+                    local t = tonumber(raw)
+                    if t and t > 0 then
+                        temp_c = (t > 1000) and (t / 1000.0) or t
+                        break
+                    end
                 end
             end
         end
@@ -1299,7 +1345,8 @@ end
 -- =========================================================================
 -- 5. Process Tree Construction Engine
 -- =========================================================================
-local function build_process_tree(procs, sort_mode, sort_reverse)
+local function build_process_tree(procs, sort_mode, sort_reverse, collapsed_pids)
+    collapsed_pids = collapsed_pids or {}
     local by_pid = {}
     local children = {}
     local roots = {}
@@ -1309,14 +1356,42 @@ local function build_process_tree(procs, sort_mode, sort_reverse)
         children[p.pid] = {}
         p.tree_prefix = ""
         p.tree_depth = 0
+        p.has_children = false
+        p.is_collapsed = false
+        p.child_count = 0
+        p.total_sub_cpu = p.cpu_pct or 0
+        p.total_sub_res = p.res_kb or 0
     end
 
     for _, p in ipairs(procs) do
         if p.ppid and p.ppid ~= p.pid and by_pid[p.ppid] then
             table.insert(children[p.ppid], p)
+            by_pid[p.ppid].has_children = true
         else
             table.insert(roots, p)
         end
+    end
+
+    -- Precompute subtree metrics (recursive child counts, CPU, Memory)
+    local function compute_subtotals(p)
+        local kids = children[p.pid] or {}
+        local count = #kids
+        local sub_cpu = p.cpu_pct or 0
+        local sub_res = p.res_kb or 0
+        for _, kid in ipairs(kids) do
+            local k_count, k_cpu, k_res = compute_subtotals(kid)
+            count = count + k_count
+            sub_cpu = sub_cpu + k_cpu
+            sub_res = sub_res + k_res
+        end
+        p.child_count = count
+        p.total_sub_cpu = sub_cpu
+        p.total_sub_res = sub_res
+        return count, sub_cpu, sub_res
+    end
+
+    for _, r in ipairs(roots) do
+        compute_subtotals(r)
     end
 
     local comparator = function(a, b)
@@ -1354,7 +1429,13 @@ local function build_process_tree(procs, sort_mode, sort_reverse)
 
         node.tree_depth = depth
         node.tree_prefix = prefix
+        node.is_collapsed = (collapsed_pids[node.pid] == true)
         table.insert(ordered, node)
+
+        -- If node is collapsed, skip traversing its children
+        if node.is_collapsed then
+            return
+        end
 
         local kids = children[node.pid] or {}
         table.sort(kids, comparator)
@@ -1470,7 +1551,7 @@ Keybindings:
 ]])
             return 0
         elseif a == "--version" or a == "-v" then
-            print("btop_lite.lua v2.0.0 (Professional Edition) - LuaJIT FFI System Monitor")
+            print("btop_lite.lua v2.1.0 (Professional Edition) - LuaJIT FFI System Monitor")
             return 0
         elseif a == "--interval" and args[i + 1] then
             arg_interval = tonumber(args[i + 1])
@@ -1493,6 +1574,8 @@ Keybindings:
     local in_search_mode = false
     local is_paused = false
     local refresh_interval_ms = arg_interval or 1000
+    local collapsed_pids = {}
+    local sync_updates = not is_windows or os.getenv("WT_SESSION") ~= nil or os.getenv("TERM_PROGRAM") == "vscode"
 
     -- Modals state
     local show_help = false
@@ -1512,6 +1595,7 @@ Keybindings:
     io.flush()
 
     local next_refresh_time = 0
+    local procs = {}
 
     while true do
         local now_clock = os.clock()
@@ -1596,8 +1680,20 @@ Keybindings:
                     sel_proc = 1
                 elseif k == "END" or k == "G" then
                     sel_proc = 999999
-                elseif k == "SPACE" then
-                    is_paused = not is_paused
+                elseif k == "SPACE" or k == "TAB" then
+                    if in_tree_mode and procs[sel_proc] and procs[sel_proc].has_children then
+                        local p = procs[sel_proc]
+                        if collapsed_pids[p.pid] then
+                            collapsed_pids[p.pid] = nil
+                            status_flash_msg = string.format("Expanded %s (PID %d)", p.comm, p.pid)
+                        else
+                            collapsed_pids[p.pid] = true
+                            status_flash_msg = string.format("Folded %s (%d sub-processes)", p.comm, p.child_count or 0)
+                        end
+                        status_flash_expiry = os.clock() + 2.0
+                    else
+                        is_paused = not is_paused
+                    end
                 elseif k == "/" then
                     in_search_mode = true
                 elseif k == "t" or k == "F5" then
@@ -1674,7 +1770,7 @@ Keybindings:
 
             -- Process Tree or Flat sort
             if in_tree_mode then
-                procs = build_process_tree(procs, sort_mode, sort_reverse)
+                procs = build_process_tree(procs, sort_mode, sort_reverse, collapsed_pids)
             else
                 local comparator = function(a, b)
                     local val_a, val_b
@@ -1735,23 +1831,25 @@ Keybindings:
             local cpu_spark = make_sparkline(cpu_history, math.max(10, left_w - 20), C.cpu_low)
             draw_pane(out, 1, 2, left_w, top_h, cpu_title, false, "Usage: " .. cpu_spark)
 
-            local num_cores_to_show = math.min(#cores, (top_h - 3) * 2)
-            for i = 1, top_h - 3 do
-                local c1_idx = (i - 1) * 2 + 1
-                local c2_idx = (i - 1) * 2 + 2
-                local c1 = cores[c1_idx]
-                local c2 = cores[c2_idx]
+            -- Dynamic core columns based on left_w and core count
+            local avail_rows = top_h - 3
+            local num_cols = 2
+            if #cores > avail_rows * 2 and left_w >= 60 then
+                num_cols = (left_w >= 90 and #cores > avail_rows * 3) and 4 or 3
+            end
+            local col_sub_w = math.floor((left_w - 4 - num_cols) / num_cols)
 
+            for i = 1, avail_rows do
                 local line_parts = {}
-                local col_sub_w = math.floor((left_w - 6) / 2)
-
-                if c1 then
-                    local mbar = make_meter_bar(c1.pct, col_sub_w - 11)
-                    table.insert(line_parts, string.format("%s%2d%s %s%4.0f%%%s", C.dim, c1_idx - 1, C.reset, mbar, c1.pct, C.reset))
-                end
-                if c2 then
-                    local mbar = make_meter_bar(c2.pct, col_sub_w - 11)
-                    table.insert(line_parts, string.format(" %s%2d%s %s%4.0f%%%s", C.dim, c2_idx - 1, C.reset, mbar, c2.pct, C.reset))
+                for col = 1, num_cols do
+                    local c_idx = (i - 1) * num_cols + col
+                    local c = cores[c_idx]
+                    if c then
+                        local bar_w = math.max(3, col_sub_w - 11)
+                        local mbar = make_meter_bar(c.pct, bar_w)
+                        local sep = (col > 1) and " " or ""
+                        table.insert(line_parts, string.format("%s%s%2d%s %s%4.0f%%%s", sep, C.dim, c_idx - 1, C.reset, mbar, c.pct, C.reset))
+                    end
                 end
                 table.insert(out, draw_box_row(1, 2 + i, left_w, table.concat(line_parts)))
             end
@@ -1820,8 +1918,30 @@ Keybindings:
 
             -- Columns: PID (7), USER (8), %CPU (7), %MEM (7), RES (9), TH (4), STAT (5), COMMAND (rest)
             local table_header_y = proc_y + 1
-            local th_str = string.format("  %s%-7s %-8s %-7s %-7s %-9s %-4s %-5s %s%s",
-                C.table_hdr, "PID", "USER", "%CPU", "%MEM", "RES", "TH", "STAT", in_tree_mode and "PROCESS TREE" or "COMMAND", C.reset)
+            local function col_hdr(name, mode_key, width)
+                local is_active = (sort_mode == mode_key)
+                local text = name
+                if is_active then
+                    text = text .. (sort_reverse and "▲" or "▼")
+                end
+                if is_active then
+                    return string.format("%s%-" .. width .. "s%s", C.border_focus, text, C.table_hdr)
+                else
+                    return string.format("%-" .. width .. "s", text)
+                end
+            end
+
+            local h_pid  = col_hdr("PID", "pid", 7)
+            local h_user = col_hdr("USER", "user", 8)
+            local h_cpu  = col_hdr("%CPU", "cpu", 7)
+            local h_mem  = col_hdr("%MEM", "mem", 7)
+            local h_res  = (sort_mode == "mem") and col_hdr("RES", "mem", 9) or string.format("%-9s", "RES")
+            local h_th   = col_hdr("TH", "threads", 4)
+            local h_stat = string.format("%-5s", "STAT")
+            local h_cmd  = in_tree_mode and (C.title_col .. "PROCESS TREE [Space/Tab: Fold]" .. C.table_hdr) or col_hdr("COMMAND", "name", 15)
+
+            local th_str = string.format("  %s%s %s %s %s %s %s %s %s%s",
+                C.table_hdr, h_pid, h_user, h_cpu, h_mem, h_res, h_th, h_stat, h_cmd, C.reset)
             table.insert(out, draw_box_row(1, table_header_y, term_w, th_str))
 
             local visible_rows = bot_h - 3
@@ -1835,12 +1955,24 @@ Keybindings:
                 local pr = procs[p_idx]
                 if pr then
                     local is_sel = (p_idx == sel_proc)
-                    local cpu_col = pr.cpu_pct > 50 and C.cpu_high or (pr.cpu_pct > 15 and C.cpu_mid or C.reset)
+                    local cpu_val = (in_tree_mode and pr.is_collapsed and pr.total_sub_cpu > pr.cpu_pct) and pr.total_sub_cpu or pr.cpu_pct
+                    local res_val = (in_tree_mode and pr.is_collapsed and pr.total_sub_res > pr.res_kb) and pr.total_sub_res or pr.res_kb
+                    local cpu_col = cpu_val > 50 and C.cpu_high or (cpu_val > 15 and C.cpu_mid or C.reset)
                     local user_str = truncate(pr.username or "user", 8)
-                    local cmd_display = in_tree_mode and (C.tree_branch .. pr.tree_prefix .. C.reset .. pr.comm) or pr.cmdline
+
+                    local cmd_display
+                    if in_tree_mode then
+                        local fold_badge = ""
+                        if pr.has_children then
+                            fold_badge = pr.is_collapsed and string.format("\27[1;33m[+%d]\27[0m ", pr.child_count) or "\27[36m[-]\27[0m "
+                        end
+                        cmd_display = C.tree_branch .. pr.tree_prefix .. C.reset .. fold_badge .. pr.comm
+                    else
+                        cmd_display = pr.cmdline
+                    end
 
                     local row_content = string.format("%-7d %-8s %s%5.1f%%%s %5.1f%% %-9s %-4d %-5s %s",
-                        pr.pid, user_str, cpu_col, pr.cpu_pct, C.reset, pr.mem_pct, format_bytes(pr.res_kb), pr.threads or 1, pr.state, cmd_display)
+                        pr.pid, user_str, cpu_col, cpu_val, C.reset, pr.mem_pct, format_bytes(res_val), pr.threads or 1, pr.state, cmd_display)
 
                     if is_sel then
                         table.insert(out, draw_box_row(1, table_header_y + i, term_w, C.sel_bg .. "▶ " .. row_content .. C.reset))
@@ -1922,12 +2054,19 @@ Keybindings:
                 footer_line = string.format("\27[%d;1H\27[2K  \27[1;38;2;34;197;94m✔ %s\27[0m", footer_y, status_flash_msg)
             else
                 local f_status = #filter_query > 0 and string.format("\27[1;38;2;251;191;36mFilter: /%s\27[0m  ", filter_query) or ""
-                local help_str = "[/] Filter  [t] Tree  [Enter] Inspect  [k] Kill  [c/m/p/n/u/s] Sort  [r] Rev  [T] Theme  [?] Help  [q] Quit"
+                local help_str = in_tree_mode
+                    and "[/] Filter  [Space] Fold  [Enter] Inspect  [k] Kill  [c/m/p/n/u/s] Sort  [r] Rev  [T] Theme  [?] Help  [q] Quit"
+                    or "[/] Filter  [t] Tree  [Enter] Inspect  [k] Kill  [c/m/p/n/u/s] Sort  [r] Rev  [T] Theme  [?] Help  [q] Quit"
                 footer_line = string.format("\27[%d;1H\27[2K  %s%s%s", footer_y, f_status, C.dim, help_str)
             end
             table.insert(out, footer_line)
 
-            io.write(table.concat(out))
+            local frame = table.concat(out)
+            if sync_updates then
+                io.write("\27[?2026h" .. frame .. "\27[?2026l")
+            else
+                io.write(frame)
+            end
             io.flush()
         end
     end
@@ -1975,6 +2114,41 @@ local function run_self_test()
     assert(#tree == #procs, "Tree must contain all processes")
     print(string.format("  ✔ Process Tree Engine: Hierarchical tree built successfully with %d nodes", #tree))
 
+    -- Test tree folding on first process with children
+    local parent_with_kids = nil
+    for _, p in ipairs(tree) do
+        if p.has_children and p.child_count > 0 then
+            parent_with_kids = p
+            break
+        end
+    end
+    if parent_with_kids then
+        local collapsed_tbl = { [parent_with_kids.pid] = true }
+        local folded_tree = build_process_tree(procs, "cpu", false, collapsed_tbl)
+        assert(#folded_tree < #tree, "Folded tree must have fewer visible nodes than expanded tree")
+        local found_folded_node = false
+        for _, p in ipairs(folded_tree) do
+            if p.pid == parent_with_kids.pid then
+                assert(p.is_collapsed == true, "Parent node must be marked is_collapsed")
+                assert(p.total_sub_res >= p.res_kb, "Subtree memory rollup must be >= own memory")
+                found_folded_node = true
+                break
+            end
+        end
+        assert(found_folded_node, "Folded parent node must be present in folded tree")
+        print(string.format("  ✔ Tree Folding & Rollups: Folded PID %d (%s) reduced tree from %d to %d nodes",
+            parent_with_kids.pid, parent_with_kids.comm, #tree, #folded_tree))
+    end
+
+    -- Sensors test
+    local temp_c, freq_ghz = read_cpu_sensors()
+    if temp_c then
+        print(string.format("  ✔ CPU Sensors: Package temp detected: %.1f°C", temp_c))
+    end
+    if freq_ghz then
+        print(string.format("  ✔ CPU Scaling: Current frequency detected: %.2f GHz", freq_ghz))
+    end
+
     -- Theme test
     for _, tname in ipairs(theme_order) do
         assert(set_theme(tname) == true, "Setting theme " .. tname .. " should succeed")
@@ -1994,7 +2168,7 @@ end
 -- 10. Module Export & CLI Entry Point
 -- =========================================================================
 local M = {
-    version            = "2.0.0",
+    version            = "2.1.0",
     read_cpu_stats     = read_cpu_stats,
     read_cpu_sensors   = read_cpu_sensors,
     read_memory_stats  = read_memory_stats,
