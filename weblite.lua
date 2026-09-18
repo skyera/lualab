@@ -893,6 +893,14 @@ local function build_image_overlay(output, url, max_width, max_height)
     return rows, top, left, box_width, box_height
 end
 
+local function wait_for_key()
+    local key
+    repeat
+        key = read_key(1000)
+    until key
+    return key
+end
+
 local function download_image(url, path, referer, insecure)
     local tmp_dir = os.getenv("TEMP") or os.getenv("TMP") or "/tmp"
     local suffix = image_cache_key(url)
@@ -997,7 +1005,7 @@ local function show_image_preview(url, max_width, max_height, referer, insecure)
         io.write(string.format("\27[%d;%dH", top + row, left) .. line)
     end
     io.flush()
-    read_key()
+    wait_for_key()
     for row = 0, box_height - 1 do
         io.write(string.format("\27[%d;%dH\27[2K", top + row, left))
     end

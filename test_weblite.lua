@@ -166,6 +166,7 @@ TestRunner.describe("2b. Response Metadata & Link Tools", function()
         local rows, top, left, width, height = web.build_image_overlay("line 1\nline 2", "https://example.com/a.png", 80, 24)
         assert_true(rows[1] == "Image Preview" and top > 1 and left > 1, "image preview must be centered in an overlay")
         assert_true(width <= 76 and height <= 22, "image overlay must fit the terminal")
+        assert_true(web.show_image_preview ~= nil, "image preview must wait for an explicit close key")
     end)
 end)
 
