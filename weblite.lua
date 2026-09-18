@@ -984,6 +984,21 @@ local function find_image_renderer()
     return nil
 end
 
+local function detect_graphics_format()
+    local term = (os.getenv("TERM") or ""):lower()
+    local prog = (os.getenv("TERM_PROGRAM") or ""):lower()
+    if os.getenv("KITTY_WINDOW_ID") or term:find("kitty") or prog:find("ghostty") then
+        return "kitty"
+    elseif prog:find("wezterm") or term:find("foot") or term:find("mlterm") then
+        return "sixels"
+    elseif prog:find("iterm") then
+        return "iterm"
+    end
+    return "symbols"
+end
+
+M.detect_graphics_format = detect_graphics_format
+
 local function image_download_message(status, url)
     if status == 403 then
         return string.format("Image server returned HTTP 403 Forbidden for %s. It may require a page referrer, block this network, or deny hotlinking; try gx or open the image URL directly.", url)
@@ -1116,15 +1131,34 @@ local function show_image_preview(url, max_width, max_height, referer, insecure)
         end
     end
     local size = string.format("%dx%d", math.max(20, max_width - 4), math.max(8, max_height - 8))
-    local render_cmd = renderer == "chafa"
-        and string.format("chafa --format symbols --colors 256 --size %s %s", size, shell_quote(path))
-        or string.format("viu -w %d %s", math.max(20, max_width - 4), shell_quote(path))
+    local gfx_fmt = detect_graphics_format()
+    local render_cmd
+    if renderer == "chafa" then
+        if gfx_fmt == "symbols" then
+            render_cmd = string.format("chafa --format symbols --colors 256 --size %s %s", size, shell_quote(path))
+        else
+            render_cmd = string.format("chafa --format %s --size %s %s", gfx_fmt, size, shell_quote(path))
+        end
+    else
+        render_cmd = string.format("viu -w %d %s", math.max(20, max_width - 4), shell_quote(path))
+    end
     local pipe = io.popen(render_cmd, "r")
     if not pipe then return false, "Failed to start image renderer." end
     local output = pipe:read("*a")
     local ok = pipe:close()
     if not ok or not output or #output == 0 then
         return false, "Image renderer returned no output."
+    end
+    if renderer == "chafa" and gfx_fmt ~= "symbols" then
+        io.write("\27[2J\27[H\27[?25l")
+        io.write("\27[1;36m[Image Preview (" .. gfx_fmt:upper() .. " High-Res)]\27[0m " .. truncate(url, max_width - 35) .. "\n\n")
+        io.write(output)
+        io.write("\n\n\27[1;33mPress any key to close...\27[0m")
+        io.flush()
+        wait_for_key()
+        io.write("\27[2J\27[H\27[?25h")
+        io.flush()
+        return true
     end
     local rows, top, left, box_width, box_height = build_image_overlay(output, url, max_width, max_height)
     local border = "+" .. string.rep("-", box_width - 2) .. "+"

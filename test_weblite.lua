@@ -945,6 +945,11 @@ TestRunner.describe("13. Image Link Extraction & Media Inspection", function()
         assert_eq(b.selected_link_idx, 1)
         assert_eq(b.doc.links[1].text, "[IMG: Workflow]")
     end)
+
+    TestRunner.it("should detect terminal graphics protocols (kitty, sixel, symbols)", function()
+        local fmt = web.detect_graphics_format()
+        assert_true(fmt == "kitty" or fmt == "sixels" or fmt == "iterm" or fmt == "symbols", "graphics format must be a valid protocol")
+    end)
 end)
 
 -- 14. Persistent Browsing History (about:history, :history, gH)
