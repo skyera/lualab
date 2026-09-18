@@ -868,6 +868,31 @@ local function image_error_html(url, message)
 </body></html>]], message, url, url)
 end
 
+local function build_image_overlay(output, url, max_width, max_height)
+    local box_width = math.min(math.max(30, max_width - 4), 100)
+    local inner_width = box_width - 4
+    local image_lines = {}
+    for line in (output .. "\n"):gmatch("(.-)\n") do
+        table.insert(image_lines, truncate(line, inner_width))
+    end
+    local max_image_lines = math.max(1, max_height - 6)
+    while #image_lines > max_image_lines do
+        table.remove(image_lines)
+    end
+    local rows = {
+        "Image Preview",
+        truncate(url, inner_width),
+        ""
+    }
+    for _, line in ipairs(image_lines) do table.insert(rows, line) end
+    table.insert(rows, "")
+    table.insert(rows, "Press any key to close")
+    local box_height = math.min(max_height - 2, #rows + 2)
+    local top = math.max(1, math.floor((max_height - box_height) / 2) + 1)
+    local left = math.max(1, math.floor((max_width - box_width) / 2) + 1)
+    return rows, top, left, box_width, box_height
+end
+
 local function download_image(url, path, referer, insecure)
     local tmp_dir = os.getenv("TEMP") or os.getenv("TMP") or "/tmp"
     local suffix = image_cache_key(url)
@@ -960,10 +985,24 @@ local function show_image_preview(url, max_width, max_height, referer, insecure)
     if not ok or not output or #output == 0 then
         return false, "Image renderer returned no output."
     end
-    io.write("\27[2J\27[H\27[1;36mImage Preview\27[0m\n\27[90m" .. url .. "\27[0m\n\n")
-    io.write(output .. "\n\27[90mPress any key to return\27[0m")
+    local rows, top, left, box_width, box_height = build_image_overlay(output, url, max_width, max_height)
+    local border = "+" .. string.rep("-", box_width - 2) .. "+"
+    io.write("\27[?25l")
+    for row = 0, box_height - 1 do
+        local content = rows[row] or ""
+        content = truncate(content, box_width - 4)
+        local padding = string.rep(" ", math.max(0, box_width - 4 - visual_len(content)))
+        local line = row == 0 and border or (row == box_height - 1 and border
+            or "| " .. content .. padding .. " |")
+        io.write(string.format("\27[%d;%dH", top + row, left) .. line)
+    end
     io.flush()
     read_key()
+    for row = 0, box_height - 1 do
+        io.write(string.format("\27[%d;%dH\27[2K", top + row, left))
+    end
+    io.write("\27[?25h")
+    io.flush()
     return true
 end
 
@@ -973,6 +1012,7 @@ M.image_download_message = image_download_message
 M.is_image_url = is_image_url
 M.image_error_html = image_error_html
 M.reddit_original_image_url = reddit_original_image_url
+M.build_image_overlay = build_image_overlay
 
 local function get_bookmarks_file_path()
     local home = os.getenv("USERPROFILE") or os.getenv("HOME") or os.getenv("TEMP") or "."
