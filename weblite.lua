@@ -681,16 +681,21 @@ local function fetch_url(url, insecure)
     end
 
     local curl_cmd = is_windows and "curl.exe" or "curl"
-    local user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) weblite/1.0"
+    local user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
     local tmp_dir = os.getenv("TEMP") or os.getenv("TMP") or "/tmp"
     local cookie_file = tmp_dir:gsub("\\", "/") .. "/weblite_cookies.txt"
     local error_file = tmp_dir:gsub("\\", "/") .. "/weblite_curl_error.txt"
     local header_file = tmp_dir:gsub("\\", "/") .. "/weblite_curl_headers.txt"
     local insecure_opt = insecure and " -k" or ""
-    local cmd = string.format("%s -sSL%s --connect-timeout 10 --max-time 15 -D %s -b %s -c %s -H %s -H %s -A %s %s 2>%s",
+    local cmd = string.format("%s -sSL%s --compressed --connect-timeout 10 --max-time 15 -D %s -b %s -c %s -H %s -H %s -H %s -H %s -H %s -H %s -H %s -A %s %s 2>%s",
         curl_cmd, insecure_opt, shell_quote(header_file), shell_quote(cookie_file), shell_quote(cookie_file),
+        shell_quote("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"),
         shell_quote("Accept-Language: en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7"),
-        shell_quote("Accept-Charset: utf-8, *;q=0.8"),
+        shell_quote("Sec-Fetch-Dest: document"),
+        shell_quote("Sec-Fetch-Mode: navigate"),
+        shell_quote("Sec-Fetch-Site: none"),
+        shell_quote("Sec-Fetch-User: ?1"),
+        shell_quote("Upgrade-Insecure-Requests: 1"),
         shell_quote(user_agent), shell_quote(url), shell_quote(error_file))
 
     local pipe = io.popen(cmd, is_windows and "rb" or "r")
