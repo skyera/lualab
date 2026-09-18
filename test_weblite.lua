@@ -162,6 +162,7 @@ TestRunner.describe("2b. Response Metadata & Link Tools", function()
         assert_eq(web.reddit_original_image_url("https://i.redd.it/photo.jpeg"), nil, "original Reddit media URL must remain unchanged")
         local error_doc = web.render_html_to_document(web.image_error_html("https://images.example/photo.jpg", "HTTP 403 Forbidden (CDN error 54113)"), "https://images.example/photo.jpg", 80)
         assert_true(table.concat(error_doc.lines, "\n"):find("CDN error 54113"), "image errors must render as a readable page")
+        assert_true(web.show_image_preview ~= nil, "image preview must download before rendering")
     end)
 end)
 

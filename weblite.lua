@@ -894,6 +894,17 @@ local function download_image(url, path, referer, insecure)
         os.remove(error_file)
         return false, status
     end
+    local downloaded = io.open(path, "rb")
+    local has_content = false
+    if downloaded then
+        has_content = downloaded:seek("end") > 0
+        downloaded:close()
+    end
+    if not has_content then
+        os.remove(path)
+        os.remove(error_file)
+        return false, status
+    end
     os.remove(error_file)
     return true, status
 end
@@ -917,14 +928,23 @@ local function show_image_preview(url, max_width, max_height, referer, insecure)
     if file then
         file:close()
     else
+        local partial_path = path .. ".part"
+        os.remove(partial_path)
         local ok, status
         for _, image_url in ipairs(image_urls) do
-            ok, status = download_image(image_url, path, referer, insecure)
+            ok, status = download_image(image_url, partial_path, referer, insecure)
             if not ok and not insecure and image_url:match("^https://") then
-                ok, status = download_image(image_url, path, referer, true)
+                ok, status = download_image(image_url, partial_path, referer, true)
             end
-            if ok then break end
+            if ok then
+                os.remove(path)
+                local moved = os.rename(partial_path, path)
+                if moved then break end
+                ok = false
+                status = nil
+            end
         end
+        os.remove(partial_path)
         if not ok then
             return false, image_download_message(status, url)
         end
