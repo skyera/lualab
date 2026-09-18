@@ -562,6 +562,32 @@ local function resolve_relative_url(base_url, href)
         return href
     end
 
+    if base_url:match("^file://") then
+        if href:sub(1, 1) == "#" then
+            local no_hash = base_url:match("^([^#]+)")
+            return (no_hash or base_url) .. href
+        end
+        local file_prefix, file_path = base_url:match("^(file:///?)(.*)$")
+        if href:sub(1, 1) == "/" or (is_windows and href:match("^[A-Za-z]:")) then
+            return "file:///" .. href:gsub("^[/\\]+", "")
+        end
+        local dir = file_path:match("^(.-[/\\])[^/\\]*$") or ""
+        return file_prefix .. dir .. href
+    end
+
+    if base_url:match("^[A-Za-z]:[\\/]") or base_url:match("^/[^/]") then
+        if href:sub(1, 1) == "#" then
+            local no_hash = base_url:match("^([^#]+)")
+            return (no_hash or base_url) .. href
+        end
+        local sep = base_url:find("\\") and "\\" or "/"
+        if href:sub(1, 1) == "/" or href:sub(1, 1) == "\\" or (is_windows and href:match("^[A-Za-z]:")) then
+            return href
+        end
+        local dir = base_url:match("^(.-[/\\])[^/\\]*$") or ("." .. sep)
+        return dir .. href
+    end
+
     local scheme, host, path = base_url:match("^(https?://)([^/]+)(.*)$")
     if not scheme then return href end
 
@@ -599,7 +625,14 @@ local function smart_resolve_input(input)
         return input, "about"
     end
 
-    if input:match("^file://") or input:match("^[A-Za-z]:[\\/]") or input:match("^/[^/]") then
+    if input:match("^file://") or input:match("^[A-Za-z]:[\\/]") or input:match("^/[^/]")
+        or input:match("^%.[\\/]") or input:match("^%.%.[\\/]") then
+        return input, "file"
+    end
+
+    local local_check = io.open(input, "rb")
+    if local_check then
+        local_check:close()
         return input, "file"
     end
 
@@ -785,7 +818,8 @@ local function fetch_url(url, insecure)
         return M.get_home_page_html(), 200, "text/html"
     end
 
-    if url:match("^file://") or url:match("^[A-Za-z]:[\\/]") or (is_windows and url:match("^[A-Za-z]:")) then
+    if url:match("^file://") or url:match("^[A-Za-z]:[\\/]") or (is_windows and url:match("^[A-Za-z]:"))
+        or url:match("^/[^/]") or url:match("^%.[\\/]") or url:match("^%.%.[\\/]") then
         local filepath = url:gsub("^file:///?", "")
         if is_windows and filepath:match("^/[A-Za-z]:") then
             filepath = filepath:sub(2)
@@ -796,6 +830,13 @@ local function fetch_url(url, insecure)
         end
         local content = f:read("*a")
         f:close()
+        return content, 200, "text/html"
+    end
+
+    local local_file_test = io.open(url, "rb")
+    if local_file_test then
+        local content = local_file_test:read("*a")
+        local_file_test:close()
         return content, 200, "text/html"
     end
 
@@ -952,11 +993,12 @@ local function image_cache_key(url)
 end
 
 local function is_image_url(url)
-    if not url or not url:match("^https?://") then return false end
-    local path = url:lower():match("^https?://[^?#]+") or ""
+    if not url or url == "" then return false end
+    local path = url:lower():match("^[^?#]+") or ""
     return path:match("%.avif$") or path:match("%.bmp$") or path:match("%.gif$")
         or path:match("%.jpe?g$") or path:match("%.png$") or path:match("%.svg$")
-        or path:match("%.webp$") ~= nil
+        or path:match("%.webp$") or path:match("%.ppm$") or path:match("%.ico$")
+        or path:match("%.tiff?$") ~= nil
 end
 
 local function reddit_original_image_url(url)
@@ -1103,36 +1145,59 @@ local function show_image_preview(url, max_width, max_height, referer, insecure)
     if not renderer then
         return false, "Install chafa or viu to preview images; use gx to open externally."
     end
-    local image_urls = { url }
-    local original_url = reddit_original_image_url(url)
-    if original_url then
-        image_urls = { original_url, url }
+
+    local path = nil
+    local local_file = nil
+    if url:match("^file://") then
+        local_file = url:gsub("^file:///?", "")
+        if is_windows and local_file:match("^/[A-Za-z]:") then local_file = local_file:sub(2) end
+        local_file = local_file:gsub("/", is_windows and "\\" or "/")
+    elseif not url:match("^https?://") then
+        local_file = url
     end
-    local ext = url:match("%.([%w]+)%?") or url:match("%.([%w]+)$") or "img"
-    local path = image_cache_dir() .. (is_windows and "\\" or "/") .. image_cache_key(url) .. "." .. ext:lower()
-    local file = io.open(path, "rb")
-    if file then
-        file:close()
-    else
-        local partial_path = path .. ".part"
-        os.remove(partial_path)
-        local ok, status
-        for _, image_url in ipairs(image_urls) do
-            ok, status = download_image(image_url, partial_path, referer, insecure)
-            if not ok and not insecure and image_url:match("^https://") then
-                ok, status = download_image(image_url, partial_path, referer, true)
-            end
-            if ok then
-                os.remove(path)
-                local moved = os.rename(partial_path, path)
-                if moved then break end
-                ok = false
-                status = nil
-            end
+
+    if local_file then
+        local f = io.open(local_file, "rb")
+        if f then
+            f:close()
+            path = local_file
+        else
+            return false, "Local image file not found: " .. local_file
         end
-        os.remove(partial_path)
-        if not ok then
-            return false, image_download_message(status, url)
+    end
+
+    if not path then
+        local image_urls = { url }
+        local original_url = reddit_original_image_url(url)
+        if original_url then
+            image_urls = { original_url, url }
+        end
+        local ext = url:match("%.([%w]+)%?") or url:match("%.([%w]+)$") or "img"
+        path = image_cache_dir() .. (is_windows and "\\" or "/") .. image_cache_key(url) .. "." .. ext:lower()
+        local file = io.open(path, "rb")
+        if file then
+            file:close()
+        else
+            local partial_path = path .. ".part"
+            os.remove(partial_path)
+            local ok, status
+            for _, image_url in ipairs(image_urls) do
+                ok, status = download_image(image_url, partial_path, referer, insecure)
+                if not ok and not insecure and image_url:match("^https://") then
+                    ok, status = download_image(image_url, partial_path, referer, true)
+                end
+                if ok then
+                    os.remove(path)
+                    local moved = os.rename(partial_path, path)
+                    if moved then break end
+                    ok = false
+                    status = nil
+                end
+            end
+            os.remove(partial_path)
+            if not ok then
+                return false, image_download_message(status, url)
+            end
         end
     end
     local size = string.format("%dx%d", math.max(20, max_width - 4), math.max(8, max_height - 8))
@@ -1997,8 +2062,14 @@ function M.render_html_to_document(html_text, base_url, max_width, reader_mode)
             else
                 pos = tag_end + 1
             end
+            local is_img_link = false
             local link_text = decode_entities(a_inner:gsub("<[^>]+>", " "):gsub("%s+", " "):match("^%s*(.-)%s*$") or "")
-            if #link_text == 0 then
+            if a_inner:find("<[iI][mM][gG]") then
+                local img_alt = a_inner:match("[aA][lL][tT]=[\"'](.-)[\"']") or a_inner:match("[tT][iI][tT][lL][eE]=[\"'](.-)[\"']")
+                local clean_alt = img_alt and decode_entities(img_alt:gsub("<[^>]+>", " "):gsub("%s+", " "):match("^%s*(.-)%s*$") or "") or ""
+                link_text = (#clean_alt > 0) and ("[IMG: " .. clean_alt .. "]") or "[IMG: Image]"
+                is_img_link = true
+            elseif #link_text == 0 then
                 if full_tag:find("vote") or a_inner:find("vote") or a_inner:find("votearrow") then
                     link_text = "▲"
                 else
@@ -2015,7 +2086,8 @@ function M.render_html_to_document(html_text, base_url, max_width, reader_mode)
                     id = link_counter,
                     href = full_href,
                     text = link_text,
-                    line_idx = 0
+                    line_idx = 0,
+                    is_image = is_img_link
                 })
             end
         elseif lower_tag == "li" then
@@ -2032,13 +2104,40 @@ function M.render_html_to_document(html_text, base_url, max_width, reader_mode)
                 link_counter = link_counter + 1
                 local full_href = resolve_relative_url(base_url, a_href)
                 local clean_txt = decode_entities(a_txt:gsub("<[^>]+>", " "):gsub("%s+", " "):match("^%s*(.-)%s*$") or "")
+                local is_img = false
+                if a_txt:find("<[iI][mM][gG]") then
+                    local img_alt = a_txt:match("[aA][lL][tT]=[\"'](.-)[\"']") or a_txt:match("[tT][iI][tT][lL][eE]=[\"'](.-)[\"']")
+                    local clean_alt = img_alt and decode_entities(img_alt:gsub("<[^>]+>", " "):gsub("%s+", " "):match("^%s*(.-)%s*$") or "") or ""
+                    clean_txt = (#clean_alt > 0) and ("[IMG: " .. clean_alt .. "]") or "[IMG: Image]"
+                    is_img = true
+                end
                 table.insert(links, {
                     id = link_counter,
                     href = full_href,
                     text = clean_txt,
-                    line_idx = 0
+                    line_idx = 0,
+                    is_image = is_img
                 })
                 return string.format("%s [%d]", clean_txt, link_counter)
+            end)
+            li_text = li_text:gsub("<[iI][mM][gG][^>]*>", function(img_tag)
+                local src = img_tag:match("[sS][rR][cC]=[\"'](.-)[\"']") or img_tag:match("[sS][rR][cC]=([^%s>]+)")
+                local alt = img_tag:match("[aA][lL][tT]=[\"'](.-)[\"']") or img_tag:match("[tT][iI][tT][lL][eE]=[\"'](.-)[\"']")
+                if src and not src:match("^data:") then
+                    link_counter = link_counter + 1
+                    local full_src = resolve_relative_url(base_url, src)
+                    local clean_alt = alt and decode_entities(alt:gsub("<[^>]+>", " "):gsub("%s+", " "):match("^%s*(.-)%s*$") or "") or ""
+                    local img_label = (#clean_alt > 0) and ("[IMG: " .. clean_alt .. "]") or string.format("[IMG: Image %d]", link_counter)
+                    table.insert(links, {
+                        id = link_counter,
+                        href = full_src,
+                        text = img_label,
+                        line_idx = 0,
+                        is_image = true
+                    })
+                    return string.format(" %s [%d]", img_label, link_counter)
+                end
+                return ""
             end)
             li_text = decode_entities(li_text:gsub("<[^>]+>", " "):gsub("%s+", " "):match("^%s*(.-)%s*$") or "")
             if #li_text > 0 then
@@ -2301,14 +2400,21 @@ function Browser:load_url(target_url, from_history)
 
     if is_image_url(target_url) then
         local term_h = select(2, get_terminal_size())
+        local image_name = target_url:match("([^/\\]+)$") or target_url
+        self.raw_html = string.format([[
+<!DOCTYPE html><html><head><title>%s</title></head><body>
+<h1>Image Viewer: %s</h1>
+<p><img src="%s" alt="%s"></p><hr>
+<p><i>Commands: Press <b>Enter</b>, <b>gi</b>, or <b>i</b> to inspect image in high-resolution viewer. Press <b>gx</b> to open externally. Press <b>H</b> to go back.</i></p>
+</body></html>]], image_name, image_name, target_url, image_name)
+        self.doc = M.render_html_to_document(self.raw_html, target_url, term_w - 4, false)
+        self.url = target_url
+        self.scroll_y = 1
+        self.selected_link_idx = 1
         local ok, err = self:preview_image(target_url, term_w, term_h)
-        if ok then
-            self.status_msg = "Image preview closed."
-            self.needs_render = true
-            return
-        end
-        self.status_msg = err or "Image preview failed."
+        self.status_msg = ok and "Image preview closed. Press Enter or 'i' to re-inspect." or (err or "Image preview failed.")
         self.needs_render = true
+        M.add_history_entry(target_url, image_name)
         return
     end
 
@@ -2952,9 +3058,9 @@ function Browser:handle_key(k)
         elseif k == "l" or k == "L" then
             self:show_links()
             return
-        elseif k == "i" then
+        elseif k == "i" or k == "I" then
             local target = self.doc and self.doc.links and self.doc.links[self.selected_link_idx]
-            if target and target.is_image then
+            if target and (target.is_image or is_image_url(target.href)) then
                 local term_w, term_h = get_terminal_size()
                 local ok, err = self:preview_image(target.href, term_w, term_h)
                 self.status_msg = ok and "Image preview closed." or err
@@ -3129,15 +3235,36 @@ function Browser:handle_key(k)
                 end
             end
             if target_link and target_link.href then
-                self:navigate_to(target_link.href)
+                if target_link.is_image or is_image_url(target_link.href) then
+                    local term_w, term_h = get_terminal_size()
+                    local ok, err = self:preview_image(target_link.href, term_w, term_h)
+                    self.status_msg = ok and "Image preview closed." or err
+                else
+                    self:navigate_to(target_link.href)
+                end
             else
                 self.status_msg = string.format("Link [%d] not found.", count)
             end
         elseif self.doc and #self.doc.links >= self.selected_link_idx then
             local l = self.doc.links[self.selected_link_idx]
             if l and l.href then
-                self:navigate_to(l.href)
+                if l.is_image or is_image_url(l.href) then
+                    local term_w, term_h = get_terminal_size()
+                    local ok, err = self:preview_image(l.href, term_w, term_h)
+                    self.status_msg = ok and "Image preview closed." or err
+                else
+                    self:navigate_to(l.href)
+                end
             end
+        end
+    elseif k == "i" or k == "I" then
+        local target = self.doc and self.doc.links and self.doc.links[self.selected_link_idx]
+        if target and (target.is_image or is_image_url(target.href)) then
+            local term_w, term_h = get_terminal_size()
+            local ok, err = self:preview_image(target.href, term_w, term_h)
+            self.status_msg = ok and "Image preview closed." or err
+        else
+            self.status_msg = "Focus an image link first."
         end
     elseif k == "o" then
         self.mode = "INPUT"
@@ -3218,6 +3345,43 @@ M.Browser = Browser
 local function dump_page(url, max_width, insecure)
     max_width = max_width or 80
     local resolved, _ = smart_resolve_input(url)
+    if is_image_url(resolved) then
+        local renderer = find_image_renderer()
+        if not renderer then
+            print("Install chafa or viu to display images in terminal.")
+            return
+        end
+        local path = resolved
+        if resolved:match("^file://") then
+            path = resolved:gsub("^file:///?", "")
+            if is_windows and path:match("^/[A-Za-z]:") then path = path:sub(2) end
+            path = path:gsub("/", is_windows and "\\" or "/")
+        elseif resolved:match("^https?://") then
+            local ext = resolved:match("%.([%w]+)%?") or resolved:match("%.([%w]+)$") or "img"
+            path = image_cache_dir() .. (is_windows and "\\" or "/") .. image_cache_key(resolved) .. "." .. ext:lower()
+            local f = io.open(path, "rb")
+            if f then
+                f:close()
+            else
+                local ok, status = download_image(resolved, path, nil, insecure)
+                if not ok then
+                    print("Failed to download image: " .. tostring(status))
+                    return
+                end
+            end
+        end
+        local render_cmd = (renderer == "chafa")
+            and string.format("chafa --format symbols --colors 256 --size %dx24 %s", math.max(20, max_width - 4), shell_quote(path))
+            or string.format("viu -w %d %s", math.max(20, max_width - 4), shell_quote(path))
+        local pipe = io.popen(render_cmd, "r")
+        if pipe then
+            local out = pipe:read("*a")
+            pipe:close()
+            if out and #out > 0 then io.write(out) end
+        end
+        return
+    end
+
     local html, code = fetch_url(resolved, insecure)
     local doc = M.render_html_to_document(html, resolved, max_width)
 

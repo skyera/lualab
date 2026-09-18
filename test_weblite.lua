@@ -989,6 +989,87 @@ TestRunner.describe("13. Image Link Extraction & Media Inspection", function()
         local orig2 = web.reddit_original_image_url(direct_url)
         assert_eq(orig2, "https://i.redd.it/x8ftn8rtp7qh1.jpeg", "must resolve direct path without slug")
     end)
+
+    TestRunner.it("should detect local images and diverse formats in is_image_url", function()
+        assert_true(web.is_image_url("nasa_nebula1.jpg"), "local jpg file must be detected")
+        assert_true(web.is_image_url("portraits/01_traditional_hanfu_lady.png"), "subfolder png must be detected")
+        assert_true(web.is_image_url("file:///D:/test/image.ppm"), "file URI ppm must be detected")
+        assert_true(web.is_image_url("https://example.com/art.webp?w=800"), "query-string webp must be detected")
+        assert_eq(web.is_image_url("https://example.com/index.html"), false, "html must not be detected as image")
+        assert_eq(web.is_image_url(""), false, "empty string must return false")
+    end)
+
+    TestRunner.it("should resolve relative image paths against file:// and local base paths", function()
+        local r1 = web.resolve_relative_url("file:///D:/test/lualab/index.html", "nasa_nebula1.jpg")
+        assert_eq(r1, "file:///D:/test/lualab/nasa_nebula1.jpg", "file:// relative path must resolve correctly")
+
+        local r2 = web.resolve_relative_url("file:///D:/test/lualab/index.html", "#section")
+        assert_eq(r2, "file:///D:/test/lualab/index.html#section", "hash fragment on file:// must be preserved")
+
+        local r3 = web.resolve_relative_url("D:/test/lualab/index.html", "nasa_nebula1.jpg")
+        assert_true(r3:find("nasa_nebula1.jpg") ~= nil, "local windows path must resolve")
+    end)
+
+    TestRunner.it("should detect existing local files in smart_resolve_input", function()
+        local res, mode = web.smart_resolve_input("nasa_nebula1.jpg")
+        assert_eq(mode, "file", "existing local file must resolve to 'file' mode")
+        assert_eq(res, "nasa_nebula1.jpg")
+    end)
+
+    TestRunner.it("should parse <img> tags inside <li> elements into image links", function()
+        local html = "<ul><li>Cosmic view:<img src=\"nasa_nebula1.jpg\" alt=\"Nebula\"></li></ul>"
+        local doc = web.render_html_to_document(html, "file:///D:/test/lualab/index.html", 80)
+        assert_true(#doc.links >= 1, "li with img must produce an image link")
+        assert_eq(doc.links[1].text, "[IMG: Nebula]")
+        assert_eq(doc.links[1].is_image, true)
+    end)
+
+    TestRunner.it("should parse <a> tags wrapping <img> into image links with alt text", function()
+        local html = "<p><a href=\"nasa_nebula1.jpg\"><img src=\"thumb.jpg\" alt=\"Carina Nebula\"></a></p>"
+        local doc = web.render_html_to_document(html, "file:///D:/test/lualab/index.html", 80)
+        assert_eq(#doc.links, 1)
+        assert_eq(doc.links[1].text, "[IMG: Carina Nebula]")
+        assert_eq(doc.links[1].is_image, true)
+    end)
+
+    TestRunner.it("should trigger image preview on ENTER and direct key 'i' when focused on image link", function()
+        local b = web.Browser.new("file:///D:/test/lualab/gallery_images.html")
+        local html = "<h1>Gallery</h1><p><img src=\"nasa_nebula1.jpg\" alt=\"Nebula Photo\"></p>"
+        b.raw_html = html
+        b.doc = web.render_html_to_document(html, "file:///D:/test/lualab/gallery_images.html", 80)
+        b.selected_link_idx = 1
+        assert_eq(b.doc.links[1].is_image, true)
+
+        local previewed_url = nil
+        b.preview_image = function(self, url, w, h)
+            previewed_url = url
+            return true
+        end
+
+        -- Test 'i' key on image link
+        b:handle_key("i")
+        assert_eq(previewed_url, "file:///D:/test/lualab/nasa_nebula1.jpg", "direct 'i' key must invoke preview_image with resolved target")
+        assert_true(b.status_msg:find("Image preview") ~= nil)
+
+        -- Test ENTER on image link
+        previewed_url = nil
+        b:handle_key("ENTER")
+        assert_eq(previewed_url, "file:///D:/test/lualab/nasa_nebula1.jpg", "ENTER on image link must invoke preview_image")
+        assert_true(b.status_msg:find("Image preview") ~= nil)
+    end)
+
+    TestRunner.it("should generate dedicated Image Viewer page when navigating directly to image", function()
+        local b = web.Browser.new("about:home")
+        b.preview_image = function(self, url, w, h)
+            return true
+        end
+        b:load_url("nasa_nebula1.jpg")
+        assert_eq(b.url, "nasa_nebula1.jpg")
+        assert_true(b.doc ~= nil, "doc must be generated")
+        assert_true(b.doc.title:find("Image Viewer") ~= nil or b.doc.title:find("nasa_nebula1.jpg") ~= nil)
+        assert_true(#b.doc.links >= 1, "image link must be present on page")
+        assert_eq(b.doc.links[1].is_image, true)
+    end)
 end)
 
 -- 14. Persistent Browsing History (about:history, :history, gH)
