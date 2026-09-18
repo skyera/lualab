@@ -1725,6 +1725,24 @@ end
 
 M.extract_spa_hydration_content = extract_spa_hydration_content
 
+local function detect_article_candidate(url, html)
+    if not url or url:match("^about:") then return false end
+    local path = url:lower():match("^https?://[^/]+(/.*)$") or ""
+    local is_article_url = path:match("/article/") or path:match("/post/") or path:match("/p/")
+        or path:match("/blog/") or path:match("/wiki/") or path:match("/%d%d%d%d/%d%d/")
+        or path:match("%.html?$")
+    if not html then return is_article_url ~= nil end
+    local has_article_markup = html:find("<[aA][rR][tT][iI][cC][lL][eE]") ~= nil
+        or html:find("<[mM][aA][iI][nN]") ~= nil
+        or html:find("post%-content") ~= nil
+        or html:find("entry%-content") ~= nil
+        or html:find("article%-body") ~= nil
+        or html:find("mw%-parser%-output") ~= nil
+    return (is_article_url or has_article_markup)
+end
+
+M.detect_article_candidate = detect_article_candidate
+
 function M.render_html_to_document(html_text, base_url, max_width, reader_mode)
     max_width = max_width or 80
     if max_width < 40 then max_width = 40 end
@@ -1734,6 +1752,8 @@ function M.render_html_to_document(html_text, base_url, max_width, reader_mode)
     if reader_mode then
         local article_content = clean_html:match("<[aA][rR][tT][iI][cC][lL][eE][^>]*>(.-)</[aA][rR][tT][iI][cC][lL][eE]>")
             or clean_html:match("<[mM][aA][iI][nN][^>]*>(.-)</[mM][aA][iI][nN]>")
+            or clean_html:match("<div[^>]*class=[\"'][^\"']*(?:post%-content|entry%-content|article%-body|article%-content|mw%-parser%-output)[^\"']*[\"'][^>]*>(.-)</div>")
+            or clean_html:match("<div[^>]*id=[\"'](?:content|main%-content|article)[^\"']*[\"'][^>]*>(.-)</div>")
         if article_content and #article_content > 200 then
             clean_html = article_content
         else
@@ -1741,6 +1761,7 @@ function M.render_html_to_document(html_text, base_url, max_width, reader_mode)
             clean_html = clean_html:gsub("<[fF][oO][oO][tT][eE][rR][^>]*>.-</[fF][oO][oO][tT][eE][rR]>", "")
             clean_html = clean_html:gsub("<[aA][sS][iI][dD][eE][^>]*>.-</[aA][sS][iI][dD][eE]>", "")
             clean_html = clean_html:gsub("<[hH][eE][aA][dD][eE][rR][^>]*>.-</[hH][eE][aA][dD][eE][rR]>", "")
+            clean_html = clean_html:gsub("<[fF][oO][rR][mM][^>]*>.-</[fF][oO][rR][mM]>", "")
         end
     end
 
@@ -2143,6 +2164,7 @@ function Browser.new(initial_url, insecure)
     self.raw_html = ""
     self.last_term_w = 0
     self.reader_mode = false
+    self.auto_reader = false
     self.doc = nil
     self.scroll_y = 1
     self.selected_link_idx = 1
@@ -2254,7 +2276,12 @@ function Browser:load_url(target_url, from_history)
     local html, status_code, content_type, used_fallback, final_url = fetch_url(target_url, self.insecure)
 
     self.raw_html = html
-    self.doc = M.render_html_to_document(html, final_url or target_url, term_w - 4, self.reader_mode)
+    local use_reader = self.reader_mode
+    if self.auto_reader and not use_reader and detect_article_candidate(target_url, html) then
+        use_reader = true
+        self.reader_mode = true
+    end
+    self.doc = M.render_html_to_document(html, final_url or target_url, term_w - 4, use_reader)
     self.url = final_url or target_url
     self.scroll_y = 1
     self.selected_link_idx = 1
@@ -2677,6 +2704,9 @@ function Browser:handle_key(k)
                 end
             elseif cmd == "toc" then
                 self:show_toc()
+            elseif cmd == "reader auto" or cmd == "autoreader" or cmd == "set autoreader" then
+                self.auto_reader = not self.auto_reader
+                self.status_msg = string.format("Auto-reader mode: %s", self.auto_reader and "ON" or "OFF")
             elseif cmd == "reader" or cmd == "rdr" then
                 self:toggle_reader_mode()
             elseif cmd == "yl" or cmd == "yanklink" then
@@ -2740,7 +2770,7 @@ function Browser:handle_key(k)
             self.input_buf = ""
         elseif k == "CTRL_W" then
             self.input_buf = self.input_buf:gsub("%s*%S+$", "")
-        elseif k == "SPACE" then
+        elseif k == "SPACE" or k == " " then
             self.input_buf = self.input_buf .. " "
         elseif #k >= 1 and not k:match("^CTRL_") and not (k:match("^[A-Z_]+$") and #k > 1) then
             self.input_buf = self.input_buf .. k
@@ -2775,7 +2805,7 @@ function Browser:handle_key(k)
             end
         elseif k == "BACKSPACE" then
             self.input_buf = utf8_pop_char(self.input_buf)
-        elseif k == "SPACE" then
+        elseif k == "SPACE" or k == " " then
             self.input_buf = self.input_buf .. " "
         elseif #k >= 1 and not k:match("^CTRL_") and not (k:match("^[A-Z_]+$") and #k > 1) then
             self.input_buf = self.input_buf .. k

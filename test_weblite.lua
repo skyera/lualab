@@ -1043,6 +1043,23 @@ TestRunner.describe("15. Distraction-Free Reader Mode", function()
         assert_eq(b.reader_mode, false, "':reader' must toggle reader_mode back to false")
         assert_true(b.status_msg:find("Reader mode: OFF"))
     end)
+
+    TestRunner.it("should detect article candidate URLs and markup", function()
+        assert_true(web.detect_article_candidate("https://example.com/blog/my-first-post", nil))
+        assert_true(web.detect_article_candidate("https://example.com/wiki/LuaJIT", nil))
+        assert_true(web.detect_article_candidate("https://example.com/page", "<article><h1>Story</h1><p>Text</p></article>"))
+        assert_true(not web.detect_article_candidate("about:home", nil))
+    end)
+
+    TestRunner.it("should toggle auto-reader mode via ':reader auto'", function()
+        local b = web.Browser.new("about:home")
+        assert_eq(b.auto_reader, false)
+        b:handle_key(":")
+        for c in string.gmatch("reader auto", ".") do b:handle_key(c) end
+        b:handle_key("ENTER")
+        assert_eq(b.auto_reader, true, "':reader auto' must toggle auto_reader to true")
+        assert_true(b.status_msg:find("Auto-reader mode: ON", 1, true), "status msg should confirm auto-reader")
+    end)
 end)
 
 print(string.format("\n========================================="))
