@@ -819,6 +819,13 @@ local function is_image_url(url)
         or path:match("%.webp$") ~= nil
 end
 
+local function reddit_original_image_url(url)
+    if not url then return nil end
+    local path = url:match("^https://preview%.redd%.it/([^?]+)")
+    if not path then return nil end
+    return "https://i.redd.it/" .. path
+end
+
 local function find_image_renderer()
     local candidates = is_windows and {
         { name = "chafa", command = "where chafa >NUL 2>NUL" },
@@ -899,15 +906,24 @@ local function show_image_preview(url, max_width, max_height, referer, insecure)
     if not renderer then
         return false, "Install chafa or viu to preview images; use gx to open externally."
     end
+    local image_urls = { url }
+    local original_url = reddit_original_image_url(url)
+    if original_url then
+        image_urls = { original_url, url }
+    end
     local ext = url:match("%.([%w]+)%?") or url:match("%.([%w]+)$") or "img"
     local path = image_cache_dir() .. (is_windows and "\\" or "/") .. image_cache_key(url) .. "." .. ext:lower()
     local file = io.open(path, "rb")
     if file then
         file:close()
     else
-        local ok, status = download_image(url, path, referer, insecure)
-        if not ok and not insecure and url:match("^https://") then
-            ok, status = download_image(url, path, referer, true)
+        local ok, status
+        for _, image_url in ipairs(image_urls) do
+            ok, status = download_image(image_url, path, referer, insecure)
+            if not ok and not insecure and image_url:match("^https://") then
+                ok, status = download_image(image_url, path, referer, true)
+            end
+            if ok then break end
         end
         if not ok then
             return false, image_download_message(status, url)
@@ -936,6 +952,7 @@ M.show_image_preview = show_image_preview
 M.image_download_message = image_download_message
 M.is_image_url = is_image_url
 M.image_error_html = image_error_html
+M.reddit_original_image_url = reddit_original_image_url
 
 local function get_bookmarks_file_path()
     local home = os.getenv("USERPROFILE") or os.getenv("HOME") or os.getenv("TEMP") or "."
