@@ -2209,6 +2209,7 @@ function Browser.new(initial_url, insecure)
     self.search_query = ""
     self.search_matches = {}
     self.search_match_idx = 1
+    self.search_pre_scroll = 1
     self.pending_key = nil
     self.count_prefix = 0
     self.hint_map = {}
@@ -2532,6 +2533,20 @@ function Browser:toggle_reader_mode()
     self.status_msg = string.format("Reader mode: %s (%d lines)", self.reader_mode and "ON" or "OFF", #self.doc.lines)
 end
 
+function Browser:update_search_matches(query)
+    self.search_matches = {}
+    self.search_match_idx = 1
+    if not query or query == "" or not self.doc or not self.doc.lines then
+        return
+    end
+    local pat = query:lower()
+    for l_idx, line in ipairs(self.doc.lines) do
+        if line:lower():find(pat, 1, true) then
+            table.insert(self.search_matches, l_idx)
+        end
+    end
+end
+
 function Browser:build_hints(view_height)
     self.hint_map = {}
     if not self.doc or #self.doc.links == 0 then return end
@@ -2606,9 +2621,12 @@ function Browser:render()
             local raw_line = self.doc.lines[line_idx] or ""
             local display_line = raw_line
 
-            if #self.search_query > 0 then
-                local query = self.search_query
-                display_line = display_line:gsub("(" .. query:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1") .. ")", "\27[7;33m%1\27[0m")
+            local active_query = (self.mode == "SEARCH") and self.input_buf or self.search_query
+            if #active_query > 0 then
+                local is_active_line = (#self.search_matches > 0 and self.search_matches[self.search_match_idx] == line_idx)
+                local esc_pat = active_query:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1")
+                local hl_color = is_active_line and "\27[7;1;32m%1\27[0m" or "\27[7;33m%1\27[0m"
+                display_line = display_line:gsub("(" .. esc_pat .. ")", hl_color)
             end
 
             if self.mode == "HINT" then
@@ -2662,8 +2680,17 @@ function Browser:render()
         emit("\27[1;37m" .. prompt_disp .. "\27[7m \27[0m" .. badge .. string.rep(" ", pad))
     elseif self.mode == "SEARCH" then
         local prompt_disp = "/" .. self.input_buf
-        local pad = math.max(0, term_w - visual_len(prompt_disp) - 1)
-        emit("\27[1;33m" .. prompt_disp .. "\27[7m \27[0m" .. string.rep(" ", pad))
+        local badge = ""
+        if #self.input_buf > 0 then
+            if #self.search_matches > 0 then
+                badge = string.format(" \27[1;32m[%d/%d matches]\27[0m", self.search_match_idx, #self.search_matches)
+            else
+                badge = " \27[1;31m[Pattern not found]\27[0m"
+            end
+        end
+        local prompt_vlen = visual_len(prompt_disp) + visual_len(badge)
+        local pad = math.max(0, term_w - prompt_vlen - 1)
+        emit("\27[1;33m" .. prompt_disp .. "\27[7m \27[0m" .. badge .. string.rep(" ", pad))
     elseif self.mode == "HINT" then
         local hint_prompt = (self.hint_action == "YANK")
             and "-- YANK HINT MODE -- Type letter [A-Z] to copy link URL to clipboard, or <Esc> to cancel."
@@ -2816,19 +2843,13 @@ function Browser:handle_key(k)
     if self.mode == "SEARCH" then
         if k == "ESC" then
             self.mode = "NORMAL"
+            self.scroll_y = self.search_pre_scroll or self.scroll_y
+            self:update_search_matches(self.search_query)
             self.status_msg = "Search cancelled."
         elseif k == "ENTER" then
             self.mode = "NORMAL"
             self.search_query = self.input_buf
-            self.search_matches = {}
-            if #self.search_query > 0 and self.doc then
-                local pat = self.search_query:lower()
-                for l_idx, line in ipairs(self.doc.lines) do
-                    if line:lower():find(pat, 1, true) then
-                        table.insert(self.search_matches, l_idx)
-                    end
-                end
-            end
+            self:update_search_matches(self.search_query)
             if #self.search_matches > 0 then
                 self.search_match_idx = 1
                 local target_line = self.search_matches[1]
@@ -2837,12 +2858,22 @@ function Browser:handle_key(k)
             else
                 self.status_msg = string.format("Pattern not found: '%s'", self.search_query)
             end
-        elseif k == "BACKSPACE" then
-            self.input_buf = utf8_pop_char(self.input_buf)
-        elseif k == "SPACE" or k == " " then
-            self.input_buf = self.input_buf .. " "
-        elseif #k >= 1 and not k:match("^CTRL_") and not (k:match("^[A-Z_]+$") and #k > 1) then
-            self.input_buf = self.input_buf .. k
+        else
+            if k == "BACKSPACE" then
+                self.input_buf = utf8_pop_char(self.input_buf)
+            elseif k == "SPACE" or k == " " then
+                self.input_buf = self.input_buf .. " "
+            elseif #k >= 1 and not k:match("^CTRL_") and not (k:match("^[A-Z_]+$") and #k > 1) then
+                self.input_buf = self.input_buf .. k
+            end
+            -- Live incsearch match updating
+            self:update_search_matches(self.input_buf)
+            if #self.search_matches > 0 then
+                local target_line = self.search_matches[1]
+                self.scroll_y = math.max(1, math.min(max_scroll, target_line - math.floor(view_h / 3)))
+            else
+                self.scroll_y = self.search_pre_scroll or self.scroll_y
+            end
         end
         return
     end
@@ -3118,6 +3149,7 @@ function Browser:handle_key(k)
     elseif k == "/" then
         self.mode = "SEARCH"
         self.input_buf = ""
+        self.search_pre_scroll = self.scroll_y
     elseif k == "n" then
         if #self.search_matches > 0 then
             self.search_match_idx = (self.search_match_idx % #self.search_matches) + 1

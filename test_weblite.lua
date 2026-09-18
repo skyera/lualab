@@ -361,16 +361,44 @@ TestRunner.describe("4. Browser State Machine & Vim Navigation", function()
         assert_eq(b.mode, "NORMAL", "ESC should exit hint mode")
     end)
 
-    TestRunner.it("should handle in-page search (/)", function()
+    TestRunner.it("should handle interactive incsearch and match navigation (/)", function()
+        b.scroll_y = 1
         b:handle_key("/")
         assert_eq(b.mode, "SEARCH", "'/' should enter search mode")
 
-        -- Type "vim" and Enter
+        -- Live incsearch while typing
+        b:handle_key("V")
+        assert_true(#b.search_matches > 0, "incsearch should find live matches while typing 'V'")
+        local matches_v = #b.search_matches
+
+        b:handle_key("i")
+        b:handle_key("m")
+        assert_true(#b.search_matches > 0, "incsearch should narrow matches for 'Vim'")
+        assert_true(#b.search_matches <= matches_v, "narrowed matches count should be <= prefix match count")
+
+        -- Test backspace in incsearch
+        b:handle_key("BACKSPACE")
+        assert_eq(b.input_buf, "Vi")
+
+        -- Test live search with no matches and ESC restoration
+        b:handle_key("z")
+        b:handle_key("x")
+        b:handle_key("q")
+        assert_eq(#b.search_matches, 0, "should find 0 matches for non-existent term")
+
+        -- Cancel search with ESC restores scroll
+        b:handle_key("ESC")
+        assert_eq(b.mode, "NORMAL", "ESC should return to NORMAL mode")
+        assert_eq(b.scroll_y, 1, "ESC should restore pre-search scroll position")
+
+        -- Confirm search with ENTER
+        b:handle_key("/")
         for char in string.gmatch("Vim", ".") do
             b:handle_key(char)
         end
         b:handle_key("ENTER")
         assert_eq(b.mode, "NORMAL", "Enter should return to NORMAL mode")
+        assert_eq(b.search_query, "Vim")
         assert_true(#b.search_matches > 0, "should find matches for 'Vim'")
 
         local first_match = b.scroll_y
@@ -379,6 +407,7 @@ TestRunner.describe("4. Browser State Machine & Vim Navigation", function()
 
         b:handle_key("ESC")
         assert_eq(b.search_query, "", "ESC should clear search")
+        assert_eq(#b.search_matches, 0, "search matches should be empty after clear")
     end)
 
     TestRunner.it("should handle Omnibox URL input (o)", function()
