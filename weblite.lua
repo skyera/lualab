@@ -616,6 +616,24 @@ M.smart_resolve_input  = smart_resolve_input
 -- =========================================================================
 -- 5. Network & HTTP/HTTPS Fetcher
 -- =========================================================================
+local function is_cloudflare_challenge(headers, body)
+    headers = headers or ""
+    body = body or ""
+    return headers:lower():find("cf%-mitigated:%s*challenge", 1, false) ~= nil
+        or body:lower():find("<title>%s*just a moment%.%.%.", 1, false) ~= nil
+        or body:lower():find("challenges%.cloudflare%.com", 1, false) ~= nil
+end
+
+local function get_http_status(headers)
+    local status
+    for code in headers:gmatch("[\r\n]HTTP/%d+%.?%d*%s+(%d%d%d)") do
+        status = tonumber(code)
+    end
+    return status or tonumber(headers:match("^HTTP/%d+%.?%d*%s+(%d%d%d)") or "") or 200
+end
+
+M.is_cloudflare_challenge = is_cloudflare_challenge
+
 local function fetch_url(url, insecure)
     if url == "about:home" or url == "about:blank" then
         return M.get_home_page_html(), 200, "text/html"
@@ -671,9 +689,24 @@ local function fetch_url(url, insecure)
     os.remove(header_file)
     local content_type = headers:match("[Cc]ontent%-[Tt]ype:%s*([^;\r\n]+)") or "text/html"
     local final_url = headers:match("[Ll]ocation:%s*([^\r\n]+)") or url
+    local http_status = get_http_status(headers)
     if M.debug then
-        io.stderr:write(string.format("[weblite] %s -> %s (%s)%s\n", url, final_url, content_type, insecure and " [insecure]" or ""))
+        io.stderr:write(string.format("[weblite] %s -> %s (%d, %s)%s\n", url, final_url, http_status, content_type, insecure and " [insecure]" or ""))
         if error_text ~= "" then io.stderr:write("[weblite] curl: " .. error_text) end
+    end
+
+    if is_cloudflare_challenge(headers, body) then
+        local challenge_html = string.format([[
+<!DOCTYPE html><html><head><title>Cloudflare verification required</title></head><body>
+<h1>Cloudflare verification required</h1>
+<p>Stack Overflow or this website returned a browser-verification challenge (HTTP %d).</p>
+<p>weblite uses curl and cannot execute the JavaScript challenge.</p>
+<p><b>--insecure will not bypass this protection.</b></p>
+<p>Press <b>gx</b> or use the URL below in a normal browser to complete verification:</p>
+<p><a href="%s">%s</a></p>
+<p>For Stack Overflow questions, try the Stack Exchange API or open the page in a normal browser.</p>
+</body></html>]], http_status, url, url)
+        return challenge_html, http_status, "text/html", false, final_url
     end
 
     -- Auto-solve Reddit client challenge if encountered
@@ -707,7 +740,7 @@ local function fetch_url(url, insecure)
         return string.format("<html><body><h1>Connection Failed</h1><p>Could not connect to: %s</p>%s<p>Please check your internet connection or URL.</p></body></html>", url, detail), 502, "text/html"
     end
 
-    return body, 200, content_type, false, final_url
+    return body, http_status, content_type, false, final_url
 end
 
 M.fetch_url = fetch_url
@@ -1666,8 +1699,9 @@ function Browser:load_url(target_url, from_history)
     local security_status = (self.insecure or used_fallback) and " [INSECURE TLS]" or ""
     local type_label = M.get_content_type(content_type)
     local type_suffix = type_label ~= "text/html" and " [" .. type_label .. "]" or ""
-    self.status_msg = string.format("Loaded (%d lines, %d links)%s%s",
-        #self.doc.lines, #self.doc.links, type_suffix, security_status)
+    local status_suffix = status_code and status_code >= 400 and string.format(" [HTTP %d]", status_code) or ""
+    self.status_msg = string.format("Loaded (%d lines, %d links)%s%s%s",
+        #self.doc.lines, #self.doc.links, type_suffix, security_status, status_suffix)
     self.needs_render = true
 
     M.add_history_entry(target_url, self.doc and self.doc.title or target_url)

@@ -115,6 +115,22 @@ TestRunner.describe("2b. Response Metadata & Link Tools", function()
         assert_eq(web.get_content_type(" application/json "), "application/json")
     end)
 
+    TestRunner.it("should detect Cloudflare browser challenges", function()
+        local headers = "HTTP/2 403\r\ncf-mitigated: challenge\r\ncontent-type: text/html\r\n"
+        local body = "<html><title>Just a moment...</title></html>"
+        assert_true(web.is_cloudflare_challenge(headers, body), "Cloudflare challenge must be detected")
+        assert_true(not web.is_cloudflare_challenge("HTTP/2 200\r\n", "<title>Normal page</title>"), "normal HTML must not be flagged")
+    end)
+
+    TestRunner.it("should render a useful Cloudflare challenge page", function()
+        local b = web.Browser.new("about:home")
+        b.raw_html = "<html><title>Cloudflare verification required</title><body><h1>Cloudflare verification required</h1><p>weblite uses curl and cannot execute the JavaScript challenge.</p><p>--insecure will not bypass this protection.</p></body></html>"
+        b.doc = web.render_html_to_document(b.raw_html, "https://stackoverflow.com", 80)
+        assert_true(b.doc.title:find("Cloudflare"), "challenge page should have a clear title")
+        local text = table.concat(b.doc.lines, "\n")
+        assert_true(text:find("JavaScript challenge"), "challenge page should explain the limitation")
+    end)
+
     TestRunner.it("should build a navigable links page", function()
         local b = web.Browser.new("about:home")
         b.doc = web.render_html_to_document("<h1>Test</h1><a href='https://example.com'>Example</a>", "about:home", 80)
