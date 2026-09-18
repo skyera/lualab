@@ -1101,11 +1101,15 @@ local function download_image(url, path, referer, insecure)
     local suffix = image_cache_key(url)
     local error_file = tmp_dir:gsub("\\", "/") .. "/weblite_image_error_" .. suffix .. ".txt"
     local curl_cmd = is_windows and "curl.exe" or "curl"
-    local user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) weblite/1.0"
+    local user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
     local insecure_opt = insecure and " -k" or ""
-    local referer_opt = referer and referer ~= "" and string.format(" -e %s", shell_quote(referer)) or ""
+    local ref = referer
+    if (not ref or ref == "") and url:find("redd%.it") then
+        ref = "https://www.reddit.com/"
+    end
+    local referer_opt = ref and ref ~= "" and string.format(" -e %s", shell_quote(ref)) or ""
     local command = string.format(
-        "%s -sSL%s --connect-timeout 10 --max-time 20 -A %s -H %s%s -o %s -w '%%{http_code}' %s 2>%s",
+        "%s -sSL%s --connect-timeout 10 --max-time 20 -A %s -H %s%s -o %s -w %%{http_code} %s 2>%s",
         curl_cmd, insecure_opt, shell_quote(user_agent),
         shell_quote("Accept: image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"),
         referer_opt, shell_quote(path), shell_quote(url), shell_quote(error_file))
@@ -1115,7 +1119,7 @@ local function download_image(url, path, referer, insecure)
     end
     local status_text = pipe:read("*a") or ""
     local close_ok, close_reason, close_code = pipe:close()
-    local status = tonumber(status_text:match("(%d%d%d)$"))
+    local status = tonumber(status_text:match("(%d%d%d)"))
     local failed = close_ok ~= true or (close_reason == "exit" and close_code ~= 0)
     if failed or not status or status >= 400 then
         os.remove(path)
