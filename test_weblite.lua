@@ -267,6 +267,29 @@ TestRunner.describe("3. Document Reflow, Formatting & Tables", function()
         assert_eq(doc.links[3].href, "https://news.ycombinator.com/item?id=101")
         assert_eq(doc.links[4].text, "Second Story Title")
     end)
+
+    TestRunner.it("should format HTML5 details, summary, and definition lists", function()
+        local html = [[
+            <main>
+                <details>
+                    <summary>Advanced Configuration</summary>
+                    <p>Options details here.</p>
+                </details>
+                <dl>
+                    <dt>CPU</dt>
+                    <dd>Central Processing Unit</dd>
+                    <dt>RAM</dt>
+                    <dd>Random Access Memory</dd>
+                </dl>
+            </main>
+        ]]
+        local doc = web.render_html_to_document(html, "https://example.com", 80)
+        local text = table.concat(doc.lines, "\n")
+        assert_true(text:find("▶ Advanced Configuration"), "summary must render with disclosure symbol")
+        assert_true(text:find("Options details here"), "details content must be preserved")
+        assert_true(text:find("• CPU:"), "dt must render with bullet and colon")
+        assert_true(text:find("Central Processing Unit"), "dd text must be rendered")
+    end)
 end)
 
 -- 4. Browser State Machine & Vim Navigation

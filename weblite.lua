@@ -1809,9 +1809,9 @@ function M.render_html_to_document(html_text, base_url, max_width, reader_mode)
         local is_closing = (slash == "/")
 
         if is_closing then
-            if lower_tag == "p" or lower_tag == "div" or lower_tag == "li" or lower_tag == "ul" or lower_tag == "ol" or lower_tag == "table" or lower_tag == "blockquote" or lower_tag:match("^h[1-6]$") or lower_tag == "pre" or lower_tag == "section" or lower_tag == "article" or lower_tag == "tr" then
+            if lower_tag == "p" or lower_tag == "div" or lower_tag == "li" or lower_tag == "ul" or lower_tag == "ol" or lower_tag == "table" or lower_tag == "blockquote" or lower_tag:match("^h[1-6]$") or lower_tag == "pre" or lower_tag == "section" or lower_tag == "article" or lower_tag == "tr" or lower_tag == "main" or lower_tag == "details" or lower_tag == "dl" or lower_tag == "dt" or lower_tag == "dd" or lower_tag == "figure" or lower_tag == "figcaption" or lower_tag == "header" or lower_tag == "footer" or lower_tag == "aside" then
                 flush_inline()
-                if lower_tag == "p" or lower_tag == "div" or lower_tag == "ul" or lower_tag == "ol" or lower_tag == "table" or lower_tag == "blockquote" then
+                if lower_tag == "p" or lower_tag == "div" or lower_tag == "ul" or lower_tag == "ol" or lower_tag == "table" or lower_tag == "blockquote" or lower_tag == "main" or lower_tag == "details" or lower_tag == "dl" or lower_tag == "figure" then
                     add_blank_line()
                 end
             elseif lower_tag == "td" or lower_tag == "th" then
@@ -1965,9 +1965,55 @@ function M.render_html_to_document(html_text, base_url, max_width, reader_mode)
                 })
             end
             pos = tag_end + 1
-        elseif lower_tag == "p" or lower_tag == "div" or lower_tag == "br" then
+        elseif lower_tag == "summary" then
             flush_inline()
-            if lower_tag == "p" or lower_tag == "div" then add_blank_line() end
+            local close_start, close_end = body:find("</%s*[sS][uU][mM][mM][aA][rR][yY]%s*>", tag_end + 1)
+            local s_text = ""
+            if close_start then
+                s_text = body:sub(tag_end + 1, close_start - 1)
+                pos = close_end + 1
+            else
+                pos = tag_end + 1
+            end
+            s_text = decode_entities(s_text:gsub("<[^>]+>", " "):gsub("%s+", " "):match("^%s*(.-)%s*$") or "")
+            if #s_text > 0 then
+                add_blank_line()
+                add_line("▶ " .. s_text)
+                add_blank_line()
+            end
+        elseif lower_tag == "dt" then
+            flush_inline()
+            local close_start, close_end = body:find("</%s*[dD][tT]%s*>", tag_end + 1)
+            local dt_text = ""
+            if close_start then
+                dt_text = body:sub(tag_end + 1, close_start - 1)
+                pos = close_end + 1
+            else
+                pos = tag_end + 1
+            end
+            dt_text = decode_entities(dt_text:gsub("<[^>]+>", " "):gsub("%s+", " "):match("^%s*(.-)%s*$") or "")
+            if #dt_text > 0 then
+                add_line("• " .. dt_text .. ":")
+            end
+        elseif lower_tag == "dd" then
+            flush_inline()
+            local close_start, close_end = body:find("</%s*[dD][dD]%s*>", tag_end + 1)
+            local dd_text = ""
+            if close_start then
+                dd_text = body:sub(tag_end + 1, close_start - 1)
+                pos = close_end + 1
+            else
+                pos = tag_end + 1
+            end
+            dd_text = decode_entities(dd_text:gsub("<[^>]+>", " "):gsub("%s+", " "):match("^%s*(.-)%s*$") or "")
+            if #dd_text > 0 then
+                for _, wl in ipairs(word_wrap(dd_text, max_width, "    ", "    ")) do
+                    add_line(wl)
+                end
+            end
+        elseif lower_tag == "p" or lower_tag == "div" or lower_tag == "br" or lower_tag == "main" or lower_tag == "section" or lower_tag == "article" or lower_tag == "figure" or lower_tag == "details" then
+            flush_inline()
+            if lower_tag ~= "br" then add_blank_line() end
             pos = tag_end + 1
         else
             pos = tag_end + 1
