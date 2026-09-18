@@ -136,6 +136,14 @@ TestRunner.describe("2b. Response Metadata & Link Tools", function()
         assert_true(not web.is_reddit_block("HTTP/2 200\r\n", "<title>Reddit</title>", "https://www.reddit.com"), "normal Reddit HTML must not be flagged")
     end)
 
+    TestRunner.it("should parse JSON strings with escapes and unicode", function()
+        local json = [[{"title":"How to use \"quotes\" & \u2605 star","body":"<p>Paragraph</p>"}]]
+        local title = web.parse_json_value_after(json, "title")
+        local body = web.parse_json_value_after(json, "body")
+        assert_eq(title, "How to use \"quotes\" & ★ star")
+        assert_eq(body, "<p>Paragraph</p>")
+    end)
+
     TestRunner.it("should render a useful Cloudflare challenge page", function()
         local b = web.Browser.new("about:home")
         b.raw_html = "<html><title>Cloudflare verification required</title><body><h1>Cloudflare verification required</h1><p>weblite uses curl and cannot execute the JavaScript challenge.</p><p>--insecure will not bypass this protection.</p></body></html>"

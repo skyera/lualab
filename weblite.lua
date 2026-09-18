@@ -650,8 +650,127 @@ local function get_http_status(headers)
     return status or tonumber(headers:match("^HTTP/%d+%.?%d*%s+(%d%d%d)") or "") or 200
 end
 
+local function parse_json_value_after(json, key, start_pos)
+    if not json then return nil end
+    local pat = "\"" .. key .. "\"%s*:%s*\""
+    local _, s_val_start = json:find(pat, start_pos or 1)
+    if not s_val_start then return nil end
+    local i = s_val_start + 1
+    local len = #json
+    local buf = {}
+    while i <= len do
+        local b = string.byte(json, i)
+        if b == 92 then -- backslash escape
+            local next_c = json:sub(i + 1, i + 1)
+            if next_c == "\"" then table.insert(buf, "\"")
+            elseif next_c == "n" then table.insert(buf, "\n")
+            elseif next_c == "r" then table.insert(buf, "\r")
+            elseif next_c == "t" then table.insert(buf, "\t")
+            elseif next_c == "/" then table.insert(buf, "/")
+            elseif next_c == "\\" then table.insert(buf, "\\")
+            elseif next_c == "u" then
+                local hex = json:sub(i + 2, i + 5)
+                local code = tonumber(hex, 16)
+                if code then
+                    if code < 128 then table.insert(buf, string.char(code))
+                    elseif code < 2048 then
+                        table.insert(buf, string.char(bit.bor(0xC0, bit.rshift(code, 6)), bit.bor(0x80, bit.band(code, 0x3F))))
+                    else
+                        table.insert(buf, string.char(bit.bor(0xE0, bit.rshift(code, 12)), bit.bor(0x80, bit.band(bit.rshift(code, 6), 0x3F)), bit.bor(0x80, bit.band(code, 0x3F))))
+                    end
+                end
+                i = i + 4
+            else
+                table.insert(buf, next_c)
+            end
+            i = i + 2
+        elseif b == 34 then -- quote closes string
+            break
+        else
+            table.insert(buf, string.char(b))
+            i = i + 1
+        end
+    end
+    return table.concat(buf), i
+end
+
+local function fetch_stackexchange_question(url)
+    if not url then return nil end
+    local site = "stackoverflow"
+    local q_id = url:match("stackoverflow%.com/questions/(%d+)")
+    if not q_id then
+        site = "askubuntu"
+        q_id = url:match("askubuntu%.com/questions/(%d+)")
+    end
+    if not q_id then
+        site = "superuser"
+        q_id = url:match("superuser%.com/questions/(%d+)")
+    end
+    if not q_id then
+        site = "serverfault"
+        q_id = url:match("serverfault%.com/questions/(%d+)")
+    end
+    if not q_id then
+        local sub, id = url:match("([%w%-]+)%.stackexchange%.com/questions/(%d+)")
+        if sub and id then site = sub; q_id = id end
+    end
+    if not q_id then return nil end
+
+    local curl_cmd = is_windows and "curl.exe" or "curl"
+    local q_api = string.format("https://api.stackexchange.com/2.3/questions/%s?order=desc&sort=votes&site=%s&filter=withbody", q_id, site)
+    local a_api = string.format("https://api.stackexchange.com/2.3/questions/%s/answers?order=desc&sort=votes&site=%s&filter=withbody&pagesize=10", q_id, site)
+
+    local pq = io.popen(string.format("%s -sSL --compressed --max-time 10 %s", curl_cmd, shell_quote(q_api)), "r")
+    if not pq then return nil end
+    local jq = pq:read("*a")
+    pq:close()
+    if not jq or #jq == 0 then return nil end
+
+    local q_title = parse_json_value_after(jq, "title")
+    local q_body = parse_json_value_after(jq, "body")
+    if not q_title or not q_body then return nil end
+    local q_score = jq:match("\"score\":%s*(%-?%d+)") or "0"
+    local q_author = parse_json_value_after(jq, "display_name") or "Anonymous"
+
+    local pa = io.popen(string.format("%s -sSL --compressed --max-time 10 %s", curl_cmd, shell_quote(a_api)), "r")
+    local ja = pa and pa:read("*a") or ""
+    if pa then pa:close() end
+
+    local buf = {}
+    table.insert(buf, "<!DOCTYPE html><html><head><title>" .. q_title:gsub("<", "&lt;"):gsub(">", "&gt;") .. " - Stack Overflow</title></head><body>")
+    table.insert(buf, "<h1>" .. q_title:gsub("<", "&lt;"):gsub(">", "&gt;") .. "</h1>")
+    table.insert(buf, string.format("<p><b>Asked by %s</b> | <b>Score: +%s</b> | <i>(Retrieved via Stack Exchange API)</i></p><hr>", q_author:gsub("<", "&lt;"):gsub(">", "&gt;"), q_score))
+    table.insert(buf, q_body)
+    table.insert(buf, "<hr><h2>Answers</h2>")
+
+    if ja and #ja > 0 then
+        local pos = 1
+        local ans_count = 0
+        while pos <= #ja do
+            local a_body, next_pos = parse_json_value_after(ja, "body", pos)
+            if not a_body then break end
+            local a_chunk = ja:sub(pos, next_pos or #ja)
+            local a_score = a_chunk:match("\"score\":%s*(%-?%d+)") or "0"
+            local is_accepted = a_chunk:find("\"is_accepted\":%s*true") ~= nil
+            local a_author = parse_json_value_after(a_chunk, "display_name") or "User"
+            ans_count = ans_count + 1
+            local accepted_badge = is_accepted and " <b>[✔ ACCEPTED]</b>" or ""
+            table.insert(buf, string.format("<hr><h3>Answer %d (Score: +%s by %s)%s</h3>", ans_count, a_score, a_author:gsub("<", "&lt;"):gsub(">", "&gt;"), accepted_badge))
+            table.insert(buf, a_body)
+            pos = next_pos + 1
+        end
+        if ans_count == 0 then
+            table.insert(buf, "<p><i>No answers recorded.</i></p>")
+        end
+    end
+    table.insert(buf, "<hr><p><a href=\"about:home\">Home</a> | <a href=\"" .. url .. "\">Open Original URL (gx)</a></p></body></html>")
+    return table.concat(buf, "\n")
+end
+
 M.is_cloudflare_challenge = is_cloudflare_challenge
 M.is_reddit_block = is_reddit_block
+M.parse_json_value_after = parse_json_value_after
+M.fetch_stackexchange_question = fetch_stackexchange_question
 
 local function fetch_url(url, insecure)
     if url == "about:home" or url == "about:blank" then
@@ -723,6 +842,10 @@ local function fetch_url(url, insecure)
     end
 
     if is_cloudflare_challenge(headers, body) then
+        local so_html = fetch_stackexchange_question(url)
+        if so_html then
+            return so_html, 200, "text/html", false, final_url
+        end
         local challenge_html = string.format([[
 <!DOCTYPE html><html><head><title>Cloudflare verification required</title></head><body>
 <h1>Cloudflare verification required</h1>
