@@ -290,6 +290,33 @@ TestRunner.describe("3. Document Reflow, Formatting & Tables", function()
         assert_true(text:find("• CPU:"), "dt must render with bullet and colon")
         assert_true(text:find("Central Processing Unit"), "dd text must be rendered")
     end)
+
+    TestRunner.it("should extract article text from SPA JSON-LD and hydration data", function()
+        local spa_html = [[
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <script type="application/ld+json">
+                {
+                  "@type": "NewsArticle",
+                  "headline": "Breakthrough in Quantum Computing",
+                  "description": "Researchers announce a new fault-tolerant architecture.",
+                  "articleBody": "Scientists announced a 1000-qubit processor with low error rates."
+                }
+                </script>
+            </head>
+            <body>
+                <div id="root"></div>
+                <noscript>You need to enable JavaScript to run this app.</noscript>
+            </body>
+            </html>
+        ]]
+        local doc = web.render_html_to_document(spa_html, "https://example.com/spa", 80)
+        local text = table.concat(doc.lines, "\n")
+        assert_true(text:find("Breakthrough in Quantum Computing"), "headline must be extracted from JSON-LD")
+        assert_true(text:find("Researchers announce a new fault%-tolerant architecture"), "description must be rendered")
+        assert_true(text:find("1000%-qubit processor"), "articleBody must be rendered")
+    end)
 end)
 
 -- 4. Browser State Machine & Vim Navigation

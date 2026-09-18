@@ -1666,6 +1666,65 @@ end
 M.word_wrap         = word_wrap
 M.format_html_table = format_html_table
 
+local function extract_spa_hydration_content(raw_html, max_width)
+    if not raw_html or #raw_html == 0 then return nil end
+    local title, desc, body_text
+
+    for ld_json in raw_html:gmatch("<[sS][cC][rR][iI][pP][tT][^>]*type=['\"]application/ld%+json['\"][^>]*>(.-)</[sS][cC][rR][iI][pP][tT]>") do
+        title = title or parse_json_value_after(ld_json, "headline") or parse_json_value_after(ld_json, "name")
+        desc = desc or parse_json_value_after(ld_json, "description")
+        body_text = body_text or parse_json_value_after(ld_json, "articleBody") or parse_json_value_after(ld_json, "text")
+        if body_text and #body_text > 50 then break end
+    end
+
+    if not body_text then
+        local next_data = raw_html:match("<[sS][cC][rR][iI][pP][tT][^>]*id=['\"]__NEXT_DATA__['\"][^>]*>(.-)</[sS][cC][rR][iI][pP][tT]>")
+        if next_data then
+            title = title or parse_json_value_after(next_data, "title") or parse_json_value_after(next_data, "headline")
+            desc = desc or parse_json_value_after(next_data, "description")
+            body_text = parse_json_value_after(next_data, "articleBody") or parse_json_value_after(next_data, "content") or parse_json_value_after(next_data, "body") or parse_json_value_after(next_data, "text")
+        end
+    end
+
+    if not body_text or #body_text < 30 then
+        local og_desc = raw_html:match("<meta[^>]*property=['\"]og:description['\"][^>]*content=['\"](.-)['\"]")
+            or raw_html:match("<meta[^>]*content=['\"](.-)['\"][^>]*property=['\"]og:description['\"]")
+            or raw_html:match("<meta[^>]*name=['\"]description['\"][^>]*content=['\"](.-)['\"]")
+        if og_desc and #og_desc > 30 then
+            desc = desc or decode_entities(og_desc)
+        end
+    end
+
+    if not body_text and not desc then return nil end
+
+    local lines = {}
+    if title and #title > 0 then
+        table.insert(lines, title)
+        table.insert(lines, string.rep("═", math.min(visual_len(title), max_width)))
+        table.insert(lines, "")
+    end
+    if desc and #desc > 0 then
+        for _, wl in ipairs(word_wrap(desc, max_width, "  │ ", "  │ ")) do
+            table.insert(lines, wl)
+        end
+        table.insert(lines, "")
+    end
+    if body_text and #body_text > 0 then
+        for para in (body_text .. "\n"):gmatch("(.-)\r?\n") do
+            para = para:match("^%s*(.-)%s*$")
+            if #para > 0 then
+                for _, wl in ipairs(word_wrap(para, max_width)) do
+                    table.insert(lines, wl)
+                end
+                table.insert(lines, "")
+            end
+        end
+    end
+    return lines
+end
+
+M.extract_spa_hydration_content = extract_spa_hydration_content
+
 function M.render_html_to_document(html_text, base_url, max_width, reader_mode)
     max_width = max_width or 80
     if max_width < 40 then max_width = 40 end
@@ -2026,8 +2085,20 @@ function M.render_html_to_document(html_text, base_url, max_width, reader_mode)
         table.remove(current_lines)
     end
 
-    if #current_lines == 0 then
-        table.insert(current_lines, "(Empty page or non-HTML content)")
+    local is_empty_or_js_warning = (#current_lines == 0)
+    if #current_lines == 1 then
+        local single = current_lines[1]:lower()
+        if single:find("enable javascript") or single:find("requires javascript") then
+            is_empty_or_js_warning = true
+        end
+    end
+    if is_empty_or_js_warning then
+        local spa_lines = extract_spa_hydration_content(html_text, max_width)
+        if spa_lines and #spa_lines > 0 then
+            current_lines = spa_lines
+        elseif #current_lines == 0 then
+            table.insert(current_lines, "(Empty page or non-HTML content)")
+        end
     end
 
     -- Accurately associate line_idx for all links by scanning rendered lines
