@@ -793,6 +793,92 @@ local function open_in_external_browser(url)
     end
 end
 
+local function image_cache_dir()
+    local dir = (os.getenv("TEMP") or os.getenv("TMP") or "/tmp"):gsub("\\", "/") .. "/weblite_images"
+    if is_windows then
+        os.execute(string.format('if not exist "%s" mkdir "%s" >NUL 2>NUL', dir, dir))
+    else
+        os.execute(string.format('mkdir -p "%s" 2>/dev/null', dir))
+    end
+    return dir
+end
+
+local function image_cache_key(url)
+    local hash = 5381
+    for i = 1, #url do
+        hash = (hash * 33 + string.byte(url, i)) % 2147483647
+    end
+    return string.format("%08x", hash)
+end
+
+local function find_image_renderer()
+    local candidates = is_windows and {
+        { name = "chafa", command = "where chafa >NUL 2>NUL" },
+        { name = "viu", command = "where viu >NUL 2>NUL" },
+    } or {
+        { name = "chafa", command = "command -v chafa >/dev/null 2>&1" },
+        { name = "viu", command = "command -v viu >/dev/null 2>&1" },
+    }
+    for _, candidate in ipairs(candidates) do
+        local p = io.popen(candidate.command, "r")
+        if p then
+            local ok = p:close()
+            if ok then return candidate.name end
+        end
+    end
+    return nil
+end
+
+local function shell_quote(value)
+    if is_windows then
+        return '"' .. value:gsub('"', '""') .. '"'
+    end
+    return "'" .. value:gsub("'", "'\\''") .. "'"
+end
+
+local function show_image_preview(url, max_width, max_height)
+    if not url or url == "" or url:match("^data:") then
+        return false, "Image has no previewable URL."
+    end
+    local renderer = find_image_renderer()
+    if not renderer then
+        return false, "Install chafa or viu to preview images; use gx to open externally."
+    end
+    local ext = url:match("%.([%w]+)%?") or url:match("%.([%w]+)$") or "img"
+    local path = image_cache_dir() .. (is_windows and "\\" or "/") .. image_cache_key(url) .. "." .. ext:lower()
+    local file = io.open(path, "rb")
+    if file then
+        file:close()
+    else
+        local null_out = is_windows and " >NUL 2>NUL" or " >/dev/null 2>&1"
+        local cmd = string.format("curl -sSL --max-time 20 -o %s %s%s", shell_quote(path), shell_quote(url), null_out)
+        local result = os.execute(cmd)
+        if result ~= true and result ~= 0 then
+            os.remove(path)
+            return false, "Could not download image."
+        end
+    end
+    local size = string.format("%dx%d", math.max(20, max_width - 4), math.max(8, max_height - 8))
+    local render_cmd = renderer == "chafa"
+        and string.format("chafa --format symbols --colors 256 --size %s %s", size, shell_quote(path))
+        or string.format("viu -w %d %s", math.max(20, max_width - 4), shell_quote(path))
+    local pipe = io.popen(render_cmd, "r")
+    if not pipe then return false, "Failed to start image renderer." end
+    local output = pipe:read("*a")
+    local ok = pipe:close()
+    if not ok or not output or #output == 0 then
+        return false, "Image renderer returned no output."
+    end
+    io.write("\27[2J\27[H\27[1;36mImage Preview\27[0m\n\27[90m" .. url .. "\27[0m\n\n")
+    io.write(output .. "\n\27[90mPress any key to return\27[0m")
+    io.flush()
+    read_key()
+    return true
+end
+
+M.find_image_renderer = find_image_renderer
+M.show_image_preview = show_image_preview
+
 local function get_bookmarks_file_path()
     local home = os.getenv("USERPROFILE") or os.getenv("HOME") or os.getenv("TEMP") or "."
     return home:gsub("\\", "/") .. "/.weblite_bookmarks.txt"
@@ -1029,6 +1115,7 @@ function M.get_home_page_html()
   <tr><td><b>yl / yf</b></td><td>Yank Link</td><td>Copy focused link URL (yl) or hint link (yf) to clipboard</td></tr>
   <tr><td><b>yy</b></td><td>Yank Page URL</td><td>Copy current website address to system clipboard</td></tr>
   <tr><td><b>gx</b></td><td>GUI Browser</td><td>Open current page, focused link, or image in system browser</td></tr>
+  <tr><td><b>gi / :images</b></td><td>Image Preview</td><td>Render the focused image with chafa or viu</td></tr>
   <tr><td><b>gr / :reader</b></td><td>Reader Mode</td><td>Toggle distraction-free article reader view</td></tr>
   <tr><td><b>m / :mark</b></td><td>Bookmark Page</td><td>Save current page to ~/.weblite_bookmarks.txt</td></tr>
   <tr><td><b>gb / :b</b></td><td>Bookmarks Page</td><td>Open your saved bookmarks list (about:bookmarks)</td></tr>
@@ -1083,6 +1170,7 @@ function M.get_help_page_html()
   <li><b>yl</b>: Copy (yank) the currently focused hyperlink URL to system clipboard</li>
   <li><b>yf</b>: Yank Hint mode: overlay badges on links, press letter to copy that link URL to clipboard</li>
   <li><b>gx</b>: Open the focused hyperlink (or image) in your system GUI browser / image viewer</li>
+  <li><b>gi</b> or <b>:images</b>: Preview the focused image with chafa or viu; images remain available via gx</li>
   <li><b>[IMG: alt]</b>: Images on page are preserved as interactive links with [IMG: alt] badges</li>
 </ul>
 <h2>3. Reader Mode & Document Outline</h2>
@@ -2132,6 +2220,15 @@ function Browser:handle_key(k)
                 self:history_forward()
             elseif cmd == "stop" then
                 self.status_msg = "No active request."
+            elseif cmd == "images" or cmd == "image" then
+                local target = self.doc and self.doc.links and self.doc.links[self.selected_link_idx]
+                if target and target.is_image then
+                    local term_w, term_h = get_terminal_size()
+                    local ok, err = show_image_preview(target.href, term_w, term_h)
+                    self.status_msg = ok and "Image preview closed." or err
+                else
+                    self.status_msg = "Focus an image link first."
+                end
             elseif cmd == "toc" then
                 self:show_toc()
             elseif cmd == "reader" or cmd == "rdr" then
@@ -2308,6 +2405,16 @@ function Browser:handle_key(k)
             return
         elseif k == "l" or k == "L" then
             self:show_links()
+            return
+        elseif k == "i" then
+            local target = self.doc and self.doc.links and self.doc.links[self.selected_link_idx]
+            if target and target.is_image then
+                local term_w, term_h = get_terminal_size()
+                local ok, err = show_image_preview(target.href, term_w, term_h)
+                self.status_msg = ok and "Image preview closed." or err
+            else
+                self.status_msg = "Focus an image link first."
+            end
             return
         elseif k == "]" then
             self:jump_heading_next()

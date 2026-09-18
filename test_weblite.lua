@@ -147,6 +147,14 @@ TestRunner.describe("2b. Response Metadata & Link Tools", function()
         assert_true(b.doc and #b.doc.links > 0, "links page should contain links")
         assert_true(b.raw_html:find("https://example.com"), "links page should include target URLs")
     end)
+
+    TestRunner.it("should expose image preview support without loading images automatically", function()
+        local doc = web.render_html_to_document("<img src='https://example.com/test.png' alt='Test image'>", "https://example.com", 80)
+        assert_true(#doc.links == 1, "image should remain an interactive link")
+        assert_true(doc.links[1].is_image, "image link should be marked as an image")
+        local renderer = web.find_image_renderer()
+        assert_true(renderer == nil or renderer == "chafa" or renderer == "viu", "renderer detection must be safe")
+    end)
 end)
 
 -- 3. Document Reflow, Formatting & Tables
