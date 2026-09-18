@@ -1795,11 +1795,12 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
     local last_rendered_pos = -1
     local last_rendered_sub = ""
     local last_rendered_pause = nil
+    local max_list_h = 10
 
     local function draw_tui()
         local term_w, term_h = get_terminal_size()
         local player_h = (MpvController.is_playing and MpvController.current_item) and 3 or 0
-        local max_list_h = math.max(4, term_h - 7 - player_h)
+        max_list_h = math.max(4, term_h - 7 - player_h)
 
         -- Clamp selection
         if #items > 0 then

@@ -157,4 +157,29 @@ if is_win then
 end
 print("  [✓] Test 11 passed: Mini-Player, Playback Queue, Offline Download, and Search Filters verified.")
 
+-- Test 12: Bytecode Scoping & Global Integrity Check (ensures max_list_h and other locals are not global)
+local p_bc = io.popen(luajit .. " -bl yt.lua", "r")
+assert(p_bc, "Failed to run luajit -bl yt.lua")
+local std_globals = {
+    require=true, io=true, os=true, pcall=true, xpcall=true, string=true, math=true, table=true,
+    print=true, ipairs=true, pairs=true, tonumber=true, tostring=true, type=true, assert=true,
+    error=true, setmetatable=true, getmetatable=true, select=true, next=true, rawget=true,
+    rawset=true, loadstring=true, bit=true, ffi=true, jit=true, arg=true, _G=true
+}
+local bad_globals = {}
+for line in p_bc:lines() do
+    local g = line:match('GGET%s+%d+%s+%d+%s+;%s+"([^"]+)"')
+    if g and not std_globals[g] then
+        bad_globals[g] = (bad_globals[g] or 0) + 1
+    end
+end
+p_bc:close()
+assert(next(bad_globals) == nil, "Undefined global accesses detected in yt.lua: " .. table.concat((function()
+    local t = {}
+    for k, v in pairs(bad_globals) do table.insert(t, string.format("%s (%d)", k, v)) end
+    return t
+end)(), ", "))
+print("  [✓] Test 12 passed: Bytecode scoping verified (0 undeclared globals in yt.lua).")
+
 print("=== All Backend Verification Tests Completed Successfully ===")
+
