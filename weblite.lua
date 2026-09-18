@@ -963,6 +963,11 @@ local function reddit_original_image_url(url)
     if not url then return nil end
     local path = url:match("^https://preview%.redd%.it/([^?]+)")
     if not path then return nil end
+    -- If path has slug like "post-title-v0-x8ftn8rtp7qh1.jpeg", strip slug to "x8ftn8rtp7qh1.jpeg"
+    local slug_id, slug_ext = path:match("%-v0%-([%w]+)%.([%w]+)$")
+    if slug_id and slug_ext then
+        return "https://i.redd.it/" .. slug_id .. "." .. slug_ext
+    end
     return "https://i.redd.it/" .. path
 end
 

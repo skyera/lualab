@@ -979,6 +979,16 @@ TestRunner.describe("13. Image Link Extraction & Media Inspection", function()
         local fmt = web.detect_graphics_format()
         assert_true(fmt == "kitty" or fmt == "sixels" or fmt == "iterm" or fmt == "symbols", "graphics format must be a valid protocol")
     end)
+
+    TestRunner.it("should strip SEO slugs from preview.redd.it URLs to full-res i.redd.it images", function()
+        local slug_url = "https://preview.redd.it/victoria-justice-v0-x8ftn8rtp7qh1.jpeg?width=640&crop=smart&auto=webp&s=2025c4aa40cb77af0bfdde9a9e58cc159a2ea8d4"
+        local orig = web.reddit_original_image_url(slug_url)
+        assert_eq(orig, "https://i.redd.it/x8ftn8rtp7qh1.jpeg", "must strip slug prefix and query string")
+
+        local direct_url = "https://preview.redd.it/x8ftn8rtp7qh1.jpeg?blur=40&format=pjpg"
+        local orig2 = web.reddit_original_image_url(direct_url)
+        assert_eq(orig2, "https://i.redd.it/x8ftn8rtp7qh1.jpeg", "must resolve direct path without slug")
+    end)
 end)
 
 -- 14. Persistent Browsing History (about:history, :history, gH)
