@@ -1844,6 +1844,31 @@ function Browser:reflow(new_w)
     self.needs_render = true
 end
 
+function Browser:preview_image(url, term_w, term_h)
+    local state = {
+        url = self.url,
+        raw_html = self.raw_html,
+        doc = self.doc,
+        scroll_y = self.scroll_y,
+        selected_link_idx = self.selected_link_idx,
+        search_matches = self.search_matches,
+        reader_mode = self.reader_mode,
+        last_term_w = self.last_term_w
+    }
+    local ok, err = show_image_preview(url, term_w, term_h, self.url, self.insecure)
+    if ok then
+        self.url = state.url
+        self.raw_html = state.raw_html
+        self.doc = state.doc
+        self.scroll_y = state.scroll_y
+        self.selected_link_idx = state.selected_link_idx
+        self.search_matches = state.search_matches
+        self.reader_mode = state.reader_mode
+        self.last_term_w = state.last_term_w
+    end
+    return ok, err
+end
+
 function Browser:load_url(target_url, from_history)
     -- Cache outgoing page state if doc exists
     if self.url and self.doc then
@@ -1881,7 +1906,7 @@ function Browser:load_url(target_url, from_history)
 
     if is_image_url(target_url) then
         local term_h = select(2, get_terminal_size())
-        local ok, err = show_image_preview(target_url, term_w, term_h, self.url, self.insecure)
+        local ok, err = self:preview_image(target_url, term_w, term_h)
         if ok then
             self.status_msg = "Image preview closed."
             self.needs_render = true
@@ -2318,7 +2343,7 @@ function Browser:handle_key(k)
                 local target = self.doc and self.doc.links and self.doc.links[self.selected_link_idx]
                 if target and target.is_image then
                     local term_w, term_h = get_terminal_size()
-                    local ok, err = show_image_preview(target.href, term_w, term_h, self.url, self.insecure)
+                    local ok, err = self:preview_image(target.href, term_w, term_h)
                     self.status_msg = ok and "Image preview closed." or err
                 else
                     self.status_msg = "Focus an image link first."
@@ -2504,7 +2529,7 @@ function Browser:handle_key(k)
             local target = self.doc and self.doc.links and self.doc.links[self.selected_link_idx]
             if target and target.is_image then
                 local term_w, term_h = get_terminal_size()
-                local ok, err = show_image_preview(target.href, term_w, term_h, self.url, self.insecure)
+                local ok, err = self:preview_image(target.href, term_w, term_h)
                 self.status_msg = ok and "Image preview closed." or err
             else
                 self.status_msg = "Focus an image link first."
