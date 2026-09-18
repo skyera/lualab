@@ -1882,13 +1882,18 @@ function Browser:load_url(target_url, from_history)
     if is_image_url(target_url) then
         local term_h = select(2, get_terminal_size())
         local ok, err = show_image_preview(target_url, term_w, term_h, self.url, self.insecure)
+        if ok then
+            self.status_msg = "Image preview closed."
+            self.needs_render = true
+            return
+        end
         self.url = target_url
-        self.raw_html = image_error_html(target_url, err or "Image preview closed.")
+        self.raw_html = image_error_html(target_url, err or "Image preview failed.")
         self.doc = M.render_html_to_document(self.raw_html, target_url, term_w - 4, self.reader_mode)
         self.scroll_y = 1
         self.selected_link_idx = 1
         self.search_matches = {}
-        self.status_msg = ok and "Image preview closed." or err
+        self.status_msg = err
         self.needs_render = true
         return
     end
@@ -1915,7 +1920,7 @@ end
 
 function Browser:navigate_to(new_url)
     local resolved, mode = smart_resolve_input(new_url)
-    if self.history[self.history_idx] ~= resolved then
+    if not is_image_url(resolved) and self.history[self.history_idx] ~= resolved then
         while #self.history > self.history_idx do
             table.remove(self.history)
         end
