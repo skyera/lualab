@@ -4746,7 +4746,9 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
     -- mpv is a hand-off engine: it owns the terminal while running, then we return to the list.
     if video_play_engine == "mpv" and get_has_mpv() then
         launch_mpv(img_entry.filepath, 0, use_mpv_window)
-        video_play_engine = inline_engine or "mpv"
+        if not use_mpv_window then
+            video_play_engine = inline_engine or "mpv"
+        end
         return "back", protocol
     end
 
@@ -5124,9 +5126,23 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
                 cur_e, total_e = get_engine_position(protocol)
                 update_dynamic_header(current_fps)
             elseif k == "w" or k == "W" then
-                use_mpv_window = not use_mpv_window
-                draw_static_header()
-                update_dynamic_header(current_fps)
+                if get_has_mpv() then
+                    use_mpv_window = true
+                    close_stream()
+                    video_play_engine = "mpv"
+                    draw_static_header()
+                    launch_mpv(img_entry.filepath, cur_time, true)
+                    local resume_engine = resolve_inline_play_engine() or "mpv"
+                    video_play_engine = resume_engine
+                    use_ffi = (video_play_engine == "ffi")
+                    draw_static_header()
+                    update_dynamic_header(current_fps)
+                    open_stream(cur_time)
+                else
+                    use_mpv_window = not use_mpv_window
+                    draw_static_header()
+                    update_dynamic_header(current_fps)
+                end
             elseif k == "m" or k == "M" then
                 local next_engine = cycle_play_engine(video_play_engine)
                 if next_engine ~= video_play_engine then
@@ -5648,7 +5664,7 @@ local function main()
         print("  --sort <name|date|size> Initial sort order (default: name)")
         print("  --hidden, -a          Include hidden (dot) files and folders (toggle with [.])")
         print("  --play-engine <auto|ffi|ffmpeg|mpv> Video play engine (default: auto)")
-        print("  --window, -w          In MPV video mode, play in external MPV GUI window instead of terminal")
+        print("  --window, -w          Play video in external MPV GUI window instead of terminal")
         print("  --nerd-icons          Use Nerd Font glyphs instead of standard Unicode")
         print("  --no-icons            Disable file icons")
         print("  --no-interactive      Non-interactive script/batch mode")
@@ -6196,6 +6212,11 @@ local function main()
                         end
                     elseif k == "w" or k == "W" then
                         use_mpv_window = not use_mpv_window
+                        if use_mpv_window and get_has_mpv() then
+                            video_play_engine = "mpv"
+                        else
+                            video_play_engine = resolve_inline_play_engine() or "mpv"
+                        end
                         current_msg = use_mpv_window and "MPV Window Mode: ON (GUI Window)" or "MPV Window Mode: OFF (Terminal TCT)"
                     elseif k == "r" then
                         sort_desc = not sort_desc

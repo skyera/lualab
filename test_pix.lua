@@ -151,7 +151,12 @@ local tests = {
     {
         name = "Video format support listed in --help",
         cmd = luajit .. " pix.lua --help",
-        expect = "Videos: MP4, MKV, WEBM, AVI, MOV, M4V, FLV (via mpv, libavcodec FFI, or ffmpeg)"
+        expect = "Videos: MP4, MKV, WEBM, AVI, MOV, M4V, FLV"
+    },
+    {
+        name = "MPV standalone window option listed in --help",
+        cmd = luajit .. " pix.lua --help",
+        expect = "--window, -w"
     },
     {
         name = "Video engine status listed in --help",
