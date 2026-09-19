@@ -879,12 +879,19 @@ if is_windows then
                 comm = exe,
                 cmdline = exe,
                 state = "R",
+                nice = 0,
                 cpu_pct = cpu_pct,
                 mem_pct = mem_pct,
                 res_kb = res_kb,
+                vsize_kb = res_kb,
                 threads = threads,
                 uid = 0,
                 username = "SYSTEM",
+                io_read_bytes = 0,
+                io_write_bytes = 0,
+                io_read_rate = 0,
+                io_write_rate = 0,
+                io_total_rate = 0,
             })
 
             ok = kernel32.Process32Next(snap, pe)
@@ -932,6 +939,7 @@ else
 
     local prev_cpu_totals = {}
     local prev_proc_times = {}
+    local prev_proc_io = {}
 
     read_cpu_stats = function()
         local f = io.open("/proc/stat", "r")
@@ -1305,6 +1313,39 @@ else
                                 end
                             end
 
+                            -- Read per-process Disk I/O (/proc/[pid]/io) safely
+                            local io_read_bytes = 0
+                            local io_write_bytes = 0
+                            local io_read_rate = 0
+                            local io_write_rate = 0
+                            local io_f = io.open(proc_path .. "/io", "r")
+                            if io_f then
+                                local ok, content = pcall(function() return io_f:read("*a") end)
+                                io_f:close()
+                                if ok and content and #content > 0 then
+                                    for l in content:gmatch("[^\r\n]+") do
+                                        local k, v = l:match("^(%S+):%s*(%d+)")
+                                        if k == "read_bytes" then
+                                            io_read_bytes = tonumber(v) or 0
+                                        elseif k == "write_bytes" then
+                                            io_write_bytes = tonumber(v) or 0
+                                        end
+                                    end
+
+                                    local pio = prev_proc_io[pid]
+                                    if pio and pio.clock > 0 then
+                                        local dt = now_clock - pio.clock
+                                        if dt > 0 then
+                                            local dr = io_read_bytes - pio.r
+                                            local dw = io_write_bytes - pio.w
+                                            if dr >= 0 then io_read_rate = dr / dt end
+                                            if dw >= 0 then io_write_rate = dw / dt end
+                                        end
+                                    end
+                                    prev_proc_io[pid] = { r = io_read_bytes, w = io_write_bytes, clock = now_clock }
+                                end
+                            end
+
                             table.insert(procs, {
                                 pid = pid,
                                 ppid = ppid,
@@ -1319,6 +1360,11 @@ else
                                 vsize_kb = math.floor(vsize / 1024),
                                 uid = uid,
                                 username = username,
+                                io_read_bytes = io_read_bytes,
+                                io_write_bytes = io_write_bytes,
+                                io_read_rate = io_read_rate,
+                                io_write_rate = io_write_rate,
+                                io_total_rate = io_read_rate + io_write_rate,
                             })
                         end
                     end
@@ -1408,6 +1454,12 @@ local function build_process_tree(procs, sort_mode, sort_reverse, collapsed_pids
             val_a, val_b = a.username:lower(), b.username:lower()
         elseif sort_mode == "threads" then
             val_a, val_b = a.threads, b.threads
+        elseif sort_mode == "io" or sort_mode == "disk" then
+            val_a, val_b = (a.io_total_rate or 0), (b.io_total_rate or 0)
+        elseif sort_mode == "ior" then
+            val_a, val_b = (a.io_read_rate or 0), (b.io_read_rate or 0)
+        elseif sort_mode == "iow" then
+            val_a, val_b = (a.io_write_rate or 0), (b.io_write_rate or 0)
         else
             val_a, val_b = a.cpu_pct, b.cpu_pct
         end
@@ -1712,6 +1764,8 @@ Keybindings:
                     sort_mode = "user"
                 elseif k == "s" then
                     sort_mode = "threads"
+                elseif k == "d" then
+                    sort_mode = "io"
                 elseif k == "r" then
                     sort_reverse = not sort_reverse
                 elseif k == "T" then
@@ -1790,6 +1844,9 @@ Keybindings:
                     elseif sort_mode == "name" then val_a, val_b = a.comm:lower(), b.comm:lower()
                     elseif sort_mode == "user" then val_a, val_b = a.username:lower(), b.username:lower()
                     elseif sort_mode == "threads" then val_a, val_b = a.threads, b.threads
+                    elseif sort_mode == "io" or sort_mode == "disk" then val_a, val_b = (a.io_total_rate or 0), (b.io_total_rate or 0)
+                    elseif sort_mode == "ior" then val_a, val_b = (a.io_read_rate or 0), (b.io_read_rate or 0)
+                    elseif sort_mode == "iow" then val_a, val_b = (a.io_write_rate or 0), (b.io_write_rate or 0)
                     else val_a, val_b = a.cpu_pct, b.cpu_pct end
 
                     if val_a ~= val_b then
@@ -1952,8 +2009,16 @@ Keybindings:
             local h_stat = string.format("%-5s", "STAT")
             local h_cmd  = in_tree_mode and (C.title_col .. "PROCESS TREE [Space/Tab: Fold]" .. C.table_hdr) or col_hdr("COMMAND", "name", 15)
 
-            local th_str = string.format("  %s%s %s %s %s %s %s %s %s%s",
-                C.table_hdr, h_pid, h_user, h_cpu, h_mem, h_res, h_th, h_stat, h_cmd, C.reset)
+            local show_io_cols = (term_w >= 115)
+            local io_hdr_str = ""
+            if show_io_cols then
+                local h_ior = col_hdr("DISK R", "ior", 9)
+                local h_iow = col_hdr("DISK W", "iow", 9)
+                io_hdr_str = string.format(" %s %s", h_ior, h_iow)
+            end
+
+            local th_str = string.format("  %s%s %s %s %s %s %s %s%s %s%s",
+                C.table_hdr, h_pid, h_user, h_cpu, h_mem, h_res, h_th, h_stat, io_hdr_str, h_cmd, C.reset)
             table.insert(out, draw_box_row(1, table_header_y, term_w, th_str))
 
             local visible_rows = bot_h - 3
@@ -1983,8 +2048,13 @@ Keybindings:
                         cmd_display = pr.cmdline
                     end
 
-                    local row_content = string.format("%-7d %-8s %s%5.1f%%%s %5.1f%% %-9s %-4d %-5s %s",
-                        pr.pid, user_str, cpu_col, cpu_val, C.reset, pr.mem_pct, format_bytes(res_val), pr.threads or 1, pr.state, cmd_display)
+                    local io_val_str = ""
+                    if show_io_cols then
+                        io_val_str = string.format(" %-9s %-9s", format_rate(pr.io_read_rate or 0), format_rate(pr.io_write_rate or 0))
+                    end
+
+                    local row_content = string.format("%-7d %-8s %s%5.1f%%%s %5.1f%% %-9s %-4d %-5s%s %s",
+                        pr.pid, user_str, cpu_col, cpu_val, C.reset, pr.mem_pct, format_bytes(res_val), pr.threads or 1, pr.state, io_val_str, cmd_display)
 
                     if is_sel then
                         table.insert(out, draw_box_row(1, table_header_y + i, term_w, C.sel_bg .. "▶ " .. row_content .. C.reset))
@@ -2000,7 +2070,7 @@ Keybindings:
             if show_inspector and procs[sel_proc] then
                 local pr = procs[sel_proc]
                 local mw = math.min(74, term_w - 4)
-                local mh = 14
+                local mh = 16
                 local mx = math.floor((term_w - mw) / 2)
                 local my = math.floor((term_h - mh) / 2)
                 draw_modal_box(out, mx, my, mw, mh, string.format("Process Inspector: PID %d", pr.pid))
@@ -2012,8 +2082,12 @@ Keybindings:
                 table.insert(out, draw_box_row(mx, my + 5, mw, string.format(" %sPPID:%s      %-7d   %sThreads:%s  %d", C.bold, C.reset, pr.ppid or 0, C.bold, C.reset, pr.threads or 1)))
                 table.insert(out, draw_box_row(mx, my + 6, mw, string.format(" %sCPU%%:%s     %-6.1f%%   %sMemory%%:%s %-6.1f%%", C.bold, C.reset, pr.cpu_pct, C.bold, C.reset, pr.mem_pct)))
                 table.insert(out, draw_box_row(mx, my + 7, mw, string.format(" %sMemory:%s    RES: %s │ VIRT: %s", C.bold, C.reset, format_bytes(pr.res_kb), format_bytes(pr.vsize_kb or 0))))
-                table.insert(out, draw_box_row(mx, my + 8, mw, string.format(" %sNice:%s      %d", C.bold, C.reset, pr.nice or 0)))
-                table.insert(out, draw_box_row(mx, my + 10, mw, string.format("  %s[k] Send Signal   [Enter / Esc] Close Inspector%s", C.title_col, C.reset)))
+                table.insert(out, draw_box_row(mx, my + 8, mw, string.format(" %sDisk I/O:%s  Read: %s (Tot: %s) │ Write: %s (Tot: %s)",
+                    C.bold, C.reset,
+                    format_rate(pr.io_read_rate or 0), format_bytes(math.floor((pr.io_read_bytes or 0) / 1024)),
+                    format_rate(pr.io_write_rate or 0), format_bytes(math.floor((pr.io_write_bytes or 0) / 1024)))))
+                table.insert(out, draw_box_row(mx, my + 9, mw, string.format(" %sNice:%s      %d", C.bold, C.reset, pr.nice or 0)))
+                table.insert(out, draw_box_row(mx, my + 11, mw, string.format("  %s[k] Send Signal   [Enter / Esc] Close Inspector%s", C.title_col, C.reset)))
             elseif show_signal_modal and procs[sel_proc] then
                 local pr = procs[sel_proc]
                 local mw = math.min(68, term_w - 4)
@@ -2050,7 +2124,7 @@ Keybindings:
                 table.insert(out, draw_box_row(mx, my + 8, mw, "   k              Open signal dispatcher modal"))
                 table.insert(out, draw_box_row(mx, my + 9, mw, string.format(" %sDisplay & Sorting:%s", C.title_col, C.reset)))
                 table.insert(out, draw_box_row(mx, my + 10, mw, "   c, m, p, n     Sort by CPU, Memory, PID, or Name"))
-                table.insert(out, draw_box_row(mx, my + 11, mw, "   u, s           Sort by User, Threads count"))
+                table.insert(out, draw_box_row(mx, my + 11, mw, "   u, s, d        Sort by User, Threads, Disk I/O"))
                 table.insert(out, draw_box_row(mx, my + 12, mw, "   r              Reverse current sort order"))
                 table.insert(out, draw_box_row(mx, my + 13, mw, "   T              Cycle color themes   Space Pause"))
                 table.insert(out, draw_box_row(mx, my + 14, mw, string.format("  %s[Esc / Enter / ?] Close Help Dialog%s", C.dim, C.reset)))
@@ -2067,8 +2141,8 @@ Keybindings:
             else
                 local f_status = #filter_query > 0 and string.format("\27[1;38;2;251;191;36mFilter: /%s\27[0m  ", filter_query) or ""
                 local help_str = in_tree_mode
-                    and "[/] Filter  [Space] Fold  [Enter] Inspect  [k] Kill  [c/m/p/n/u/s] Sort  [r] Rev  [T] Theme  [?] Help  [q] Quit"
-                    or "[/] Filter  [t] Tree  [Enter] Inspect  [k] Kill  [c/m/p/n/u/s] Sort  [r] Rev  [T] Theme  [?] Help  [q] Quit"
+                    and "[/] Filter  [Space] Fold  [Enter] Inspect  [k] Kill  [c/m/p/n/u/s/d] Sort  [r] Rev  [T] Theme  [?] Help  [q] Quit"
+                    or "[/] Filter  [t] Tree  [Enter] Inspect  [k] Kill  [c/m/p/n/u/s/d] Sort  [r] Rev  [T] Theme  [?] Help  [q] Quit"
                 footer_line = string.format("\27[%d;1H\27[2K  %s%s%s", footer_y, f_status, C.dim, help_str)
             end
             table.insert(out, footer_line)
@@ -2119,8 +2193,11 @@ local function run_self_test()
     assert(procs[1].pid > 0, "Process PID must be > 0")
     assert(#procs[1].comm > 0, "Process comm must not be empty")
     assert(type(procs[1].username) == "string" and #procs[1].username > 0, "Username must be resolved")
-    print(string.format("  ✔ Process Engine: %d processes parsed. Sample: PID %d (%s), User: %s",
-        #procs, procs[1].pid, procs[1].comm, procs[1].username))
+    assert(type(procs[1].io_read_bytes) == "number", "Process IO read bytes should be a number")
+    assert(type(procs[1].io_write_bytes) == "number", "Process IO write bytes should be a number")
+    print(string.format("  ✔ Process Engine: %d processes parsed. Sample: PID %d (%s), User: %s, Disk I/O: R=%s W=%s",
+        #procs, procs[1].pid, procs[1].comm, procs[1].username,
+        format_bytes(math.floor(procs[1].io_read_bytes / 1024)), format_bytes(math.floor(procs[1].io_write_bytes / 1024))))
 
     local tree = build_process_tree(procs, "cpu", false)
     assert(#tree == #procs, "Tree must contain all processes")
