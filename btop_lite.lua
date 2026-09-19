@@ -150,14 +150,14 @@ if is_windows then
         raw_mode = bit.bor(raw_mode, 0x0200)
         kernel32.SetConsoleMode(hIn, raw_mode)
         in_raw_mode = true
-        io.write("\27[?1049h\27[?25l")
+        io.write("\27[?1049h\27[?25l\27[?1000h\27[?1006h")
         io.flush()
         return true
     end
 
     disable_raw_mode = function()
         if in_raw_mode then
-            io.write("\27[?1049l\27[?25h\27[0m")
+            io.write("\27[?1006l\27[?1000l\27[?1049l\27[?25h\27[0m")
             io.flush()
             local hIn = kernel32.GetStdHandle(0xFFFFFFF6)
             local hOut = kernel32.GetStdHandle(0xFFFFFFF5)
@@ -339,7 +339,7 @@ else
 
     disable_raw_mode = function()
         if in_raw_mode then
-            io.write("\27[?1049l\27[?25h\27[0m")
+            io.write("\27[?1006l\27[?1000l\27[?1049l\27[?25h\27[0m")
             io.flush()
             ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
             in_raw_mode = false
@@ -369,7 +369,7 @@ else
         in_raw_mode = true
 
         install_signal_cleanup()
-        io.write("\27[?1049h\27[?25l")
+        io.write("\27[?1049h\27[?25l\27[?1000h\27[?1006h")
         io.flush()
         return true
     end
@@ -383,18 +383,31 @@ else
     end
 
     local pfd = ffi.new("struct pollfd", { fd = STDIN_FILENO, events = POLLIN, revents = 0 })
-    local key_buf = ffi.new("char[32]")
+    local key_buf = ffi.new("char[64]")
 
     read_key = function(timeout_ms)
         timeout_ms = timeout_ms or 50
         local ret = ffi.C.poll(pfd, 1, timeout_ms)
         if ret > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
-            local n = ffi.C.read(STDIN_FILENO, key_buf, 32)
+            local n = ffi.C.read(STDIN_FILENO, key_buf, 64)
             if n > 0 then
                 local c0 = key_buf[0]
                 if c0 == 27 then
                     if n >= 3 and key_buf[1] == 91 then
                         local c2 = key_buf[2]
+                        if c2 == 60 and n >= 6 then -- SGR mouse sequence \27[<btn;x;yM/m
+                            local s = ffi.string(key_buf, n)
+                            local b, x, y, act = s:match("^\27%[<(%d+);(%d+);(%d+)([Mm])")
+                            if b and x and y and act then
+                                return {
+                                    type = "mouse",
+                                    btn = tonumber(b),
+                                    x = tonumber(x),
+                                    y = tonumber(y),
+                                    release = (act == "m"),
+                                }
+                            end
+                        end
                         if c2 == 65 then return "UP" end
                         if c2 == 66 then return "DOWN" end
                         if c2 == 67 then return "RIGHT" end
@@ -1731,7 +1744,83 @@ Keybindings:
         if k then
             needs_redraw = true
 
-            if show_help then
+            if type(k) == "table" and k.type == "mouse" then
+                if k.btn == 64 then
+                    -- Wheel Up: scroll process list up
+                    sel_proc = math.max(1, sel_proc - 3)
+                elseif k.btn == 65 then
+                    -- Wheel Down: scroll process list down
+                    sel_proc = sel_proc + 3
+                elseif k.btn == 0 and not k.release then
+                    -- Left Click Press
+                    if show_help or show_inspector or show_signal_modal then
+                        show_help = false
+                        show_inspector = false
+                        show_signal_modal = false
+                    else
+                        local top_h = math.min(12, math.max(8, math.floor(term_h * 0.32)))
+                        local net_h = 3
+                        local proc_y = top_h + 2 + net_h
+                        local table_header_y = proc_y + 1
+                        local bot_h = term_h - top_h - net_h - 2
+                        local visible_rows = bot_h - 3
+                        local show_io = (term_w >= 115)
+
+                        if k.y == table_header_y then
+                            -- Clicked column header
+                            local new_mode = nil
+                            if k.x >= 3 and k.x <= 9 then new_mode = "pid"
+                            elseif k.x >= 11 and k.x <= 18 then new_mode = "user"
+                            elseif k.x >= 20 and k.x <= 26 then new_mode = "cpu"
+                            elseif k.x >= 28 and k.x <= 34 then new_mode = "mem"
+                            elseif k.x >= 36 and k.x <= 44 then new_mode = "mem"
+                            elseif k.x >= 46 and k.x <= 49 then new_mode = "threads"
+                            elseif show_io and k.x >= 57 and k.x <= 66 then new_mode = "ior"
+                            elseif show_io and k.x >= 67 and k.x <= 76 then new_mode = "iow"
+                            elseif (show_io and k.x >= 78) or (not show_io and k.x >= 57) then
+                                new_mode = "name"
+                            end
+
+                            if new_mode then
+                                if sort_mode == new_mode then
+                                    sort_reverse = not sort_reverse
+                                else
+                                    sort_mode = new_mode
+                                    sort_reverse = false
+                                end
+                                status_flash_msg = string.format("Sort: %s (%s)", sort_mode:upper(), sort_reverse and "ASC" or "DESC")
+                                status_flash_expiry = os.clock() + 2.0
+                            end
+                        elseif k.y > table_header_y and k.y <= table_header_y + visible_rows then
+                            -- Clicked a process row
+                            local page_offset = 1
+                            if sel_proc > visible_rows then
+                                page_offset = sel_proc - visible_rows + 1
+                            end
+                            local target_idx = page_offset + (k.y - table_header_y - 1)
+                            if target_idx >= 1 and target_idx <= #procs then
+                                if target_idx == sel_proc then
+                                    if in_tree_mode and procs[sel_proc] and procs[sel_proc].has_children then
+                                        local p = procs[sel_proc]
+                                        if collapsed_pids[p.pid] then
+                                            collapsed_pids[p.pid] = nil
+                                            status_flash_msg = string.format("Expanded %s (PID %d)", p.comm, p.pid)
+                                        else
+                                            collapsed_pids[p.pid] = true
+                                            status_flash_msg = string.format("Folded %s (%d sub-processes)", p.comm, p.child_count or 0)
+                                        end
+                                        status_flash_expiry = os.clock() + 2.0
+                                    else
+                                        show_inspector = true
+                                    end
+                                else
+                                    sel_proc = target_idx
+                                end
+                            end
+                        end
+                    end
+                end
+            elseif show_help then
                 if k == "ESC" or k == "ENTER" or k == "q" or k == "?" or k == "h" then
                     show_help = false
                 end
