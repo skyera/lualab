@@ -1240,7 +1240,7 @@ function MpvController:send_command(json_str)
     end
 end
 
-function MpvController:start(item, show_cc, sub_lang, browser, cookies_file, proxy, insecure)
+function MpvController:start(item, show_cc, sub_lang, browser, cookies_file, proxy, insecure, sub_font_size)
     self:stop()
 
     local pipe_id = tostring(math.floor(get_now_sec() * 1000))
@@ -1274,7 +1274,8 @@ function MpvController:start(item, show_cc, sub_lang, browser, cookies_file, pro
         extra_mpv_opts = extra_mpv_opts .. string.format(" --http-proxy=%q", proxy)
     end
     if show_cc then
-        extra_mpv_opts = extra_mpv_opts .. string.format(" --sub-auto=all --sub-visibility=yes --slang=%s", to_mpv_slang(sub_lang))
+        local font_opt = (sub_font_size and sub_font_size > 0) and string.format(" --sub-font-size=%d", sub_font_size) or ""
+        extra_mpv_opts = extra_mpv_opts .. string.format(" --sub-auto=all --sub-visibility=yes%s --slang=%s", font_opt, to_mpv_slang(sub_lang))
     end
 
     local cmd
@@ -1385,6 +1386,10 @@ function MpvController:change_volume(delta)
     self:send_command(string.format('{"command": ["add", "volume", %d]}', delta))
 end
 
+function MpvController:set_sub_font_size(size)
+    self:send_command(string.format('{"command": ["set_property", "sub-font-size", %d]}', size))
+end
+
 function MpvController:stop()
     if self.pipe_handle then
         self:send_command('{"command": ["quit"]}')
@@ -1402,7 +1407,7 @@ function MpvController:stop()
     self.is_eof = false
     self.read_buf = ""
 end
-local function play_item(item, mode, browser, cookies_file, use_external_window, proxy, insecure, show_cc, sub_lang)
+local function play_item(item, mode, browser, cookies_file, use_external_window, proxy, insecure, show_cc, sub_lang, sub_font_size)
     if not HAS_MPV then
         io.write("\27[H\27[2J\27[1;31mError: mpv is not installed.\27[0m\n\nPlease install mpv to play audio/video streams.\nPress any key to return...")
         io.flush()
@@ -1449,7 +1454,8 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     if show_cc or mode == "video" then
         -- Terminal video uses the status line for CC; GUI video uses normal subtitle rendering.
         local sub_vis = (mode == "video" and not use_external_window) and "no" or (show_cc and "yes" or "no")
-        extra_mpv_opts = extra_mpv_opts .. string.format(" --sub-auto=all --sub-visibility=%s --slang=%s", sub_vis, to_mpv_slang(sub_lang))
+        local font_opt = (sub_font_size and sub_font_size > 0) and string.format(" --sub-font-size=%d", sub_font_size) or ""
+        extra_mpv_opts = extra_mpv_opts .. string.format(" --sub-auto=all --sub-visibility=%s%s --slang=%s", sub_vis, font_opt, to_mpv_slang(sub_lang))
     end
 
     local term_w, term_h = get_terminal_size()
@@ -1855,6 +1861,7 @@ local function show_help_modal()
         line_pad("\27[1;36m|    \27[93m[/]\27[0m           Open search modal or paste direct URL"),
         line_pad("\27[1;36m|    \27[93m[a]\27[0m           Toggle continuous Auto-Play (Radio mode)"),
         line_pad("\27[1;36m|    \27[93m[c]\27[0m           Toggle Closed Captions (CC / Lyrics)"),
+        line_pad("\27[1;36m|    \27[93m[+ / -]\27[0m       Increase / Decrease CC font size (+/-5 pt)"),
         line_pad("\27[1;36m|    \27[93m[h]\27[0m           Toggle Playback History (recent tracks)"),
         line_pad("\27[1;36m|    \27[93m[m]\27[0m           Toggle between Music and Video mode"),
         line_pad("\27[1;36m|    \27[93m[L]\27[0m           Toggle Liked Songs playlist"),
@@ -1888,11 +1895,12 @@ end
 -- =========================================================================
 -- 7. Main Interactive TUI Application
 -- =========================================================================
-local function run_app(init_query, init_mode, browser, cookies_file, is_liked, use_window, proxy, insecure, init_show_cc, init_sub_lang, init_filters, init_site)
+local function run_app(init_query, init_mode, browser, cookies_file, is_liked, use_window, proxy, insecure, init_show_cc, init_sub_lang, init_filters, init_site, init_sub_font_size)
     local current_query = init_query or ""
     local mode = init_mode or "music"
     local show_cc = (init_show_cc ~= nil) and init_show_cc or true
     local sub_lang = init_sub_lang or "en.*"
+    local cc_font_size = (init_sub_font_size and init_sub_font_size > 0) and math.max(10, math.min(120, init_sub_font_size)) or 55
     local site = normalize_site(init_site)
     local selected_idx = 1
     local scroll_offset = 0
@@ -2128,14 +2136,14 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                 if #queue > 0 then
                     local next_item = table.remove(queue, 1)
                     save_history_item(next_item)
-                    MpvController:start(next_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure)
+                    MpvController:start(next_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure, cc_font_size)
                     status_msg = "Playing: " .. utf8_truncate(next_item.title, 30)
                     draw_tui()
                 elseif auto_play and selected_idx < #items then
                     selected_idx = selected_idx + 1
                     local next_item = items[selected_idx]
                     save_history_item(next_item)
-                    MpvController:start(next_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure)
+                    MpvController:start(next_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure, cc_font_size)
                     status_msg = "Playing: " .. utf8_truncate(next_item.title, 30)
                     draw_tui()
                 else
@@ -2222,13 +2230,13 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                     if #queue > 0 then
                         local next_item = table.remove(queue, 1)
                         save_history_item(next_item)
-                        MpvController:start(next_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure)
+                        MpvController:start(next_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure, cc_font_size)
                         status_msg = "Playing: " .. utf8_truncate(next_item.title, 30)
                     elseif auto_play and selected_idx < #items then
                         selected_idx = selected_idx + 1
                         local next_item = items[selected_idx]
                         save_history_item(next_item)
-                        MpvController:start(next_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure)
+                        MpvController:start(next_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure, cc_font_size)
                         status_msg = "Playing: " .. utf8_truncate(next_item.title, 30)
                     else
                         MpvController:stop()
@@ -2263,7 +2271,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                     MpvController:stop()
                     local sel = items[selected_idx]
                     save_history_item(sel)
-                    play_item(sel, mode, browser, cookies_file, use_window, proxy, insecure, show_cc, sub_lang)
+                    play_item(sel, mode, browser, cookies_file, use_window, proxy, insecure, show_cc, sub_lang, cc_font_size)
                     draw_tui()
                 end
             elseif k == "m" then
@@ -2287,6 +2295,16 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                 draw_tui()
             elseif k == "c" or k == "C" then
                 show_cc = not show_cc
+                draw_tui()
+            elseif k == "+" or k == "=" then
+                cc_font_size = math.min(120, cc_font_size + 5)
+                MpvController:set_sub_font_size(cc_font_size)
+                status_msg = string.format("CC font size: %d pt", cc_font_size)
+                draw_tui()
+            elseif k == "-" or k == "_" then
+                cc_font_size = math.max(10, cc_font_size - 5)
+                MpvController:set_sub_font_size(cc_font_size)
+                status_msg = string.format("CC font size: %d pt", cc_font_size)
                 draw_tui()
             elseif k == "h" or k == "H" then
                 is_history = not is_history
@@ -2317,12 +2335,12 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                     local sel = items[selected_idx]
                     save_history_item(sel)
                     if mode == "music" then
-                        MpvController:start(sel, show_cc, sub_lang, browser, cookies_file, proxy, insecure)
+                        MpvController:start(sel, show_cc, sub_lang, browser, cookies_file, proxy, insecure, cc_font_size)
                         status_msg = "Playing: " .. utf8_truncate(sel.title, 30)
                         draw_tui()
                     else
                         MpvController:stop()
-                        local exit_code = play_item(sel, mode, browser, cookies_file, use_window, proxy, insecure, show_cc, sub_lang)
+                        local exit_code = play_item(sel, mode, browser, cookies_file, use_window, proxy, insecure, show_cc, sub_lang, cc_font_size)
                         draw_tui()
                         if auto_play and (exit_code == 0 or exit_code == true) and selected_idx < #items then
                             selected_idx = selected_idx + 1
@@ -2516,6 +2534,17 @@ local function run_self_tests()
     assert(to_mpv_slang("fr,de") == "fr,de", "to_mpv_slang multiple list failed")
     print("  [✓] to_mpv_slang language expansion passed")
 
+    -- 14. CC font size bounding & adjustment
+    local function clamp_font_size(size)
+        return math.max(10, math.min(120, math.floor(size)))
+    end
+    assert(clamp_font_size(55) == 55, "Default font size failed")
+    assert(clamp_font_size(5) == 10, "Min font size clamping failed")
+    assert(clamp_font_size(200) == 120, "Max font size clamping failed")
+    assert(clamp_font_size(55 + 5) == 60, "Font size increment failed")
+    assert(clamp_font_size(55 - 5) == 50, "Font size decrement failed")
+    print("  [✓] CC / subtitle font size bounding logic passed")
+
     print("=== All Internal Self-Tests Passed Successfully ===")
     return true
 end
@@ -2535,6 +2564,8 @@ local function print_help()
     print("  -c, --cc, --lyrics    Show Closed Captions (CC) / lyrics (enabled by default)")
     print("  --no-cc               Disable Closed Captions (CC) / lyrics")
     print("  --sub-lang <lang>     Preferred subtitle/lyrics language pattern (default: en.*)")
+    print("  --sub-font-size <pts> Font size for subtitles / CC (default: 55, range: 10-120)")
+    print("  --cc-font-size <pts>  Alias for --sub-font-size")
     print("  --browser <name>      Extract session cookies from browser (firefox, chrome, brave, edge)")
     print("  --no-interactive      Non-interactive script/batch mode (print results and exit)")
     print("  --cookies <file>      Use Netscape format cookies.txt file")
@@ -2558,6 +2589,7 @@ local function print_help()
     print("  [/]           Open search modal or paste URL")
     print("  [a]           Toggle Auto-Play (Radio mode)")
     print("  [c]           Toggle Closed Captions (CC / Lyrics)")
+    print("  [+ / -]       Increase / Decrease CC font size (+/-5 pt)")
     print("  [m]           Toggle Music / Video mode")
     print("  [q]           Quit viewer")
     print("\nSystem Status:")
@@ -2592,6 +2624,7 @@ local function main()
     local non_interactive = false
     local show_cc = true
     local sub_lang = "en.*"
+    local sub_font_size = 55
     local download_target = nil
     local active_filters = { sort = "relevance", duration = "all" }
     local site = "youtube"
@@ -2627,6 +2660,12 @@ local function main()
         elseif a == "--sub-lang" or a == "--sub-langs" or a == "--slang" then
             i = i + 1
             sub_lang = arg[i]
+        elseif a == "--sub-font-size" or a == "--cc-font-size" or a == "--sub-fontsize" then
+            i = i + 1
+            local parsed_size = tonumber(arg[i])
+            if parsed_size then
+                sub_font_size = math.max(10, math.min(120, math.floor(parsed_size)))
+            end
         elseif a == "-d" or a == "--download" then
             i = i + 1
             download_target = arg[i]
@@ -2710,7 +2749,7 @@ local function main()
         return
     end
 
-    run_app(query, mode, browser, cookies_file, is_liked, use_window, proxy, insecure, show_cc, sub_lang, active_filters, site)
+    run_app(query, mode, browser, cookies_file, is_liked, use_window, proxy, insecure, show_cc, sub_lang, active_filters, site, sub_font_size)
 end
 
 main()

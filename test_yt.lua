@@ -126,13 +126,15 @@ p_help:close()
 assert(h_out:find("--cc", 1, true), "Help output missing --cc option")
 assert(h_out:find("--lyrics", 1, true), "Help output missing --lyrics option")
 assert(h_out:find("--sub-lang", 1, true), "Help output missing --sub-lang option")
+assert(h_out:find("--sub-font-size", 1, true), "Help output missing --sub-font-size option")
+assert(h_out:find("--cc-font-size", 1, true), "Help output missing --cc-font-size option")
 
-local p_cc_run = io.popen(luajit .. ' yt.lua --lyrics --sub-lang en.* --no-interactive --max-results 1 "lofi" ' .. null_dev, "r")
-assert(p_cc_run, "Failed to run yt.lua with --lyrics flag")
+local p_cc_run = io.popen(luajit .. ' yt.lua --lyrics --sub-lang en.* --sub-font-size 65 --no-interactive --max-results 1 "lofi" ' .. null_dev, "r")
+assert(p_cc_run, "Failed to run yt.lua with --lyrics and --sub-font-size flags")
 local cc_run_out = p_cc_run:read("*a")
 p_cc_run:close()
 assert(cc_run_out:find("01.", 1, true), "Non-interactive run with --lyrics failed to produce results")
-print("  [✓] Test 10 passed: --cc, --lyrics, and --sub-lang options parse and execute successfully.")
+print("  [✓] Test 10 passed: --cc, --lyrics, --sub-lang, and --sub-font-size options parse and execute successfully.")
 
 -- Test 11: Mini-Player, Queue, Download, and Filter Options & Self-Test verification
 local p_help11 = io.popen(luajit .. " yt.lua --help", "r")
