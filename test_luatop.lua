@@ -123,11 +123,16 @@ TestRunner.describe("4. Storage and Disk I/O Telemetry", function()
         assert_true(#st.mounts > 0, "should discover at least 1 mounted filesystem")
 
         local root_found = false
+        local seen_devices = {}
         for _, m in ipairs(st.mounts) do
             if m.mount == "/" or m.mount == "C:" then root_found = true end
             assert_true(m.total_bytes > 0, "total storage bytes > 0")
             assert_true(m.avail_bytes > 0, "avail storage bytes > 0")
             assert_true(m.used_pct >= 0 and m.used_pct <= 100, "used pct in [0, 100]")
+            if m.device then
+                assert_true(not seen_devices[m.device], "duplicate block device detected: " .. tostring(m.device))
+                seen_devices[m.device] = true
+            end
         end
         assert_true(root_found, "root mount point must be discovered")
     end)

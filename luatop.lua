@@ -351,6 +351,7 @@ else
 
         int getpriority(int which, int who);
         int setpriority(int which, int who, int prio);
+        int usleep(unsigned int usec);
     ]]
 
     local TIOCGWINSZ   = 0x5413
@@ -1481,36 +1482,59 @@ else
 
     read_storage_stats = function(now_clock)
         local mounts = {}
-        local seen_mounts = {}
+        local candidates = {}
+        local seen_devs = {}
 
         local f_mnt = io.open("/proc/mounts", "r")
         if f_mnt then
-            local sv = ffi.new("struct statvfs")
             for line in f_mnt:lines() do
                 local dev, mnt, fstype = line:match("^(%S+)%s+(%S+)%s+(%S+)")
-                if dev and dev:find("^/dev/") and not dev:find("^/dev/loop") and not seen_mounts[mnt] then
-                    seen_mounts[mnt] = true
-                    if ffi.C.statvfs(mnt, sv) == 0 then
-                        local bsize = tonumber(sv.f_frsize) > 0 and tonumber(sv.f_frsize) or tonumber(sv.f_bsize)
-                        local total = tonumber(sv.f_blocks) * bsize
-                        local free = tonumber(sv.f_bfree) * bsize
-                        local avail = tonumber(sv.f_bavail) * bsize
-                        local used = math.max(0, total - free)
-                        local pct = (total > 0) and (used / total * 100.0) or 0
+                if dev and dev:find("^/dev/") and not dev:find("^/dev/loop") then
+                    -- Priority: / (1) > /home (2) > /boot (3) > /var (4) > /srv (5) > others
+                    local prio = 100
+                    if mnt == "/" then prio = 1
+                    elseif mnt == "/home" then prio = 2
+                    elseif mnt == "/boot" or mnt:find("^/boot/") then prio = 3
+                    elseif mnt:find("^/var") then prio = 50
+                    elseif mnt:find("^/srv") then prio = 60
+                    elseif mnt:find("^/root") then prio = 70
+                    end
 
-                        table.insert(mounts, {
-                            mount = mnt,
-                            device = dev,
-                            fstype = fstype,
-                            total_bytes = total,
-                            used_bytes = used,
-                            avail_bytes = avail,
-                            used_pct = pct,
-                        })
+                    -- For multi-subvolume setups (e.g. Btrfs on CachyOS/Fedora) sharing the exact same device,
+                    -- prioritize the main root / or home mount over subvolumes to avoid redundant identical meters.
+                    if not seen_devs[dev] or prio < seen_devs[dev].prio then
+                        seen_devs[dev] = { dev = dev, mnt = mnt, fstype = fstype, prio = prio }
                     end
                 end
             end
             f_mnt:close()
+
+            for _, info in pairs(seen_devs) do
+                table.insert(candidates, info)
+            end
+            table.sort(candidates, function(a, b) return a.prio < b.prio end)
+
+            local sv = ffi.new("struct statvfs")
+            for _, c in ipairs(candidates) do
+                if ffi.C.statvfs(c.mnt, sv) == 0 then
+                    local bsize = tonumber(sv.f_frsize) > 0 and tonumber(sv.f_frsize) or tonumber(sv.f_bsize)
+                    local total = tonumber(sv.f_blocks) * bsize
+                    local free = tonumber(sv.f_bfree) * bsize
+                    local avail = tonumber(sv.f_bavail) * bsize
+                    local used = math.max(0, total - free)
+                    local pct = (total > 0) and (used / total * 100.0) or 0
+
+                    table.insert(mounts, {
+                        mount = c.mnt,
+                        device = c.dev,
+                        fstype = c.fstype,
+                        total_bytes = total,
+                        used_bytes = used,
+                        avail_bytes = avail,
+                        used_pct = pct,
+                    })
+                end
+            end
         end
 
         -- Read Disk Read/Write rates from /proc/diskstats
@@ -2238,6 +2262,16 @@ Keybindings:
     local next_refresh_time = 0
     local procs = {}
 
+    -- Warm up telemetry (CPU and processes) so the very first frame renders realistic percentages
+    pcall(function()
+        read_cpu_stats()
+        if is_windows then
+            kernel32.Sleep(40)
+        else
+            ffi.C.usleep(40000)
+        end
+    end)
+
     while true do
         local now_clock = os.clock()
         local term_w, term_h = get_terminal_size()
@@ -2723,7 +2757,6 @@ Keybindings:
                 local col_w = math.floor((right_w - 2 - 3) / 2)
                 local function format_col(m)
                     if not m then return string.rep(" ", col_w) end
-                    local mnt = truncate(m.mount, 3)
                     local u_kb = math.floor(m.used_bytes / 1024)
                     local t_kb = math.floor(m.total_bytes / 1024)
                     local u_str = (u_kb >= 1024 * 1024 * 1024) and string.format("%.1fT", u_kb / (1024 * 1024 * 1024))
@@ -2732,9 +2765,11 @@ Keybindings:
                         or (t_kb >= 1024 * 1024 and string.format("%.0fG", t_kb / (1024 * 1024)) or format_bytes(t_kb):gsub("%s+", ""))
                     local cap_str = u_str .. "/" .. t_str
                     local pct_str = string.format("%3.0f%%", m.used_pct or 0)
+                    local max_mnt_w = math.max(4, math.min(10, col_w - (visual_len(cap_str) + 12)))
+                    local mnt = truncate(m.mount, max_mnt_w)
                     local bar_w = math.max(3, col_w - (visual_len(mnt) + 1 + 5 + visual_len(cap_str) + 1))
                     local bar = make_meter_bar(m.used_pct, bar_w)
-                    local col_txt = string.format("%s%-2s%s %s %s%s%s %s%s%s",
+                    local col_txt = string.format("%s%-4s%s %s %s%s%s %s%s%s",
                         C.bold, mnt, C.reset, bar, C.title_col, pct_str, C.reset, C.dim, cap_str, C.reset)
                     local vlen = visual_len(mnt) + 1 + bar_w + 1 + visual_len(pct_str) + 1 + visual_len(cap_str)
                     if vlen < col_w then
