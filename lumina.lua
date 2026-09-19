@@ -1,5 +1,5 @@
 --[[
-    yazi_lite.lua
+    lumina.lua
     A fast, modern, Miller-columns terminal file manager written in pure LuaJIT with FFI.
     Inspired by ranger & yazi.
 
@@ -948,7 +948,7 @@ local function main()
             table.insert(out, "\27[H") -- Home cursor without flash
 
             -- 1. Top Header Bar
-            local header_str = string.format("  %s⚡ YAZI-LITE%s %s│%s %s%s%s %s(%d items)%s\27[K",
+            local header_str = string.format("  %s⚡ LUMINA%s %s│%s %s%s%s %s(%d items)%s\27[K",
                 C.bold .. "\27[38;2;56;189;248m", C.reset, C.dim, C.reset,
                 C.bold .. "\27[38;2;241;245;249m", current_dir, C.reset,
                 C.dim, #current_entries, C.reset)
@@ -1145,12 +1145,12 @@ local function main()
     end
 
     disable_raw_mode()
-    print("\n\27[1;36mExited Yazi-Lite. Goodbye!\27[0m")
+    print("\n\27[1;36mExited Lumina. Goodbye!\27[0m")
 end
 
 local ok, err = xpcall(main, debug.traceback)
 if not ok then
     disable_raw_mode()
-    io.stderr:write("\27[1;31mYazi-Lite error:\27[0m " .. tostring(err) .. "\n")
+    io.stderr:write("\27[1;31mLumina error:\27[0m " .. tostring(err) .. "\n")
     os.exit(1)
 end
