@@ -786,13 +786,16 @@ local function generate_image_preview(filepath, max_w, max_h)
     if #raw < w * h * 3 then return {} end
 
     local lines = {}
-    for y = 0, h - 2, 2 do
+    for y = 0, h - 1, 2 do
         local line = {}
         for x = 0, w - 1 do
             local top_idx = (y * w + x) * 3 + 1
-            local bot_idx = ((y + 1) * w + x) * 3 + 1
             local tr, tg, tb = raw:byte(top_idx, top_idx + 2)
-            local br, bg, bb = raw:byte(bot_idx, bot_idx + 2)
+            local br, bg, bb = tr, tg, tb
+            if y + 1 < h then
+                local bot_idx = ((y + 1) * w + x) * 3 + 1
+                br, bg, bb = raw:byte(bot_idx, bot_idx + 2)
+            end
             table.insert(line, string.format("\27[48;2;%d;%d;%dm\27[38;2;%d;%d;%dm▄",
                 tr or 0, tg or 0, tb or 0, br or 0, bg or 0, bb or 0))
         end
@@ -898,12 +901,28 @@ end
 -- 6. Main Interactive Application Loop
 -- =========================================================================
 local function main()
-    local current_dir = resolve_canonical_path(arg[1] or ".")
+    local requested_path = arg[1] or "."
+    local current_dir = resolve_canonical_path(requested_path)
+    local initial_selection_name
+    local requested_file = io.open(requested_path, "rb")
+    if requested_file then
+        requested_file:close()
+        initial_selection_name = requested_path:match("([^/\\]+)$")
+        current_dir = get_parent_dir(requested_path)
+    end
     local show_hidden = false
     local filter_query = ""
 
     local sel_index = 1
     local current_entries = read_dir_entries(current_dir, show_hidden)
+    if initial_selection_name then
+        for idx, entry in ipairs(current_entries) do
+            if entry.name == initial_selection_name then
+                sel_index = idx
+                break
+            end
+        end
+    end
     local parent_dir = get_parent_dir(current_dir)
     local parent_entries = read_dir_entries(parent_dir, show_hidden)
 
