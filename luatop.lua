@@ -700,7 +700,7 @@ end
 -- 4. Cross-Platform Telemetry Engine (Hardware, /proc, FFI)
 -- =========================================================================
 local read_cpu_stats, read_cpu_sensors, read_memory_stats
-local read_network_stats, read_storage_stats, read_loadavg
+local read_network_stats, read_storage_stats, read_loadavg, read_gpu_stats
 local read_process_table, terminate_process, kill_process, send_signal_to_process, renice_process
 
 local uid_cache = {}
@@ -846,6 +846,187 @@ if is_windows then
     read_loadavg = function(overall_cpu, num_procs)
         local approx_load = (overall_cpu or 0) / 100 * num_cores
         return string.format("%.2f", approx_load), string.format("%d procs", num_procs or 0)
+    end
+
+    -- GPU Telemetry Engine (NVML + DXGI)
+    local gpu_initialized = false
+    local nvml_handle = nil
+    local nvml_device_count = 0
+    local dxgi_cached_gpus = nil
+
+    local function init_gpu_probes()
+        if gpu_initialized then return end
+        gpu_initialized = true
+
+        -- 1. Try NVML (NVIDIA)
+        local ok, lib = pcall(ffi.load, "nvml")
+        if not ok then
+            ok, lib = pcall(ffi.load, "C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvml.dll")
+        end
+        if ok then
+            pcall(function()
+                ffi.cdef[[
+                    typedef void* nvmlDevice_t;
+                    typedef struct {
+                        unsigned long long total;
+                        unsigned long long free;
+                        unsigned long long used;
+                    } nvmlMemory_t;
+                    typedef struct {
+                        unsigned int gpu;
+                        unsigned int memory;
+                    } nvmlUtilization_t;
+                    int nvmlInit_v2(void);
+                    int nvmlShutdown(void);
+                    int nvmlDeviceGetCount_v2(unsigned int *deviceCount);
+                    int nvmlDeviceGetHandleByIndex_v2(unsigned int index, nvmlDevice_t *device);
+                    int nvmlDeviceGetName(nvmlDevice_t device, char *name, unsigned int length);
+                    int nvmlDeviceGetMemoryInfo(nvmlDevice_t device, nvmlMemory_t *memory);
+                    int nvmlDeviceGetUtilizationRates(nvmlDevice_t device, nvmlUtilization_t *utilization);
+                    int nvmlDeviceGetTemperature(nvmlDevice_t device, int sensorType, unsigned int *temp);
+                ]]
+            end)
+            local init_ok = false
+            pcall(function()
+                if lib.nvmlInit_v2() == 0 then init_ok = true end
+            end)
+            if init_ok then
+                local cnt = ffi.new("unsigned int[1]")
+                if lib.nvmlDeviceGetCount_v2(cnt) == 0 and cnt[0] > 0 then
+                    nvml_handle = lib
+                    nvml_device_count = cnt[0]
+                    return
+                end
+            end
+        end
+
+        -- 2. Fallback to DXGI for AMD / Intel / generic GPUs on Windows
+        local dx_ok, dxgi = pcall(ffi.load, "dxgi")
+        if dx_ok then
+            pcall(function()
+                ffi.cdef[[
+                    typedef struct {
+                        uint16_t Description[128];
+                        uint32_t VendorId;
+                        uint32_t DeviceId;
+                        uint32_t SubSysId;
+                        uint32_t Revision;
+                        size_t DedicatedVideoMemory;
+                        size_t DedicatedSystemMemory;
+                        size_t SharedSystemMemory;
+                        struct { uint32_t LowPart; int32_t HighPart; } AdapterLuid;
+                    } DXGI_ADAPTER_DESC;
+
+                    typedef struct IDXGIAdapterVtbl {
+                        void* QueryInterface;
+                        void* AddRef;
+                        uint32_t (*Release)(void* this);
+                        void* SetPrivateData;
+                        void* SetPrivateDataInterface;
+                        void* GetPrivateData;
+                        void* GetParent;
+                        void* EnumOutputs;
+                        int (*GetDesc)(void* this, DXGI_ADAPTER_DESC* pDesc);
+                    } IDXGIAdapterVtbl;
+
+                    typedef struct IDXGIAdapter {
+                        IDXGIAdapterVtbl* lpVtbl;
+                    } IDXGIAdapter;
+
+                    typedef struct IDXGIFactoryVtbl {
+                        void* QueryInterface;
+                        void* AddRef;
+                        uint32_t (*Release)(void* this);
+                        void* SetPrivateData;
+                        void* SetPrivateDataInterface;
+                        void* GetPrivateData;
+                        void* GetParent;
+                        int (*EnumAdapters)(void* this, uint32_t Adapter, IDXGIAdapter** ppAdapter);
+                    } IDXGIFactoryVtbl;
+
+                    typedef struct IDXGIFactory {
+                        IDXGIFactoryVtbl* lpVtbl;
+                    } IDXGIFactory;
+
+                    typedef struct { uint32_t Data1; uint16_t Data2; uint16_t Data3; uint8_t Data4[8]; } GUID;
+                    int CreateDXGIFactory(const GUID* riid, void** ppFactory);
+                ]]
+            end)
+            local IID_IDXGIFactory = ffi.new("GUID", {0x7b7166ec, 0x21c7, 0x44ae, {0xb2, 0x1a, 0xc9, 0xae, 0x32, 0x1a, 0xe3, 0x69}})
+            local ppFactory = ffi.new("void*[1]")
+            local ok_f = pcall(function() return dxgi.CreateDXGIFactory(IID_IDXGIFactory, ppFactory) end)
+            if ok_f and ppFactory[0] ~= nil then
+                local factory = ffi.cast("IDXGIFactory*", ppFactory[0])
+                local pAdapter = ffi.new("IDXGIAdapter*[1]")
+                local idx = 0
+                dxgi_cached_gpus = {}
+                while factory.lpVtbl.EnumAdapters(factory, idx, pAdapter) == 0 do
+                    local adapter = pAdapter[0]
+                    local desc = ffi.new("DXGI_ADAPTER_DESC")
+                    if adapter.lpVtbl.GetDesc(adapter, desc) == 0 then
+                        local vram_bytes = tonumber(desc.DedicatedVideoMemory)
+                        if vram_bytes > 0 then
+                            local chars = {}
+                            for ci = 0, 127 do
+                                local c = desc.Description[ci]
+                                if c == 0 then break end
+                                table.insert(chars, string.char(bit.band(c, 0xFF)))
+                            end
+                            local name = table.concat(chars)
+                            if not name:find("Basic Render Driver") then
+                                table.insert(dxgi_cached_gpus, {
+                                    name = name,
+                                    mem_total_kb = math.floor(vram_bytes / 1024),
+                                    mem_used_kb = 0,
+                                    mem_used_pct = 0,
+                                    temp_c = nil,
+                                    util_pct = nil,
+                                })
+                            end
+                        end
+                    end
+                    adapter.lpVtbl.Release(adapter)
+                    idx = idx + 1
+                end
+                factory.lpVtbl.Release(factory)
+            end
+        end
+    end
+
+    read_gpu_stats = function()
+        init_gpu_probes()
+        local gpus = {}
+        if nvml_handle and nvml_device_count > 0 then
+            for i = 0, nvml_device_count - 1 do
+                local dev = ffi.new("nvmlDevice_t[1]")
+                if nvml_handle.nvmlDeviceGetHandleByIndex_v2(i, dev) == 0 then
+                    local name_buf = ffi.new("char[64]")
+                    nvml_handle.nvmlDeviceGetName(dev[0], name_buf, 64)
+                    local mem = ffi.new("nvmlMemory_t")
+                    nvml_handle.nvmlDeviceGetMemoryInfo(dev[0], mem)
+                    local util = ffi.new("nvmlUtilization_t")
+                    nvml_handle.nvmlDeviceGetUtilizationRates(dev[0], util)
+                    local temp = ffi.new("unsigned int[1]")
+                    local has_temp = (nvml_handle.nvmlDeviceGetTemperature(dev[0], 0, temp) == 0)
+
+                    local tot_kb = math.floor(tonumber(mem.total) / 1024)
+                    local usd_kb = math.floor(tonumber(mem.used) / 1024)
+                    local pct = tot_kb > 0 and (usd_kb / tot_kb * 100.0) or 0
+                    table.insert(gpus, {
+                        name = ffi.string(name_buf),
+                        temp_c = has_temp and tonumber(temp[0]) or nil,
+                        util_pct = tonumber(util.gpu),
+                        mem_util_pct = tonumber(util.memory),
+                        mem_total_kb = tot_kb,
+                        mem_used_kb = usd_kb,
+                        mem_used_pct = pct,
+                    })
+                end
+            end
+        elseif dxgi_cached_gpus and #dxgi_cached_gpus > 0 then
+            return dxgi_cached_gpus
+        end
+        return gpus
     end
 
     local prev_win_proc_times = {}
@@ -1261,6 +1442,121 @@ else
         f:close()
         local l1, l5, l15, tasks = content:match("^(%S+)%s+(%S+)%s+(%S+)%s+(%S+)")
         return string.format("%s %s %s", l1 or "0.00", l5 or "0.00", l15 or "0.00"), tasks or ""
+    end
+
+    -- Linux GPU Telemetry (NVML + DRM Sysfs)
+    local linux_gpu_inited = false
+    local linux_nvml_lib = nil
+    local linux_nvml_cnt = 0
+
+    local function init_linux_gpu()
+        if linux_gpu_inited then return end
+        linux_gpu_inited = true
+
+        local ok, lib = pcall(ffi.load, "libnvidia-ml.so.1")
+        if not ok then ok, lib = pcall(ffi.load, "libnvidia-ml.so") end
+        if ok then
+            pcall(function()
+                ffi.cdef[[
+                    typedef void* nvmlDevice_t;
+                    typedef struct {
+                        unsigned long long total;
+                        unsigned long long free;
+                        unsigned long long used;
+                    } nvmlMemory_t;
+                    typedef struct {
+                        unsigned int gpu;
+                        unsigned int memory;
+                    } nvmlUtilization_t;
+                    int nvmlInit_v2(void);
+                    int nvmlShutdown(void);
+                    int nvmlDeviceGetCount_v2(unsigned int *deviceCount);
+                    int nvmlDeviceGetHandleByIndex_v2(unsigned int index, nvmlDevice_t *device);
+                    int nvmlDeviceGetName(nvmlDevice_t device, char *name, unsigned int length);
+                    int nvmlDeviceGetMemoryInfo(nvmlDevice_t device, nvmlMemory_t *memory);
+                    int nvmlDeviceGetUtilizationRates(nvmlDevice_t device, nvmlUtilization_t *utilization);
+                    int nvmlDeviceGetTemperature(nvmlDevice_t device, int sensorType, unsigned int *temp);
+                ]]
+            end)
+            local init_ok = false
+            pcall(function()
+                if lib.nvmlInit_v2() == 0 then init_ok = true end
+            end)
+            if init_ok then
+                local cnt = ffi.new("unsigned int[1]")
+                if lib.nvmlDeviceGetCount_v2(cnt) == 0 and cnt[0] > 0 then
+                    linux_nvml_lib = lib
+                    linux_nvml_cnt = cnt[0]
+                end
+            end
+        end
+    end
+
+    read_gpu_stats = function()
+        init_linux_gpu()
+        local gpus = {}
+        if linux_nvml_lib and linux_nvml_cnt > 0 then
+            for i = 0, linux_nvml_cnt - 1 do
+                local dev = ffi.new("nvmlDevice_t[1]")
+                if linux_nvml_lib.nvmlDeviceGetHandleByIndex_v2(i, dev) == 0 then
+                    local name_buf = ffi.new("char[64]")
+                    linux_nvml_lib.nvmlDeviceGetName(dev[0], name_buf, 64)
+                    local mem = ffi.new("nvmlMemory_t")
+                    linux_nvml_lib.nvmlDeviceGetMemoryInfo(dev[0], mem)
+                    local util = ffi.new("nvmlUtilization_t")
+                    linux_nvml_lib.nvmlDeviceGetUtilizationRates(dev[0], util)
+                    local temp = ffi.new("unsigned int[1]")
+                    local has_temp = (linux_nvml_lib.nvmlDeviceGetTemperature(dev[0], 0, temp) == 0)
+
+                    local tot_kb = math.floor(tonumber(mem.total) / 1024)
+                    local usd_kb = math.floor(tonumber(mem.used) / 1024)
+                    local pct = tot_kb > 0 and (usd_kb / tot_kb * 100.0) or 0
+                    table.insert(gpus, {
+                        name = ffi.string(name_buf),
+                        temp_c = has_temp and tonumber(temp[0]) or nil,
+                        util_pct = tonumber(util.gpu),
+                        mem_util_pct = tonumber(util.memory),
+                        mem_total_kb = tot_kb,
+                        mem_used_kb = usd_kb,
+                        mem_used_pct = pct,
+                    })
+                end
+            end
+            return gpus
+        end
+
+        -- Linux sysfs fallback (AMDGPU / Intel DRM)
+        local f_tot = io.open("/sys/class/drm/card0/device/mem_info_vram_total", "r")
+        if f_tot then
+            local tot_str = f_tot:read("*a")
+            f_tot:close()
+            local tot_bytes = tonumber(tot_str:match("%d+"))
+            if tot_bytes and tot_bytes > 0 then
+                local usd_bytes = 0
+                local f_usd = io.open("/sys/class/drm/card0/device/mem_info_vram_used", "r")
+                if f_usd then
+                    usd_bytes = tonumber(f_usd:read("*a"):match("%d+")) or 0
+                    f_usd:close()
+                end
+                local util_pct = nil
+                local f_busy = io.open("/sys/class/drm/card0/device/gpu_busy_percent", "r")
+                if f_busy then
+                    util_pct = tonumber(f_busy:read("*a"):match("%d+"))
+                    f_busy:close()
+                end
+                local tot_kb = math.floor(tot_bytes / 1024)
+                local usd_kb = math.floor(usd_bytes / 1024)
+                table.insert(gpus, {
+                    name = "AMD/DRM GPU",
+                    temp_c = nil,
+                    util_pct = util_pct,
+                    mem_total_kb = tot_kb,
+                    mem_used_kb = usd_kb,
+                    mem_used_pct = tot_kb > 0 and (usd_kb / tot_kb * 100.0) or 0,
+                })
+            end
+        end
+        return gpus
     end
 
     read_process_table = function(mem_total_kb, now_clock)
@@ -1740,6 +2036,7 @@ Keybindings:
     local last_w, last_h = get_terminal_size()
     local cpu_history = {}
     local mem_history = {}
+    local gpu_history = {}
     local rx_history = {}
     local tx_history = {}
     local max_history = 35
@@ -2005,6 +2302,7 @@ Keybindings:
             local mem = read_memory_stats()
             local net = read_network_stats(curr_clock)
             local storage = read_storage_stats(curr_clock)
+            local gpus = read_gpu_stats and read_gpu_stats() or {}
             local procs = read_process_table(mem.total_kb or 1, curr_clock)
             local load_str, task_str = read_loadavg(overall_cpu, #procs)
 
@@ -2014,6 +2312,11 @@ Keybindings:
 
             table.insert(mem_history, mem.used_pct)
             if #mem_history > max_history then table.remove(mem_history, 1) end
+
+            if #gpus > 0 and gpus[1].mem_used_pct then
+                table.insert(gpu_history, gpus[1].mem_used_pct)
+                if #gpu_history > max_history then table.remove(gpu_history, 1) end
+            end
 
             table.insert(rx_history, net.rx_rate)
             if #rx_history > max_history then table.remove(rx_history, 1) end
@@ -2090,8 +2393,16 @@ Keybindings:
             if term_w >= 120 then
                 local freq_ghz_str = freq_ghz and string.format(" │ CPU: \27[1;97m%.2f GHz\27[0m", freq_ghz) or ""
                 local temp_str = temp_c and string.format(" (\27[1;38;2;251;191;36m%.0f°C\27[0m)", temp_c) or ""
-                header_content = string.format("  \27[1;38;2;56;189;248m⚡ LUATOP v2.2\27[0m │ Load: \27[1;97m%s\27[0m │ Tasks: \27[1;97m%s\27[0m%s%s%s%s%s",
-                    load_str, task_str, zombie_str, freq_ghz_str, temp_str, theme_ind, rate_str)
+                local gpu_hdr = ""
+                if #gpus > 0 then
+                    local g0 = gpus[1]
+                    local g0_short = g0.name:gsub("^NVIDIA%s+", ""):gsub("^AMD%s+", "")
+                    g0_short = truncate(g0_short, 16)
+                    local g0_temp = g0.temp_c and string.format(" (\27[1;38;2;251;191;36m%d°C\27[0m)", g0.temp_c) or ""
+                    gpu_hdr = string.format(" │ GPU: \27[1;97m%s\27[0m%s", g0_short, g0_temp)
+                end
+                header_content = string.format("  \27[1;38;2;56;189;248m⚡ LUATOP v2.2\27[0m │ Load: \27[1;97m%s\27[0m │ Tasks: \27[1;97m%s\27[0m%s%s%s%s%s%s",
+                    load_str, task_str, zombie_str, freq_ghz_str, temp_str, gpu_hdr, theme_ind, rate_str)
             elseif term_w >= 90 then
                 local short_tasks = task_str:match("^[^,]+") or task_str
                 header_content = string.format("  \27[1;38;2;56;189;248m⚡ LUATOP v2.2\27[0m │ Load: \27[1;97m%s\27[0m │ Tasks: \27[1;97m%s\27[0m%s%s",
@@ -2105,7 +2416,9 @@ Keybindings:
             table.insert(out, string.format("\27[1;1H%s\27[K", truncate(header_content, term_w)))
 
             -- Layout calculations
-            local top_h = math.min(12, math.max(8, math.floor(term_h * 0.32)))
+            local min_top = (#gpus > 0) and 10 or 8
+            local max_top = (#gpus > 0) and 14 or 12
+            local top_h = math.min(max_top, math.max(min_top, math.floor(term_h * ((#gpus > 0) and 0.35 or 0.32))))
             local net_h = 3
             local bot_h = term_h - top_h - net_h - 2
 
@@ -2140,9 +2453,11 @@ Keybindings:
                 table.insert(out, draw_box_row(1, 2 + i, left_w, table.concat(line_parts)))
             end
 
-            -- 2. Memory, Swap & Storage Pane (Top Right)
+            -- 2. Memory, GPU & Storage Pane (Top Right)
             local mem_spark = make_sparkline(mem_history, math.max(8, right_w - 26), C.mem_used)
-            draw_pane(out, left_w + 1, 2, right_w, top_h, "Memory & Storage", false, "Trend: " .. mem_spark)
+            local pane_title = (#gpus > 0) and "Memory, GPU & Storage" or "Memory & Storage"
+            if #gpus > 0 and right_w < 50 then pane_title = "Memory & GPU" end
+            draw_pane(out, left_w + 1, 2, right_w, top_h, pane_title, false, "Trend: " .. mem_spark)
             local mem_bar = make_meter_bar(mem.used_pct, right_w - 24, C.mem_used)
             local swap_bar = make_meter_bar(mem.swap_pct, right_w - 24, C.mem_swap)
 
@@ -2162,8 +2477,29 @@ Keybindings:
                     C.bold, C.reset, swap_bar, mem.swap_pct, C.reset,
                     format_bytes(mem.swap_used_kb), format_bytes(mem.swap_total_kb))))
 
-            -- Storage Mounts & Disk I/O
+            -- GPU Telemetry (if detected)
             local row_y = 6
+            for _, g in ipairs(gpus) do
+                if row_y >= top_h then break end
+                local g_temp = g.temp_c and string.format("  \27[1;38;2;251;191;36m%d°C\27[0m", g.temp_c) or ""
+                local g_core = g.util_pct and string.format(" │ Core: \27[1;97m%d%%\27[0m", g.util_pct) or ""
+                local g_name = g.name:gsub("^NVIDIA%s+", ""):gsub("^AMD%s+", "")
+                local avail_name_w = math.max(10, right_w - 24)
+                g_name = truncate(g_name, avail_name_w)
+                table.insert(out, draw_box_row(left_w + 1, row_y, right_w,
+                    string.format("%sGPU %s%s%s%s%s", C.bold, C.reset, C.title_col, g_name, C.reset, g_temp, g_core)))
+                row_y = row_y + 1
+
+                if row_y >= top_h + 1 then break end
+                local vram_bar = make_meter_bar(g.mem_used_pct, right_w - 24, C.mem_used)
+                table.insert(out, draw_box_row(left_w + 1, row_y, right_w,
+                    string.format("%sVRAM%s %s %5.1f%%%s %s/%s",
+                        C.bold, C.reset, vram_bar, g.mem_used_pct or 0, C.reset,
+                        format_bytes(g.mem_used_kb), format_bytes(g.mem_total_kb))))
+                row_y = row_y + 1
+            end
+
+            -- Storage Mounts & Disk I/O
             for _, m in ipairs(storage.mounts) do
                 if row_y >= top_h + 1 then break end
                 local disk_bar = make_meter_bar(m.used_pct, right_w - 24)
@@ -2443,6 +2779,17 @@ local function run_self_test()
     assert(type(storage.mounts) == "table", "Mounts should be a table")
     print(string.format("  ✔ Storage Telemetry: %d mounted filesystems inspected", #storage.mounts))
 
+    local gpus = read_gpu_stats()
+    assert(type(gpus) == "table", "GPUs should be a table")
+    if #gpus > 0 then
+        print(string.format("  ✔ GPU Telemetry: %d GPU(s) detected: %s (VRAM: %s/%s, Core: %s%%)",
+            #gpus, gpus[1].name,
+            format_bytes(gpus[1].mem_used_kb), format_bytes(gpus[1].mem_total_kb),
+            tostring(gpus[1].util_pct or "N/A")))
+    else
+        print("  ✔ GPU Telemetry: Headless/Integrated system (Zero-fork fallback active)")
+    end
+
     local procs = read_process_table(mem.total_kb or 1, os.clock())
     assert(#procs > 0, "Process table must contain at least 1 process")
     assert(procs[1].pid >= 0, "Process PID must be >= 0")
@@ -2542,6 +2889,7 @@ local M = {
     read_memory_stats  = read_memory_stats,
     read_network_stats = read_network_stats,
     read_storage_stats = read_storage_stats,
+    read_gpu_stats     = read_gpu_stats,
     read_process_table = read_process_table,
     build_process_tree = build_process_tree,
     match_smart_filter = match_smart_filter,
