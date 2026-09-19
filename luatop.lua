@@ -701,7 +701,8 @@ local function format_bytes(kb)
     if kb < 1024 then
         return string.format("%d K", kb)
     elseif kb < 1024 * 1024 then
-        return string.format("%.1f M", kb / 1024)
+        local mb = kb / 1024
+        return mb >= 100 and string.format("%.0f M", mb) or string.format("%.1f M", mb)
     elseif kb < 1024 * 1024 * 1024 then
         return string.format("%.2f G", kb / (1024 * 1024))
     else
@@ -2912,23 +2913,28 @@ Keybindings:
             local left_w = math.floor(term_w * 0.50)
             local right_w = term_w - left_w
 
-            -- Layout calculations
             local num_mounts = #storage.mounts
-            local mount_rows = (num_mounts >= 4 and right_w >= 50) and math.ceil(num_mounts / 2) or num_mounts
+            local use_dual_col = (num_mounts >= 4 and right_w >= 50)
+            local storage_rows = use_dual_col and math.ceil(num_mounts / 2) or num_mounts
             local gpu_rows = 0
-            if #gpus > 0 then
-                gpu_rows = 1
-                if not gpus[1].is_integrated and gpus[1].mem_total_kb and gpus[1].mem_total_kb > 0 then
-                    gpu_rows = 2
+            for _, g in ipairs(gpus) do
+                gpu_rows = gpu_rows + 1
+                if not g.is_integrated and g.mem_total_kb and g.mem_total_kb > 0 then
+                    gpu_rows = gpu_rows + 1
                 end
             end
-            local desired_top = 3 + gpu_rows + mount_rows + 1 + 2
-            local max_avail_top = math.max(10, term_h - 8)
-            local min_top = math.min(max_avail_top, math.max((#gpus > 0 or num_mounts > 2) and 10 or 8, desired_top))
-            local max_top = math.min(max_avail_top, math.max(min_top, (#gpus > 0 or num_mounts > 2) and 14 or 12))
-            if term_h >= 36 then max_top = math.min(max_avail_top, math.max(16, desired_top)) end
-            local top_ratio = (#gpus > 0 or num_mounts > 2) and 0.38 or 0.32
-            local top_h = math.min(max_top, math.max(min_top, math.floor(term_h * top_ratio)))
+            local right_content_bottom = 6 + gpu_rows + storage_rows
+            local core_rows = math.max(1, math.ceil(#cores / 2))
+            if left_w < 36 then
+                core_rows = #cores
+            elseif left_w >= 90 and #cores > 3 * (right_content_bottom - 2) then
+                core_rows = math.ceil(#cores / 4)
+            elseif left_w >= 60 and #cores > 2 * (right_content_bottom - 2) then
+                core_rows = math.ceil(#cores / 3)
+            end
+            local required_top_h = math.max(6, right_content_bottom, 2 + core_rows)
+            local max_top_h = math.max(6, term_h - 6)
+            local top_h = math.min(required_top_h, max_top_h)
             local net_h = 3
             local bot_h = term_h - top_h - net_h - 2
 
@@ -2955,15 +2961,9 @@ Keybindings:
 
             -- Dynamic core columns based on left_w and core count
             local avail_rows = math.max(1, top_h - 2)
-            local num_cols = 2
-            if left_w < 36 then
-                num_cols = 1
-            elseif #cores > avail_rows * 2 and left_w >= 60 then
-                num_cols = (left_w >= 90 and #cores > avail_rows * 3) and 4 or 3
-            end
-            if math.ceil(#cores / num_cols) > avail_rows then
-                num_cols = math.max(1, math.ceil(#cores / avail_rows))
-            end
+            local num_cols = left_w < 36 and 1
+                or (left_w >= 90 and #cores > 3 * avail_rows and 4
+                or (left_w >= 60 and #cores > 2 * avail_rows and 3 or 2))
             local col_sub_w = math.floor((left_w - 4 - num_cols) / num_cols)
 
             for i = 1, avail_rows do
@@ -3048,7 +3048,6 @@ Keybindings:
             end
 
             -- Storage Mounts & Disk I/O
-            local use_dual_col = (#storage.mounts >= 4 and right_w >= 50)
             if use_dual_col then
                 local col_w = math.floor((right_w - 2 - 3) / 2)
                 local max_mnt_len = 2
@@ -3129,6 +3128,7 @@ Keybindings:
                     C.dim, C.disk_read, format_rate(storage.read_speed), C.reset,
                     C.disk_write, format_rate(storage.write_speed), C.reset)
                 table.insert(out, draw_box_row(left_w + 1, row_y, right_w, io_str))
+                row_y = row_y + 1
             end
 
             -- 3. Network I/O Pane (Middle)
