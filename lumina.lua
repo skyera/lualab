@@ -326,6 +326,13 @@ else
             if n > 0 then
                 local c0 = key_buf[0]
                 if c0 == 27 then
+                    while n < 3 do
+                        local more = ffi.C.poll(pfd, 1, 15)
+                        if more <= 0 or bit.band(pfd.revents, POLLIN) == 0 then break end
+                        local got = ffi.C.read(STDIN_FILENO, key_buf + n, 3 - n)
+                        if got <= 0 then break end
+                        n = n + got
+                    end
                     if n >= 3 and key_buf[1] == 91 then
                         local c2 = key_buf[2]
                         if c2 == 65 then return "UP" end
@@ -825,28 +832,53 @@ local function generate_image_preview(filepath, max_w, max_h)
     return lines
 end
 
-local function show_image_fullscreen(entry)
-    local term_w, term_h = get_terminal_size()
-    local header = string.format("  %s%s%s",
-        C.bold, entry.name, C.reset,
-        C.reset)
-    local footer = "  " .. C.dim .. "[q/Esc/Enter] Return to Lumina" .. C.reset
-    local image_lines = generate_image_preview(entry.path, math.max(1, term_w - 2), math.max(1, term_h - 4))
-
-    io.write("\27[H\27[2J\27[?25l")
-    io.write(header .. "\n")
-    for _, line in ipairs(image_lines) do
-        io.write(line .. "\n")
+local function show_image_fullscreen(images, selected_idx)
+    local image_indices = {}
+    for idx, entry in ipairs(images) do
+        if IMAGE_EXTS[entry.ext] then
+            table.insert(image_indices, idx)
+        end
     end
-    io.write(string.format("\27[%d;1H\27[2K%s", term_h, footer))
-    io.flush()
 
+    local image_pos = 1
+    for pos, idx in ipairs(image_indices) do
+        if idx == selected_idx then
+            image_pos = pos
+            break
+        end
+    end
+
+    local function render()
+        local entry = images[image_indices[image_pos]]
+        local term_w, term_h = get_terminal_size()
+        local header = string.format("  %s%s%s  %s[%d/%d]%s",
+            C.bold, entry.name, C.reset,
+            C.dim, image_pos, #image_indices, C.reset)
+        local footer = "  " .. C.dim .. "[←/→] Previous/Next  [q/Esc/Enter] Return to Lumina" .. C.reset
+        local image_lines = generate_image_preview(entry.path, math.max(1, term_w - 2), math.max(1, term_h - 4))
+
+        io.write("\27[H\27[2J\27[?25l")
+        io.write(header .. "\n")
+        for _, line in ipairs(image_lines) do
+            io.write(line .. "\n")
+        end
+        io.write(string.format("\27[%d;1H\27[2K%s", term_h, footer))
+        io.flush()
+    end
+
+    render()
     while true do
         local k = read_key()
         if k == "q" or k == "Q" or k == "ESC" or k == "ENTER" then
             io.write("\27[H\27[2J")
             io.flush()
-            return
+            return image_indices[image_pos]
+        elseif k == "LEFT" and #image_indices > 1 then
+            image_pos = (image_pos - 2 + #image_indices) % #image_indices + 1
+            render()
+        elseif k == "RIGHT" and #image_indices > 1 then
+            image_pos = image_pos % #image_indices + 1
+            render()
         end
     end
 end
@@ -1191,7 +1223,7 @@ local function main()
                     sel_index = 1
                     reload_current()
                 elseif k == "ENTER" and IMAGE_EXTS[sel and sel.ext] then
-                    show_image_fullscreen(sel)
+                    sel_index = show_image_fullscreen(current_entries, sel_index) or sel_index
                     needs_redraw = true
                 elseif k == "ENTER" and is_text_file(sel) then
                     edit_text_file(sel.path)
