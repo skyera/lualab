@@ -46,6 +46,7 @@ local kernel32
 
 if is_windows then
     kernel32 = ffi.load("kernel32")
+    local msvcrt = ffi.load("msvcrt")
     ffi.cdef[[
         typedef void *HANDLE;
         typedef struct _COORD { short X; short Y; } COORD;
@@ -145,10 +146,10 @@ if is_windows then
         timeout_ms = timeout_ms or 50
         local elapsed = 0
         while elapsed < timeout_ms do
-            if ffi.C._kbhit() ~= 0 then
-                local c0 = ffi.C._getch()
+            if msvcrt._kbhit() ~= 0 then
+                local c0 = msvcrt._getch()
                 if c0 == 0 or c0 == 224 then
-                    local c1 = ffi.C._getch()
+                    local c1 = msvcrt._getch()
                     if c1 == 72 then return "UP"
                     elseif c1 == 80 then return "DOWN"
                     elseif c1 == 75 then return "LEFT"
@@ -801,6 +802,74 @@ local function generate_image_preview(filepath, max_w, max_h)
     return lines
 end
 
+local PREVIEW_CACHE_LIMIT = 64
+local preview_cache = {}
+local preview_cache_order = {}
+
+local function clear_preview_cache()
+    preview_cache = {}
+    preview_cache_order = {}
+end
+
+local function preview_cache_get(key)
+    return preview_cache[key]
+end
+
+local function preview_cache_put(key, lines)
+    if preview_cache[key] then return end
+    preview_cache[key] = lines
+    table.insert(preview_cache_order, key)
+    if #preview_cache_order > PREVIEW_CACHE_LIMIT then
+        local evicted = table.remove(preview_cache_order, 1)
+        preview_cache[evicted] = nil
+    end
+end
+
+local function generate_preview(entry, max_lines, max_cols, show_hidden)
+    local key = table.concat({
+        entry.path,
+        entry.ext,
+        tostring(entry.size),
+        tostring(max_lines),
+        tostring(max_cols),
+        show_hidden and "hidden" or "visible",
+    }, "\31")
+    local cached = preview_cache_get(key)
+    if cached then return cached end
+
+    local lines
+    if entry.is_dir then
+        lines = generate_dir_preview(entry.path, max_lines, show_hidden)
+    elseif IMAGE_EXTS[entry.ext] then
+        lines = generate_image_preview(entry.path, max_cols, max_lines)
+    elseif CODE_EXTS[entry.ext] or entry.ext == "txt" then
+        lines = generate_text_preview(entry.path, entry.ext, max_lines, max_cols)
+    elseif entry.size > 0 and entry.size < 1024 * 1024 * 5 then
+        local test_f = io.open(entry.path, "rb")
+        local first_bytes = test_f and test_f:read(512) or ""
+        if test_f then test_f:close() end
+
+        local is_binary = false
+        for i = 1, #first_bytes do
+            local byte_val = first_bytes:byte(i)
+            if byte_val < 9 or (byte_val > 13 and byte_val < 32) then
+                is_binary = true
+                break
+            end
+        end
+        if is_binary then
+            lines = generate_hex_preview(entry.path, max_lines)
+        else
+            lines = generate_text_preview(entry.path, entry.ext, max_lines, max_cols)
+        end
+    else
+        lines = { C.dim .. "Large / Binary File (" .. entry.size_str .. ")" .. C.reset }
+    end
+
+    preview_cache_put(key, lines)
+    return lines
+end
+
 -- =========================================================================
 -- 5. Screen Layout & Rendering Engine (Miller Columns)
 -- =========================================================================
@@ -947,41 +1016,9 @@ local function main()
             local preview_title = sel_entry and sel_entry.name or "Preview"
             draw_pane(out, col3_x, start_y, col3_w, usable_h, preview_title, false)
 
-            local preview_lines = {}
-            if sel_entry then
-                if sel_entry.is_dir then
-                    preview_lines = generate_dir_preview(sel_entry.path, visible_rows, show_hidden)
-                elseif IMAGE_EXTS[sel_entry.ext] then
-                    preview_lines = generate_image_preview(sel_entry.path, col3_w - 4, visible_rows)
-                elseif CODE_EXTS[sel_entry.ext] or sel_entry.ext == "txt" then
-                    preview_lines = generate_text_preview(sel_entry.path, sel_entry.ext, visible_rows, col3_w - 4)
-                elseif sel_entry.size > 0 and sel_entry.size < 1024 * 1024 * 5 then
-                    -- Test if binary or text via direct byte examination
-                    local test_f = io.open(sel_entry.path, "rb")
-                    local first_bytes = test_f and test_f:read(512) or ""
-                    if test_f then test_f:close() end
-
-                    local is_binary = false
-                    for b_i = 1, #first_bytes do
-                        local byte_val = first_bytes:byte(b_i)
-                        -- Non-printable control characters (excluding tab, LF, CR)
-                        if byte_val < 9 or (byte_val > 13 and byte_val < 32) then
-                            is_binary = true
-                            break
-                        end
-                    end
-
-                    if is_binary then
-                        preview_lines = generate_hex_preview(sel_entry.path, visible_rows)
-                    else
-                        preview_lines = generate_text_preview(sel_entry.path, sel_entry.ext, visible_rows, col3_w - 4)
-                    end
-                else
-                    preview_lines = { C.dim .. "Large / Binary File (" .. sel_entry.size_str .. ")" .. C.reset }
-                end
-            else
-                preview_lines = { C.dim .. "(Empty Directory)" .. C.reset }
-            end
+            local preview_lines = sel_entry
+                and generate_preview(sel_entry, visible_rows, col3_w - 4, show_hidden)
+                or { C.dim .. "(Empty Directory)" .. C.reset }
 
             for i = 1, visible_rows do
                 local pline = preview_lines[i] or ""
@@ -1042,6 +1079,7 @@ local function main()
                     local prev_dir = current_dir
                     current_dir = get_parent_dir(current_dir)
                     filter_query = ""
+                    clear_preview_cache()
                     current_entries = read_dir_entries(current_dir, show_hidden)
                     parent_dir = get_parent_dir(current_dir)
                     parent_entries = is_root_dir(current_dir) and {} or read_dir_entries(parent_dir, show_hidden)
@@ -1091,4 +1129,9 @@ local function main()
     print("\n\27[1;36mExited Yazi-Lite. Goodbye!\27[0m")
 end
 
-main()
+local ok, err = xpcall(main, debug.traceback)
+if not ok then
+    disable_raw_mode()
+    io.stderr:write("\27[1;31mYazi-Lite error:\27[0m " .. tostring(err) .. "\n")
+    os.exit(1)
+end
