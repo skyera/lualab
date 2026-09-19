@@ -307,42 +307,88 @@ else
         };
         struct passwd *getpwuid(uid_t uid);
 
-        typedef unsigned long fsblkcnt_t;
-        typedef unsigned long fsfilcnt_t;
-        struct statvfs {
-            unsigned long f_bsize;
-            unsigned long f_frsize;
-            fsblkcnt_t    f_blocks;
-            fsblkcnt_t    f_bfree;
-            fsblkcnt_t    f_bavail;
-            fsfilcnt_t    f_files;
-            fsfilcnt_t    f_ffree;
-            fsfilcnt_t    f_favail;
-            unsigned long f_fsid;
-            unsigned long f_flag;
-            unsigned long f_namemax;
-            int __f_spare[6];
-        };
-        int statvfs(const char *path, struct statvfs *buf);
-
         struct timespec { long tv_sec; long tv_nsec; };
-        struct stat {
-            unsigned long  st_dev;
-            unsigned long  st_ino;
-            unsigned long  st_nlink;
-            unsigned int   st_mode;
-            unsigned int   st_uid;
-            unsigned int   st_gid;
-            unsigned int   __pad0;
-            unsigned long  st_rdev;
-            long           st_size;
-            long           st_blksize;
-            long           st_blocks;
-            struct timespec st_atim;
-            struct timespec st_mtim;
-            struct timespec st_ctim;
-            long           __glibc_reserved[3];
-        };
+    ]]
+
+    if ffi.arch == "arm" then
+        ffi.cdef[[
+            struct statvfs {
+                unsigned long f_bsize;
+                unsigned long f_frsize;
+                unsigned long f_blocks;
+                unsigned long f_bfree;
+                unsigned long f_bavail;
+                unsigned long f_files;
+                unsigned long f_ffree;
+                unsigned long f_favail;
+                unsigned long f_fsid;
+                int           __f_unused;
+                unsigned long f_flag;
+                unsigned long f_namemax;
+                int           __f_spare[6];
+            };
+
+            struct stat {
+                uint64_t st_dev;
+                uint16_t __pad1;
+                uint32_t st_ino;
+                uint32_t st_mode;
+                uint32_t st_nlink;
+                uint32_t st_uid;
+                uint32_t st_gid;
+                uint64_t st_rdev;
+                uint16_t __pad2;
+                int32_t  st_size;
+                int32_t  st_blksize;
+                int32_t  st_blocks;
+                struct timespec st_atim;
+                struct timespec st_mtim;
+                struct timespec st_ctim;
+                uint32_t __glibc_reserved4;
+                uint32_t __glibc_reserved5;
+            };
+        ]]
+    else
+        ffi.cdef[[
+            typedef unsigned long fsblkcnt_t;
+            typedef unsigned long fsfilcnt_t;
+            struct statvfs {
+                unsigned long f_bsize;
+                unsigned long f_frsize;
+                fsblkcnt_t    f_blocks;
+                fsblkcnt_t    f_bfree;
+                fsblkcnt_t    f_bavail;
+                fsfilcnt_t    f_files;
+                fsfilcnt_t    f_ffree;
+                fsfilcnt_t    f_favail;
+                unsigned long f_fsid;
+                unsigned long f_flag;
+                unsigned long f_namemax;
+                int __f_spare[6];
+            };
+
+            struct stat {
+                unsigned long  st_dev;
+                unsigned long  st_ino;
+                unsigned long  st_nlink;
+                unsigned int   st_mode;
+                unsigned int   st_uid;
+                unsigned int   st_gid;
+                unsigned int   __pad0;
+                unsigned long  st_rdev;
+                long           st_size;
+                long           st_blksize;
+                long           st_blocks;
+                struct timespec st_atim;
+                struct timespec st_mtim;
+                struct timespec st_ctim;
+                long           __glibc_reserved[3];
+            };
+        ]]
+    end
+
+    ffi.cdef[[
+        int statvfs(const char *path, struct statvfs *buf);
         int stat(const char *pathname, struct stat *statbuf);
         int __xstat(int ver, const char *pathname, struct stat *statbuf);
 
@@ -1247,7 +1293,8 @@ else
     -- POSIX / Linux Telemetry Implementation
     local posix_stat
     if pcall(function() return ffi.C.__xstat end) then
-        posix_stat = function(path, st) return ffi.C.__xstat(1, path, st) end
+        local stat_ver = (ffi.arch == "arm") and 3 or 1
+        posix_stat = function(path, st) return ffi.C.__xstat(stat_ver, path, st) end
     else
         posix_stat = function(path, st) return ffi.C.stat(path, st) end
     end
