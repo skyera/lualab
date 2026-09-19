@@ -231,8 +231,8 @@ else
         struct stat {
             unsigned long  st_dev;
             unsigned long  st_ino;
+            unsigned long  st_nlink;
             unsigned int   st_mode;
-            unsigned int   st_nlink;
             unsigned int   st_uid;
             unsigned int   st_gid;
             unsigned long  st_rdev;
@@ -547,7 +547,7 @@ else
             if name ~= "." and name ~= ".." and (show_hidden or name:sub(1, 1) ~= ".") then
                 local full_path = (dir_path == "/" and ("/" .. name) or (dir_path .. "/" .. name))
                 local size = 0
-                local is_dir = false
+                local is_dir = (ent.d_type == 4) -- DT_DIR
                 local is_exec = false
                 local is_symlink = (ent.d_type == 10) -- DT_LNK
 
