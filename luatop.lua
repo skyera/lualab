@@ -1735,35 +1735,111 @@ else
             return gpus
         end
 
-        -- Linux sysfs fallback (AMDGPU / Intel DRM)
-        local f_tot = io.open("/sys/class/drm/card0/device/mem_info_vram_total", "r")
-        if f_tot then
-            local tot_str = f_tot:read("*a")
-            f_tot:close()
-            local tot_bytes = tonumber(tot_str:match("%d+"))
-            if tot_bytes and tot_bytes > 0 then
-                local usd_bytes = 0
-                local f_usd = io.open("/sys/class/drm/card0/device/mem_info_vram_used", "r")
-                if f_usd then
-                    usd_bytes = tonumber(f_usd:read("*a"):match("%d+")) or 0
-                    f_usd:close()
+        -- Linux sysfs & DRM fallback (Intel iGPU / AMDGPU / DRM Cards)
+        local cached_drm_names = {}
+        for card_idx = 0, 7 do
+            local card_base = "/sys/class/drm/card" .. card_idx
+            local f_uevent = io.open(card_base .. "/device/uevent", "r")
+            if f_uevent then
+                local slot = nil
+                local driver = nil
+                local pci_id = nil
+                for line in f_uevent:lines() do
+                    local s = line:match("^PCI_SLOT_NAME=(%S+)")
+                    if s then slot = s end
+                    local d = line:match("^DRIVER=(%S+)")
+                    if d then driver = d end
+                    local p = line:match("^PCI_ID=(%x+:%x+)")
+                    if p then pci_id = p end
                 end
-                local util_pct = nil
-                local f_busy = io.open("/sys/class/drm/card0/device/gpu_busy_percent", "r")
-                if f_busy then
-                    util_pct = tonumber(f_busy:read("*a"):match("%d+"))
-                    f_busy:close()
+                f_uevent:close()
+
+                local gpu_name = cached_drm_names[card_idx]
+                if not gpu_name and slot then
+                    local p = io.popen("lspci -s " .. slot .. " 2>/dev/null")
+                    if p then
+                        local l = p:read("*l")
+                        p:close()
+                        if l then
+                            local desc = l:match(":%s+(.-)%s*%(rev") or l:match(":%s+(.*)")
+                            if desc then
+                                local bracket = desc:match("%[(.-)%]")
+                                if bracket and not bracket:find("^%x%x%x%x") then
+                                    local brand = desc:find("^Intel") and "Intel " or (desc:find("^AMD") and "AMD " or "")
+                                    gpu_name = brand .. bracket
+                                else
+                                    gpu_name = desc:gsub("^Corporation%s+", "")
+                                end
+                            end
+                        end
+                    end
+                    if not gpu_name and driver then
+                        if driver == "i915" or driver == "xe" then gpu_name = "Intel HD/UHD Graphics"
+                        elseif driver == "amdgpu" or driver == "radeon" then gpu_name = "AMD Radeon Graphics"
+                        elseif driver == "nouveau" then gpu_name = "NVIDIA Graphics (nouveau)"
+                        end
+                    end
+                    cached_drm_names[card_idx] = gpu_name
                 end
-                local tot_kb = math.floor(tot_bytes / 1024)
-                local usd_kb = math.floor(usd_bytes / 1024)
-                table.insert(gpus, {
-                    name = "AMD/DRM GPU",
-                    temp_c = nil,
-                    util_pct = util_pct,
-                    mem_total_kb = tot_kb,
-                    mem_used_kb = usd_kb,
-                    mem_used_pct = tot_kb > 0 and (usd_kb / tot_kb * 100.0) or 0,
-                })
+
+                if gpu_name then
+                    -- Check VRAM (discrete AMD / Intel)
+                    local f_tot = io.open(card_base .. "/device/mem_info_vram_total", "r")
+                    local tot_bytes = nil
+                    local usd_bytes = 0
+                    if f_tot then
+                        tot_bytes = tonumber(f_tot:read("*a"):match("%d+"))
+                        f_tot:close()
+                        if tot_bytes and tot_bytes > 0 then
+                            local f_usd = io.open(card_base .. "/device/mem_info_vram_used", "r")
+                            if f_usd then
+                                usd_bytes = tonumber(f_usd:read("*a"):match("%d+")) or 0
+                                f_usd:close()
+                            end
+                        end
+                    end
+
+                    -- Check utilization
+                    local util_pct = nil
+                    local f_busy = io.open(card_base .. "/device/gpu_busy_percent", "r")
+                    if f_busy then
+                        util_pct = tonumber(f_busy:read("*a"):match("%d+"))
+                        f_busy:close()
+                    end
+
+                    -- Check frequency (e.g. Intel gt_act_freq_mhz or gt_cur_freq_mhz)
+                    local freq_ghz = nil
+                    local function read_mhz(p)
+                        local f = io.open(p, "r")
+                        if not f then return nil end
+                        local m = tonumber(f:read("*a"):match("%d+"))
+                        f:close()
+                        return (m and m > 0) and m or nil
+                    end
+                    local mhz = read_mhz(card_base .. "/gt_act_freq_mhz")
+                        or read_mhz(card_base .. "/device/drm/card" .. card_idx .. "/gt_act_freq_mhz")
+                        or read_mhz(card_base .. "/gt_cur_freq_mhz")
+                        or read_mhz(card_base .. "/gt_max_freq_mhz")
+                    if mhz then
+                        freq_ghz = mhz / 1000.0
+                    end
+
+                    local tot_kb = tot_bytes and math.floor(tot_bytes / 1024) or 0
+                    local usd_kb = math.floor(usd_bytes / 1024)
+                    local mem_pct = (tot_kb > 0) and (usd_kb / tot_kb * 100.0) or nil
+
+                    table.insert(gpus, {
+                        name = gpu_name,
+                        temp_c = nil,
+                        util_pct = util_pct,
+                        freq_ghz = freq_ghz,
+                        mem_total_kb = tot_kb > 0 and tot_kb or nil,
+                        mem_used_kb = tot_kb > 0 and usd_kb or nil,
+                        mem_used_pct = mem_pct,
+                        is_integrated = (tot_kb == 0),
+                    })
+                    break -- Display primary display GPU
+                end
             end
         end
         return gpus
@@ -2735,20 +2811,23 @@ Keybindings:
                 if row_y >= top_h then break end
                 local g_temp = g.temp_c and string.format("  \27[1;38;2;251;191;36m%d°C\27[0m", g.temp_c) or ""
                 local g_core = g.util_pct and string.format(" │ Core: \27[1;97m%d%%\27[0m", g.util_pct) or ""
+                local g_freq = g.freq_ghz and string.format(" │ Freq: \27[1;97m%.2f GHz\27[0m", g.freq_ghz) or ""
                 local g_name = g.name:gsub("^NVIDIA%s+", ""):gsub("^AMD%s+", "")
                 local avail_name_w = math.max(10, right_w - 24)
                 g_name = truncate(g_name, avail_name_w)
                 table.insert(out, draw_box_row(left_w + 1, row_y, right_w,
-                    string.format("%sGPU %s%s%s%s%s", C.bold, C.reset, C.title_col, g_name, C.reset, g_temp, g_core)))
+                    string.format("%sGPU %s%s%s%s%s%s", C.bold, C.reset, C.title_col, g_name, C.reset, g_temp, g_core, g_freq)))
                 row_y = row_y + 1
 
-                if row_y >= top_h + 1 then break end
-                local vram_bar = make_meter_bar(g.mem_used_pct, right_w - 24, C.mem_used)
-                table.insert(out, draw_box_row(left_w + 1, row_y, right_w,
-                    string.format("%sVRAM%s %s %5.1f%%%s %s/%s",
-                        C.bold, C.reset, vram_bar, g.mem_used_pct or 0, C.reset,
-                        format_bytes(g.mem_used_kb), format_bytes(g.mem_total_kb))))
-                row_y = row_y + 1
+                if not g.is_integrated and g.mem_total_kb and g.mem_total_kb > 0 then
+                    if row_y >= top_h + 1 then break end
+                    local vram_bar = make_meter_bar(g.mem_used_pct, right_w - 24, C.mem_used)
+                    table.insert(out, draw_box_row(left_w + 1, row_y, right_w,
+                        string.format("%sVRAM%s %s %5.1f%%%s %s/%s",
+                            C.bold, C.reset, vram_bar, g.mem_used_pct or 0, C.reset,
+                            format_bytes(g.mem_used_kb), format_bytes(g.mem_total_kb))))
+                    row_y = row_y + 1
+                end
             end
 
             -- Storage Mounts & Disk I/O

@@ -150,6 +150,15 @@ TestRunner.describe("4. Storage and Disk I/O Telemetry", function()
         assert_true(type(res.read_mbs) == "number" and res.read_mbs > 0, "read MB/s must be > 0")
         assert_true(res.bytes_tested == 1024 * 1024, "bytes tested should match test_size_mb")
     end)
+
+    TestRunner.it("should report GPU telemetry and detect integrated/discrete GPUs", function()
+        local gpus = btop.read_gpu_stats()
+        assert_true(type(gpus) == "table", "gpus must be a table")
+        if #gpus > 0 then
+            local g = gpus[1]
+            assert_true(type(g.name) == "string" and #g.name > 0, "gpu name must be non-empty string")
+        end
+    end)
 end)
 
 -- 5. Process Engine & Username Resolution
