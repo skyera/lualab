@@ -235,8 +235,8 @@ else
             unsigned int   st_mode;
             unsigned int   st_uid;
             unsigned int   st_gid;
+            unsigned int   __pad0;
             unsigned long  st_rdev;
-            unsigned long  __pad1;
             long           st_size;
             long           st_blksize;
             long           st_blocks;
@@ -1097,6 +1097,18 @@ local function main()
                 local _, term_h = get_terminal_size()
                 sel_index = math.min(#current_entries, sel_index + math.max(4, term_h - 6))
             elseif k == "PAGE_UP" then
+                local _, term_h = get_terminal_size()
+                sel_index = math.max(1, sel_index - math.max(4, term_h - 6))
+            elseif k == "\4" or k == "CTRL_D" then
+                local _, term_h = get_terminal_size()
+                sel_index = math.min(#current_entries, sel_index + math.max(4, math.floor((term_h - 6) / 2)))
+            elseif k == "\21" or k == "CTRL_U" then
+                local _, term_h = get_terminal_size()
+                sel_index = math.max(1, sel_index - math.max(4, math.floor((term_h - 6) / 2)))
+            elseif k == "\6" or k == "CTRL_F" then
+                local _, term_h = get_terminal_size()
+                sel_index = math.min(#current_entries, sel_index + math.max(4, term_h - 6))
+            elseif k == "\2" or k == "CTRL_B" then
                 local _, term_h = get_terminal_size()
                 sel_index = math.max(1, sel_index - math.max(4, term_h - 6))
             elseif k == "HOME" or k == "g" then
