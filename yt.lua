@@ -1023,7 +1023,7 @@ local function fetch_youtube_results(query, mode, browser, cookies_file, max_res
             return nil, "Text search is not supported for site '" .. site .. "'. Use a direct URL or a supported site (youtube, soundcloud, twitch).", insecure
         end
 
-        local extra_opts = site == "youtube" and " --extractor-args=\"youtube:player_client=android\"" or ""
+        local extra_opts = ""
         if browser and #browser > 0 then
             extra_opts = extra_opts .. string.format(" --cookies-from-browser %s", browser)
         elseif cookies_file and #cookies_file > 0 then
@@ -1247,7 +1247,7 @@ function MpvController:start(item, show_cc, sub_lang, browser, cookies_file, pro
     local pipe_path = is_windows and ("\\\\.\\pipe\\yt_mpv_" .. pipe_id) or ("/tmp/yt_mpv_" .. pipe_id .. ".sock")
     self.pipe_name = pipe_path
 
-    local raw_opts = { "extractor-args=youtube:player_client=android" }
+    local raw_opts = {}
     if show_cc then
         table.insert(raw_opts, "write-subs=")
         table.insert(raw_opts, "write-auto-subs=")
@@ -1264,7 +1264,7 @@ function MpvController:start(item, show_cc, sub_lang, browser, cookies_file, pro
     if proxy and #proxy > 0 then
         table.insert(raw_opts, string.format("proxy=%s", proxy))
     end
-    local ytdl_raw_opts = string.format(' --ytdl-raw-options=%q', table.concat(raw_opts, ","))
+    local ytdl_raw_opts = #raw_opts > 0 and string.format(' --ytdl-raw-options=%q', table.concat(raw_opts, ",")) or ""
 
     local extra_mpv_opts = ""
     if insecure then
@@ -1415,7 +1415,7 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
         return
     end
 
-    local raw_opts = { "extractor-args=youtube:player_client=android" }
+    local raw_opts = {}
     if show_cc or mode == "video" then
         table.insert(raw_opts, "write-subs=")
         table.insert(raw_opts, "write-auto-subs=")
@@ -1432,7 +1432,7 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     if proxy and #proxy > 0 then
         table.insert(raw_opts, string.format("proxy=%s", proxy))
     end
-    local ytdl_raw_opts = string.format(' --ytdl-raw-options=%q', table.concat(raw_opts, ","))
+    local ytdl_raw_opts = #raw_opts > 0 and string.format(' --ytdl-raw-options=%q', table.concat(raw_opts, ",")) or ""
 
     local extra_mpv_opts = ""
     if insecure then
@@ -1500,6 +1500,17 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     io.flush()
 
     local exit_code = safe_execute(mpv_cmd)
+    if exit_code ~= 0 and exit_code ~= true then
+        io.write("\n\27[1;31m[Playback Error] mpv exited with code: " .. tostring(exit_code) .. "\27[0m\n")
+        io.write("\27[1;33mTroubleshooting Tips:\27[0m\n")
+        io.write("  * Ensure yt-dlp is updated (run: pip install -U yt-dlp or yt-dlp -U)\n")
+        io.write("  * If YouTube blocked the stream, try: --browser <chrome|firefox|edge>\n")
+        io.write("  * In video mode, try external window player: --window\n")
+        io.write("  * For corporate networks or SSL issues: --insecure\n")
+        io.write("\nPress any key to return to menu...")
+        io.flush()
+        read_key()
+    end
 
     enable_raw_mode()
     return exit_code
@@ -1534,7 +1545,7 @@ local function download_item(item, mode, browser, cookies_file, proxy, insecure)
     io.write(string.format("  \27[1;37mURL:\27[0m      %s\n\n", item.url))
     io.flush()
 
-    local extra_args = " --extractor-args \"youtube:player_client=android\""
+    local extra_args = ""
     if browser and #browser > 0 then
         extra_args = extra_args .. string.format(" --cookies-from-browser %s", browser)
     elseif cookies_file and #cookies_file > 0 then
