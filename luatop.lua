@@ -1887,6 +1887,106 @@ else
                 end
             end
         end
+
+        -- NVIDIA Jetson / Tegra SoC GPU fallback (Nano, TX1, TX2, Xavier, Orin)
+        if #gpus == 0 then
+            local tegra_gpu_path = nil
+            local f_chk = io.open("/sys/devices/gpu.0/load", "r")
+            if f_chk then
+                f_chk:close()
+                tegra_gpu_path = "/sys/devices/gpu.0"
+            else
+                for _, p in ipairs({"/sys/devices/57000000.gpu", "/sys/devices/17000000.gp10b", "/sys/devices/17000000.gv11b", "/sys/devices/platform/17000000.ga10b"}) do
+                    local f = io.open(p .. "/load", "r")
+                    if f then f:close(); tegra_gpu_path = p; break end
+                end
+            end
+
+            if tegra_gpu_path then
+                local util_pct = nil
+                local f_load = io.open(tegra_gpu_path .. "/load", "r")
+                if f_load then
+                    local raw = f_load:read("*a")
+                    f_load:close()
+                    local n = tonumber(raw and raw:match("%d+"))
+                    if n then util_pct = math.min(100, math.floor(n / 10 + 0.5)) end
+                end
+
+                local freq_ghz = nil
+                local freq_candidates = {
+                    tegra_gpu_path .. "/devfreq/57000000.gpu/cur_freq",
+                    "/sys/class/devfreq/57000000.gpu/cur_freq",
+                    tegra_gpu_path .. "/devfreq/cur_freq"
+                }
+                for _, fc in ipairs(freq_candidates) do
+                    local f_fq = io.open(fc, "r")
+                    if f_fq then
+                        local raw_fq = f_fq:read("*a")
+                        f_fq:close()
+                        local hz = tonumber(raw_fq and raw_fq:match("%d+"))
+                        if hz and hz > 0 then freq_ghz = hz / 1e9; break end
+                    end
+                end
+                if not freq_ghz then
+                    local d_df = ffi.C.opendir("/sys/class/devfreq")
+                    if d_df ~= nil then
+                        while true do
+                            local ent = ffi.C.readdir(d_df)
+                            if ent == nil then break end
+                            local entry_name = ffi.string(ent.d_name)
+                            if entry_name:find("%.gpu$") or entry_name:find("gv11b") or entry_name:find("ga10b") or entry_name:find("gp10b") then
+                                local f_fq = io.open("/sys/class/devfreq/" .. entry_name .. "/cur_freq", "r")
+                                if f_fq then
+                                    local raw_fq = f_fq:read("*a")
+                                    f_fq:close()
+                                    local hz = tonumber(raw_fq and raw_fq:match("%d+"))
+                                    if hz and hz > 0 then freq_ghz = hz / 1e9; break end
+                                end
+                            end
+                        end
+                        ffi.C.closedir(d_df)
+                    end
+                end
+
+                local temp_c = nil
+                for z = 0, 9 do
+                    local f_t = io.open("/sys/class/thermal/thermal_zone" .. z .. "/type", "r")
+                    if f_t then
+                        local ztype = f_t:read("*l") or ""
+                        f_t:close()
+                        if ztype:upper():find("GPU") then
+                            local f_v = io.open("/sys/class/thermal/thermal_zone" .. z .. "/temp", "r")
+                            if f_v then
+                                local raw_t = tonumber(f_v:read("*a"):match("%d+"))
+                                f_v:close()
+                                if raw_t then temp_c = math.floor(raw_t / 1000 + 0.5); break end
+                            end
+                        end
+                    end
+                end
+
+                local gpu_name = "NVIDIA Tegra GPU"
+                local f_comp = io.open("/proc/device-tree/gpu/compatible", "r")
+                if f_comp then
+                    local s = f_comp:read("*a") or ""
+                    f_comp:close()
+                    if s:find("gm20b") then gpu_name = "NVIDIA Tegra Maxwell GPU"
+                    elseif s:find("gp10b") then gpu_name = "NVIDIA Tegra Pascal GPU"
+                    elseif s:find("gv11b") then gpu_name = "NVIDIA Tegra Volta GPU"
+                    elseif s:find("ga10b") then gpu_name = "NVIDIA Tegra Ampere GPU"
+                    end
+                end
+
+                table.insert(gpus, {
+                    name = gpu_name,
+                    temp_c = temp_c,
+                    util_pct = util_pct,
+                    freq_ghz = freq_ghz,
+                    is_integrated = true,
+                })
+            end
+        end
+
         return gpus
     end
 
@@ -3293,10 +3393,11 @@ local function run_self_test()
     local gpus = read_gpu_stats()
     assert(type(gpus) == "table", "GPUs should be a table")
     if #gpus > 0 then
-        print(string.format("  ✔ GPU Telemetry: %d GPU(s) detected: %s (VRAM: %s/%s, Core: %s%%)",
-            #gpus, gpus[1].name,
-            format_bytes(gpus[1].mem_used_kb), format_bytes(gpus[1].mem_total_kb),
-            tostring(gpus[1].util_pct or "N/A")))
+        local g0 = gpus[1]
+        local vram_str = g0.is_integrated and "Integrated (UMA)" or string.format("%s/%s", format_bytes(g0.mem_used_kb), format_bytes(g0.mem_total_kb))
+        local temp_str = g0.temp_c and string.format(", Temp: %d°C", g0.temp_c) or ""
+        print(string.format("  ✔ GPU Telemetry: %d GPU(s) detected: %s (VRAM: %s, Core: %s%%%s)",
+            #gpus, g0.name, vram_str, tostring(g0.util_pct or "N/A"), temp_str))
     else
         print("  ✔ GPU Telemetry: Headless/Integrated system (Zero-fork fallback active)")
     end

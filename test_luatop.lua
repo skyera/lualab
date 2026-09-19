@@ -157,6 +157,15 @@ TestRunner.describe("4. Storage and Disk I/O Telemetry", function()
         if #gpus > 0 then
             local g = gpus[1]
             assert_true(type(g.name) == "string" and #g.name > 0, "gpu name must be non-empty string")
+            if g.util_pct ~= nil then
+                assert_true(g.util_pct >= 0 and g.util_pct <= 100, "util_pct must be between 0 and 100")
+            end
+            if g.temp_c ~= nil then
+                assert_true(g.temp_c > 0 and g.temp_c < 150, "temp_c must be in a realistic temperature range")
+            end
+            if g.freq_ghz ~= nil then
+                assert_true(g.freq_ghz > 0 and g.freq_ghz < 10, "freq_ghz must be in a realistic GHz range")
+            end
         end
     end)
 end)
