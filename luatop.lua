@@ -131,6 +131,25 @@ if is_windows then
         int GetProcessMemoryInfo(HANDLE hProcess, PROCESS_MEMORY_COUNTERS *ppmc, uint32_t cb);
 
         int GetDiskFreeSpaceExA(const char *lpDirectoryName, uint64_t *lpFreeBytesAvailableToCaller, uint64_t *lpTotalNumberOfBytes, uint64_t *lpTotalNumberOfFreeBytes);
+        uint32_t GetLogicalDriveStringsA(uint32_t nBufferLength, char *lpBuffer);
+        uint32_t GetDriveTypeA(const char *lpRootPathName);
+
+        typedef struct _OSVERSIONINFOW {
+            uint32_t dwOSVersionInfoSize;
+            uint32_t dwMajorVersion;
+            uint32_t dwMinorVersion;
+            uint32_t dwBuildNumber;
+            uint32_t dwPlatformId;
+            uint16_t szCSDVersion[128];
+        } OSVERSIONINFOW;
+        void RtlGetVersion(OSVERSIONINFOW *lpVersionInformation);
+
+        typedef void *HKEY;
+        typedef unsigned long DWORD;
+        typedef unsigned char BYTE;
+        long RegOpenKeyExA(HKEY hKey, const char *lpSubKey, DWORD ulOptions, DWORD samDesired, HKEY *phkResult);
+        long RegQueryValueExA(HKEY hKey, const char *lpValueName, DWORD *lpReserved, DWORD *lpType, BYTE *lpData, DWORD *lpcbData);
+        long RegCloseKey(HKEY hKey);
     ]]
 
     local orig_in_mode = ffi.new("uint32_t[1]")
@@ -701,6 +720,7 @@ end
 -- =========================================================================
 local read_cpu_stats, read_cpu_sensors, read_memory_stats
 local read_network_stats, read_storage_stats, read_loadavg, read_gpu_stats
+local read_os_info, read_cpu_model
 local read_process_table, terminate_process, kill_process, send_signal_to_process, renice_process
 
 local uid_cache = {}
@@ -768,8 +788,76 @@ if is_windows then
         return cores, overall_pct
     end
 
+    local cached_cpu_model = nil
+    local cached_cpu_mhz = 0
+    local cached_os_info = nil
+
+    local function probe_win_sysinfo()
+        if cached_os_info and cached_cpu_model then return end
+
+        -- 1. Windows OS Detection via RtlGetVersion
+        pcall(function()
+            local ntdll = ffi.load("ntdll")
+            local vi = ffi.new("OSVERSIONINFOW")
+            vi.dwOSVersionInfoSize = ffi.sizeof(vi)
+            ntdll.RtlGetVersion(vi)
+            local maj = tonumber(vi.dwMajorVersion)
+            local bld = tonumber(vi.dwBuildNumber)
+            local name = "Windows"
+            if maj == 10 then
+                name = (bld >= 22000) and "Windows 11" or "Windows 10"
+            elseif maj == 6 then
+                local min = tonumber(vi.dwMinorVersion)
+                if min == 3 then name = "Windows 8.1"
+                elseif min == 2 then name = "Windows 8"
+                elseif min == 1 then name = "Windows 7"
+                end
+            end
+            cached_os_info = name
+        end)
+        if not cached_os_info then
+            cached_os_info = os.getenv("OS") or "Windows"
+        end
+
+        -- 2. CPU Model and Base Frequency (MHz) via Registry
+        pcall(function()
+            local advapi32 = ffi.load("advapi32")
+            local hk = ffi.new("HKEY[1]")
+            local HKEY_LOCAL_MACHINE = ffi.cast("HKEY", 0x80000002)
+            if advapi32.RegOpenKeyExA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", 0, 0x20019, hk) == 0 then
+                local buf = ffi.new("char[256]")
+                local sz = ffi.new("DWORD[1]", 256)
+                if advapi32.RegQueryValueExA(hk[0], "ProcessorNameString", nil, nil, ffi.cast("BYTE*", buf), sz) == 0 then
+                    local raw = ffi.string(buf)
+                    cached_cpu_model = raw:gsub("%(R%)", ""):gsub("%(TM%)", ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+                end
+                local mhz = ffi.new("DWORD[1]")
+                local msz = ffi.new("DWORD[1]", 4)
+                if advapi32.RegQueryValueExA(hk[0], "~MHz", nil, nil, ffi.cast("BYTE*", mhz), msz) == 0 then
+                    cached_cpu_mhz = tonumber(mhz[0])
+                end
+                advapi32.RegCloseKey(hk[0])
+            end
+        end)
+        if not cached_cpu_model or #cached_cpu_model == 0 then
+            cached_cpu_model = os.getenv("PROCESSOR_IDENTIFIER") or "Windows Processor"
+        end
+    end
+
+    read_os_info = function()
+        probe_win_sysinfo()
+        return cached_os_info or "Windows"
+    end
+
+    read_cpu_model = function()
+        probe_win_sysinfo()
+        return cached_cpu_model or "Windows Processor"
+    end
+
     read_cpu_sensors = function()
-        return nil, nil -- Temperature / frequency requires WMI on Win32
+        probe_win_sysinfo()
+        local freq_ghz = (cached_cpu_mhz > 0) and (cached_cpu_mhz / 1000.0) or nil
+        return nil, freq_ghz
     end
 
     read_memory_stats = function()
@@ -789,8 +877,8 @@ if is_windows then
         local pagefile_total_kb = tonumber(mem_status.ullTotalPageFile / 1024)
         local pagefile_avail_kb = tonumber(mem_status.ullAvailPageFile / 1024)
         local swap_total_kb = math.max(0, pagefile_total_kb - total_kb)
-        local swap_used_kb  = math.max(0, (pagefile_total_kb - pagefile_avail_kb) - used_kb)
-        local swap_pct = (swap_total_kb > 0) and ((swap_used_kb / swap_total_kb) * 100.0) or 0
+        local swap_used_kb  = math.min(swap_total_kb, math.max(0, (pagefile_total_kb - pagefile_avail_kb) - used_kb))
+        local swap_pct = (swap_total_kb > 0) and math.min(100.0, math.max(0.0, (swap_used_kb / swap_total_kb) * 100.0)) or 0
 
         return {
             total_kb = total_kb,
@@ -822,7 +910,33 @@ if is_windows then
         local total_free   = ffi.new("uint64_t[1]")
         local mounts = {}
 
-        if kernel32.GetDiskFreeSpaceExA("C:\\", free_caller, total_bytes, total_free) ~= 0 then
+        local dbuf = ffi.new("char[512]")
+        local dlen = kernel32.GetLogicalDriveStringsA(512, dbuf)
+        local p = 0
+        while p < dlen do
+            local drive = ffi.string(dbuf + p)
+            local dtype = kernel32.GetDriveTypeA(drive)
+            -- Only probe DRIVE_FIXED (3) or DRIVE_REMOTE (4) to avoid blocking on empty removable drives
+            if (dtype == 3 or dtype == 4) and kernel32.GetDiskFreeSpaceExA(drive, free_caller, total_bytes, total_free) ~= 0 then
+                local tot = tonumber(total_bytes[0])
+                local fre = tonumber(total_free[0])
+                local usd = math.max(0, tot - fre)
+                local pct = tot > 0 and (usd / tot * 100.0) or 0
+                local mnt_name = drive:gsub("\\+$", "")
+                table.insert(mounts, {
+                    mount = mnt_name,
+                    device = mnt_name,
+                    total_bytes = tot,
+                    used_bytes = usd,
+                    avail_bytes = fre,
+                    used_pct = pct,
+                })
+            end
+            p = p + #drive + 1
+        end
+
+        -- Fallback to C: if drive enumeration returned empty
+        if #mounts == 0 and kernel32.GetDiskFreeSpaceExA("C:\\", free_caller, total_bytes, total_free) ~= 0 then
             local tot = tonumber(total_bytes[0])
             local fre = tonumber(total_free[0])
             local usd = math.max(0, tot - fre)
@@ -836,6 +950,7 @@ if is_windows then
                 used_pct = pct,
             })
         end
+
         return {
             mounts = mounts,
             read_speed = 0,
@@ -1444,6 +1559,52 @@ else
         return string.format("%s %s %s", l1 or "0.00", l5 or "0.00", l15 or "0.00"), tasks or ""
     end
 
+    local cached_linux_os = nil
+    local cached_linux_cpu = nil
+
+    read_os_info = function()
+        if cached_linux_os then return cached_linux_os end
+        local f = io.open("/etc/os-release", "r")
+        if f then
+            for line in f:lines() do
+                local p = line:match('^PRETTY_NAME="?([^"\r\n]+)"?')
+                if p then cached_linux_os = p; break end
+                if not cached_linux_os then
+                    local n = line:match('^NAME="?([^"\r\n]+)"?')
+                    if n then cached_linux_os = n end
+                end
+            end
+            f:close()
+        end
+        if not cached_linux_os then
+            pcall(function()
+                local u = ffi.new("struct utsname")
+                if ffi.C.uname(u) == 0 then
+                    cached_linux_os = ffi.string(u.sysname) .. " " .. (ffi.string(u.release):match("^%d+%.%d+") or "")
+                end
+            end)
+        end
+        cached_linux_os = cached_linux_os or "Linux"
+        return cached_linux_os
+    end
+
+    read_cpu_model = function()
+        if cached_linux_cpu then return cached_linux_cpu end
+        local f = io.open("/proc/cpuinfo", "r")
+        if f then
+            for line in f:lines() do
+                local m = line:match("^model name%s*:%s*(.+)")
+                if m then
+                    cached_linux_cpu = m:gsub("%(R%)", ""):gsub("%(TM%)", ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+                    break
+                end
+            end
+            f:close()
+        end
+        cached_linux_cpu = cached_linux_cpu or "Linux CPU"
+        return cached_linux_cpu
+    end
+
     -- Linux GPU Telemetry (NVML + DRM Sysfs)
     local linux_gpu_inited = false
     local linux_nvml_lib = nil
@@ -2009,6 +2170,11 @@ Keybindings:
 
     enable_raw_mode()
 
+    local os_name = read_os_info and read_os_info() or "System"
+    local raw_cpu_model = read_cpu_model and read_cpu_model() or "CPU"
+    local cpu_model_clean = raw_cpu_model:gsub("^Intel%s+", ""):gsub("^AMD%s+", ""):gsub("%s*Processor", ""):gsub("%s*CPU", ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+    local cpu_model_short = cpu_model_clean:gsub("%s*@.*", ""):gsub("^Core%s+", "")
+
     local sort_mode = "cpu" -- "cpu", "mem", "pid", "name", "user", "threads"
     local sort_reverse = false
     local in_tree_mode = arg_tree
@@ -2388,6 +2554,7 @@ Keybindings:
             local theme_ind = string.format(" │ Theme: \27[38;2;125;207;255m%s\27[0m", C.name)
             local zombie_str = zombie_count > 0 and string.format(" │ \27[1;38;2;247;118;142m⚠ %d ZOMBIE%s\27[0m", zombie_count, zombie_count > 1 and "S" or "") or ""
             local rate_str = string.format(" │ \27[1;93m%.1fs\27[0m%s", refresh_interval_ms / 1000.0, pause_ind)
+            local os_badge = string.format(" │ \27[1;38;2;167;139;250m%s\27[0m", os_name)
 
             local header_content
             if term_w >= 120 then
@@ -2401,12 +2568,12 @@ Keybindings:
                     local g0_temp = g0.temp_c and string.format(" (\27[1;38;2;251;191;36m%d°C\27[0m)", g0.temp_c) or ""
                     gpu_hdr = string.format(" │ GPU: \27[1;97m%s\27[0m%s", g0_short, g0_temp)
                 end
-                header_content = string.format("  \27[1;38;2;56;189;248m⚡ LUATOP v2.2\27[0m │ Load: \27[1;97m%s\27[0m │ Tasks: \27[1;97m%s\27[0m%s%s%s%s%s%s",
-                    load_str, task_str, zombie_str, freq_ghz_str, temp_str, gpu_hdr, theme_ind, rate_str)
+                header_content = string.format("  \27[1;38;2;56;189;248m⚡ LUATOP v2.2\27[0m%s │ Load: \27[1;97m%s\27[0m │ Tasks: \27[1;97m%s\27[0m%s%s%s%s%s%s",
+                    os_badge, load_str, task_str, zombie_str, freq_ghz_str, temp_str, gpu_hdr, theme_ind, rate_str)
             elseif term_w >= 90 then
                 local short_tasks = task_str:match("^[^,]+") or task_str
-                header_content = string.format("  \27[1;38;2;56;189;248m⚡ LUATOP v2.2\27[0m │ Load: \27[1;97m%s\27[0m │ Tasks: \27[1;97m%s\27[0m%s%s",
-                    load_str, short_tasks, theme_ind, rate_str)
+                header_content = string.format("  \27[1;38;2;56;189;248m⚡ LUATOP v2.2\27[0m%s │ Load: \27[1;97m%s\27[0m │ Tasks: \27[1;97m%s\27[0m%s%s",
+                    os_badge, load_str, short_tasks, theme_ind, rate_str)
             else
                 local short_load = load_str:match("^[^,]+") or load_str
                 local proc_cnt = task_str:match("^(%d+) procs") or tostring(#procs)
@@ -2416,9 +2583,12 @@ Keybindings:
             table.insert(out, string.format("\27[1;1H%s\27[K", truncate(header_content, term_w)))
 
             -- Layout calculations
-            local min_top = (#gpus > 0) and 10 or 8
-            local max_top = (#gpus > 0) and 14 or 12
-            local top_h = math.min(max_top, math.max(min_top, math.floor(term_h * ((#gpus > 0) and 0.35 or 0.32))))
+            local num_mounts = #storage.mounts
+            local min_top = (#gpus > 0 or num_mounts > 2) and 10 or 8
+            local max_top = (#gpus > 0 or num_mounts > 2) and 14 or 12
+            if term_h >= 36 then max_top = 16 end
+            local top_ratio = (#gpus > 0 or num_mounts > 2) and 0.36 or 0.32
+            local top_h = math.min(max_top, math.max(min_top, math.floor(term_h * top_ratio)))
             local net_h = 3
             local bot_h = term_h - top_h - net_h - 2
 
@@ -2426,8 +2596,14 @@ Keybindings:
             local right_w = term_w - left_w
 
             -- 1. CPU Pane (Top Left)
+            local cpu_spark_w = math.min(14, math.max(6, math.floor(left_w * 0.18)))
+            local cpu_spark = make_sparkline(cpu_history, cpu_spark_w, C.cpu_low)
             local cpu_title = string.format("CPU: %.1f%%", overall_cpu)
-            local cpu_spark = make_sparkline(cpu_history, math.max(10, left_w - 20), C.cpu_low)
+            if left_w >= 54 and #cpu_model_clean > 0 then
+                cpu_title = string.format("CPU: %.1f%% [%s]", overall_cpu, truncate(cpu_model_clean, left_w - 30))
+            elseif left_w >= 40 and #cpu_model_short > 0 then
+                cpu_title = string.format("CPU: %.1f%% [%s]", overall_cpu, truncate(cpu_model_short, left_w - 24))
+            end
             draw_pane(out, 1, 2, left_w, top_h, cpu_title, false, "Usage: " .. cpu_spark)
 
             -- Dynamic core columns based on left_w and core count
@@ -2500,14 +2676,51 @@ Keybindings:
             end
 
             -- Storage Mounts & Disk I/O
-            for _, m in ipairs(storage.mounts) do
-                if row_y >= top_h + 1 then break end
-                local disk_bar = make_meter_bar(m.used_pct, right_w - 24)
-                table.insert(out, draw_box_row(left_w + 1, row_y, right_w,
-                    string.format("%s%-3s %s %s%5.1f%%%s %s/%s",
-                        C.dim, m.mount, C.reset, disk_bar, m.used_pct, C.reset,
-                        format_bytes(math.floor(m.used_bytes / 1024)), format_bytes(math.floor(m.total_bytes / 1024)))))
-                row_y = row_y + 1
+            local use_dual_col = (#storage.mounts >= 4 and right_w >= 54)
+            if use_dual_col then
+                local col_w = math.floor((right_w - 2 - 3) / 2)
+                local function format_col(m)
+                    if not m then return string.rep(" ", col_w) end
+                    local mnt = truncate(m.mount, 3)
+                    local u_kb = math.floor(m.used_bytes / 1024)
+                    local t_kb = math.floor(m.total_bytes / 1024)
+                    local u_str = (u_kb >= 1024 * 1024 * 1024) and string.format("%.1fT", u_kb / (1024 * 1024 * 1024))
+                        or (u_kb >= 1024 * 1024 and string.format("%.0fG", u_kb / (1024 * 1024)) or format_bytes(u_kb):gsub("%s+", ""))
+                    local t_str = (t_kb >= 1024 * 1024 * 1024) and string.format("%.1fT", t_kb / (1024 * 1024 * 1024))
+                        or (t_kb >= 1024 * 1024 and string.format("%.0fG", t_kb / (1024 * 1024)) or format_bytes(t_kb):gsub("%s+", ""))
+                    local cap_str = u_str .. "/" .. t_str
+                    local pct_str = string.format("%3.0f%%", m.used_pct or 0)
+                    local bar_w = math.max(3, col_w - (visual_len(mnt) + 1 + 5 + visual_len(cap_str) + 1))
+                    local bar = make_meter_bar(m.used_pct, bar_w)
+                    local col_txt = string.format("%s%-2s%s %s %s%s%s %s%s%s",
+                        C.bold, mnt, C.reset, bar, C.title_col, pct_str, C.reset, C.dim, cap_str, C.reset)
+                    local vlen = visual_len(mnt) + 1 + bar_w + 1 + visual_len(pct_str) + 1 + visual_len(cap_str)
+                    if vlen < col_w then
+                        col_txt = col_txt .. string.rep(" ", col_w - vlen)
+                    end
+                    return col_txt
+                end
+
+                local m_idx = 1
+                while m_idx <= #storage.mounts do
+                    if row_y >= top_h + 1 then break end
+                    local m1 = storage.mounts[m_idx]
+                    local m2 = storage.mounts[m_idx + 1]
+                    m_idx = m_idx + 2
+                    local row_content = format_col(m1) .. " " .. C.dim .. "│" .. C.reset .. " " .. format_col(m2)
+                    table.insert(out, draw_box_row(left_w + 1, row_y, right_w, row_content))
+                    row_y = row_y + 1
+                end
+            else
+                for _, m in ipairs(storage.mounts) do
+                    if row_y >= top_h + 1 then break end
+                    local disk_bar = make_meter_bar(m.used_pct, right_w - 24)
+                    table.insert(out, draw_box_row(left_w + 1, row_y, right_w,
+                        string.format("%s%-3s %s %s%5.1f%%%s %s/%s",
+                            C.dim, m.mount, C.reset, disk_bar, m.used_pct, C.reset,
+                            format_bytes(math.floor(m.used_bytes / 1024)), format_bytes(math.floor(m.total_bytes / 1024)))))
+                    row_y = row_y + 1
+                end
             end
 
             if row_y <= top_h then
@@ -2759,6 +2972,12 @@ end
 local function run_self_test()
     print("=== Running luatop.lua Headless Self-Test ===")
 
+    local os_str = read_os_info and read_os_info() or "Unknown OS"
+    local cpu_str = read_cpu_model and read_cpu_model() or "Unknown CPU"
+    assert(type(os_str) == "string" and #os_str > 0, "OS name must be a non-empty string")
+    assert(type(cpu_str) == "string" and #cpu_str > 0, "CPU model must be a non-empty string")
+    print(string.format("  ✔ System Telemetry: OS='%s', CPU='%s'", os_str, cpu_str))
+
     local cores, cpu_pct = read_cpu_stats()
     assert(type(cores) == "table", "CPU cores should be a table")
     assert(cpu_pct >= 0 and cpu_pct <= 100, "CPU percent must be in [0, 100]")
@@ -2777,6 +2996,7 @@ local function run_self_test()
 
     local storage = read_storage_stats(os.clock())
     assert(type(storage.mounts) == "table", "Mounts should be a table")
+    assert(#storage.mounts > 0, "At least 1 filesystem mount must be discovered")
     print(string.format("  ✔ Storage Telemetry: %d mounted filesystems inspected", #storage.mounts))
 
     local gpus = read_gpu_stats()
@@ -2884,6 +3104,8 @@ end
 -- =========================================================================
 local M = {
     version            = "2.2.0",
+    read_os_info       = read_os_info,
+    read_cpu_model     = read_cpu_model,
     read_cpu_stats     = read_cpu_stats,
     read_cpu_sensors   = read_cpu_sensors,
     read_memory_stats  = read_memory_stats,
