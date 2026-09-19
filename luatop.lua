@@ -723,7 +723,7 @@ local function format_rate(bytes_sec)
 end
 
 local function make_meter_bar(pct, width, col_override)
-    width = math.max(4, width or 10)
+    width = math.max(2, width or 10)
     pct = math.max(0.0, math.min(100.0, pct or 0.0))
     local filled = math.floor((pct / 100.0) * width)
     filled = math.max(0, math.min(width, filled))
@@ -2909,18 +2909,28 @@ Keybindings:
             end
             table.insert(out, string.format("\27[1;1H%s\27[K", truncate(header_content, term_w)))
 
+            local left_w = math.floor(term_w * 0.50)
+            local right_w = term_w - left_w
+
             -- Layout calculations
             local num_mounts = #storage.mounts
-            local min_top = (#gpus > 0 or num_mounts > 2) and 10 or 8
-            local max_top = (#gpus > 0 or num_mounts > 2) and 14 or 12
-            if term_h >= 36 then max_top = 16 end
-            local top_ratio = (#gpus > 0 or num_mounts > 2) and 0.36 or 0.32
+            local mount_rows = (num_mounts >= 4 and right_w >= 50) and math.ceil(num_mounts / 2) or num_mounts
+            local gpu_rows = 0
+            if #gpus > 0 then
+                gpu_rows = 1
+                if not gpus[1].is_integrated and gpus[1].mem_total_kb and gpus[1].mem_total_kb > 0 then
+                    gpu_rows = 2
+                end
+            end
+            local desired_top = 3 + gpu_rows + mount_rows + 1 + 2
+            local max_avail_top = math.max(10, term_h - 8)
+            local min_top = math.min(max_avail_top, math.max((#gpus > 0 or num_mounts > 2) and 10 or 8, desired_top))
+            local max_top = math.min(max_avail_top, math.max(min_top, (#gpus > 0 or num_mounts > 2) and 14 or 12))
+            if term_h >= 36 then max_top = math.min(max_avail_top, math.max(16, desired_top)) end
+            local top_ratio = (#gpus > 0 or num_mounts > 2) and 0.38 or 0.32
             local top_h = math.min(max_top, math.max(min_top, math.floor(term_h * top_ratio)))
             local net_h = 3
             local bot_h = term_h - top_h - net_h - 2
-
-            local left_w = math.floor(term_w * 0.50)
-            local right_w = term_w - left_w
 
             -- 1. CPU Pane (Top Left)
             local cpu_spark_w = math.min(14, math.max(6, math.floor(left_w * 0.18)))
@@ -2974,17 +2984,22 @@ Keybindings:
             end
 
             -- 2. Memory, GPU & Storage Pane (Top Right)
-            local mem_spark = make_sparkline(mem_history, math.max(8, right_w - 26), C.mem_used)
             local pane_title = (#gpus > 0) and "Memory, GPU & Storage" or "Memory & Storage"
             if #gpus > 0 and right_w < 50 then pane_title = "Memory & GPU" end
+            local spark_w = math.max(4, right_w - (visual_len(pane_title) + 14))
+            local mem_spark = make_sparkline(mem_history, spark_w, C.mem_used)
             draw_pane(out, left_w + 1, 2, right_w, top_h, pane_title, false, "Trend: " .. mem_spark)
-            local mem_bar = make_meter_bar(mem.used_pct, right_w - 24, C.mem_used)
-            local swap_bar = make_meter_bar(mem.swap_pct, right_w - 24, C.mem_swap)
+
+            local mem_cap_str = format_bytes(mem.used_kb) .. "/" .. format_bytes(mem.total_kb)
+            local mem_pct_str = string.format("%5.1f%%", mem.used_pct)
+            local mem_fixed_w = 4 + 1 + visual_len(mem_pct_str) + 1 + visual_len(mem_cap_str)
+            local mem_bar_w = math.max(4, (right_w - 2) - mem_fixed_w)
+            local mem_bar = make_meter_bar(mem.used_pct, mem_bar_w, C.mem_used)
 
             table.insert(out, draw_box_row(left_w + 1, 3, right_w,
-                string.format("%sRAM %s %s%5.1f%%%s %s/%s",
-                    C.bold, C.reset, mem_bar, mem.used_pct, C.reset,
-                    format_bytes(mem.used_kb), format_bytes(mem.total_kb))))
+                string.format("%sRAM %s%s %s%5.1f%%%s %s%s%s",
+                    C.bold, C.reset, mem_bar, C.reset, mem.used_pct, C.reset,
+                    C.dim, mem_cap_str, C.reset)))
 
             table.insert(out, draw_box_row(left_w + 1, 4, right_w,
                 string.format("  %sFree: %s%s │ %sCached: %s%s │ %sAvail: %s%s",
@@ -2992,10 +3007,16 @@ Keybindings:
                     C.dim, format_bytes(mem.cached_kb), C.reset,
                     C.dim, format_bytes(mem.avail_kb), C.reset)))
 
+            local swp_cap_str = format_bytes(mem.swap_used_kb) .. "/" .. format_bytes(mem.swap_total_kb)
+            local swp_pct_str = string.format("%5.1f%%", mem.swap_pct)
+            local swp_fixed_w = 4 + 1 + visual_len(swp_pct_str) + 1 + visual_len(swp_cap_str)
+            local swp_bar_w = math.max(4, (right_w - 2) - swp_fixed_w)
+            local swap_bar = make_meter_bar(mem.swap_pct, swp_bar_w, C.mem_swap)
+
             table.insert(out, draw_box_row(left_w + 1, 5, right_w,
-                string.format("%sSWP %s %s%5.1f%%%s %s/%s",
-                    C.bold, C.reset, swap_bar, mem.swap_pct, C.reset,
-                    format_bytes(mem.swap_used_kb), format_bytes(mem.swap_total_kb))))
+                string.format("%sSWP %s%s %s%5.1f%%%s %s%s%s",
+                    C.bold, C.reset, swap_bar, C.reset, mem.swap_pct, C.reset,
+                    C.dim, swp_cap_str, C.reset)))
 
             -- GPU Telemetry (if detected)
             local row_y = 6
@@ -3012,20 +3033,30 @@ Keybindings:
                 row_y = row_y + 1
 
                 if not g.is_integrated and g.mem_total_kb and g.mem_total_kb > 0 then
-                    if row_y >= top_h + 1 then break end
-                    local vram_bar = make_meter_bar(g.mem_used_pct, right_w - 24, C.mem_used)
+                    if row_y >= top_h then break end
+                    local vram_cap_str = format_bytes(g.mem_used_kb) .. "/" .. format_bytes(g.mem_total_kb)
+                    local vram_pct_str = string.format("%5.1f%%", g.mem_used_pct or 0)
+                    local vram_fixed_w = 5 + 1 + visual_len(vram_pct_str) + 1 + visual_len(vram_cap_str)
+                    local vram_bar_w = math.max(4, (right_w - 2) - vram_fixed_w)
+                    local vram_bar = make_meter_bar(g.mem_used_pct, vram_bar_w, C.mem_used)
                     table.insert(out, draw_box_row(left_w + 1, row_y, right_w,
-                        string.format("%sVRAM%s %s %5.1f%%%s %s/%s",
+                        string.format("%sVRAM%s %s %5.1f%%%s %s%s%s",
                             C.bold, C.reset, vram_bar, g.mem_used_pct or 0, C.reset,
-                            format_bytes(g.mem_used_kb), format_bytes(g.mem_total_kb))))
+                            C.dim, vram_cap_str, C.reset)))
                     row_y = row_y + 1
                 end
             end
 
             -- Storage Mounts & Disk I/O
-            local use_dual_col = (#storage.mounts >= 4 and right_w >= 54)
+            local use_dual_col = (#storage.mounts >= 4 and right_w >= 50)
             if use_dual_col then
                 local col_w = math.floor((right_w - 2 - 3) / 2)
+                local max_mnt_len = 2
+                for _, m in ipairs(storage.mounts) do
+                    max_mnt_len = math.max(max_mnt_len, visual_len(m.mount))
+                end
+                local mnt_w = math.max(2, math.min(6, max_mnt_len))
+
                 local function format_col(m)
                     if not m then return string.rep(" ", col_w) end
                     local u_kb = math.floor(m.used_bytes / 1024)
@@ -3036,22 +3067,25 @@ Keybindings:
                         or (t_kb >= 1024 * 1024 and string.format("%.0fG", t_kb / (1024 * 1024)) or format_bytes(t_kb):gsub("%s+", ""))
                     local cap_str = u_str .. "/" .. t_str
                     local pct_str = string.format("%3.0f%%", m.used_pct or 0)
-                    local max_mnt_w = math.max(4, math.min(10, col_w - (visual_len(cap_str) + 12)))
-                    local mnt = truncate(m.mount, max_mnt_w)
-                    local bar_w = math.max(3, col_w - (visual_len(mnt) + 1 + 5 + visual_len(cap_str) + 1))
+                    local mnt = truncate(m.mount, mnt_w)
+                    local mnt_pad = mnt .. string.rep(" ", math.max(0, mnt_w - visual_len(mnt)))
+                    local fixed_w = mnt_w + 1 + 1 + visual_len(pct_str) + 1 + visual_len(cap_str)
+                    local bar_w = math.max(2, col_w - fixed_w)
                     local bar = make_meter_bar(m.used_pct, bar_w)
-                    local col_txt = string.format("%s%-4s%s %s %s%s%s %s%s%s",
-                        C.bold, mnt, C.reset, bar, C.title_col, pct_str, C.reset, C.dim, cap_str, C.reset)
-                    local vlen = visual_len(mnt) + 1 + bar_w + 1 + visual_len(pct_str) + 1 + visual_len(cap_str)
+                    local col_txt = string.format("%s%s%s %s %s%s%s %s%s%s",
+                        C.bold, mnt_pad, C.reset, bar, C.title_col, pct_str, C.reset, C.dim, cap_str, C.reset)
+                    local vlen = visual_len(col_txt)
                     if vlen < col_w then
                         col_txt = col_txt .. string.rep(" ", col_w - vlen)
+                    elseif vlen > col_w then
+                        col_txt = truncate(col_txt, col_w)
                     end
                     return col_txt
                 end
 
                 local m_idx = 1
                 while m_idx <= #storage.mounts do
-                    if row_y >= top_h + 1 then break end
+                    if row_y >= top_h then break end
                     local m1 = storage.mounts[m_idx]
                     local m2 = storage.mounts[m_idx + 1]
                     m_idx = m_idx + 2
@@ -3060,17 +3094,27 @@ Keybindings:
                     row_y = row_y + 1
                 end
             else
+                local max_mnt_len = 2
                 for _, m in ipairs(storage.mounts) do
-                    if row_y >= top_h + 1 then break end
+                    max_mnt_len = math.max(max_mnt_len, visual_len(m.mount))
+                end
+                local mnt_w = math.max(2, math.min(10, max_mnt_len))
+
+                for _, m in ipairs(storage.mounts) do
+                    if row_y >= top_h then break end
                     local bar_col = (m.used_pct > 90.0) and C.cpu_high or ((m.used_pct > 80.0) and C.cpu_mid or C.cpu_low)
-                    local max_mnt_w = math.max(6, math.min(16, math.floor(right_w * 0.28)))
-                    local mnt_str = truncate(m.mount, max_mnt_w)
+                    local mnt = truncate(m.mount, mnt_w)
+                    local mnt_str = mnt .. string.rep(" ", math.max(0, mnt_w - visual_len(mnt)))
                     local u_kb = math.floor(m.used_bytes / 1024)
                     local t_kb = math.floor(m.total_bytes / 1024)
-                    local cap_str = string.format("%s/%s", format_bytes(u_kb):gsub("%s+", ""), format_bytes(t_kb):gsub("%s+", ""))
+                    local u_str = (u_kb >= 1024 * 1024 * 1024) and string.format("%.1fT", u_kb / (1024 * 1024 * 1024))
+                        or (u_kb >= 1024 * 1024 and string.format("%.0fG", u_kb / (1024 * 1024)) or format_bytes(u_kb):gsub("%s+", ""))
+                    local t_str = (t_kb >= 1024 * 1024 * 1024) and string.format("%.1fT", t_kb / (1024 * 1024 * 1024))
+                        or (t_kb >= 1024 * 1024 and string.format("%.0fG", t_kb / (1024 * 1024)) or format_bytes(t_kb):gsub("%s+", ""))
+                    local cap_str = u_str .. "/" .. t_str
                     local pct_str = string.format("%5.1f%%", m.used_pct)
-                    local fixed_w = visual_len(mnt_str) + 1 + visual_len(pct_str) + 1 + visual_len(cap_str) + 4
-                    local bar_w = math.max(3, right_w - fixed_w)
+                    local fixed_w = mnt_w + 1 + 1 + visual_len(pct_str) + 1 + visual_len(cap_str)
+                    local bar_w = math.max(3, (right_w - 2) - fixed_w)
                     local disk_bar = make_meter_bar(m.used_pct, bar_w, bar_col)
 
                     table.insert(out, draw_box_row(left_w + 1, row_y, right_w,
@@ -3565,6 +3609,7 @@ local M = {
     format_rate           = format_rate,
     visual_len            = visual_len,
     truncate              = truncate,
+    make_meter_bar        = make_meter_bar,
     main                  = main,
     run_self_test         = run_self_test,
 }

@@ -168,6 +168,64 @@ TestRunner.describe("4. Storage and Disk I/O Telemetry", function()
             end
         end
     end)
+
+    TestRunner.it("should support compact meter bars without forced overflow", function()
+        local bar2 = btop.make_meter_bar(50, 2)
+        local bar3 = btop.make_meter_bar(50, 3)
+        assert_eq(btop.visual_len(bar2), 2, "bar of width 2 must have visual length 2")
+        assert_eq(btop.visual_len(bar3), 3, "bar of width 3 must have visual length 3")
+    end)
+
+    TestRunner.it("should ensure disk capacity and memory strings never truncate in top right pane", function()
+        local mem = btop.read_memory_stats()
+        local st = btop.read_storage_stats(os.clock())
+        for _, rw in ipairs({ 50, 54, 66, 80, 100, 132 }) do
+            local max_allowed = rw - 2
+            -- Test RAM
+            local mem_cap = btop.format_bytes(mem.used_kb) .. "/" .. btop.format_bytes(mem.total_kb)
+            local mem_pct = string.format("%5.1f%%", mem.used_pct)
+            local mem_fixed = 4 + 1 + btop.visual_len(mem_pct) + 1 + btop.visual_len(mem_cap)
+            local mem_bar_w = math.max(4, max_allowed - mem_fixed)
+            local mem_row = string.format("RAM %s %5.1f%% %s", btop.make_meter_bar(mem.used_pct, mem_bar_w), mem.used_pct, mem_cap)
+            assert_true(btop.visual_len(mem_row) <= max_allowed, "RAM line must not exceed max_allowed")
+
+            -- Test Dual-Column Disks
+            local col_w = math.floor((rw - 2 - 3) / 2)
+            local max_mnt_len = 2
+            for _, m in ipairs(st.mounts) do
+                max_mnt_len = math.max(max_mnt_len, btop.visual_len(m.mount))
+            end
+            local mnt_w = math.max(2, math.min(6, max_mnt_len))
+            for i = 1, #st.mounts, 2 do
+                local m1 = st.mounts[i]
+                local m2 = st.mounts[i + 1]
+                local function format_col(m)
+                    if not m then return string.rep(" ", col_w) end
+                    local u_kb = math.floor(m.used_bytes / 1024)
+                    local t_kb = math.floor(m.total_bytes / 1024)
+                    local u_str = (u_kb >= 1024 * 1024 * 1024) and string.format("%.1fT", u_kb / (1024 * 1024 * 1024))
+                        or (u_kb >= 1024 * 1024 and string.format("%.0fG", u_kb / (1024 * 1024)) or btop.format_bytes(u_kb):gsub("%s+", ""))
+                    local t_str = (t_kb >= 1024 * 1024 * 1024) and string.format("%.1fT", t_kb / (1024 * 1024 * 1024))
+                        or (t_kb >= 1024 * 1024 and string.format("%.0fG", t_kb / (1024 * 1024)) or btop.format_bytes(t_kb):gsub("%s+", ""))
+                    local cap_str = u_str .. "/" .. t_str
+                    local pct_str = string.format("%3.0f%%", m.used_pct or 0)
+                    local mnt = btop.truncate(m.mount, mnt_w)
+                    local mnt_pad = mnt .. string.rep(" ", math.max(0, mnt_w - btop.visual_len(mnt)))
+                    local fixed_w = mnt_w + 1 + 1 + btop.visual_len(pct_str) + 1 + btop.visual_len(cap_str)
+                    local bar_w = math.max(2, col_w - fixed_w)
+                    local bar = btop.make_meter_bar(m.used_pct, bar_w)
+                    local col_txt = string.format("%s %s %s %s", mnt_pad, bar, pct_str, cap_str)
+                    local vlen = btop.visual_len(col_txt)
+                    if vlen < col_w then col_txt = col_txt .. string.rep(" ", col_w - vlen)
+                    elseif vlen > col_w then col_txt = btop.truncate(col_txt, col_w) end
+                    return col_txt
+                end
+                local row_str = format_col(m1) .. " │ " .. format_col(m2)
+                assert_true(btop.visual_len(row_str) <= max_allowed, "Disk dual column row must not exceed max_allowed")
+                assert_true(row_str:find("%.%.%.") == nil, "Disk dual column row must not be truncated with ellipsis")
+            end
+        end
+    end)
 end)
 
 -- 5. Process Engine & Username Resolution
