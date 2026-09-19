@@ -1049,6 +1049,8 @@ local function main()
     enable_raw_mode()
 
     local needs_redraw = true
+    local is_searching = false
+    local search_query = ""
     local preview_pending = true
     local last_w, last_h = get_terminal_size()
 
@@ -1176,13 +1178,17 @@ local function main()
             -- 3. Bottom Status & Keybinding Bar
             local footer_y = term_h - 1
             local status_text = ""
-            if #filter_query > 0 then
+            local help_hint = ""
+            if is_searching then
+                status_text = string.format("\27[1;38;2;251;191;36m/%s\27[7m \27[0m", search_query)
+                help_hint = "\27[90m[Enter] Confirm  [Esc] Cancel  [↑/↓] Select\27[0m"
+            elseif #filter_query > 0 then
                 status_text = string.format("\27[1;38;2;251;191;36mFilter: /%s\27[0m", filter_query)
+                help_hint = "[h/l] Navigate  [j/k] Move  [/] Search  [Esc] Clear  [q] Quit"
             else
                 status_text = string.format("%s%s%s", C.dim, sel_entry and sel_entry.path or current_dir, C.reset)
+                help_hint = "[h/l/←/→] Navigate  [j/k] Up/Down  [/] Filter  [.] Hidden  [q] Quit"
             end
-
-            local help_hint = "[h/l/←/→] Navigate  [j/k] Up/Down  [/] Filter  [.] Hidden  [q] Quit"
             local footer_line = string.format("\27[%d;1H\27[2K  %s \27[90m│\27[0m \27[90m%s\27[0m",
                 footer_y, status_text, help_hint)
             table.insert(out, footer_line)
@@ -1198,7 +1204,40 @@ local function main()
             local previous_dir = current_dir
             local previous_selection = sel_index
             needs_redraw = true
-            if k == "q" or k == "ESC" then
+            if is_searching then
+                if k == "ENTER" then
+                    is_searching = false
+                elseif k == "ESC" then
+                    is_searching = false
+                    search_query = ""
+                    filter_query = ""
+                    reload_current()
+                elseif k == "BACKSPACE" then
+                    if #search_query > 0 then
+                        search_query = search_query:sub(1, -2)
+                        filter_query = search_query
+                        sel_index = 1
+                        reload_current()
+                    else
+                        is_searching = false
+                        filter_query = ""
+                        reload_current()
+                    end
+                elseif k == "UP" then
+                    if sel_index > 1 then
+                        sel_index = sel_index - 1
+                    end
+                elseif k == "DOWN" then
+                    if sel_index < #current_entries then
+                        sel_index = sel_index + 1
+                    end
+                elseif #k == 1 and k:byte(1) >= 32 and k:byte(1) <= 126 then
+                    search_query = search_query .. k
+                    filter_query = search_query
+                    sel_index = 1
+                    reload_current()
+                end
+            elseif k == "q" or k == "ESC" then
                 if #filter_query > 0 then
                     filter_query = ""
                     reload_current()
@@ -1282,17 +1321,12 @@ local function main()
                 -- Refresh
                 reload_current()
             elseif k == "/" then
-                -- Filter prompt
-                disable_raw_mode()
-                io.write("\n\27[1;38;2;56;189;248mSearch / Filter (press Enter): \27[0m")
-                io.flush()
-                local q = io.read("*l")
-                enable_raw_mode()
-                if q then
-                    filter_query = q:gsub("^%s+", ""):gsub("%s+$", "")
-                    sel_index = 1
-                    reload_current()
-                end
+                -- In-TUI Vim-style search prompt
+                is_searching = true
+                search_query = ""
+                filter_query = ""
+                sel_index = 1
+                reload_current()
             end
             if current_dir ~= previous_dir or sel_index ~= previous_selection then
                 preview_pending = true

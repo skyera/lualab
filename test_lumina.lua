@@ -150,7 +150,7 @@ assert_false(is_text_file(img_entry), "JPG image is NOT a text file")
 local bin_entry = { path = "demo_repl", ext = "", size = get_file_size("demo_repl"), is_dir = false }
 assert_false(is_text_file(bin_entry), "ELF binary executable is NOT a text file")
 
--- Test Suite 3: Verify lumina.lua file content contains the new functions
+-- Test Suite 3: Source Code Integrity Check
 print("\n-- Test Suite 3: Source Code Integrity Check --")
 local lf = io.open("lumina.lua", "r")
 local content = lf:read("*all")
@@ -160,6 +160,107 @@ assert_true(content:find("resolve_text_editor") ~= nil, "lumina.lua contains res
 assert_true(content:find("is_command_available%(\"nvim\"%)") ~= nil, "lumina.lua checks nvim availability")
 assert_true(content:find("clear_preview_cache") ~= nil, "lumina.lua clears preview cache on edit")
 assert_true(content:find("reload_current") ~= nil, "lumina.lua reloads directory on edit")
+assert_true(content:find("is_searching") ~= nil, "lumina.lua maintains is_searching state")
+assert_true(content:find("io%.read%(\"%*l\"%)") == nil, "lumina.lua does not use blocking io.read for search")
+
+-- Test Suite 4: Vim-style Search State Machine Simulation
+print("\n-- Test Suite 4: Vim-Style Search State Machine Simulation --")
+local mock_entries = {
+    { name = "AGENTS.md" },
+    { name = "data.txt" },
+    { name = "lumina.lua" },
+    { name = "test_lumina.lua" },
+    { name = "test_pix.lua" },
+}
+
+local function filter_entries(entries, query)
+    if #query == 0 then return entries end
+    local res = {}
+    for _, e in ipairs(entries) do
+        if e.name:lower():find(query:lower(), 1, true) then
+            table.insert(res, e)
+        end
+    end
+    return res
+end
+
+local is_searching = false
+local search_query = ""
+local filter_query = ""
+local current_list = mock_entries
+
+local function simulate_key(k)
+    if is_searching then
+        if k == "ENTER" then
+            is_searching = false
+        elseif k == "ESC" then
+            is_searching = false
+            search_query = ""
+            filter_query = ""
+            current_list = filter_entries(mock_entries, filter_query)
+        elseif k == "BACKSPACE" then
+            if #search_query > 0 then
+                search_query = search_query:sub(1, -2)
+                filter_query = search_query
+                current_list = filter_entries(mock_entries, filter_query)
+            else
+                is_searching = false
+                filter_query = ""
+                current_list = filter_entries(mock_entries, filter_query)
+            end
+        elseif #k == 1 and k:byte(1) >= 32 and k:byte(1) <= 126 then
+            search_query = search_query .. k
+            filter_query = search_query
+            current_list = filter_entries(mock_entries, filter_query)
+        end
+    elseif k == "/" then
+        is_searching = true
+        search_query = ""
+        filter_query = ""
+        current_list = filter_entries(mock_entries, filter_query)
+    elseif k == "ESC" then
+        if #filter_query > 0 then
+            filter_query = ""
+            current_list = filter_entries(mock_entries, filter_query)
+        end
+    end
+end
+
+-- 1. Trigger search with '/'
+simulate_key("/")
+assert_true(is_searching, "Pressing '/' activates is_searching")
+assert_eq(#current_list, 5, "Initial search list contains all entries")
+
+-- 2. Type 'test'
+simulate_key("t")
+simulate_key("e")
+simulate_key("s")
+simulate_key("t")
+assert_eq(search_query, "test", "search_query captures typed text 'test'")
+assert_eq(#current_list, 2, "Typing 'test' live-filters down to 2 matches")
+
+-- 3. Confirm with Enter
+simulate_key("ENTER")
+assert_false(is_searching, "Pressing ENTER exits is_searching mode")
+assert_eq(filter_query, "test", "filter_query remains active after ENTER")
+assert_eq(#current_list, 2, "List remains filtered after ENTER")
+
+-- 4. Clear in normal mode with ESC
+simulate_key("ESC")
+assert_eq(filter_query, "", "Pressing ESC in normal mode clears filter_query")
+assert_eq(#current_list, 5, "List restores to full 5 entries")
+
+-- 5. Search with Backspace and Cancel with ESC
+simulate_key("/")
+simulate_key("l")
+simulate_key("u")
+simulate_key("m")
+assert_eq(#current_list, 2, "Typing 'lum' matches 2 entries (lumina.lua, test_lumina.lua)")
+simulate_key("BACKSPACE")
+assert_eq(search_query, "lu", "Backspace deletes last character to 'lu'")
+simulate_key("ESC")
+assert_false(is_searching, "ESC cancels search")
+assert_eq(#current_list, 5, "ESC restores all entries")
 
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
