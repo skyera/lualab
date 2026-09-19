@@ -910,6 +910,7 @@ local function main()
     enable_raw_mode()
 
     local needs_redraw = true
+    local preview_pending = true
     local last_w, last_h = get_terminal_size()
 
     -- Initial screen clear
@@ -1016,9 +1017,17 @@ local function main()
             local preview_title = sel_entry and sel_entry.name or "Preview"
             draw_pane(out, col3_x, start_y, col3_w, usable_h, preview_title, false)
 
-            local preview_lines = sel_entry
-                and generate_preview(sel_entry, visible_rows, col3_w - 4, show_hidden)
-                or { C.dim .. "(Empty Directory)" .. C.reset }
+            local preview_lines
+            if preview_pending then
+                preview_lines = {
+                    C.dim .. "Loading preview..." .. C.reset,
+                    C.dim .. "Pause briefly to render the selected item." .. C.reset,
+                }
+            elseif sel_entry then
+                preview_lines = generate_preview(sel_entry, visible_rows, col3_w - 4, show_hidden)
+            else
+                preview_lines = { C.dim .. "(Empty Directory)" .. C.reset }
+            end
 
             for i = 1, visible_rows do
                 local pline = preview_lines[i] or ""
@@ -1047,6 +1056,8 @@ local function main()
         -- 4. Key Event Handling (Event-driven without busy spinning)
         local k = read_key(150)
         if k then
+            local previous_dir = current_dir
+            local previous_selection = sel_index
             needs_redraw = true
             if k == "q" or k == "ESC" then
                 if #filter_query > 0 then
@@ -1080,6 +1091,7 @@ local function main()
                     current_dir = get_parent_dir(current_dir)
                     filter_query = ""
                     clear_preview_cache()
+                    preview_pending = true
                     current_entries = read_dir_entries(current_dir, show_hidden)
                     parent_dir = get_parent_dir(current_dir)
                     parent_entries = is_root_dir(current_dir) and {} or read_dir_entries(parent_dir, show_hidden)
@@ -1122,6 +1134,13 @@ local function main()
                     reload_current()
                 end
             end
+            if current_dir ~= previous_dir or sel_index ~= previous_selection then
+                preview_pending = true
+            end
+        elseif preview_pending then
+            -- Wait for one quiet input interval before doing potentially expensive preview work.
+            preview_pending = false
+            needs_redraw = true
         end
     end
 
