@@ -1,8 +1,8 @@
 #!/usr/bin/env luajit
 --[[
     deploy.lua
-    Installs lualab tools (pix.lua, yt.lua, weblite.lua, luatop.lua) plus thin launchers, so they can be
-    started by simply typing `pix`, `yt`, `weblite` / `wl`, or `luatop` / `ltop`:
+    Installs lualab tools (pix.lua, lumina.lua, yt.lua, weblite.lua, luatop.lua) plus thin launchers, so they can be
+    started by simply typing `pix`, `lumina`, `yt`, `weblite` / `wl`, or `luatop` / `ltop`:
 
       Linux / macOS : ~/bin/<app>.lua  + ~/bin/<app>      (POSIX sh, made executable)
       Windows       : C:\app\bin\<app>.lua + <app>.cmd    (cmd.exe / PowerShell)
@@ -10,7 +10,7 @@
 
     Usage:
       luajit deploy.lua                     Install all tools for the current OS
-      luajit deploy.lua --app <name|all>    Select specific tool: pix, yt, weblite, or luatop (default: all)
+      luajit deploy.lua --app <name|all>    Select specific tool: pix, lumina, yt, weblite, or luatop (default: all)
       luajit deploy.lua --dir <path>        Install into a custom directory
       luajit deploy.lua --os windows        Generate the Windows layout (e.g. from Linux/CI)
       luajit deploy.lua --check             Report only, write nothing
@@ -32,6 +32,13 @@ local APPS = {
         script = "pix.lua",
         desc = "Terminal Directory Image Viewer",
         env_var = "PIX_LUAJIT",
+    },
+    lumina = {
+        id = "lumina",
+        name = "lumina",
+        script = "lumina.lua",
+        desc = "Miller-Columns Terminal File Manager",
+        env_var = "LUMINA_LUAJIT",
     },
     yt = {
         id = "yt",
@@ -68,9 +75,9 @@ local opts = {
 local function print_usage()
     print("lualab deploy — Cross-Platform Tools Deployer (LuaJIT FFI)")
     print("Usage:")
-    print("  luajit deploy.lua [--app all|pix|yt|weblite|luatop] [--dir <path>] [--os linux|windows] [--check]")
+    print("  luajit deploy.lua [--app all|pix|lumina|yt|weblite|luatop] [--dir <path>] [--os linux|windows] [--check]")
     print("")
-    print("  --app <name>    App to deploy: all (default), pix, yt, weblite (wl), or luatop (ltop)")
+    print("  --app <name>    App to deploy: all (default), pix, lumina, yt, weblite (wl), or luatop (ltop)")
     print("  --dir <path>    Target directory (default: C:\\app\\bin on Windows, ~/bin elsewhere)")
     print("  --os <name>     Force the target layout: linux (POSIX) or windows")
     print("  --check         Show what would be installed without writing anything")
@@ -111,7 +118,7 @@ do
 end
 
 if opts.app ~= "all" and not APPS[opts.app] and opts.app ~= "wl" and opts.app ~= "ltop" then
-    io.stderr:write("deploy: unknown --app '" .. tostring(opts.app) .. "' (use all, pix, yt, weblite, or luatop)\n")
+    io.stderr:write("deploy: unknown --app '" .. tostring(opts.app) .. "' (use all, pix, lumina, yt, weblite, or luatop)\n")
     os.exit(2)
 end
 
@@ -340,6 +347,7 @@ local luajit_path = resolve_luajit()
 local apps_to_deploy = {}
 if opts.app == "all" then
     table.insert(apps_to_deploy, APPS.pix)
+    table.insert(apps_to_deploy, APPS.lumina)
     table.insert(apps_to_deploy, APPS.yt)
     table.insert(apps_to_deploy, APPS.weblite)
     table.insert(apps_to_deploy, APPS.luatop)
