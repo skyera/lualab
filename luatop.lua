@@ -2073,18 +2073,17 @@ Keybindings:
             -- Render Frame
             -- =================================================================
             local out = {}
-            table.insert(out, "\27[H")
 
             -- Top Banner
             local pause_ind = is_paused and "\27[1;38;2;239;68;68m [PAUSED]\27[0m" or ""
-            local freq_str = freq_ghz and string.format(" │ CPU: \27[1;97m%.2f GHz\27[0m", freq_ghz) or ""
+            local freq_ghz_str = freq_ghz and string.format(" │ CPU: \27[1;97m%.2f GHz\27[0m", freq_ghz) or ""
             local temp_str = temp_c and string.format(" (\27[1;38;2;251;191;36m%.0f°C\27[0m)", temp_c) or ""
             local theme_ind = string.format(" │ Theme: \27[38;2;125;207;255m%s\27[0m", C.name)
             local zombie_str = zombie_count > 0 and string.format(" │ \27[1;38;2;247;118;142m⚠ %d ZOMBIE%s\27[0m", zombie_count, zombie_count > 1 and "S" or "") or ""
 
             local header_str = string.format("  \27[1;38;2;56;189;248m⚡ LUATOP v2.2\27[0m \27[90m│\27[0m Load: \27[1;97m%s\27[0m \27[90m│\27[0m Tasks: \27[1;97m%s\27[0m%s%s%s%s \27[90m│\27[0m \27[1;93m%.1fs\27[0m%s\27[K",
-                load_str, task_str, zombie_str, freq_str, temp_str, theme_ind, refresh_interval_ms / 1000.0, pause_ind)
-            table.insert(out, header_str .. "\n")
+                load_str, task_str, zombie_str, freq_ghz_str, temp_str, theme_ind, refresh_interval_ms / 1000.0, pause_ind)
+            table.insert(out, string.format("\27[1;1H%s", header_str))
 
             -- Layout calculations
             local top_h = math.min(12, math.max(8, math.floor(term_h * 0.32)))
