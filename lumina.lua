@@ -724,9 +724,9 @@ end
 local function generate_image_preview(filepath, max_w, max_h)
     local cmd
     if is_windows then
-        cmd = string.format('magick %q -resize %dx%d! ppm:- 2>%s', filepath, max_w, max_h * 2, devnull)
+        cmd = string.format('magick %q -resize %dx%d ppm:- 2>%s', filepath, max_w, max_h * 2, devnull)
     else
-        cmd = string.format('magick %q -resize %dx%d! ppm:- 2>%s || convert %q -resize %dx%d! ppm:- 2>%s',
+        cmd = string.format('magick %q -resize %dx%d ppm:- 2>%s || convert %q -resize %dx%d ppm:- 2>%s',
             filepath, max_w, max_h * 2, devnull, filepath, max_w, max_h * 2, devnull)
     end
     local pipe = io.popen(cmd, popen_rb)
@@ -737,7 +737,7 @@ local function generate_image_preview(filepath, max_w, max_h)
     end
 
     if not img_data or #img_data == 0 then
-        local ffmpeg_cmd = string.format('ffmpeg -v error -i %q -vf scale=%d:%d -f image2pipe -vcodec ppm - 2>%s',
+        local ffmpeg_cmd = string.format('ffmpeg -v error -i %q -vf scale=%d:%d:force_original_aspect_ratio=decrease -f image2pipe -vcodec ppm - 2>%s',
             filepath, max_w, max_h * 2, devnull)
         local fpipe = io.popen(ffmpeg_cmd, popen_rb)
         if fpipe then
