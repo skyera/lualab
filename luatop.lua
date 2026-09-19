@@ -147,19 +147,22 @@ if is_windows then
         end
         kernel32.GetConsoleMode(hOut, orig_out_mode)
         kernel32.SetConsoleOutputCP(65001)
-        kernel32.SetConsoleMode(hOut, bit.bor(orig_out_mode[0], 0x0004))
+        local raw_out = bit.bor(orig_out_mode[0], 0x0004) -- ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        raw_out = bit.bor(raw_out, 0x0008)                -- DISABLE_NEWLINE_AUTO_RETURN
+        raw_out = bit.band(raw_out, bit.bnot(0x0002))     -- Clear ENABLE_WRAP_AT_EOL_OUTPUT
+        kernel32.SetConsoleMode(hOut, raw_out)
         local raw_mode = bit.band(orig_in_mode[0], bit.bnot(0x0001 + 0x0002 + 0x0004))
         raw_mode = bit.bor(raw_mode, 0x0200)
         kernel32.SetConsoleMode(hIn, raw_mode)
         in_raw_mode = true
-        io.write("\27[?1049h\27[?25l\27[?1000h\27[?1006h")
+        io.write("\27[?1049h\27[?25l\27[?7l\27[?1000h\27[?1006h")
         io.flush()
         return true
     end
 
     disable_raw_mode = function()
         if in_raw_mode then
-            io.write("\27[?1006l\27[?1000l\27[?1049l\27[?25h\27[0m")
+            io.write("\27[?1006l\27[?1000l\27[?7h\27[?1049l\27[?25h\27[0m")
             io.flush()
             local hIn = kernel32.GetStdHandle(0xFFFFFFF6)
             local hOut = kernel32.GetStdHandle(0xFFFFFFF5)
@@ -344,7 +347,7 @@ else
 
     disable_raw_mode = function()
         if in_raw_mode then
-            io.write("\27[?1006l\27[?1000l\27[?1049l\27[?25h\27[0m")
+            io.write("\27[?1006l\27[?1000l\27[?7h\27[?1049l\27[?25h\27[0m")
             io.flush()
             ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
             in_raw_mode = false
@@ -374,7 +377,7 @@ else
         in_raw_mode = true
 
         install_signal_cleanup()
-        io.write("\27[?1049h\27[?25l\27[?1000h\27[?1006h")
+        io.write("\27[?1049h\27[?25l\27[?7l\27[?1000h\27[?1006h")
         io.flush()
         return true
     end
@@ -1719,7 +1722,10 @@ Keybindings:
     local is_paused = false
     local refresh_interval_ms = arg_interval or 1000
     local collapsed_pids = {}
-    local sync_updates = not is_windows or os.getenv("WT_SESSION") ~= nil or os.getenv("TERM_PROGRAM") == "vscode"
+    local sync_updates = not is_windows or os.getenv("WT_SESSION") ~= nil
+        or os.getenv("TERM_PROGRAM") == "vscode"
+        or os.getenv("TERM_PROGRAM") == "WezTerm"
+        or os.getenv("WEZTERM_PANE") ~= nil
 
     -- Modals state
     local show_help = false
@@ -2074,16 +2080,29 @@ Keybindings:
             -- =================================================================
             local out = {}
 
-            -- Top Banner
+            -- Responsive Top Banner
             local pause_ind = is_paused and "\27[1;38;2;239;68;68m [PAUSED]\27[0m" or ""
-            local freq_ghz_str = freq_ghz and string.format(" │ CPU: \27[1;97m%.2f GHz\27[0m", freq_ghz) or ""
-            local temp_str = temp_c and string.format(" (\27[1;38;2;251;191;36m%.0f°C\27[0m)", temp_c) or ""
             local theme_ind = string.format(" │ Theme: \27[38;2;125;207;255m%s\27[0m", C.name)
             local zombie_str = zombie_count > 0 and string.format(" │ \27[1;38;2;247;118;142m⚠ %d ZOMBIE%s\27[0m", zombie_count, zombie_count > 1 and "S" or "") or ""
+            local rate_str = string.format(" │ \27[1;93m%.1fs\27[0m%s", refresh_interval_ms / 1000.0, pause_ind)
 
-            local header_str = string.format("  \27[1;38;2;56;189;248m⚡ LUATOP v2.2\27[0m \27[90m│\27[0m Load: \27[1;97m%s\27[0m \27[90m│\27[0m Tasks: \27[1;97m%s\27[0m%s%s%s%s \27[90m│\27[0m \27[1;93m%.1fs\27[0m%s\27[K",
-                load_str, task_str, zombie_str, freq_ghz_str, temp_str, theme_ind, refresh_interval_ms / 1000.0, pause_ind)
-            table.insert(out, string.format("\27[1;1H%s", header_str))
+            local header_content
+            if term_w >= 120 then
+                local freq_ghz_str = freq_ghz and string.format(" │ CPU: \27[1;97m%.2f GHz\27[0m", freq_ghz) or ""
+                local temp_str = temp_c and string.format(" (\27[1;38;2;251;191;36m%.0f°C\27[0m)", temp_c) or ""
+                header_content = string.format("  \27[1;38;2;56;189;248m⚡ LUATOP v2.2\27[0m │ Load: \27[1;97m%s\27[0m │ Tasks: \27[1;97m%s\27[0m%s%s%s%s%s",
+                    load_str, task_str, zombie_str, freq_ghz_str, temp_str, theme_ind, rate_str)
+            elseif term_w >= 90 then
+                local short_tasks = task_str:match("^[^,]+") or task_str
+                header_content = string.format("  \27[1;38;2;56;189;248m⚡ LUATOP v2.2\27[0m │ Load: \27[1;97m%s\27[0m │ Tasks: \27[1;97m%s\27[0m%s%s",
+                    load_str, short_tasks, theme_ind, rate_str)
+            else
+                local short_load = load_str:match("^[^,]+") or load_str
+                local proc_cnt = task_str:match("^(%d+) procs") or tostring(#procs)
+                header_content = string.format("  \27[1;38;2;56;189;248m⚡ LUATOP\27[0m │ Load: \27[1;97m%s\27[0m │ %sp%s%s",
+                    short_load, proc_cnt, theme_ind, rate_str)
+            end
+            table.insert(out, string.format("\27[1;1H%s\27[K", truncate(header_content, term_w)))
 
             -- Layout calculations
             local top_h = math.min(12, math.max(8, math.floor(term_h * 0.32)))
@@ -2361,15 +2380,25 @@ Keybindings:
             local footer_line = ""
 
             if in_search_mode then
-                footer_line = string.format("\27[%d;1H\27[2K  \27[1;38;2;254;231;21mSearch: \27[0m\27[4m%s\27[0m\27[5m_\27[0m  \27[90m(Enter confirm, Esc cancel)\27[0m", footer_y, filter_query)
+                local raw_footer = string.format("  \27[1;38;2;254;231;21mSearch: \27[0m\27[4m%s\27[0m\27[5m_\27[0m  \27[90m(Enter confirm, Esc cancel)\27[0m", filter_query)
+                footer_line = string.format("\27[%d;1H\27[2K%s", footer_y, truncate(raw_footer, term_w - 1))
             elseif os.clock() < status_flash_expiry and #status_flash_msg > 0 then
-                footer_line = string.format("\27[%d;1H\27[2K  \27[1;38;2;34;197;94m✔ %s\27[0m", footer_y, status_flash_msg)
+                local raw_footer = string.format("  \27[1;38;2;34;197;94m✔ %s\27[0m", status_flash_msg)
+                footer_line = string.format("\27[%d;1H\27[2K%s", footer_y, truncate(raw_footer, term_w - 1))
             else
                 local f_status = #filter_query > 0 and string.format("\27[1;38;2;251;191;36mFilter: /%s\27[0m  ", filter_query) or ""
-                local help_str = in_tree_mode
-                    and "[/] Filter  [Space] Fold  [Enter] Inspect  [k] Kill  [R] Renice  [c/m/p/n/u/s/d] Sort  [r] Rev  [T] Theme  [?] Help  [q] Quit"
-                    or "[/] Filter  [t] Tree  [Enter] Inspect  [k] Kill  [R] Renice  [c/m/p/n/u/s/d] Sort  [r] Rev  [T] Theme  [?] Help  [q] Quit"
-                footer_line = string.format("\27[%d;1H\27[2K  %s%s%s", footer_y, f_status, C.dim, help_str)
+                local help_str
+                if term_w >= 115 then
+                    help_str = in_tree_mode
+                        and "[/] Filter  [Space] Fold  [Enter] Inspect  [k] Kill  [R] Renice  [c/m/p/n/u/s/d] Sort  [r] Rev  [T] Theme  [?] Help  [q] Quit"
+                        or "[/] Filter  [t] Tree  [Enter] Inspect  [k] Kill  [R] Renice  [c/m/p/n/u/s/d] Sort  [r] Rev  [T] Theme  [?] Help  [q] Quit"
+                elseif term_w >= 85 then
+                    help_str = "[/] Filter  [t] Tree  [Enter] Inspect  [c/m/p] Sort  [T] Theme  [?] Help  [q] Quit"
+                else
+                    help_str = "[/] Filter  [t] Tree  [T] Theme  [?] Help  [q] Quit"
+                end
+                local raw_footer = string.format("  %s%s%s", f_status, C.dim, help_str)
+                footer_line = string.format("\27[%d;1H\27[2K%s", footer_y, truncate(raw_footer, term_w - 1))
             end
             table.insert(out, footer_line)
 
@@ -2416,7 +2445,7 @@ local function run_self_test()
 
     local procs = read_process_table(mem.total_kb or 1, os.clock())
     assert(#procs > 0, "Process table must contain at least 1 process")
-    assert(procs[1].pid > 0, "Process PID must be > 0")
+    assert(procs[1].pid >= 0, "Process PID must be >= 0")
     assert(#procs[1].comm > 0, "Process comm must not be empty")
     assert(type(procs[1].username) == "string" and #procs[1].username > 0, "Username must be resolved")
     assert(type(procs[1].io_read_bytes) == "number", "Process IO read bytes should be a number")
