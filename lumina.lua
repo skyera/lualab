@@ -438,6 +438,12 @@ local CODE_EXTS = {
     md = true, html = true, css = true, sql = true
 }
 
+local TEXT_EXTS = {
+    txt = true, log = true, conf = true, cfg = true, ini = true, env = true,
+    csv = true, tsv = true, xml = true, diff = true, patch = true,
+    vim = true, zsh = true, bash = true, fish = true, make = true, cmake = true
+}
+
 local function shell_quote(path)
     if is_windows then
         return '"' .. path:gsub('"', '\\"') .. '"'
@@ -445,15 +451,51 @@ local function shell_quote(path)
     return "'" .. path:gsub("'", "'\\''") .. "'"
 end
 
+local function is_command_available(cmd)
+    local test_cmd = is_windows
+        and ('where ' .. shell_quote(cmd) .. ' >nul 2>&1')
+        or ('command -v ' .. shell_quote(cmd) .. ' >/dev/null 2>&1')
+    return os.execute(test_cmd) == 0
+end
+
+local function resolve_text_editor()
+    if is_command_available("nvim") then
+        return "nvim"
+    end
+    local env_editor = os.getenv("EDITOR") or os.getenv("VISUAL")
+    if env_editor and #env_editor > 0 then
+        return env_editor
+    end
+    return is_windows and "notepad" or (is_command_available("vim") and "vim" or "vi")
+end
+
 local function is_text_file(entry)
-    return entry and not entry.is_dir and (CODE_EXTS[entry.ext] or entry.ext == "txt")
+    if not entry or entry.is_dir then return false end
+    if IMAGE_EXTS[entry.ext] or ARCHIVE_EXTS[entry.ext] then return false end
+    if CODE_EXTS[entry.ext] or TEXT_EXTS[entry.ext] then return true end
+    if entry.size == 0 then return true end
+    if entry.size > 0 and entry.size < 1024 * 1024 * 10 then
+        local f = io.open(entry.path, "rb")
+        if f then
+            local bytes = f:read(512) or ""
+            f:close()
+            for i = 1, #bytes do
+                local b = bytes:byte(i)
+                if b < 9 or (b > 13 and b < 32) then return false end
+            end
+            return true
+        end
+    end
+    return false
 end
 
 local function edit_text_file(path)
-    local editor = os.getenv("EDITOR") or os.getenv("VISUAL") or "nvim"
+    local editor = resolve_text_editor()
     disable_raw_mode()
     local ok = os.execute(editor .. " " .. shell_quote(path))
     enable_raw_mode()
+    io.write("\27[H\27[2J")
+    io.flush()
     return ok
 end
 
@@ -1227,6 +1269,9 @@ local function main()
                     needs_redraw = true
                 elseif k == "ENTER" and is_text_file(sel) then
                     edit_text_file(sel.path)
+                    clear_preview_cache()
+                    preview_pending = true
+                    reload_current()
                     needs_redraw = true
                 end
             elseif k == "." then

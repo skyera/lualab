@@ -25,6 +25,7 @@ local test_suites = {
     { file = "test_ffi_wafer_d2d_inspector.lua", description = "Semiconductor 300mm Wafer Die-to-Die (D2D) Inspector Suite" },
     { file = "test_luatop.lua", description = "luatop — LuaJIT FFI Real-Time System & Hardware Monitor Suite" },
     { file = "test_weblite.lua", description = "weblite — Vim-Driven Terminal Web Browser Suite" },
+    { file = "test_lumina.lua", description = "lumina — Miller Columns File Manager Suite" },
 }
 
 local luajit_bin = "luajit"
