@@ -1587,6 +1587,7 @@ Keybindings:
 
     local last_w, last_h = get_terminal_size()
     local cpu_history = {}
+    local mem_history = {}
     local rx_history = {}
     local tx_history = {}
     local max_history = 35
@@ -1747,11 +1748,20 @@ Keybindings:
             table.insert(cpu_history, overall_cpu)
             if #cpu_history > max_history then table.remove(cpu_history, 1) end
 
+            table.insert(mem_history, mem.used_pct)
+            if #mem_history > max_history then table.remove(mem_history, 1) end
+
             table.insert(rx_history, net.rx_rate)
             if #rx_history > max_history then table.remove(rx_history, 1) end
 
             table.insert(tx_history, net.tx_rate)
             if #tx_history > max_history then table.remove(tx_history, 1) end
+
+            -- Detect zombie processes
+            local zombie_count = 0
+            for _, pr in ipairs(procs) do
+                if pr.state == "Z" then zombie_count = zombie_count + 1 end
+            end
 
             -- Filter processes
             if #filter_query > 0 then
@@ -1813,9 +1823,10 @@ Keybindings:
             local freq_str = freq_ghz and string.format(" │ CPU: \27[1;97m%.2f GHz\27[0m", freq_ghz) or ""
             local temp_str = temp_c and string.format(" (\27[1;38;2;251;191;36m%.0f°C\27[0m)", temp_c) or ""
             local theme_ind = string.format(" │ Theme: \27[38;2;125;207;255m%s\27[0m", C.name)
+            local zombie_str = zombie_count > 0 and string.format(" │ \27[1;38;2;247;118;142m⚠ %d ZOMBIE%s\27[0m", zombie_count, zombie_count > 1 and "S" or "") or ""
 
-            local header_str = string.format("  \27[1;38;2;56;189;248m⚡ BTOP-PRO v2.0\27[0m \27[90m│\27[0m Load: \27[1;97m%s\27[0m \27[90m│\27[0m Tasks: \27[1;97m%s\27[0m%s%s%s \27[90m│\27[0m \27[1;93m%.1fs\27[0m%s\27[K",
-                load_str, task_str, freq_str, temp_str, theme_ind, refresh_interval_ms / 1000.0, pause_ind)
+            local header_str = string.format("  \27[1;38;2;56;189;248m⚡ BTOP-PRO v2.1\27[0m \27[90m│\27[0m Load: \27[1;97m%s\27[0m \27[90m│\27[0m Tasks: \27[1;97m%s\27[0m%s%s%s%s \27[90m│\27[0m \27[1;93m%.1fs\27[0m%s\27[K",
+                load_str, task_str, zombie_str, freq_str, temp_str, theme_ind, refresh_interval_ms / 1000.0, pause_ind)
             table.insert(out, header_str .. "\n")
 
             -- Layout calculations
@@ -1855,7 +1866,8 @@ Keybindings:
             end
 
             -- 2. Memory, Swap & Storage Pane (Top Right)
-            draw_pane(out, left_w + 1, 2, right_w, top_h, "Memory & Storage", false)
+            local mem_spark = make_sparkline(mem_history, math.max(8, right_w - 26), C.mem_used)
+            draw_pane(out, left_w + 1, 2, right_w, top_h, "Memory & Storage", false, "Trend: " .. mem_spark)
             local mem_bar = make_meter_bar(mem.used_pct, right_w - 24, C.mem_used)
             local swap_bar = make_meter_bar(mem.swap_pct, right_w - 24, C.mem_swap)
 
