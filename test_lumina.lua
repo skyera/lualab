@@ -265,7 +265,7 @@ assert_eq(#current_list, 5, "ESC restores all entries")
 -- Test Suite 5: ANSI and Unicode Safe Truncation
 print("\n-- Test Suite 5: ANSI & Unicode-Safe Truncation --")
 local function test_visual_len(str)
-    local clean = tostring(str):gsub("\27%[[%d;]*[a-zA-Z]", "")
+    local clean = tostring(str):gsub("\27%[[%d;]*[a-zA-Z]", ""):gsub("[\r\n]", "")
     local count = 0
     for c in clean:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
         local b = c:byte(1)
@@ -327,6 +327,40 @@ assert_true(test_visual_len(tr) <= 20, "Truncated length does not exceed max_w")
 assert_true(tr:find("\27%[0m%.%.%.$") ~= nil, "Truncated string cleanly terminates with reset and ellipsis")
 -- Check for broken escape sequence like "\27[38;2;56;189;248..."
 assert_false(tr:find("\27%[[%d;]*%.%.%.") ~= nil, "Truncated string never has broken ANSI sequence before dots")
+
+-- Test Suite 6: CRLF Sanitization in Previews and Rows
+print("\n-- Test Suite 6: CRLF Sanitization in Previews and Rows --")
+local function test_draw_row(x, y, w, content)
+    local sanitized = tostring(content):gsub("[\r\n]", "")
+    local clr = test_truncate(sanitized, w - 2)
+    local vlen = test_visual_len(clr)
+    local pad = string.rep(" ", math.max(0, w - 2 - vlen))
+    return string.format("\27[%d;%dH%s%s\27[0m", y, x + 1, clr, pad)
+end
+
+-- Test draw_row with CRLF content
+local crlf_content = "Object.__index = Object\r"
+local rendered_row = test_draw_row(50, 2, 40, crlf_content)
+assert_false(rendered_row:find("\r") ~= nil, "Rendered row contains no carriage return '\\r'")
+assert_false(rendered_row:find("\n") ~= nil, "Rendered row contains no newline '\\n'")
+assert_true(rendered_row:find("Object%.%_%_index %= Object") ~= nil, "Rendered row retains content")
+
+-- Verify visual_len and truncate ignore \r\n
+assert_eq(test_visual_len("hello\r\n"), 5, "visual_len ignores trailing CRLF")
+local tr_crlf = test_truncate("hello world\r\n", 8)
+assert_false(tr_crlf:find("\r") ~= nil, "truncate strips '\\r'")
+assert_false(tr_crlf:find("\n") ~= nil, "truncate strips '\\n'")
+
+-- Verify real CRLF file preview parsing (/home/zliu/test/love/classic.lua if present)
+local cf = io.open("/home/zliu/test/love/classic.lua", "r")
+if cf then
+    local l1 = cf:read("*l")
+    cf:close()
+    if l1 then
+        local cleaned_l1 = l1:gsub("\r$", "")
+        assert_false(cleaned_l1:find("\r") ~= nil, "classic.lua line has \\r stripped")
+    end
+end
 
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then

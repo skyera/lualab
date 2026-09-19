@@ -395,7 +395,7 @@ local C = {
 }
 
 local function visual_len(str)
-    local clean = tostring(str):gsub("\27%[[%d;]*[a-zA-Z]", "")
+    local clean = tostring(str):gsub("\27%[[%d;]*[a-zA-Z]", ""):gsub("[\r\n]", "")
     local count = 0
     for c in clean:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
         local b = c:byte(1)
@@ -411,6 +411,7 @@ local function visual_len(str)
 end
 
 local function truncate(str, max_w)
+    str = tostring(str):gsub("[\r\n]", "")
     local vlen = visual_len(str)
     if vlen <= max_w then return str end
     if max_w <= 3 then return string.rep(".", max_w) end
@@ -751,6 +752,7 @@ local function generate_text_preview(filepath, ext, max_lines, max_cols)
     while count < max_lines do
         local line = f:read("*l")
         if not line then break end
+        line = line:gsub("\r$", "")
         count = count + 1
         -- Replace tabs with 4 spaces
         line = line:gsub("\t", "    ")
@@ -1041,7 +1043,8 @@ local function draw_pane(out, x, y, w, h, title, is_focused)
 end
 
 local function draw_row(x, y, w, content)
-    local clr = truncate(content, w - 2)
+    local sanitized = tostring(content):gsub("[\r\n]", "")
+    local clr = truncate(sanitized, w - 2)
     local vlen = visual_len(clr)
     local pad = string.rep(" ", math.max(0, w - 2 - vlen))
     return string.format("\27[%d;%dH%s%s%s", y, x + 1, clr, pad, C.reset)
