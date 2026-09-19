@@ -18,7 +18,8 @@
         - Binary files: Hex dump preview.
     - Keybindings:
       * h / ← / Backspace: Go to parent directory
-      * l / → / Enter    : Open directory / view file
+      * l / →            : Open directory
+      * Enter            : Open directory or edit text files
       * j / ↓            : Move cursor down
       * k / ↑            : Move cursor up
       * g / G            : Jump to top / bottom
@@ -429,6 +430,25 @@ local CODE_EXTS = {
     rs = true, go = true, sh = true, json = true, yaml = true, yml = true, toml = true,
     md = true, html = true, css = true, sql = true
 }
+
+local function shell_quote(path)
+    if is_windows then
+        return '"' .. path:gsub('"', '\\"') .. '"'
+    end
+    return "'" .. path:gsub("'", "'\\''") .. "'"
+end
+
+local function is_text_file(entry)
+    return entry and not entry.is_dir and (CODE_EXTS[entry.ext] or entry.ext == "txt")
+end
+
+local function edit_text_file(path)
+    local editor = os.getenv("EDITOR") or os.getenv("VISUAL") or "nvim"
+    disable_raw_mode()
+    local ok = os.execute(editor .. " " .. shell_quote(path))
+    enable_raw_mode()
+    return ok
+end
 
 local function get_file_type_info(entry)
     if entry.is_dir then
@@ -1137,13 +1157,16 @@ local function main()
                     end
                 end
             elseif k == "RIGHT" or k == "l" or k == "ENTER" then
-                -- Open selected directory
+                -- Open selected directory; Enter also edits supported text files.
                 local sel = current_entries[sel_index]
                 if sel and sel.is_dir then
                     current_dir = sel.path
                     filter_query = ""
                     sel_index = 1
                     reload_current()
+                elseif k == "ENTER" and is_text_file(sel) then
+                    edit_text_file(sel.path)
+                    needs_redraw = true
                 end
             elseif k == "." then
                 -- Toggle hidden files
