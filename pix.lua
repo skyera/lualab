@@ -5896,6 +5896,7 @@ local function main()
 
     local search_mode = false
     local search_query = ""
+    local search_query_before_edit = ""
     local filtered_images = filter_images(raw_images, search_query)
     local selected_idx = 1
     local page_offset = 1
@@ -5951,6 +5952,13 @@ local function main()
         elseif selected_idx > page_offset + max_items - 1 then
             page_offset = math.max(1, selected_idx - max_items + 1)
         end
+    end
+
+    local function apply_search_query(query)
+        search_query = query or ""
+        filtered_images = filter_images(raw_images, search_query)
+        selected_idx = 1
+        page_offset = 1
     end
 
     -- Build a list of indices that correspond to actual media files (excluding directories)
@@ -6124,10 +6132,7 @@ local function main()
                 if search_mode then
                     if k == "ESC" or k == "CTRL_C" then
                         search_mode = false
-                        search_query = ""
-                        filtered_images = filter_images(raw_images, search_query)
-                        selected_idx = 1
-                        page_offset = 1
+                        apply_search_query(search_query_before_edit)
                     elseif k == "ENTER" then
                         search_mode = false
                         local item = filtered_images[selected_idx]
@@ -6175,6 +6180,7 @@ local function main()
                             break
                         end
                     elseif k == "/" then
+                        search_query_before_edit = search_query
                         search_mode = true
                     elseif k == "?" then
                         in_help = true
