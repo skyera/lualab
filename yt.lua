@@ -1467,7 +1467,7 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     if mode == "music" then
         -- Audio-only streaming with OSD status (terminal mode: load-scripts=no)
         mpv_cmd = string.format(
-            'mpv --no-video --load-scripts=no --hwdec=auto --term-osd-bar --ytdl-format="bestaudio/best" '
+            'mpv --no-video --load-scripts=no --hwdec=auto --msg-level=ffmpeg=fatal --term-osd-bar --ytdl-format="bestaudio/best" '
             .. '--term-status-msg="%s" '
             .. '%s%s %q',
             command_status_msg, ytdl_raw_opts, extra_mpv_opts, item.url
@@ -1484,7 +1484,7 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
             -- 3. Avoid title/time wrapping, which leaves stale rows on Windows consoles
             local h_offset = 5
             mpv_cmd = string.format(
-                'mpv --vo=tct --vo-tct-buffering=frame --sub-visibility=no --video-margin-ratio-bottom=0.15 --vo-tct-width=%d --vo-tct-height=%d --load-scripts=no --hwdec=auto --term-osd=no '
+                'mpv --vo=tct --vo-tct-buffering=frame --msg-level=ffmpeg=fatal --sub-visibility=no --video-margin-ratio-bottom=0.15 --vo-tct-width=%d --vo-tct-height=%d --load-scripts=no --hwdec=auto --term-osd=no '
                 .. '--ytdl-format="bestvideo[height<=480]+bestaudio/best[height<=480]/best" '
                 .. '--term-status-msg="%s" '
                 .. '%s%s %q',
