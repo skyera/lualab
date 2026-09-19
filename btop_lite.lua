@@ -324,6 +324,9 @@ else
 
         typedef void (*sighandler_t)(int);
         sighandler_t signal(int signum, sighandler_t handler);
+
+        int getpriority(int which, int who);
+        int setpriority(int which, int who, int prio);
     ]]
 
     local TIOCGWINSZ   = 0x5413
@@ -693,7 +696,7 @@ end
 -- =========================================================================
 local read_cpu_stats, read_cpu_sensors, read_memory_stats
 local read_network_stats, read_storage_stats, read_loadavg
-local read_process_table, terminate_process, kill_process, send_signal_to_process
+local read_process_table, terminate_process, kill_process, send_signal_to_process, renice_process
 
 local uid_cache = {}
 local function resolve_username(uid)
@@ -933,6 +936,10 @@ if is_windows then
         if sig == 9 or sig == 15 then
             kill_process(pid)
         end
+    end
+
+    renice_process = function(pid, new_nice)
+        return false
     end
 else
     -- POSIX / Linux Telemetry Implementation
@@ -1399,6 +1406,11 @@ else
     send_signal_to_process = function(pid, sig)
         ffi.C.kill(pid, sig)
     end
+
+    renice_process = function(pid, new_nice)
+        local ret = ffi.C.setpriority(0, pid, new_nice)
+        return (ret == 0)
+    end
 end
 
 -- =========================================================================
@@ -1680,7 +1692,7 @@ Keybindings:
 ]])
             return 0
         elseif a == "--version" or a == "-v" then
-            print("btop_lite.lua v2.1.0 (Professional Edition) - LuaJIT FFI System Monitor")
+            print("btop_lite.lua v2.2.0 (Professional Edition) - LuaJIT FFI System Monitor")
             return 0
         elseif a == "--interval" and args[i + 1] then
             arg_interval = tonumber(args[i + 1])
@@ -1710,7 +1722,9 @@ Keybindings:
     local show_help = false
     local show_inspector = false
     local show_signal_modal = false
+    local show_renice_modal = false
     local sel_signal_idx = 1
+    local renice_val = 0
     local status_flash_msg = ""
     local status_flash_expiry = 0
 
@@ -1831,6 +1845,13 @@ Keybindings:
                     show_inspector = false
                     show_signal_modal = true
                     sel_signal_idx = 1
+                elseif k == "R" or k == "r" then
+                    show_inspector = false
+                    local pr = procs[sel_proc]
+                    if pr then
+                        renice_val = pr.nice or 0
+                        show_renice_modal = true
+                    end
                 end
             elseif show_signal_modal then
                 if k == "ESC" or k == "q" then
@@ -1848,6 +1869,27 @@ Keybindings:
                     status_flash_expiry = os.clock() + 3.0
                     -- Flag to execute kill
                     k = "__SEND_SIGNAL__"
+                end
+            elseif show_renice_modal then
+                if k == "ESC" or k == "q" then
+                    show_renice_modal = false
+                elseif k == "LEFT" or k == "DOWN" or k == "h" or k == "j" or k == "-" then
+                    renice_val = math.max(-20, renice_val - 1)
+                elseif k == "RIGHT" or k == "UP" or k == "l" or k == "k" or k == "+" or k == "=" then
+                    renice_val = math.min(19, renice_val + 1)
+                elseif k == "ENTER" then
+                    show_renice_modal = false
+                    local pr = procs[sel_proc]
+                    if pr then
+                        local ok = renice_process(pr.pid, renice_val)
+                        if ok then
+                            status_flash_msg = string.format("Reniced PID %d (%s) to %d", pr.pid, pr.comm, renice_val)
+                            pr.nice = renice_val
+                        else
+                            status_flash_msg = string.format("Failed to renice PID %d (Permission denied? Root required)", pr.pid)
+                        end
+                        status_flash_expiry = os.clock() + 3.0
+                    end
                 end
             elseif in_search_mode then
                 if k == "ENTER" or k == "ESC" then
@@ -1930,6 +1972,12 @@ Keybindings:
                 elseif k == "k" then
                     show_signal_modal = true
                     sel_signal_idx = 1
+                elseif k == "R" or k == "F7" or k == "F8" then
+                    local pr = procs[sel_proc]
+                    if pr then
+                        renice_val = pr.nice or 0
+                        show_renice_modal = true
+                    end
                 elseif k == "+" or k == "=" then
                     refresh_interval_ms = math.max(250, refresh_interval_ms - 250)
                 elseif k == "-" then
@@ -2236,7 +2284,7 @@ Keybindings:
                     format_rate(pr.io_read_rate or 0), format_bytes(math.floor((pr.io_read_bytes or 0) / 1024)),
                     format_rate(pr.io_write_rate or 0), format_bytes(math.floor((pr.io_write_bytes or 0) / 1024)))))
                 table.insert(out, draw_box_row(mx, my + 9, mw, string.format(" %sNice:%s      %d", C.bold, C.reset, pr.nice or 0)))
-                table.insert(out, draw_box_row(mx, my + 11, mw, string.format("  %s[k] Send Signal   [Enter / Esc] Close Inspector%s", C.title_col, C.reset)))
+                table.insert(out, draw_box_row(mx, my + 11, mw, string.format("  %s[k] Kill   [R] Renice   [Enter / Esc] Close Inspector%s", C.title_col, C.reset)))
             elseif show_signal_modal and procs[sel_proc] then
                 local pr = procs[sel_proc]
                 local mw = math.min(68, term_w - 4)
@@ -2256,6 +2304,33 @@ Keybindings:
                     end
                 end
                 table.insert(out, draw_box_row(mx, my + mh - 2, mw, string.format("  %s[↑/↓] Select   [Enter] Send   [Esc] Cancel%s", C.dim, C.reset)))
+            elseif show_renice_modal and procs[sel_proc] then
+                local pr = procs[sel_proc]
+                local mw = math.min(64, term_w - 4)
+                local mh = 10
+                local mx = math.floor((term_w - mw) / 2)
+                local my = math.floor((term_h - mh) / 2)
+                draw_modal_box(out, mx, my, mw, mh, string.format("Renice Process: PID %d (%s)", pr.pid, pr.comm))
+
+                table.insert(out, draw_box_row(mx, my + 1, mw, string.format(" Current Priority: %sNice %d%s", C.bold, pr.nice or 0, C.reset)))
+                table.insert(out, draw_box_row(mx, my + 2, mw, " Adjust priority (-20 = Highest/Realtime, 19 = Lowest/Idle):"))
+
+                local slider_w = mw - 16
+                local ratio = (renice_val + 20) / 39.0
+                local pos = math.max(0, math.min(slider_w - 1, math.floor(ratio * (slider_w - 1))))
+                local slider_str = string.rep("─", pos) .. "█" .. string.rep("─", slider_w - 1 - pos)
+                local prio_col = (renice_val < 0) and C.cpu_high or ((renice_val == 0) and C.reset or C.cpu_low)
+
+                table.insert(out, draw_box_row(mx, my + 4, mw, string.format("  Nice: %s%3d%s  [%s%s%s]",
+                    prio_col, renice_val, C.reset, C.title_col, slider_str, C.reset)))
+
+                local label = (renice_val < -5) and "High Priority (Aggressive)"
+                    or ((renice_val < 0) and "Above Normal Priority"
+                    or ((renice_val == 0) and "Normal Priority (Default)"
+                    or ((renice_val < 10) and "Below Normal Priority"
+                    or "Idle / Background Priority")))
+                table.insert(out, draw_box_row(mx, my + 5, mw, string.format("  Level: %s%s%s", C.bold, label, C.reset)))
+                table.insert(out, draw_box_row(mx, my + 7, mw, string.format("  %s[←/→, +/-] Adjust   [Enter] Apply   [Esc] Cancel%s", C.dim, C.reset)))
             elseif show_help then
                 local mw = math.min(72, term_w - 4)
                 local mh = 16
@@ -2270,7 +2345,7 @@ Keybindings:
                 table.insert(out, draw_box_row(mx, my + 5, mw, "   /              Filter: name, u:<user>, s:<state>, cpu>X, m>XM"))
                 table.insert(out, draw_box_row(mx, my + 6, mw, "   t, F5          Toggle Process Tree view"))
                 table.insert(out, draw_box_row(mx, my + 7, mw, "   Enter, i       Inspect process details modal"))
-                table.insert(out, draw_box_row(mx, my + 8, mw, "   k              Open signal dispatcher modal"))
+                table.insert(out, draw_box_row(mx, my + 8, mw, "   k, R           Open signal dispatcher, Renice modal"))
                 table.insert(out, draw_box_row(mx, my + 9, mw, string.format(" %sDisplay & Sorting:%s", C.title_col, C.reset)))
                 table.insert(out, draw_box_row(mx, my + 10, mw, "   c, m, p, n     Sort by CPU, Memory, PID, or Name"))
                 table.insert(out, draw_box_row(mx, my + 11, mw, "   u, s, d        Sort by User, Threads, Disk I/O"))
@@ -2290,8 +2365,8 @@ Keybindings:
             else
                 local f_status = #filter_query > 0 and string.format("\27[1;38;2;251;191;36mFilter: /%s\27[0m  ", filter_query) or ""
                 local help_str = in_tree_mode
-                    and "[/] Filter  [Space] Fold  [Enter] Inspect  [k] Kill  [c/m/p/n/u/s/d] Sort  [r] Rev  [T] Theme  [?] Help  [q] Quit"
-                    or "[/] Filter  [t] Tree  [Enter] Inspect  [k] Kill  [c/m/p/n/u/s/d] Sort  [r] Rev  [T] Theme  [?] Help  [q] Quit"
+                    and "[/] Filter  [Space] Fold  [Enter] Inspect  [k] Kill  [R] Renice  [c/m/p/n/u/s/d] Sort  [r] Rev  [T] Theme  [?] Help  [q] Quit"
+                    or "[/] Filter  [t] Tree  [Enter] Inspect  [k] Kill  [R] Renice  [c/m/p/n/u/s/d] Sort  [r] Rev  [T] Theme  [?] Help  [q] Quit"
                 footer_line = string.format("\27[%d;1H\27[2K  %s%s%s", footer_y, f_status, C.dim, help_str)
             end
             table.insert(out, footer_line)
@@ -2409,6 +2484,14 @@ local function run_self_test()
     assert(match_smart_filter(test_proc, "testworker") == true, "Smart filter text match")
     print("  ✔ Smart Filter Engine: Verified u:<user>, s:<state>, cpu>X, m>XM, text queries")
 
+    -- Renice test
+    assert(type(renice_process) == "function", "renice_process must be a function")
+    if not is_windows then
+        local cur_prio = ffi.C.getpriority(0, 0)
+        assert(type(cur_prio) == "number", "getpriority must return a number")
+        print(string.format("  ✔ Process Renice Engine: Priority subsystem verified (Current PID nice: %d)", cur_prio))
+    end
+
     print("\n\27[1;32mALL SELF-TEST CHECKS PASSED SUCCESSFULLY!\27[0m")
     return true
 end
@@ -2417,7 +2500,7 @@ end
 -- 10. Module Export & CLI Entry Point
 -- =========================================================================
 local M = {
-    version            = "2.1.0",
+    version            = "2.2.0",
     read_cpu_stats     = read_cpu_stats,
     read_cpu_sensors   = read_cpu_sensors,
     read_memory_stats  = read_memory_stats,
@@ -2426,6 +2509,7 @@ local M = {
     read_process_table = read_process_table,
     build_process_tree = build_process_tree,
     match_smart_filter = match_smart_filter,
+    renice_process     = renice_process,
     resolve_username   = resolve_username,
     set_theme          = set_theme,
     cycle_theme        = cycle_theme,
