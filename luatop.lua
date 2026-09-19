@@ -2496,6 +2496,7 @@ Keybindings:
     local sort_mode = "cpu" -- "cpu", "mem", "pid", "name", "user", "threads"
     local sort_reverse = false
     local in_tree_mode = arg_tree
+    local cpu_view_mode = "auto" -- "auto", "summary", "detail"
     local sel_proc = 1
     local filter_query = ""
     local in_search_mode = false
@@ -2518,6 +2519,8 @@ Keybindings:
     local status_flash_expiry = 0
 
     local last_w, last_h = get_terminal_size()
+    local last_top_h = math.min(12, math.max(8, math.floor(last_h * 0.32)))
+    local last_visible_rows = math.max(1, last_h - last_top_h - 3 - 5)
     local cpu_history = {}
     local mem_history = {}
     local gpu_history = {}
@@ -2572,12 +2575,10 @@ Keybindings:
                         show_inspector = false
                         show_signal_modal = false
                     else
-                        local top_h = math.min(12, math.max(8, math.floor(term_h * 0.32)))
                         local net_h = 3
-                        local proc_y = top_h + 2 + net_h
+                        local proc_y = last_top_h + 2 + net_h
                         local table_header_y = proc_y + 1
-                        local bot_h = term_h - top_h - net_h - 2
-                        local visible_rows = bot_h - 3
+                        local visible_rows = last_visible_rows
                         local show_io = (term_w >= 115)
 
                         if k.y == table_header_y then
@@ -2747,6 +2748,16 @@ Keybindings:
                 elseif k == "t" or k == "F5" then
                     in_tree_mode = not in_tree_mode
                     sel_proc = 1
+                elseif k == "C" then
+                    if cpu_view_mode == "auto" then
+                        cpu_view_mode = "summary"
+                    elseif cpu_view_mode == "summary" then
+                        cpu_view_mode = "detail"
+                    else
+                        cpu_view_mode = "auto"
+                    end
+                    status_flash_msg = string.format("CPU view: %s", cpu_view_mode:upper())
+                    status_flash_expiry = os.clock() + 2.0
                 elseif k == "c" then
                     sort_mode = "cpu"
                 elseif k == "m" then
@@ -2932,11 +2943,19 @@ Keybindings:
             elseif left_w >= 60 and #cores > 2 * (right_content_bottom - 2) then
                 core_rows = math.ceil(#cores / 3)
             end
-            local required_top_h = math.max(6, right_content_bottom, 2 + core_rows)
-            local max_top_h = math.max(6, term_h - 6)
+            local min_process_h = 8
+            local max_top_h = math.max(6, term_h - 3 - 2 - min_process_h)
+            local detail_fits = (2 + core_rows) <= max_top_h
+            local show_cpu_summary = cpu_view_mode == "summary"
+                or (cpu_view_mode == "auto" and not detail_fits)
+            local cpu_summary_rows = 4
+            local required_top_h = math.max(6, right_content_bottom,
+                show_cpu_summary and (2 + cpu_summary_rows) or (2 + core_rows))
             local top_h = math.min(required_top_h, max_top_h)
             local net_h = 3
             local bot_h = term_h - top_h - net_h - 2
+            last_top_h = top_h
+            last_visible_rows = math.max(1, bot_h - 3)
 
             -- 1. CPU Pane (Top Left)
             local cpu_spark_w = math.min(14, math.max(6, math.floor(left_w * 0.18)))
@@ -2957,30 +2976,56 @@ Keybindings:
             else
                 cpu_title = string.format("CPU: %.1f%%%s", overall_cpu, sensor_str)
             end
-            draw_pane(out, 1, 2, left_w, top_h, cpu_title, false, "Usage: " .. cpu_spark)
+            local cpu_header_right = "Usage: " .. cpu_spark
+            if show_cpu_summary then
+                cpu_title = string.format("CPU Summary: %.1f%%%s", overall_cpu, sensor_str)
+            end
+            draw_pane(out, 1, 2, left_w, top_h, cpu_title, false, cpu_header_right)
 
-            -- Dynamic core columns based on left_w and core count
-            local avail_rows = math.max(1, top_h - 2)
-            local num_cols = left_w < 36 and 1
-                or (left_w >= 90 and #cores > 3 * avail_rows and 4
-                or (left_w >= 60 and #cores > 2 * avail_rows and 3 or 2))
-            local col_sub_w = math.floor((left_w - 4 - num_cols) / num_cols)
-
-            for i = 1, avail_rows do
-                local line_parts = {}
-                for col = 1, num_cols do
-                    local c_idx = (i - 1) * num_cols + col
-                    local c = cores[c_idx]
-                    if c then
-                        local lbl = (col_sub_w >= 14) and string.format("C%-2d", c_idx - 1) or string.format("%2d", c_idx - 1)
-                        local fixed_w = visual_len(lbl) + 1 + 5
-                        local bar_w = math.max(3, col_sub_w - fixed_w)
-                        local mbar = make_meter_bar(c.pct, bar_w)
-                        local sep = (col > 1) and " " or ""
-                        table.insert(line_parts, string.format("%s%s%s%s %s%4.0f%%%s", sep, C.dim, lbl, C.reset, mbar, c.pct, C.reset))
-                    end
+            if show_cpu_summary then
+                local min_pct, max_pct = 100, 0
+                local busy_cores = 0
+                local total_pct = 0
+                for _, c in ipairs(cores) do
+                    min_pct = math.min(min_pct, c.pct)
+                    max_pct = math.max(max_pct, c.pct)
+                    total_pct = total_pct + c.pct
+                    if c.pct >= 1 then busy_cores = busy_cores + 1 end
                 end
-                table.insert(out, draw_box_row(1, 2 + i, left_w, table.concat(line_parts)))
+                local avg_pct = #cores > 0 and total_pct / #cores or 0
+                local summary_lines = {
+                    string.format("  Overall: %5.1f%%   Avg/core: %5.1f%%", overall_cpu, avg_pct),
+                    string.format("  Min/core: %5.1f%%   Max/core: %5.1f%%", min_pct, max_pct),
+                    string.format("  Busy cores: %d/%d   View: %s", busy_cores, #cores, cpu_view_mode:upper()),
+                    string.format("  Per-core details hidden (%d cores); press C to cycle view", #cores)
+                }
+                for i, line in ipairs(summary_lines) do
+                    table.insert(out, draw_box_row(1, 2 + i, left_w, line))
+                end
+            else
+                -- Dynamic core columns based on left_w and core count.
+                local avail_rows = math.max(1, top_h - 2)
+                local num_cols = left_w < 36 and 1
+                    or (left_w >= 90 and #cores > 3 * avail_rows and 4
+                    or (left_w >= 60 and #cores > 2 * avail_rows and 3 or 2))
+                local col_sub_w = math.floor((left_w - 4 - num_cols) / num_cols)
+
+                for i = 1, avail_rows do
+                    local line_parts = {}
+                    for col = 1, num_cols do
+                        local c_idx = (i - 1) * num_cols + col
+                        local c = cores[c_idx]
+                        if c then
+                            local lbl = (col_sub_w >= 14) and string.format("C%-2d", c_idx - 1) or string.format("%2d", c_idx - 1)
+                            local fixed_w = visual_len(lbl) + 1 + 5
+                            local bar_w = math.max(3, col_sub_w - fixed_w)
+                            local mbar = make_meter_bar(c.pct, bar_w)
+                            local sep = (col > 1) and " " or ""
+                            table.insert(line_parts, string.format("%s%s%s%s %s%4.0f%%%s", sep, C.dim, lbl, C.reset, mbar, c.pct, C.reset))
+                        end
+                    end
+                    table.insert(out, draw_box_row(1, 2 + i, left_w, table.concat(line_parts)))
+                end
             end
 
             -- 2. Memory, GPU & Storage Pane (Top Right)
@@ -3304,7 +3349,7 @@ Keybindings:
                 table.insert(out, draw_box_row(mx, my + 7, mw, string.format("  %s[←/→, +/-] Adjust   [Enter] Apply   [Esc] Cancel%s", C.dim, C.reset)))
             elseif show_help then
                 local mw = math.min(72, term_w - 4)
-                local mh = 16
+                local mh = 17
                 local mx = math.floor((term_w - mw) / 2)
                 local my = math.floor((term_h - mh) / 2)
                 draw_modal_box(out, mx, my, mw, mh, "Help & Keybindings")
@@ -3321,8 +3366,9 @@ Keybindings:
                 table.insert(out, draw_box_row(mx, my + 10, mw, "   c, m, p, n     Sort by CPU, Memory, PID, or Name"))
                 table.insert(out, draw_box_row(mx, my + 11, mw, "   u, s, d        Sort by User, Threads, Disk I/O"))
                 table.insert(out, draw_box_row(mx, my + 12, mw, "   r              Reverse current sort order"))
-                table.insert(out, draw_box_row(mx, my + 13, mw, "   T              Cycle color themes   Space Pause"))
-                table.insert(out, draw_box_row(mx, my + 14, mw, string.format("  %s[Esc / Enter / ?] Close Help Dialog%s", C.dim, C.reset)))
+                table.insert(out, draw_box_row(mx, my + 13, mw, "   C              CPU auto/summary/detail view"))
+                table.insert(out, draw_box_row(mx, my + 14, mw, "   T              Cycle color themes   Space Pause"))
+                table.insert(out, draw_box_row(mx, my + 15, mw, string.format("  %s[Esc / Enter / ?] Close Help Dialog%s", C.dim, C.reset)))
             end
 
             -- 6. Footer Line & Search / Status
@@ -3340,12 +3386,12 @@ Keybindings:
                 local help_str
                 if term_w >= 115 then
                     help_str = in_tree_mode
-                        and "[/] Filter  [Space] Fold  [Enter] Inspect  [k] Kill  [R] Renice  [c/m/p/n/u/s/d] Sort  [r] Rev  [T] Theme  [?] Help  [q] Quit"
-                        or "[/] Filter  [t] Tree  [Enter] Inspect  [k] Kill  [R] Renice  [c/m/p/n/u/s/d] Sort  [r] Rev  [T] Theme  [?] Help  [q] Quit"
+                        and "[/] Filter  [Space] Fold  [Enter] Inspect  [k] Kill  [R] Renice  [c/m/p/n/u/s/d] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit"
+                        or "[/] Filter  [t] Tree  [Enter] Inspect  [k] Kill  [R] Renice  [c/m/p/n/u/s/d] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit"
                 elseif term_w >= 85 then
-                    help_str = "[/] Filter  [t] Tree  [Enter] Inspect  [c/m/p] Sort  [T] Theme  [?] Help  [q] Quit"
+                    help_str = "[/] Filter  [t] Tree  [Enter] Inspect  [c/m/p] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit"
                 else
-                    help_str = "[/] Filter  [t] Tree  [T] Theme  [?] Help  [q] Quit"
+                    help_str = "[/] Filter  [t] Tree  [C] CPU  [T] Theme  [?] Help  [q] Quit"
                 end
                 local raw_footer = string.format("  %s%s%s", f_status, C.dim, help_str)
                 footer_line = string.format("\27[%d;1H\27[2K%s", footer_y, truncate(raw_footer, term_w - 1))
