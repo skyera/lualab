@@ -19,7 +19,7 @@
     - Keybindings:
       * h / ← / Backspace: Go to parent directory
       * l / →            : Open directory
-      * Enter            : Open directory or edit text files
+      * Enter            : Open directory, edit text, or view images
       * j / ↓            : Move cursor down
       * k / ↑            : Move cursor up
       * g / G            : Jump to top / bottom
@@ -825,6 +825,32 @@ local function generate_image_preview(filepath, max_w, max_h)
     return lines
 end
 
+local function show_image_fullscreen(entry)
+    local term_w, term_h = get_terminal_size()
+    local header = string.format("  %s%s%s",
+        C.bold, entry.name, C.reset,
+        C.reset)
+    local footer = "  " .. C.dim .. "[q/Esc/Enter] Return to Lumina" .. C.reset
+    local image_lines = generate_image_preview(entry.path, math.max(1, term_w - 2), math.max(1, term_h - 4))
+
+    io.write("\27[H\27[2J\27[?25l")
+    io.write(header .. "\n")
+    for _, line in ipairs(image_lines) do
+        io.write(line .. "\n")
+    end
+    io.write(string.format("\27[%d;1H\27[2K%s", term_h, footer))
+    io.flush()
+
+    while true do
+        local k = read_key()
+        if k == "q" or k == "Q" or k == "ESC" or k == "ENTER" then
+            io.write("\27[H\27[2J")
+            io.flush()
+            return
+        end
+    end
+end
+
 local PREVIEW_CACHE_LIMIT = 64
 local preview_cache = {}
 local preview_cache_order = {}
@@ -1164,6 +1190,9 @@ local function main()
                     filter_query = ""
                     sel_index = 1
                     reload_current()
+                elseif k == "ENTER" and IMAGE_EXTS[sel and sel.ext] then
+                    show_image_fullscreen(sel)
+                    needs_redraw = true
                 elseif k == "ENTER" and is_text_file(sel) then
                     edit_text_file(sel.path)
                     needs_redraw = true
