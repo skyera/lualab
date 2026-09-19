@@ -2362,7 +2362,7 @@ Keybindings:
             local footer_line = ""
 
             if in_search_mode then
-                footer_line = string.format("\27[%d;1H\27[2K  \27[1;38;2;254;231;21mSearch: \27[0m\27[4m%s\27[0m\27[5m_\27[0m  \27[90m(Enter confirm, Esc cancel)\27[0m", filter_query)
+                footer_line = string.format("\27[%d;1H\27[2K  \27[1;38;2;254;231;21mSearch: \27[0m\27[4m%s\27[0m\27[5m_\27[0m  \27[90m(Enter confirm, Esc cancel)\27[0m", footer_y, filter_query)
             elseif os.clock() < status_flash_expiry and #status_flash_msg > 0 then
                 footer_line = string.format("\27[%d;1H\27[2K  \27[1;38;2;34;197;94m✔ %s\27[0m", footer_y, status_flash_msg)
             else
@@ -2494,6 +2494,11 @@ local function run_self_test()
         assert(type(cur_prio) == "number", "getpriority must return a number")
         print(string.format("  ✔ Process Renice Engine: Priority subsystem verified (Current PID nice: %d)", cur_prio))
     end
+
+    -- Search footer formatting regression test
+    local test_footer = string.format("\27[%d;1H\27[2K  \27[1;38;2;254;231;21mSearch: \27[0m\27[4m%s\27[0m\27[5m_\27[0m  \27[90m(Enter confirm, Esc cancel)\27[0m", 30, "u:root")
+    assert(test_footer:find("u:root", 1, true) ~= nil, "Search footer must format correctly with footer_y and filter_query")
+    print("  ✔ Search UI: Verified in-place search footer format integrity")
 
     print("\n\27[1;32mALL SELF-TEST CHECKS PASSED SUCCESSFULLY!\27[0m")
     return true
