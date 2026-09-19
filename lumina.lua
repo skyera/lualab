@@ -395,24 +395,54 @@ local C = {
 }
 
 local function visual_len(str)
-    local clean = tostring(str):gsub("\27%[[%d;]*[mK]", "")
-    local _, count = clean:gsub("[%z\1-\127\194-\244][\128-\191]*", "")
+    local clean = tostring(str):gsub("\27%[[%d;]*[a-zA-Z]", "")
+    local count = 0
+    for c in clean:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+        local b = c:byte(1)
+        if b and b >= 240 then
+            count = count + 2
+        elseif b and b >= 228 and b <= 233 then
+            count = count + 2
+        else
+            count = count + 1
+        end
+    end
     return count
 end
 
 local function truncate(str, max_w)
-    local len = visual_len(str)
-    if len <= max_w then return str end
+    local vlen = visual_len(str)
+    if vlen <= max_w then return str end
     if max_w <= 3 then return string.rep(".", max_w) end
 
+    local esc_pattern = "^\27%[[%d;]*[a-zA-Z]"
+    local utf8_pattern = "^[%z\1-\127\194-\244][\128-\191]*"
+
     local out = {}
-    local curr = 0
-    for c in str:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
-        if curr + 1 > max_w - 3 then break end
-        table.insert(out, c)
-        curr = curr + 1
+    local curr_w = 0
+    local i = 1
+    local len = #str
+
+    while i <= len do
+        local sub = str:sub(i)
+        local esc = sub:match(esc_pattern)
+        if esc then
+            table.insert(out, esc)
+            i = i + #esc
+        else
+            local char = sub:match(utf8_pattern) or sub:sub(1, 1)
+            local b = char:byte(1)
+            local w = (b and ((b >= 240) or (b >= 228 and b <= 233))) and 2 or 1
+            if curr_w + w > max_w - 3 then
+                table.insert(out, "\27[0m...")
+                return table.concat(out)
+            end
+            table.insert(out, char)
+            curr_w = curr_w + w
+            i = i + #char
+        end
     end
-    return table.concat(out) .. "..."
+    return table.concat(out)
 end
 
 local function format_bytes(bytes)
@@ -1014,7 +1044,7 @@ local function draw_row(x, y, w, content)
     local clr = truncate(content, w - 2)
     local vlen = visual_len(clr)
     local pad = string.rep(" ", math.max(0, w - 2 - vlen))
-    return string.format("\27[%d;%dH%s%s", y, x + 1, clr, pad)
+    return string.format("\27[%d;%dH%s%s%s", y, x + 1, clr, pad, C.reset)
 end
 
 -- =========================================================================
@@ -1282,6 +1312,8 @@ local function main()
                     filter_query = ""
                     clear_preview_cache()
                     preview_pending = true
+                    io.write("\27[H\27[2J")
+                    io.flush()
                     current_entries = read_dir_entries(current_dir, show_hidden)
                     parent_dir = get_parent_dir(current_dir)
                     parent_entries = is_root_dir(current_dir) and {} or read_dir_entries(parent_dir, show_hidden)
@@ -1302,6 +1334,10 @@ local function main()
                     current_dir = sel.path
                     filter_query = ""
                     sel_index = 1
+                    clear_preview_cache()
+                    preview_pending = true
+                    io.write("\27[H\27[2J")
+                    io.flush()
                     reload_current()
                 elseif k == "ENTER" and IMAGE_EXTS[sel and sel.ext] then
                     sel_index = show_image_fullscreen(current_entries, sel_index) or sel_index
@@ -1328,7 +1364,12 @@ local function main()
                 sel_index = 1
                 reload_current()
             end
-            if current_dir ~= previous_dir or sel_index ~= previous_selection then
+            if current_dir ~= previous_dir then
+                clear_preview_cache()
+                preview_pending = true
+                io.write("\27[H\27[2J")
+                io.flush()
+            elseif sel_index ~= previous_selection then
                 preview_pending = true
             end
         elseif preview_pending then

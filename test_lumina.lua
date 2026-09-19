@@ -262,6 +262,72 @@ simulate_key("ESC")
 assert_false(is_searching, "ESC cancels search")
 assert_eq(#current_list, 5, "ESC restores all entries")
 
+-- Test Suite 5: ANSI and Unicode Safe Truncation
+print("\n-- Test Suite 5: ANSI & Unicode-Safe Truncation --")
+local function test_visual_len(str)
+    local clean = tostring(str):gsub("\27%[[%d;]*[a-zA-Z]", "")
+    local count = 0
+    for c in clean:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+        local b = c:byte(1)
+        if b and b >= 240 then
+            count = count + 2
+        elseif b and b >= 228 and b <= 233 then
+            count = count + 2
+        else
+            count = count + 1
+        end
+    end
+    return count
+end
+
+local function test_truncate(str, max_w)
+    local vlen = test_visual_len(str)
+    if vlen <= max_w then return str end
+    if max_w <= 3 then return string.rep(".", max_w) end
+
+    local esc_pattern = "^\27%[[%d;]*[a-zA-Z]"
+    local utf8_pattern = "^[%z\1-\127\194-\244][\128-\191]*"
+
+    local out = {}
+    local curr_w = 0
+    local i = 1
+    local len = #str
+
+    while i <= len do
+        local sub = str:sub(i)
+        local esc = sub:match(esc_pattern)
+        if esc then
+            table.insert(out, esc)
+            i = i + #esc
+        else
+            local char = sub:match(utf8_pattern) or sub:sub(1, 1)
+            local b = char:byte(1)
+            local w = (b and ((b >= 240) or (b >= 228 and b <= 233))) and 2 or 1
+            if curr_w + w > max_w - 3 then
+                table.insert(out, "\27[0m...")
+                return table.concat(out)
+            end
+            table.insert(out, char)
+            curr_w = curr_w + w
+            i = i + #char
+        end
+    end
+    return table.concat(out)
+end
+
+-- Verify visual_len with emoji
+assert_eq(test_visual_len("📁"), 2, "Folder emoji occupies 2 columns")
+assert_eq(test_visual_len("📜"), 2, "Script emoji occupies 2 columns")
+assert_eq(test_visual_len("\27[38;2;56;189;248m📁 test\27[0m"), 7, "Colored emoji visual length accounts for emoji width")
+
+-- Verify truncate does not mangle ANSI escape sequences
+local colored_str = "\27[38;2;56;189;248m  📜 classic.lua          331 B\27[0m"
+local tr = test_truncate(colored_str, 20)
+assert_true(test_visual_len(tr) <= 20, "Truncated length does not exceed max_w")
+assert_true(tr:find("\27%[0m%.%.%.$") ~= nil, "Truncated string cleanly terminates with reset and ellipsis")
+-- Check for broken escape sequence like "\27[38;2;56;189;248..."
+assert_false(tr:find("\27%[[%d;]*%.%.%.") ~= nil, "Truncated string never has broken ANSI sequence before dots")
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)
