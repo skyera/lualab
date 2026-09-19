@@ -1735,7 +1735,7 @@ else
             return gpus
         end
 
-        -- Linux sysfs & DRM fallback (Intel iGPU / AMDGPU / DRM Cards)
+        -- Linux sysfs & DRM fallback (Intel iGPU / AMDGPU / Broadcom VideoCore / DRM Cards)
         local cached_drm_names = {}
         for card_idx = 0, 7 do
             local card_base = "/sys/class/drm/card" .. card_idx
@@ -1744,6 +1744,7 @@ else
                 local slot = nil
                 local driver = nil
                 local pci_id = nil
+                local of_compat = nil
                 for line in f_uevent:lines() do
                     local s = line:match("^PCI_SLOT_NAME=(%S+)")
                     if s then slot = s end
@@ -1751,24 +1752,28 @@ else
                     if d then driver = d end
                     local p = line:match("^PCI_ID=(%x+:%x+)")
                     if p then pci_id = p end
+                    local c = line:match("^OF_COMPATIBLE_0=(%S+)")
+                    if c then of_compat = c end
                 end
                 f_uevent:close()
 
                 local gpu_name = cached_drm_names[card_idx]
-                if not gpu_name and slot then
-                    local p = io.popen("lspci -s " .. slot .. " 2>/dev/null")
-                    if p then
-                        local l = p:read("*l")
-                        p:close()
-                        if l then
-                            local desc = l:match(":%s+(.-)%s*%(rev") or l:match(":%s+(.*)")
-                            if desc then
-                                local bracket = desc:match("%[(.-)%]")
-                                if bracket and not bracket:find("^%x%x%x%x") then
-                                    local brand = desc:find("^Intel") and "Intel " or (desc:find("^AMD") and "AMD " or "")
-                                    gpu_name = brand .. bracket
-                                else
-                                    gpu_name = desc:gsub("^Corporation%s+", "")
+                if not gpu_name then
+                    if slot then
+                        local p = io.popen("lspci -s " .. slot .. " 2>/dev/null")
+                        if p then
+                            local l = p:read("*l")
+                            p:close()
+                            if l then
+                                local desc = l:match(":%s+(.-)%s*%(rev") or l:match(":%s+(.*)")
+                                if desc then
+                                    local bracket = desc:match("%[(.-)%]")
+                                    if bracket and not bracket:find("^%x%x%x%x") then
+                                        local brand = desc:find("^Intel") and "Intel " or (desc:find("^AMD") and "AMD " or "")
+                                        gpu_name = brand .. bracket
+                                    else
+                                        gpu_name = desc:gsub("^Corporation%s+", "")
+                                    end
                                 end
                             end
                         end
@@ -1777,6 +1782,13 @@ else
                         if driver == "i915" or driver == "xe" then gpu_name = "Intel HD/UHD Graphics"
                         elseif driver == "amdgpu" or driver == "radeon" then gpu_name = "AMD Radeon Graphics"
                         elseif driver == "nouveau" then gpu_name = "NVIDIA Graphics (nouveau)"
+                        elseif driver == "v3d" or driver == "vc4" or driver == "vc4-drm" then
+                            if of_compat and of_compat:find("2712") then gpu_name = "Broadcom VideoCore VII (RPi 5)"
+                            elseif of_compat and of_compat:find("2711") then gpu_name = "Broadcom VideoCore VI (RPi 4)"
+                            else gpu_name = "Broadcom VideoCore 3D Graphics"
+                            end
+                        elseif driver == "panfrost" or driver == "mali" then gpu_name = "ARM Mali Graphics"
+                        elseif driver == "msm" or driver == "freedreno" then gpu_name = "Qualcomm Adreno Graphics"
                         end
                     end
                     cached_drm_names[card_idx] = gpu_name
@@ -1824,13 +1836,46 @@ else
                         freq_ghz = mhz / 1000.0
                     end
 
+                    local temp_c = nil
+
+                    -- Raspberry Pi Broadcom VideoCore Fallback Telemetry
+                    if (driver == "v3d" or driver == "vc4" or driver == "vc4-drm") then
+                        local f_t = io.open("/sys/class/thermal/thermal_zone0/temp", "r")
+                        if f_t then
+                            local raw_t = tonumber(f_t:read("*a"):match("%d+"))
+                            f_t:close()
+                            if raw_t then temp_c = math.floor(raw_t / 1000.0 + 0.5) end
+                        end
+                        if not freq_ghz then
+                            local p = io.popen("vcgencmd measure_clock core 2>/dev/null")
+                            if p then
+                                local out = p:read("*a") or ""
+                                p:close()
+                                local hz = tonumber(out:match("=(%d+)"))
+                                if hz and hz > 0 then freq_ghz = hz / 1e9 end
+                            end
+                        end
+                        if not tot_bytes or tot_bytes == 0 then
+                            local p = io.popen("vcgencmd get_mem gpu 2>/dev/null")
+                            if p then
+                                local out = p:read("*a") or ""
+                                p:close()
+                                local m = tonumber(out:match("(%d+)M"))
+                                if m and m > 0 then
+                                    tot_bytes = m * 1024 * 1024
+                                    usd_bytes = math.min(4096 * 1024, tot_bytes)
+                                end
+                            end
+                        end
+                    end
+
                     local tot_kb = tot_bytes and math.floor(tot_bytes / 1024) or 0
                     local usd_kb = math.floor(usd_bytes / 1024)
                     local mem_pct = (tot_kb > 0) and (usd_kb / tot_kb * 100.0) or nil
 
                     table.insert(gpus, {
                         name = gpu_name,
-                        temp_c = nil,
+                        temp_c = temp_c,
                         util_pct = util_pct,
                         freq_ghz = freq_ghz,
                         mem_total_kb = tot_kb > 0 and tot_kb or nil,
