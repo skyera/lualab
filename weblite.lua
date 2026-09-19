@@ -1965,6 +1965,7 @@ function M.render_html_to_document(html_text, base_url, max_width, reader_mode)
                 if tbl_content then
                     add_blank_line()
                     local t_lines = format_html_table(tbl_content, max_width, links, base_url)
+                    link_counter = #links
                     for _, tl in ipairs(t_lines) do add_line(tl) end
                     add_blank_line()
                 end
