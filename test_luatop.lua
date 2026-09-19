@@ -1,10 +1,11 @@
 #!/usr/bin/env luajit
 --[[
-    test_btop_lite.lua
-    Comprehensive unit and integration test suite for btop_lite.lua.
+    test_luatop.lua
+    Comprehensive unit and integration test suite for luatop.lua.
 ]]
 
-local btop = require("btop_lite")
+local luatop = require("luatop")
+local btop = luatop
 
 local TestRunner = {
     passed = 0,
@@ -40,7 +41,7 @@ local function assert_eq(actual, expected, msg)
     end
 end
 
-print("=== Running btop_lite Professional System Monitor Test Suite ===")
+print("=== Running luatop Professional System Monitor Test Suite ===")
 
 -- 1. CPU & Hardware Sensors
 TestRunner.describe("1. CPU & Hardware Sensors", function()

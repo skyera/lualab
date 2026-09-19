@@ -23,7 +23,7 @@ local test_suites = {
     { file = "test_ffi_game_2048.lua", description = "LuaJIT FFI 2048 Sliding Puzzle & Expectimax AI Suite" },
     { file = "test_ffi_image_defect_detector.lua", description = "LuaJIT FFI Optical Defect Inspection & Image Diff Suite" },
     { file = "test_ffi_wafer_d2d_inspector.lua", description = "Semiconductor 300mm Wafer Die-to-Die (D2D) Inspector Suite" },
-    { file = "test_btop_lite.lua", description = "LuaJIT FFI System & Process Monitor Suite" },
+    { file = "test_luatop.lua", description = "luatop — LuaJIT FFI Real-Time System & Hardware Monitor Suite" },
     { file = "test_weblite.lua", description = "weblite — Vim-Driven Terminal Web Browser Suite" },
 }
 
