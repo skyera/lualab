@@ -5457,7 +5457,14 @@ end
 local function render_file_list(dir_path, images, total_unfiltered, selected_idx, page_offset, msg, search_mode, search_query, sort_mode, sort_desc, recursive, icon_mode, show_hidden)
     local term_w, term_h = get_terminal_size()
     local out = {}
-    table.insert(out, "\27[H\27[2J") -- Clear screen & home
+    table.insert(out, "\27[H") -- Home cursor without blanking the frame
+
+    local function write_frame()
+        -- Clear each line after repainting it, then remove stale rows below the frame.
+        local frame = table.concat(out):gsub("\n", "\27[K\n") .. "\27[J"
+        io.write("\27[?2026h" .. frame .. "\27[?2026l")
+        io.flush()
+    end
 
     local bar_len = math.min(term_w - 2, 90)
     table.insert(out, "\27[1;34m" .. string.rep("═", bar_len) .. "\27[0m\n")
@@ -5502,8 +5509,7 @@ local function render_file_list(dir_path, images, total_unfiltered, selected_idx
             table.insert(out, string.format("  \27[1;31mNo supported media found in %s\27[0m\n", to_display_text(dir_path)))
             table.insert(out, "  Supported formats: images, videos, MP3, FLAC, WAV, OGG, M4A, AAC, OPUS, WMA\n\n")
         end
-        io.write(table.concat(out))
-        io.flush()
+        write_frame()
         return
     end
 
@@ -5570,8 +5576,7 @@ local function render_file_list(dir_path, images, total_unfiltered, selected_idx
             page_start, page_end, #images))
     end
 
-    io.write("\27[?2026h" .. table.concat(out) .. "\27[?2026l")
-    io.flush()
+    write_frame()
 end
 
 -- =========================================================================
