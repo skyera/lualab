@@ -1389,7 +1389,71 @@ else
 end
 
 -- =========================================================================
--- 5. Process Tree Construction Engine
+-- 5. Smart Process Filter Engine
+-- =========================================================================
+local function parse_bytes_or_num(str)
+    local num, unit = str:match("^(%d+%.?%d*)([kKmMgGtT]?)$")
+    if not num then return tonumber(str) or 0 end
+    local val = tonumber(num) or 0
+    unit = unit:upper()
+    if unit == "K" then return val * 1024
+    elseif unit == "M" then return val * 1024 * 1024
+    elseif unit == "G" then return val * 1024 * 1024 * 1024
+    else return val end
+end
+
+local function match_smart_filter(pr, query)
+    if not query or #query == 0 then return true end
+    for token in query:gmatch("%S+") do
+        local matched = false
+        local u_val = token:match("^[uU][sS]?[eE]?[rR]?:(.*)$")
+        local s_val = token:match("^[sS][tT]?[aA]?[tT]?[eE]?:(.*)$")
+        local p_val = token:match("^[pP][iI]?[dD]?:(%d+)$")
+        local cpu_gt = token:match("^[cC][pP][uU]>(%d+%.?%d*)$") or token:match("^[cC][pP][uU]>=(%d+%.?%d*)$")
+        local cpu_lt = token:match("^[cC][pP][uU]<(%d+%.?%d*)$") or token:match("^[cC][pP][uU]<=(%d+%.?%d*)$")
+        local mem_gt = token:match("^[mM][eE]?[mM]?>([%d%.%w]+)$") or token:match("^[mM][eE]?[mM]?>=([%d%.%w]+)$")
+        local mem_lt = token:match("^[mM][eE]?[mM]?<([%d%.%w]+)$") or token:match("^[mM][eE]?[mM]?<=([%d%.%w]+)$")
+        local io_gt  = token:match("^[iI][oO]>([%d%.%w]+)$")
+
+        if u_val then
+            if (pr.username or ""):lower():find(u_val:lower(), 1, true) then matched = true end
+        elseif s_val then
+            if (pr.state or ""):upper():find(s_val:upper(), 1, true) then matched = true end
+        elseif p_val then
+            if tostring(pr.pid):find(p_val, 1, true) then matched = true end
+        elseif cpu_gt then
+            if (pr.cpu_pct or 0) >= (tonumber(cpu_gt) or 0) then matched = true end
+        elseif cpu_lt then
+            if (pr.cpu_pct or 0) <= (tonumber(cpu_lt) or 0) then matched = true end
+        elseif mem_gt then
+            local thresh_bytes = parse_bytes_or_num(mem_gt)
+            if not mem_gt:match("[kKmMgGtT]$") then thresh_bytes = thresh_bytes * 1024 * 1024 end
+            if (pr.res_kb or 0) * 1024 >= thresh_bytes then matched = true end
+        elseif mem_lt then
+            local thresh_bytes = parse_bytes_or_num(mem_lt)
+            if not mem_lt:match("[kKmMgGtT]$") then thresh_bytes = thresh_bytes * 1024 * 1024 end
+            if (pr.res_kb or 0) * 1024 <= thresh_bytes then matched = true end
+        elseif io_gt then
+            local thresh_bytes = parse_bytes_or_num(io_gt)
+            if not io_gt:match("[kKmMgGtT]$") then thresh_bytes = thresh_bytes * 1024 end
+            if (pr.io_total_rate or 0) >= thresh_bytes then matched = true end
+        else
+            local t_low = token:lower()
+            if pr.comm:lower():find(t_low, 1, true) or
+               pr.cmdline:lower():find(t_low, 1, true) or
+               (pr.username or ""):lower():find(t_low, 1, true) or
+               tostring(pr.pid):find(t_low, 1, true) then
+                matched = true
+            end
+        end
+
+        if not matched then return false end
+    end
+    return true
+end
+
+-- =========================================================================
+-- 6. Process Tree Construction Engine
 -- =========================================================================
 local function build_process_tree(procs, sort_mode, sort_reverse, collapsed_pids)
     collapsed_pids = collapsed_pids or {}
@@ -1817,15 +1881,11 @@ Keybindings:
                 if pr.state == "Z" then zombie_count = zombie_count + 1 end
             end
 
-            -- Filter processes
+            -- Filter processes via smart filter engine
             if #filter_query > 0 then
-                local fq = filter_query:lower()
                 local filtered = {}
                 for _, pr in ipairs(procs) do
-                    if pr.comm:lower():find(fq, 1, true) or
-                       pr.cmdline:lower():find(fq, 1, true) or
-                       pr.username:lower():find(fq, 1, true) or
-                       tostring(pr.pid):find(fq, 1, true) then
+                    if match_smart_filter(pr, filter_query) then
                         table.insert(filtered, pr)
                     end
                 end
@@ -2118,7 +2178,7 @@ Keybindings:
                 table.insert(out, draw_box_row(mx, my + 2, mw, "   ↑/↓, k/j       Select process / scroll rows"))
                 table.insert(out, draw_box_row(mx, my + 3, mw, "   PgUp/PgDn      Jump 15 rows   Home/End Jump to ends"))
                 table.insert(out, draw_box_row(mx, my + 4, mw, string.format(" %sProcess Controls:%s", C.title_col, C.reset)))
-                table.insert(out, draw_box_row(mx, my + 5, mw, "   /              In-place search / filter"))
+                table.insert(out, draw_box_row(mx, my + 5, mw, "   /              Filter: name, u:<user>, s:<state>, cpu>X, m>XM"))
                 table.insert(out, draw_box_row(mx, my + 6, mw, "   t, F5          Toggle Process Tree view"))
                 table.insert(out, draw_box_row(mx, my + 7, mw, "   Enter, i       Inspect process details modal"))
                 table.insert(out, draw_box_row(mx, my + 8, mw, "   k              Open signal dispatcher modal"))
@@ -2249,6 +2309,17 @@ local function run_self_test()
     assert(truncate("hello world", 8) == "hello...", "truncate should truncate to max_w")
     print("  ✔ Visual Utilities: visual_len and truncate verified")
 
+    -- Smart filter test
+    local test_proc = { pid = 9999, comm = "testworker", cmdline = "/usr/bin/testworker -d", username = "daemon", state = "S", cpu_pct = 12.5, res_kb = 64000, io_total_rate = 1024 }
+    assert(match_smart_filter(test_proc, "u:daemon") == true, "Smart filter user match")
+    assert(match_smart_filter(test_proc, "u:root") == false, "Smart filter user mismatch")
+    assert(match_smart_filter(test_proc, "s:S") == true, "Smart filter state match")
+    assert(match_smart_filter(test_proc, "cpu>10") == true, "Smart filter cpu> match")
+    assert(match_smart_filter(test_proc, "cpu>20") == false, "Smart filter cpu> mismatch")
+    assert(match_smart_filter(test_proc, "m>50M") == true, "Smart filter mem> match")
+    assert(match_smart_filter(test_proc, "testworker") == true, "Smart filter text match")
+    print("  ✔ Smart Filter Engine: Verified u:<user>, s:<state>, cpu>X, m>XM, text queries")
+
     print("\n\27[1;32mALL SELF-TEST CHECKS PASSED SUCCESSFULLY!\27[0m")
     return true
 end
@@ -2265,6 +2336,7 @@ local M = {
     read_storage_stats = read_storage_stats,
     read_process_table = read_process_table,
     build_process_tree = build_process_tree,
+    match_smart_filter = match_smart_filter,
     resolve_username   = resolve_username,
     set_theme          = set_theme,
     cycle_theme        = cycle_theme,
