@@ -1441,8 +1441,9 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     if proxy and #proxy > 0 then
         extra_mpv_opts = extra_mpv_opts .. string.format(" --http-proxy=%q", proxy)
     end
+    local use_native_window_subtitles = mode == "video" and use_external_window
     local cc_script
-    if show_cc or mode == "video" then
+    if (show_cc or mode == "video") and not use_native_window_subtitles then
         local script_err
         cc_script, script_err = get_mpv_cc_script()
         if not cc_script then
@@ -1459,7 +1460,7 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     end
 
     local term_w, term_h = get_terminal_size()
-    local status_msg = build_mpv_status_msg(mode, show_cc or mode == "video")
+    local status_msg = build_mpv_status_msg(mode, (show_cc or mode == "video") and not use_native_window_subtitles)
     -- Unix shells expand ${...} before mpv sees it; preserve MPV property syntax.
     local command_status_msg = is_windows and status_msg or status_msg:gsub("%$", "\\$")
     local mpv_cmd
