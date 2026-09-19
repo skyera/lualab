@@ -66,6 +66,14 @@ TestRunner.describe("1. CPU & Hardware Sensors", function()
             assert_true(type(freq) == "number" and freq > 0 and freq < 10, "frequency in realistic GHz range")
         end
     end)
+
+    TestRunner.it("should run CPU floating point performance benchmark test", function()
+        local res = btop.test_cpu_performance(0.05)
+        assert_true(type(res) == "table", "result must be a table")
+        assert_true(type(res.mflops) == "number" and res.mflops > 0, "mflops must be > 0")
+        assert_true(res.iterations >= 10000, "iterations must be >= 10000")
+        assert_true(res.duration_sec > 0, "duration must be > 0")
+    end)
 end)
 
 -- 2. Memory & Swap Telemetry
@@ -128,6 +136,14 @@ TestRunner.describe("4. Storage and Disk I/O Telemetry", function()
         assert_eq(btop.format_bytes(512), "512 K", "512 K format")
         assert_eq(btop.format_bytes(1024 * 2), "2.0 M", "2.0 M format")
         assert_eq(btop.format_bytes(1024 * 1024 * 4), "4.00 G", "4.00 G format")
+    end)
+
+    TestRunner.it("should run disk sequential write/read I/O performance test", function()
+        local res = btop.test_disk_performance(".", 1)
+        assert_true(type(res) == "table", "result must be a table")
+        assert_true(type(res.write_mbs) == "number" and res.write_mbs > 0, "write MB/s must be > 0")
+        assert_true(type(res.read_mbs) == "number" and res.read_mbs > 0, "read MB/s must be > 0")
+        assert_true(res.bytes_tested == 1024 * 1024, "bytes tested should match test_size_mb")
     end)
 end)
 

@@ -1523,7 +1523,7 @@ else
             for line in f_disk:lines() do
                 local major, minor, name, r_c, r_m, r_sec, r_t, w_c, w_m, w_sec =
                     line:match("%s*(%d+)%s+(%d+)%s+(%S+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)")
-                if name and (name:match("^sd[a-z]$") or name:match("^nvme%d+n%d+$") or name:match("^vd[a-z]$")) then
+                if name and (name:match("^sd[a-z]$") or name:match("^nvme%d+n%d+$") or name:match("^vd[a-z]$") or name:match("^mmcblk%d+$") or name:match("^hd[a-z]$") or name:match("^xvd[a-z]$")) then
                     total_r_bytes = total_r_bytes + (tonumber(r_sec) or 0) * 512
                     total_w_bytes = total_w_bytes + (tonumber(w_sec) or 0) * 512
                 end
@@ -1594,12 +1594,37 @@ else
         if f then
             for line in f:lines() do
                 local m = line:match("^model name%s*:%s*(.+)")
+                    or line:match("^Model%s*:%s*(.+)")
+                    or line:match("^Hardware%s*:%s*(.+)")
+                    or line:match("^Processor%s*:%s*(.+)")
                 if m then
                     cached_linux_cpu = m:gsub("%(R%)", ""):gsub("%(TM%)", ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
-                    break
+                    if #cached_linux_cpu > 0 then break end
                 end
             end
             f:close()
+        end
+        if not cached_linux_cpu or #cached_linux_cpu == 0 or cached_linux_cpu == "BCM2835" then
+            local f_dt = io.open("/sys/firmware/devicetree/base/model", "r") or io.open("/proc/device-tree/model", "r")
+            if f_dt then
+                local m = f_dt:read("*a")
+                f_dt:close()
+                if m and #m > 0 then
+                    local clean_m = m:gsub("%z", ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+                    if #clean_m > 0 then cached_linux_cpu = clean_m end
+                end
+            end
+        end
+        if not cached_linux_cpu or #cached_linux_cpu == 0 then
+            local f_dmi = io.open("/sys/class/dmi/id/product_name", "r")
+            if f_dmi then
+                local m = f_dmi:read("*l")
+                f_dmi:close()
+                if m and #m > 0 then
+                    local clean_m = m:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+                    if #clean_m > 0 then cached_linux_cpu = clean_m end
+                end
+            end
         end
         cached_linux_cpu = cached_linux_cpu or "Linux CPU"
         return cached_linux_cpu
@@ -2599,18 +2624,33 @@ Keybindings:
             local cpu_spark_w = math.min(14, math.max(6, math.floor(left_w * 0.18)))
             local cpu_spark = make_sparkline(cpu_history, cpu_spark_w, C.cpu_low)
             local cpu_title = string.format("CPU: %.1f%%", overall_cpu)
+            local c_temp, c_freq = read_cpu_sensors()
+            local sensor_str = ""
+            if c_temp or c_freq then
+                local parts = {}
+                if c_temp then table.insert(parts, string.format("%.0f°C", c_temp)) end
+                if c_freq then table.insert(parts, string.format("%.2fGHz", c_freq)) end
+                sensor_str = " [" .. table.concat(parts, " ") .. "]"
+            end
             if left_w >= 54 and #cpu_model_clean > 0 then
-                cpu_title = string.format("CPU: %.1f%% [%s]", overall_cpu, truncate(cpu_model_clean, left_w - 30))
+                cpu_title = string.format("CPU: %.1f%%%s [%s]", overall_cpu, sensor_str, truncate(cpu_model_clean, left_w - 32))
             elseif left_w >= 40 and #cpu_model_short > 0 then
-                cpu_title = string.format("CPU: %.1f%% [%s]", overall_cpu, truncate(cpu_model_short, left_w - 24))
+                cpu_title = string.format("CPU: %.1f%%%s [%s]", overall_cpu, sensor_str, truncate(cpu_model_short, left_w - 26))
+            else
+                cpu_title = string.format("CPU: %.1f%%%s", overall_cpu, sensor_str)
             end
             draw_pane(out, 1, 2, left_w, top_h, cpu_title, false, "Usage: " .. cpu_spark)
 
             -- Dynamic core columns based on left_w and core count
-            local avail_rows = top_h - 3
+            local avail_rows = math.max(1, top_h - 2)
             local num_cols = 2
-            if #cores > avail_rows * 2 and left_w >= 60 then
+            if left_w < 36 then
+                num_cols = 1
+            elseif #cores > avail_rows * 2 and left_w >= 60 then
                 num_cols = (left_w >= 90 and #cores > avail_rows * 3) and 4 or 3
+            end
+            if math.ceil(#cores / num_cols) > avail_rows then
+                num_cols = math.max(1, math.ceil(#cores / avail_rows))
             end
             local col_sub_w = math.floor((left_w - 4 - num_cols) / num_cols)
 
@@ -2620,10 +2660,12 @@ Keybindings:
                     local c_idx = (i - 1) * num_cols + col
                     local c = cores[c_idx]
                     if c then
-                        local bar_w = math.max(3, col_sub_w - 11)
+                        local lbl = (col_sub_w >= 14) and string.format("C%-2d", c_idx - 1) or string.format("%2d", c_idx - 1)
+                        local fixed_w = visual_len(lbl) + 1 + 5
+                        local bar_w = math.max(3, col_sub_w - fixed_w)
                         local mbar = make_meter_bar(c.pct, bar_w)
                         local sep = (col > 1) and " " or ""
-                        table.insert(line_parts, string.format("%s%s%2d%s %s%4.0f%%%s", sep, C.dim, c_idx - 1, C.reset, mbar, c.pct, C.reset))
+                        table.insert(line_parts, string.format("%s%s%s%s %s%4.0f%%%s", sep, C.dim, lbl, C.reset, mbar, c.pct, C.reset))
                     end
                 end
                 table.insert(out, draw_box_row(1, 2 + i, left_w, table.concat(line_parts)))
@@ -2714,11 +2756,20 @@ Keybindings:
             else
                 for _, m in ipairs(storage.mounts) do
                     if row_y >= top_h + 1 then break end
-                    local disk_bar = make_meter_bar(m.used_pct, right_w - 24)
+                    local bar_col = (m.used_pct > 90.0) and C.cpu_high or ((m.used_pct > 80.0) and C.cpu_mid or C.cpu_low)
+                    local max_mnt_w = math.max(6, math.min(16, math.floor(right_w * 0.28)))
+                    local mnt_str = truncate(m.mount, max_mnt_w)
+                    local u_kb = math.floor(m.used_bytes / 1024)
+                    local t_kb = math.floor(m.total_bytes / 1024)
+                    local cap_str = string.format("%s/%s", format_bytes(u_kb):gsub("%s+", ""), format_bytes(t_kb):gsub("%s+", ""))
+                    local pct_str = string.format("%5.1f%%", m.used_pct)
+                    local fixed_w = visual_len(mnt_str) + 1 + visual_len(pct_str) + 1 + visual_len(cap_str) + 4
+                    local bar_w = math.max(3, right_w - fixed_w)
+                    local disk_bar = make_meter_bar(m.used_pct, bar_w, bar_col)
+
                     table.insert(out, draw_box_row(left_w + 1, row_y, right_w,
-                        string.format("%s%-3s %s %s%5.1f%%%s %s/%s",
-                            C.dim, m.mount, C.reset, disk_bar, m.used_pct, C.reset,
-                            format_bytes(math.floor(m.used_bytes / 1024)), format_bytes(math.floor(m.total_bytes / 1024)))))
+                        string.format("%s%s%s %s %s%s%s %s%s%s",
+                            C.bold, mnt_str, C.reset, disk_bar, C.title_col, pct_str, C.reset, C.dim, cap_str, C.reset)))
                     row_y = row_y + 1
                 end
             end
@@ -2967,6 +3018,79 @@ Keybindings:
 end
 
 -- =========================================================================
+-- 8.5 CPU & Disk Diagnostic Test Engines
+-- =========================================================================
+local function test_cpu_performance(duration_sec)
+    duration_sec = duration_sec or 0.05
+    local start_t = os.clock()
+    local end_target = start_t + duration_sec
+    local iterations = 0
+    local a, b, c = 1.0001, 1.0002, 0.5
+    while os.clock() < end_target do
+        for _ = 1, 10000 do
+            a = a * b + c
+            b = b * c + a
+            c = c * a + b
+        end
+        iterations = iterations + 10000
+    end
+    local elapsed = math.max(0.000001, os.clock() - start_t)
+    local flops = iterations * 6
+    local mflops = (flops / elapsed) / 1e6
+    return {
+        duration_sec = elapsed,
+        iterations   = iterations,
+        mflops       = mflops
+    }
+end
+
+local function test_disk_performance(target_dir, test_size_mb)
+    target_dir = target_dir or "."
+    test_size_mb = test_size_mb or 1
+    local tmp_file = string.format("%s/_luatop_disk_test_%d_%d.tmp", target_dir, os.time(), math.random(1000, 9999))
+    local block_size = 64 * 1024
+    local num_blocks = math.max(1, math.floor((test_size_mb * 1024 * 1024) / block_size))
+    local dummy_data = string.rep("X", block_size)
+
+    local w_start = os.clock()
+    local f = io.open(tmp_file, "wb")
+    if not f then
+        return { error = "Failed to open temporary file for disk test", write_mbs = 0, read_mbs = 0 }
+    end
+    for _ = 1, num_blocks do
+        f:write(dummy_data)
+    end
+    f:flush()
+    f:close()
+    local w_elapsed = math.max(0.000001, os.clock() - w_start)
+    local written_bytes = num_blocks * block_size
+    local write_mbs = (written_bytes / (1024 * 1024)) / w_elapsed
+
+    local r_start = os.clock()
+    f = io.open(tmp_file, "rb")
+    local read_bytes = 0
+    if f then
+        while true do
+            local chunk = f:read(block_size)
+            if not chunk then break end
+            read_bytes = read_bytes + #chunk
+        end
+        f:close()
+    end
+    local r_elapsed = math.max(0.000001, os.clock() - r_start)
+    local read_mbs = (read_bytes / (1024 * 1024)) / r_elapsed
+
+    os.remove(tmp_file)
+
+    return {
+        write_mbs   = write_mbs,
+        read_mbs    = read_mbs,
+        bytes_tested= written_bytes,
+        test_size_mb= test_size_mb
+    }
+end
+
+-- =========================================================================
 -- 9. Self-Test Mode (Headless CI / Automated Verification)
 -- =========================================================================
 local function run_self_test()
@@ -2983,6 +3107,10 @@ local function run_self_test()
     assert(cpu_pct >= 0 and cpu_pct <= 100, "CPU percent must be in [0, 100]")
     print(string.format("  ✔ CPU Telemetry: %d cores detected, usage: %.1f%%", #cores, cpu_pct))
 
+    local cpu_bench = test_cpu_performance(0.05)
+    assert(type(cpu_bench) == "table" and cpu_bench.mflops > 0, "CPU diagnostic test should return positive MFLOPS")
+    print(string.format("  ✔ CPU Diagnostic Test: %.2f MFLOPS (tested over %.3fs)", cpu_bench.mflops, cpu_bench.duration_sec))
+
     local mem = read_memory_stats()
     assert(mem.total_kb > 0, "Memory total should be > 0")
     assert(mem.used_pct >= 0 and mem.used_pct <= 100, "Memory percent in [0, 100]")
@@ -2998,6 +3126,10 @@ local function run_self_test()
     assert(type(storage.mounts) == "table", "Mounts should be a table")
     assert(#storage.mounts > 0, "At least 1 filesystem mount must be discovered")
     print(string.format("  ✔ Storage Telemetry: %d mounted filesystems inspected", #storage.mounts))
+
+    local disk_bench = test_disk_performance(".", 1)
+    assert(type(disk_bench) == "table" and disk_bench.write_mbs > 0 and disk_bench.read_mbs > 0, "Disk diagnostic test should measure read/write throughput")
+    print(string.format("  ✔ Disk Diagnostic Test: Write=%.1f MB/s, Read=%.1f MB/s", disk_bench.write_mbs, disk_bench.read_mbs))
 
     local gpus = read_gpu_stats()
     assert(type(gpus) == "table", "GPUs should be a table")
@@ -3103,29 +3235,31 @@ end
 -- 10. Module Export & CLI Entry Point
 -- =========================================================================
 local M = {
-    version            = "2.2.0",
-    read_os_info       = read_os_info,
-    read_cpu_model     = read_cpu_model,
-    read_cpu_stats     = read_cpu_stats,
-    read_cpu_sensors   = read_cpu_sensors,
-    read_memory_stats  = read_memory_stats,
-    read_network_stats = read_network_stats,
-    read_storage_stats = read_storage_stats,
-    read_gpu_stats     = read_gpu_stats,
-    read_process_table = read_process_table,
-    build_process_tree = build_process_tree,
-    match_smart_filter = match_smart_filter,
-    renice_process     = renice_process,
-    resolve_username   = resolve_username,
-    set_theme          = set_theme,
-    cycle_theme        = cycle_theme,
-    get_themes         = function() return THEMES end,
-    format_bytes       = format_bytes,
-    format_rate        = format_rate,
-    visual_len         = visual_len,
-    truncate           = truncate,
-    main               = main,
-    run_self_test      = run_self_test,
+    version               = "2.2.0",
+    read_os_info          = read_os_info,
+    read_cpu_model        = read_cpu_model,
+    read_cpu_stats        = read_cpu_stats,
+    read_cpu_sensors      = read_cpu_sensors,
+    test_cpu_performance  = test_cpu_performance,
+    test_disk_performance = test_disk_performance,
+    read_memory_stats     = read_memory_stats,
+    read_network_stats    = read_network_stats,
+    read_storage_stats    = read_storage_stats,
+    read_gpu_stats        = read_gpu_stats,
+    read_process_table    = read_process_table,
+    build_process_tree    = build_process_tree,
+    match_smart_filter    = match_smart_filter,
+    renice_process        = renice_process,
+    resolve_username      = resolve_username,
+    set_theme             = set_theme,
+    cycle_theme           = cycle_theme,
+    get_themes            = function() return THEMES end,
+    format_bytes          = format_bytes,
+    format_rate           = format_rate,
+    visual_len            = visual_len,
+    truncate              = truncate,
+    main                  = main,
+    run_self_test         = run_self_test,
 }
 
 local is_entry_point = false
