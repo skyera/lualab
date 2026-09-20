@@ -20,6 +20,7 @@
          * Enter               : Follow currently focused link
          * o                   : Open URL / Search prompt (:open )
          * O                   : Open URL prompt prefilled with current URL
+         * s                   : Search Panel (is-fast style): type query, browse results + live preview
          * /                   : In-page text search
          * n / N               : Jump to next / previous search match
          * :                   : Ex-command mode (:open, :q, :help, :reload, :reader, :toc)
@@ -654,6 +655,76 @@ end
 
 M.resolve_relative_url = resolve_relative_url
 M.smart_resolve_input  = smart_resolve_input
+
+-- Parse DuckDuckGo Lite search results HTML into {title, url, snippet} list
+local function parse_ddg_lite_results(html)
+    local results = {}
+    if not html then return results end
+    -- Remove script/style/comment blocks only — preserve class= attributes
+    local src = html
+        :gsub("<!%-%-.-%-%->" , "")
+        :gsub("<[sS][cC][rR][iI][pP][tT][^>]*>.-</[sS][cC][rR][iI][pP][tT]>", "")
+        :gsub("<[sS][tT][yY][lL][eE][^>]*>.-</[sS][tT][yY][lL][eE]>", "")
+    local max_results = 15
+    local pos = 1
+    while #results < max_results do
+        -- Find an <a tag opening
+        local a_open_s = src:find('<a ', pos, true) or src:find('<a\t', pos, true) or src:find('<a\n', pos, true)
+        if not a_open_s then break end
+        -- Find where this <a tag ends (its closing >)
+        local a_open_e = src:find('>', a_open_s)
+        if not a_open_e then pos = a_open_s + 1; goto continue end
+        local tag_str = src:sub(a_open_s, a_open_e)
+        -- Only process if this <a> has class="result-link"
+        if tag_str:find('class="result%-link"') or tag_str:find("class='result%-link'") then
+            local href = tag_str:match('href="([^"]+)"') or tag_str:match("href='([^']+)'")
+            -- Grab the link text: between end of <a...> and </a>
+            local title_e = src:find('</a>', a_open_e, true)
+            local title = ""
+            if title_e then
+                title = src:sub(a_open_e + 1, title_e - 1):gsub('<[^>]+>', ' ')
+                title = decode_entities(title):match("^%s*(.-)%s*$") or ""
+            end
+            -- Find snippet in class="result-snippet" before next result-link <a>
+            local next_a_result = src:find('class="result-link"', a_open_e, true)
+            local snip_start    = src:find('class="result-snippet"', a_open_e, true)
+            local snippet = ""
+            if snip_start and (not next_a_result or snip_start < next_a_result) then
+                local snip_open  = src:find('>', snip_start, true)
+                local snip_close = snip_open and src:find('</td>', snip_open, true)
+                if snip_open and snip_close then
+                    snippet = src:sub(snip_open + 1, snip_close - 1):gsub('<[^>]+>', ' ')
+                    snippet = decode_entities(snippet):match("^%s*(.-)%s*$") or ""
+                end
+            end
+            -- Decode DDG redirect (uddg= param) to real URL
+            local real_url = href
+            if href then
+                local uddg = href:match('[?&]uddg=([^&]+)')
+                if uddg then
+                    real_url = uddg:gsub('%%(%x%x)', function(h) return string.char(tonumber(h, 16)) end)
+                elseif href:match('^/l/') and not href:find('uddg=') then
+                    real_url = nil  -- DDG internal nav with no target
+                end
+            end
+            if real_url and real_url:match('^https?://') and #title > 0 then
+                local seen = false
+                for _, r in ipairs(results) do
+                    if r.url == real_url then seen = true; break end
+                end
+                if not seen then
+                    table.insert(results, { title = title, url = real_url, snippet = snippet })
+                end
+            end
+            pos = (title_e and title_e + 4) or (a_open_e + 1)
+        else
+            pos = a_open_e + 1
+        end
+        ::continue::
+    end
+    return results
+end
+M.parse_ddg_lite_results = parse_ddg_lite_results
 
 -- =========================================================================
 -- 5. Network & HTTP/HTTPS Fetcher
@@ -1509,6 +1580,7 @@ function M.get_home_page_html()
   <tr><td><b>:toc</b></td><td>Table of Contents</td><td>View outline of all document headings</td></tr>
   <tr><td><b>o / O</b></td><td><b>Open URL / Search</b></td><td>Open the Omnibox prompt to enter website or search query</td></tr>
   <tr><td><b>H / L</b></td><td>History Back / Fwd</td><td>Navigate back and forward in browsing history (instant cache)</td></tr>
+  <tr><td><b>s</b></td><td><b>Search Panel</b></td><td>Open is-fast-style split panel: type query → results list + live preview → Enter to open</td></tr>
   <tr><td><b>/</b></td><td>Search in Page</td><td>Search text (press 'n' for next, 'N' for previous)</td></tr>
   <tr><td><b>:w &lt;file&gt;</b></td><td>Export Page</td><td>Save rendered text (or raw HTML if .html) to local file</td></tr>
   <tr><td><b>:</b></td><td>Command Mode</td><td>Type :open, :back, :forward, :links, :reload, :reader, :toc, :help, or :q</td></tr>
@@ -2323,6 +2395,15 @@ function Browser.new(initial_url, insecure)
     self.count_prefix = 0
     self.hint_map = {}
     self.hint_action = nil
+    -- Search Panel (is-fast style) state
+    self.sp_query = ""
+    self.sp_results = {}
+    self.sp_idx = 1
+    self.sp_preview_doc = nil
+    self.sp_loading = false
+    self.sp_preview_scroll = 1
+    self.sp_results_scroll = 1
+    self.mode_sub = nil
     self.status_msg = "Ready. Press '?' or 'h' for help."
     self.needs_render = true
     self.sync_updates = not is_windows or os.getenv("WT_SESSION") ~= nil or os.getenv("TERM_PROGRAM") == "vscode"
@@ -2696,11 +2777,296 @@ function Browser:build_hints(view_height)
 end
 
 -- =========================================================================
--- 9. Screen Buffer & Viewport Renderer
+-- Search Panel (is-fast style): methods
 -- =========================================================================
+function Browser:open_search_panel()
+    self.mode = "SEARCH_PANEL"
+    self.mode_sub = "TYPING"
+    self.sp_query = ""
+    self.sp_results = {}
+    self.sp_idx = 1
+    self.sp_preview_doc = nil
+    self.sp_loading = false
+    self.sp_preview_scroll = 1
+    self.sp_results_scroll = 1
+    self.input_buf = ""
+    self.needs_render = true
+end
+
+function Browser:fetch_search_results(query)
+    if not query or query == "" then return end
+    self.sp_loading = true
+    self.sp_results = {}
+    self.sp_preview_doc = nil
+    self.sp_idx = 1
+    self.sp_results_scroll = 1
+    self.needs_render = true
+    self:render_search_panel(get_terminal_size())
+
+    local encoded = url_encode(query)
+    local search_url = "https://lite.duckduckgo.com/lite/?q=" .. encoded
+    local html, status = fetch_url(search_url)
+    self.sp_loading = false
+    if html and status == 200 then
+        self.sp_results = parse_ddg_lite_results(html)
+    end
+    if #self.sp_results > 0 then
+        self.sp_idx = 1
+        self.mode_sub = "RESULTS"
+        self:fetch_search_preview(self.sp_results[1].url)
+    else
+        self.mode_sub = "RESULTS"
+    end
+    self.needs_render = true
+end
+
+function Browser:fetch_search_preview(url)
+    if not url or url == "" then return end
+    self.sp_loading = true
+    self.sp_preview_doc = nil
+    self.sp_preview_scroll = 1
+    self.needs_render = true
+    local tw, th = get_terminal_size()
+    self:render_search_panel(tw, th)
+
+    local left_w  = math.max(28, math.floor(tw * 0.38))
+    local right_w = math.max(10, tw - left_w - 3)
+    local html, status = fetch_url(url)
+    self.sp_loading = false
+    if html and status == 200 then
+        -- Use reader mode for clean distraction-free preview
+        self.sp_preview_doc = M.render_html_to_document(html, url, right_w - 4, true)
+    else
+        self.sp_preview_doc = nil
+    end
+    self.sp_preview_scroll = 1
+    self.needs_render = true
+end
+
+function Browser:handle_search_panel_key(k)
+    local term_w, term_h = get_terminal_size()
+    local view_h = term_h - 4
+    if view_h < 3 then view_h = 3 end
+
+    if self.mode_sub == "TYPING" then
+        if k == "ESC" then
+            self.mode = "NORMAL"
+            self.mode_sub = nil
+            self.needs_render = true
+            self.status_msg = "Search panel closed."
+        elseif k == "ENTER" then
+            self.sp_query = self.input_buf
+            if self.sp_query ~= "" then
+                self:fetch_search_results(self.sp_query)
+            end
+        elseif k == "BACKSPACE" then
+            self.input_buf = utf8_pop_char(self.input_buf)
+            self.sp_query = self.input_buf
+        elseif k == "CTRL_U" then
+            self.input_buf = ""
+            self.sp_query = ""
+        elseif k == "CTRL_W" then
+            self.input_buf = self.input_buf:gsub("%s*%S+$", "")
+            self.sp_query = self.input_buf
+        elseif k == "SPACE" then
+            self.input_buf = self.input_buf .. " "
+            self.sp_query = self.input_buf
+        elseif #k >= 1 and not k:match("^CTRL_") and not (k:match("^[A-Z_]+$") and #k > 1) then
+            self.input_buf = self.input_buf .. k
+            self.sp_query = self.input_buf
+        end
+        self.needs_render = true
+        return
+    end
+
+    -- RESULTS sub-mode
+    if k == "ESC" or k == "q" then
+        self.mode = "NORMAL"
+        self.mode_sub = nil
+        self.needs_render = true
+        self.status_msg = "Search panel closed."
+    elseif k == "ENTER" or k == "o" then
+        local r = self.sp_results[self.sp_idx]
+        if r then
+            self.mode = "NORMAL"
+            self.mode_sub = nil
+            self:navigate_to(r.url)
+        end
+    elseif k == "j" or k == "DOWN" then
+        if self.sp_idx < #self.sp_results then
+            self.sp_idx = self.sp_idx + 1
+            self:fetch_search_preview(self.sp_results[self.sp_idx].url)
+        end
+    elseif k == "k" or k == "UP" then
+        if self.sp_idx > 1 then
+            self.sp_idx = self.sp_idx - 1
+            self:fetch_search_preview(self.sp_results[self.sp_idx].url)
+        end
+    elseif k == "d" then
+        -- Scroll preview pane down
+        if self.sp_preview_doc then
+            local max_scroll = math.max(1, #self.sp_preview_doc.lines - view_h + 1)
+            self.sp_preview_scroll = math.min(max_scroll, self.sp_preview_scroll + math.floor(view_h / 2))
+        end
+    elseif k == "u" then
+        -- Scroll preview pane up
+        self.sp_preview_scroll = math.max(1, self.sp_preview_scroll - math.floor(view_h / 2))
+    elseif k == "D" then
+        -- Scroll preview pane down full page
+        if self.sp_preview_doc then
+            local max_scroll = math.max(1, #self.sp_preview_doc.lines - view_h + 1)
+            self.sp_preview_scroll = math.min(max_scroll, self.sp_preview_scroll + view_h)
+        end
+    elseif k == "U" then
+        -- Scroll preview pane up full page
+        self.sp_preview_scroll = math.max(1, self.sp_preview_scroll - view_h)
+    elseif k == "s" or k == "/" then
+        -- Re-enter typing mode for a new search
+        self.mode_sub = "TYPING"
+        self.input_buf = self.sp_query
+    elseif k == "g" then
+        self.sp_preview_scroll = 1
+    elseif k == "G" then
+        if self.sp_preview_doc then
+            local max_scroll = math.max(1, #self.sp_preview_doc.lines - view_h + 1)
+            self.sp_preview_scroll = max_scroll
+        end
+    end
+    self.needs_render = true
+end
+
+
+
+function Browser:render_search_panel(term_w, term_h)
+    local buf = {}
+    local function emit(s) table.insert(buf, s) end
+    local view_h = term_h - 4
+    if view_h < 3 then view_h = 3 end
+
+    -- Layout: each content row is "  " + left_cell + " │ " + right_cell
+    -- So usable width for cells = term_w - 2 (indent) - 3 (" │ ") = term_w - 5
+    local usable = math.max(15, term_w - 5)
+    local left_w  = math.max(22, math.floor(usable * 0.40))
+    local right_w = usable - left_w
+
+    emit("\27[H")
+
+    -- ── Header bar ────────────────────────────────────────────────────────────
+    local mode_tag = (self.mode_sub == "TYPING")
+        and "\27[1;30;43m SEARCH \27[0m"
+        or  "\27[1;30;46m RESULTS \27[0m"
+    local query_disp
+    if self.mode_sub == "TYPING" then
+        -- Show cursor after the typed text
+        query_disp = "🔍 " .. self.sp_query .. "\27[7m \27[0m"
+    else
+        query_disp = "🔍 " .. (self.sp_query ~= "" and self.sp_query or "(no query)")
+    end
+    local header_text = mode_tag .. "  \27[1;37m" .. truncate(query_disp, term_w - 14) .. "\27[0m"
+    local result_badge = #self.sp_results > 0
+        and string.format("\27[90m%d results\27[0m", #self.sp_results)
+        or ""
+    local hpad = math.max(0, term_w - visual_len(header_text) - visual_len(result_badge) - 1)
+    emit(header_text .. string.rep(" ", hpad) .. result_badge .. "\n")
+    -- Divider aligned with content rows: 2-char indent + left_w + "─┬─" + right_w
+    emit("  \27[90m" .. string.rep("─", left_w) .. "─┬─" .. string.rep("─", right_w) .. "\27[0m\n")
+
+    -- ── Content rows ──────────────────────────────────────────────────────────
+    local preview_lines = self.sp_preview_doc and self.sp_preview_doc.lines or {}
+    local preview_total = #preview_lines
+    -- Keep focused result visible (scroll results list)
+    if self.sp_idx < self.sp_results_scroll then
+        self.sp_results_scroll = self.sp_idx
+    elseif self.sp_idx >= self.sp_results_scroll + view_h then
+        self.sp_results_scroll = self.sp_idx - view_h + 1
+    end
+
+    local mid_row = math.floor(view_h / 2)
+    for row = 1, view_h do
+        -- LEFT: results list
+        local result_idx = self.sp_results_scroll + row - 1
+        local r = self.sp_results[result_idx]
+        local left_cell = ""
+        if r then
+            local is_focused = (result_idx == self.sp_idx)
+            local num_str   = string.format("%2d. ", result_idx)
+            local title_max = left_w - #num_str - 2  -- 2 for "▶ " or "  " prefix
+            if is_focused then
+                left_cell = "\27[1;33m▶ " .. num_str .. truncate(r.title, title_max) .. "\27[0m"
+            else
+                left_cell = "  \27[90m" .. num_str .. "\27[0m" .. truncate(r.title, title_max)
+            end
+        elseif self.sp_loading and #self.sp_results == 0 and row == mid_row then
+            left_cell = "⏳ Searching…"
+        elseif #self.sp_results == 0 and row == mid_row then
+            -- Only show "No results" in RESULTS mode (after a search was submitted)
+            -- In TYPING mode, show a helpful prompt instead
+            if self.mode_sub == "RESULTS" and self.sp_query ~= "" then
+                left_cell = "\27[90mNo results for: " .. truncate(self.sp_query, left_w - 17) .. "\27[0m"
+            elseif self.mode_sub == "TYPING" or self.sp_query == "" then
+                left_cell = "\27[90mType query below & press Enter\27[0m"
+            end
+        end
+
+        -- RIGHT: preview pane
+        local right_cell = ""
+        local pl_idx = self.sp_preview_scroll + row - 1
+        local pl = preview_lines[pl_idx]
+        if pl then
+            right_cell = truncate(pl, right_w)
+        elseif self.sp_loading and row == mid_row then
+            right_cell = "\27[90m⏳ Loading preview…\27[0m"
+        elseif preview_total == 0 and #self.sp_results > 0 and row == mid_row then
+            right_cell = "\27[90m(no preview available)\27[0m"
+        end
+
+        -- Pad & emit row (2-char indent + left_w + " │ " + right_w)
+        local lv   = visual_len(left_cell)
+        local lpad = string.rep(" ", math.max(0, left_w - lv))
+        local rv   = visual_len(right_cell)
+        local rpad = string.rep(" ", math.max(0, right_w - rv))
+        emit("  " .. left_cell .. lpad .. " \27[90m│\27[0m " .. right_cell .. rpad .. "\n")
+    end
+
+    -- ── Status / input bar ────────────────────────────────────────────────────
+    emit("  \27[90m" .. string.rep("─", left_w) .. "─┴─" .. string.rep("─", right_w) .. "\27[0m\n")
+    local status_line
+    if self.mode_sub == "TYPING" then
+        -- Show an explicit input prompt at the bottom (like the omnibox)
+        local prompt_str = "🔍 " .. self.sp_query .. "\27[7m \27[0m"
+        local tip = "  \27[90m[Enter] search  [Ctrl-U] clear  [Esc] cancel\27[0m"
+        local prompt_vlen = visual_len(prompt_str)
+        local tip_vlen    = visual_len(tip)
+        local gap = math.max(1, term_w - prompt_vlen - tip_vlen - 1)
+        status_line = "\27[1;37m" .. prompt_str .. "\27[0m" .. string.rep(" ", gap) .. tip
+    else
+        local scroll_info = preview_total > 0
+            and string.format("  \27[90mpreview %d/%d\27[0m", self.sp_preview_scroll, math.max(1, preview_total))
+            or ""
+        local hint = "\27[90m[j/k] select  [Enter] open  [d/u] scroll  [s] new  [Esc] close\27[0m"
+            .. scroll_info
+        local hpad2 = math.max(0, term_w - visual_len(hint) - 1)
+        status_line = hint .. string.rep(" ", hpad2)
+    end
+    emit(status_line)
+
+    local frame = table.concat(buf)
+    if self.sync_updates then
+        io.write("\27[?2026h" .. frame .. "\27[?2026l")
+    else
+        io.write(frame)
+    end
+    io.flush()
+end
+
+
 function Browser:render()
     self.needs_render = false
     local term_w, term_h = get_terminal_size()
+    if self.mode == "SEARCH_PANEL" then
+        self:render_search_panel(term_w, term_h)
+        return
+    end
     if self.last_term_w and self.last_term_w > 0 and term_w ~= self.last_term_w and self.raw_html and #self.raw_html > 0 then
         self:reflow(term_w)
     end
@@ -2838,6 +3204,12 @@ function Browser:handle_key(k)
     if not k then return end
     self.needs_render = true
 
+    -- Search Panel mode: delegate all keys to its own handler
+    if self.mode == "SEARCH_PANEL" then
+        self:handle_search_panel_key(k)
+        return
+    end
+
     local term_w, term_h = get_terminal_size()
     local view_h = term_h - 4
     if view_h < 5 then view_h = 5 end
@@ -2845,6 +3217,7 @@ function Browser:handle_key(k)
     local max_scroll = math.max(1, total_lines - view_h + 1)
 
     -- A. COMMAND / INPUT / OMNIBOX MODE
+
     if self.mode == "COMMAND" or self.mode == "INPUT" then
         if k == "ESC" then
             self.mode = "NORMAL"
@@ -3287,6 +3660,8 @@ function Browser:handle_key(k)
         self.mode = "SEARCH"
         self.input_buf = ""
         self.search_pre_scroll = self.scroll_y
+    elseif k == "s" then
+        self:open_search_panel()
     elseif k == "n" then
         if #self.search_matches > 0 then
             self.search_match_idx = (self.search_match_idx % #self.search_matches) + 1

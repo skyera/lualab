@@ -1191,6 +1191,153 @@ print(string.format("\n========================================="))
 print(string.format("Test Results: %d passed, %d failed", TestRunner.passed, TestRunner.failed))
 print(string.format("=========================================\n"))
 
+-- =========================================================================
+-- Search Panel Tests
+-- =========================================================================
+TestRunner.describe("Search Panel: parse_ddg_lite_results", function()
+    TestRunner.it("should return empty table for nil input", function()
+        local results = web.parse_ddg_lite_results(nil)
+        assert_eq(type(results), "table", "result must be a table")
+        assert_eq(#results, 0, "should return empty table for nil")
+    end)
+
+    TestRunner.it("should return empty table for empty html", function()
+        local results = web.parse_ddg_lite_results("")
+        assert_eq(#results, 0, "empty html → empty results")
+    end)
+
+    TestRunner.it("should parse a single DDG Lite result with uddg URL", function()
+        local sample_html = [[<html><body><table>
+<tr><td><a href="/l/?uddg=https%3A%2F%2Fexample.com%2Fpage&rut=xyz" class="result-link">Example Site Title</a></td></tr>
+<tr><td class="result-snippet">This is the example snippet text.</td></tr>
+</table></body></html>]]
+        local results = web.parse_ddg_lite_results(sample_html)
+        assert_true(#results >= 1, "should parse at least 1 result, got " .. #results)
+        assert_eq(results[1].url, "https://example.com/page", "URL should be decoded from uddg param")
+        assert_true(results[1].title:find("Example Site Title", 1, true), "title should match: " .. tostring(results[1].title))
+        assert_true(results[1].snippet:find("snippet", 1, true), "snippet should be extracted: " .. tostring(results[1].snippet))
+    end)
+
+    TestRunner.it("should parse multiple results", function()
+        local sample_html = [[<html><body>
+<a href="/l/?uddg=https%3A%2F%2Fsite1.com" class="result-link">Site One</a>
+<td class="result-snippet">First snippet.</td>
+<a href="/l/?uddg=https%3A%2F%2Fsite2.com" class="result-link">Site Two</a>
+<td class="result-snippet">Second snippet.</td>
+<a href="/l/?uddg=https%3A%2F%2Fsite3.com" class="result-link">Site Three</a>
+<td class="result-snippet">Third snippet.</td>
+</body></html>]]
+        local results = web.parse_ddg_lite_results(sample_html)
+        assert_true(#results >= 2, "should parse multiple results, got " .. #results)
+    end)
+
+    TestRunner.it("should skip non-http URLs and DDG internal links", function()
+        local sample_html = [[<html><body>
+<a href="/l/" class="result-link">Internal DDG Link</a>
+<td class="result-snippet">Some snippet.</td>
+<a href="/l/?uddg=https%3A%2F%2Fgood.com" class="result-link">Good Result</a>
+<td class="result-snippet">Good snippet.</td>
+</body></html>]]
+        local results = web.parse_ddg_lite_results(sample_html)
+        for _, r in ipairs(results) do
+            assert_true(r.url:match("^https?://"), "all result URLs must be http(s): " .. r.url)
+        end
+    end)
+
+    TestRunner.it("should deduplicate identical URLs", function()
+        local sample_html = [[<html><body>
+<a href="/l/?uddg=https%3A%2F%2Fsame.com" class="result-link">Same Site</a>
+<td class="result-snippet">Snippet one.</td>
+<a href="/l/?uddg=https%3A%2F%2Fsame.com" class="result-link">Same Site Again</a>
+<td class="result-snippet">Snippet two.</td>
+</body></html>]]
+        local results = web.parse_ddg_lite_results(sample_html)
+        local url_count = {}
+        for _, r in ipairs(results) do
+            url_count[r.url] = (url_count[r.url] or 0) + 1
+        end
+        for url, count in pairs(url_count) do
+            assert_true(count == 1, "duplicate URL should be deduped: " .. url)
+        end
+    end)
+end)
+
+TestRunner.describe("Search Panel: Browser state initialisation", function()
+    TestRunner.it("should initialize sp_ fields in Browser.new()", function()
+        local b = web.Browser.new("about:home")
+        assert_eq(b.sp_query, "", "sp_query should start empty")
+        assert_eq(type(b.sp_results), "table", "sp_results should be a table")
+        assert_eq(#b.sp_results, 0, "sp_results should start empty")
+        assert_eq(b.sp_idx, 1, "sp_idx should start at 1")
+        assert_eq(b.sp_preview_doc, nil, "sp_preview_doc should start nil")
+        assert_eq(b.sp_loading, false, "sp_loading should start false")
+        assert_eq(b.sp_preview_scroll, 1, "sp_preview_scroll should start at 1")
+        assert_eq(b.sp_results_scroll, 1, "sp_results_scroll should start at 1")
+        assert_eq(b.mode_sub, nil, "mode_sub should start nil")
+    end)
+
+    TestRunner.it("open_search_panel() sets SEARCH_PANEL mode and TYPING sub-mode", function()
+        local b = web.Browser.new("about:home")
+        b:open_search_panel()
+        assert_eq(b.mode, "SEARCH_PANEL", "mode should be SEARCH_PANEL")
+        assert_eq(b.mode_sub, "TYPING", "mode_sub should be TYPING")
+        assert_eq(b.sp_query, "", "sp_query should be cleared")
+        assert_eq(#b.sp_results, 0, "sp_results should be cleared")
+        assert_eq(b.input_buf, "", "input_buf should be cleared")
+    end)
+
+    TestRunner.it("ESC in TYPING mode closes panel and returns to NORMAL", function()
+        local b = web.Browser.new("about:home")
+        b:open_search_panel()
+        b:handle_key("ESC")
+        assert_eq(b.mode, "NORMAL", "ESC should close panel → NORMAL mode")
+        assert_eq(b.mode_sub, nil, "mode_sub should be nil after close")
+    end)
+
+    TestRunner.it("typing keys in TYPING sub-mode populate input_buf and sp_query", function()
+        local b = web.Browser.new("about:home")
+        b:open_search_panel()
+        b:handle_key("l")
+        b:handle_key("u")
+        b:handle_key("a")
+        assert_eq(b.input_buf, "lua", "typed chars should accumulate in input_buf")
+        assert_eq(b.sp_query, "lua", "sp_query should mirror input_buf")
+    end)
+
+    TestRunner.it("BACKSPACE in TYPING mode removes last char", function()
+        local b = web.Browser.new("about:home")
+        b:open_search_panel()
+        b:handle_key("l"); b:handle_key("u"); b:handle_key("a")
+        b:handle_key("BACKSPACE")
+        assert_eq(b.input_buf, "lu", "BACKSPACE should remove last char")
+        assert_eq(b.sp_query, "lu", "sp_query should update after BACKSPACE")
+    end)
+
+    TestRunner.it("CTRL_U in TYPING mode clears input", function()
+        local b = web.Browser.new("about:home")
+        b:open_search_panel()
+        b:handle_key("l"); b:handle_key("u"); b:handle_key("a")
+        b:handle_key("CTRL_U")
+        assert_eq(b.input_buf, "", "CTRL_U should clear input_buf")
+        assert_eq(b.sp_query, "", "CTRL_U should clear sp_query")
+    end)
+
+    TestRunner.it("'s' key in NORMAL mode opens search panel", function()
+        local b = web.Browser.new("about:home")
+        -- Load a basic page first so normal mode works
+        b.doc = { lines = {}, links = {}, title = "test", headings = {} }
+        b.mode = "NORMAL"
+        b:handle_key("s")
+        assert_eq(b.mode, "SEARCH_PANEL", "'s' should open search panel")
+        assert_eq(b.mode_sub, "TYPING", "should start in TYPING sub-mode")
+    end)
+end)
+
+-- Reprint final summary after new tests
+print(string.format("\n========================================="))
+print(string.format("Final Test Results: %d passed, %d failed", TestRunner.passed, TestRunner.failed))
+print(string.format("=========================================\n"))
+
 if TestRunner.failed > 0 then
     os.exit(1)
 end
