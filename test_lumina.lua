@@ -98,7 +98,7 @@ assert_eq(resolve_text_editor(), "nvim", "Resolves nvim when nvim is available i
 
 -- Test fallback when nvim is absent
 assert_eq(resolve_text_editor("/empty_path_dummy", "custom_nano"), "custom_nano", "Falls back to custom EDITOR if nvim missing")
-assert_eq(resolve_text_editor("/empty_path_dummy", ""), "vi", "Falls back to vi if nvim and EDITOR missing")
+assert_eq(resolve_text_editor("/empty_path_dummy", ""), is_windows and "notepad" or "vi", "Falls back to system default editor if nvim and EDITOR missing")
 
 -- Test Suite 2: is_text_file with real files in workspace
 print("\n-- Test Suite 2: is_text_file classification --")
@@ -146,9 +146,14 @@ assert_false(is_text_file(dir_entry), "Directory is NOT a text file")
 local img_entry = { path = "nasa_nebula1.jpg", ext = "jpg", size = get_file_size("nasa_nebula1.jpg"), is_dir = false }
 assert_false(is_text_file(img_entry), "JPG image is NOT a text file")
 
--- Binary executable file
-local bin_entry = { path = "demo_repl", ext = "", size = get_file_size("demo_repl"), is_dir = false }
-assert_false(is_text_file(bin_entry), "ELF binary executable is NOT a text file")
+-- Binary data file test (contains null bytes and control chars)
+local bin_tmp = "tmp_binary_test.bin"
+local bf = io.open(bin_tmp, "wb")
+bf:write("BIN\0\1\2\3\4\5\6\7\8")
+bf:close()
+local bin_entry = { path = bin_tmp, ext = "bin", size = 12, is_dir = false }
+assert_false(is_text_file(bin_entry), "Binary file with control bytes is NOT a text file")
+os.remove(bin_tmp)
 
 -- Test Suite 3: Source Code Integrity Check
 print("\n-- Test Suite 3: Source Code Integrity Check --")
@@ -162,6 +167,12 @@ assert_true(content:find("clear_preview_cache") ~= nil, "lumina.lua clears previ
 assert_true(content:find("reload_current") ~= nil, "lumina.lua reloads directory on edit")
 assert_true(content:find("is_searching") ~= nil, "lumina.lua maintains is_searching state")
 assert_true(content:find("io%.read%(\"%*l\"%)") == nil, "lumina.lua does not use blocking io.read for search")
+assert_true(content:find("THEMES%s*=") ~= nil, "lumina.lua defines THEMES collection")
+assert_true(content:find("THEME_ORDER%s*=") ~= nil, "lumina.lua defines THEME_ORDER list")
+assert_true(content:find("set_theme%(") ~= nil, "lumina.lua defines set_theme function")
+assert_true(content:find("cycle_theme%(") ~= nil, "lumina.lua defines cycle_theme function")
+assert_true(content:find('k%s*==%s*"t"') ~= nil, "lumina.lua binds 't' key to cycle theme")
+assert_true(content:find('k%s*==%s*"T"') ~= nil, "lumina.lua binds 'T' key to reverse cycle theme")
 
 -- Test Suite 4: Vim-style Search State Machine Simulation
 print("\n-- Test Suite 4: Vim-Style Search State Machine Simulation --")
@@ -361,6 +372,119 @@ if cf then
         assert_false(cleaned_l1:find("\r") ~= nil, "classic.lua line has \\r stripped")
     end
 end
+
+-- Test Suite 7: Theme Engine & Palette Integrity
+print("\n-- Test Suite 7: Theme Engine & Palette Integrity --")
+local lumina = require("lumina")
+assert_true(lumina ~= nil, "lumina module loads successfully via require")
+assert_true(#lumina.THEME_ORDER == 6, "lumina defines exactly 6 curated themes in THEME_ORDER")
+
+local expected_tokens = {
+    "name", "border_col", "border_focus", "header_accent", "header_path",
+    "dir_col", "exec_col", "image_col", "archive_col", "code_col", "file_col", "symlink_col",
+    "cursor_bg", "parent_bg", "syn_keyword", "syn_string", "syn_comment", "syn_number",
+    "syn_header", "status_accent"
+}
+
+for _, key in ipairs(lumina.THEME_ORDER) do
+    local theme = lumina.THEMES[key]
+    assert_true(theme ~= nil, string.format("Theme '%s' exists in lumina.THEMES", key))
+    for _, tok in ipairs(expected_tokens) do
+        assert_true(theme[tok] ~= nil and #theme[tok] > 0,
+            string.format("Theme '%s' defines required token '%s'", key, tok))
+        if tok ~= "name" then
+            assert_true(theme[tok]:find("\27%[") ~= nil,
+                string.format("Theme '%s' token '%s' contains valid ANSI escape sequence", key, tok))
+        end
+    end
+end
+
+-- Test set_theme
+assert_true(lumina.set_theme("dracula"), "set_theme('dracula') returns true")
+assert_eq(lumina.get_current_theme(), "dracula", "Current theme is dracula")
+assert_eq(lumina.get_theme_name(), "Dracula", "Theme name is 'Dracula'")
+assert_eq(lumina.C.name, "Dracula", "Active C palette reflects Dracula")
+
+-- Test invalid theme rejection
+assert_false(lumina.set_theme("nonexistent_theme_xyz"), "set_theme with invalid name returns false")
+assert_eq(lumina.get_current_theme(), "dracula", "Current theme unchanged after invalid set_theme")
+
+-- Test forward cycle through all themes
+lumina.set_theme("tokyo_night")
+for idx, key in ipairs(lumina.THEME_ORDER) do
+    if idx > 1 then
+        local next_key = lumina.cycle_theme(1)
+        assert_eq(next_key, key, string.format("cycle_theme(1) step %d matches %s", idx, key))
+    end
+end
+-- One more cycle returns to first
+local looped_key = lumina.cycle_theme(1)
+assert_eq(looped_key, lumina.THEME_ORDER[1], "cycle_theme(1) wraps around to first theme")
+
+-- Test backward cycle
+local prev_key = lumina.cycle_theme(-1)
+assert_eq(prev_key, lumina.THEME_ORDER[#lumina.THEME_ORDER], "cycle_theme(-1) wraps around to last theme")
+
+-- Test Suite 8: Theme Switcher & Search Isolation State Machine Simulation
+print("\n-- Test Suite 8: Theme Switcher & Search Isolation State Machine --")
+local sim_theme = "tokyo_night"
+local sim_searching = false
+local sim_search_buf = ""
+local sim_theme_order = lumina.THEME_ORDER
+
+local function sim_cycle(step)
+    local cur_idx = 1
+    for i, k in ipairs(sim_theme_order) do
+        if k == sim_theme then cur_idx = i; break end
+    end
+    local new_idx = (cur_idx - 1 + step) % #sim_theme_order + 1
+    sim_theme = sim_theme_order[new_idx]
+end
+
+local function sim_event(k)
+    if sim_searching then
+        if k == "ENTER" or k == "ESC" then
+            sim_searching = false
+        elseif #k == 1 and k:byte(1) >= 32 and k:byte(1) <= 126 then
+            sim_search_buf = sim_search_buf .. k
+        end
+    else
+        if k == "/" then
+            sim_searching = true
+            sim_search_buf = ""
+        elseif k == "t" then
+            sim_cycle(1)
+        elseif k == "T" then
+            sim_cycle(-1)
+        end
+    end
+end
+
+-- 1. Normal mode: press 't'
+assert_eq(sim_theme, "tokyo_night", "Initial theme is tokyo_night")
+sim_event("t")
+assert_eq(sim_theme, "dracula", "Pressing 't' in normal mode cycles to dracula")
+sim_event("t")
+assert_eq(sim_theme, "nord", "Pressing 't' again cycles to nord")
+sim_event("T")
+assert_eq(sim_theme, "dracula", "Pressing 'T' cycles back to dracula")
+
+-- 2. Enter search mode and type 'theme' (contains 't')
+sim_event("/")
+assert_true(sim_searching, "Entered search mode")
+sim_event("t")
+sim_event("h")
+sim_event("e")
+sim_event("m")
+sim_event("e")
+assert_eq(sim_search_buf, "theme", "Search buffer captures 'theme' without cycling theme")
+assert_eq(sim_theme, "dracula", "Theme remains unchanged while typing 't' inside search")
+
+-- 3. Exit search mode and confirm 't' cycles again
+sim_event("ENTER")
+assert_false(sim_searching, "Exited search mode")
+sim_event("t")
+assert_eq(sim_theme, "nord", "Pressing 't' after exiting search resumes cycling")
 
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then

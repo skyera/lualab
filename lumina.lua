@@ -24,6 +24,7 @@
       * k / ↑            : Move cursor up
       * g / G            : Jump to top / bottom
       * /                : Instant filter / search
+      * t / T            : Cycle color theme forward / backward
       * .                : Toggle hidden files (dotfiles)
       * r                : Refresh current directory
       * q / ESC          : Quit
@@ -361,38 +362,180 @@ else
 end
 
 -- =========================================================================
--- 2. Styling Palette & String Measurement
+-- 2. Styling Palettes, Theme Engine & String Measurement
 -- =========================================================================
-local C = {
-    reset        = "\27[0m",
-    bold         = "\27[1m",
-    dim          = "\27[2m",
-    italic       = "\27[3m",
-
-    -- Borders
-    border_col   = "\27[38;2;71;85;105m",      -- Slate grey
-    border_focus = "\27[1;38;2;56;189;248m",   -- Cyan
-
-    -- Miller Column Item Colors
-    dir_col      = "\27[1;38;2;96;165;250m",   -- Light Blue bold
-    exec_col     = "\27[1;38;2;52;211;153m",   -- Emerald Green
-    image_col    = "\27[1;38;2;244;114;182m",  -- Pink / Magenta
-    archive_col  = "\27[1;38;2;251;191;36m",   -- Amber
-    code_col     = "\27[38;2;56;189;248m",     -- Sky blue
-    file_col     = "\27[38;2;226;232;240m",    -- Neutral soft white
-    symlink_col  = "\27[38;2;45;212;191m",     -- Teal
-
-    -- Highlights & Cursors
-    cursor_bg    = "\27[48;2;30;58;138m\27[1;38;2;255;255;255m", -- Royal blue highlight
-    parent_bg    = "\27[48;2;30;41;59m\27[38;2;203;213;225m",    -- Muted grey-blue highlight
-
-    -- Syntax Colors for Previews
-    syn_keyword  = "\27[1;38;2;192;132;252m",  -- Lavender
-    syn_string   = "\27[38;2;134;239;172m",    -- Pale green
-    syn_comment  = "\27[38;2;100;116;139m\27[3m", -- Dim italic grey
-    syn_number   = "\27[38;2;251;191;36m",     -- Amber
-    syn_header   = "\27[1;38;2;56;189;248m",   -- Cyan
+local THEMES = {
+    tokyo_night = {
+        name          = "Tokyo Night",
+        border_col    = "\27[38;2;65;72;104m",       -- Slate navy
+        border_focus  = "\27[1;38;2;125;207;255m",   -- Bright cyan bold
+        header_accent = "\27[1;38;2;125;207;255m",   -- Cyan
+        header_path   = "\27[1;38;2;192;202;245m",   -- Soft white
+        dir_col       = "\27[1;38;2;122;162;247m",   -- Tokyo blue bold
+        exec_col      = "\27[1;38;2;158;206;106m",   -- Emerald green
+        image_col     = "\27[1;38;2;247;118;142m",   -- Coral red
+        archive_col   = "\27[1;38;2;224;175;104m",   -- Warm amber
+        code_col      = "\27[38;2;125;207;255m",     -- Sky cyan
+        file_col      = "\27[38;2;192;202;245m",     -- Soft white
+        symlink_col   = "\27[38;2;115;218;202m",     -- Teal
+        cursor_bg     = "\27[48;2;41;46;66m\27[1;38;2;255;255;255m", -- Night selection
+        parent_bg     = "\27[48;2;31;35;53m\27[38;2;169;177;214m",    -- Navy muted
+        syn_keyword   = "\27[1;38;2;187;154;247m",   -- Lavender
+        syn_string    = "\27[38;2;158;206;106m",     -- Green
+        syn_comment   = "\27[38;2;86;95;137m\27[3m", -- Italic slate
+        syn_number    = "\27[38;2;255;158;100m",     -- Orange
+        syn_header    = "\27[1;38;2;125;207;255m",   -- Cyan
+        status_accent = "\27[1;38;2;224;175;104m",   -- Amber
+    },
+    dracula = {
+        name          = "Dracula",
+        border_col    = "\27[38;2;98;114;164m",      -- Comment purple
+        border_focus  = "\27[1;38;2;189;147;249m",   -- Purple bold
+        header_accent = "\27[1;38;2;255;121;198m",   -- Dracula pink
+        header_path   = "\27[1;38;2;248;248;242m",   -- Foreground white
+        dir_col       = "\27[1;38;2;189;147;249m",   -- Dracula purple bold
+        exec_col      = "\27[1;38;2;80;250;123m",    -- Dracula green
+        image_col     = "\27[1;38;2;255;121;198m",   -- Dracula pink
+        archive_col   = "\27[1;38;2;255;184;108m",   -- Dracula orange
+        code_col      = "\27[38;2;139;233;253m",     -- Dracula cyan
+        file_col      = "\27[38;2;248;248;242m",     -- Foreground white
+        symlink_col   = "\27[38;2;139;233;253m",     -- Cyan
+        cursor_bg     = "\27[48;2;68;71;90m\27[1;38;2;255;255;255m", -- Selection
+        parent_bg     = "\27[48;2;40;42;54m\27[38;2;189;147;249m",    -- Dark surface purple
+        syn_keyword   = "\27[1;38;2;255;121;198m",   -- Pink
+        syn_string    = "\27[38;2;241;250;140m",     -- Yellow
+        syn_comment   = "\27[38;2;98;114;164m\27[3m", -- Italic comment purple
+        syn_number    = "\27[38;2;189;147;249m",     -- Purple
+        syn_header    = "\27[1;38;2;139;233;253m",   -- Cyan
+        status_accent = "\27[1;38;2;241;250;140m",   -- Yellow
+    },
+    nord = {
+        name          = "Nord",
+        border_col    = "\27[38;2;76;86;106m",       -- Polar Night 3
+        border_focus  = "\27[1;38;2;136;192;208m",   -- Frost Cyan bold
+        header_accent = "\27[1;38;2;136;192;208m",   -- Frost Cyan
+        header_path   = "\27[1;38;2;236;239;244m",   -- Snow Storm white
+        dir_col       = "\27[1;38;2;129;161;193m",   -- Frost Blue bold
+        exec_col      = "\27[1;38;2;163;190;140m",   -- Aurora Green
+        image_col     = "\27[1;38;2;180;142;173m",   -- Aurora Purple
+        archive_col   = "\27[1;38;2;235;203;139m",   -- Aurora Yellow
+        code_col      = "\27[38;2;143;188;187m",     -- Frost Teal
+        file_col      = "\27[38;2;229;233;240m",     -- Snow Storm
+        symlink_col   = "\27[38;2;136;192;208m",     -- Frost Cyan
+        cursor_bg     = "\27[48;2;67;76;94m\27[1;38;2;255;255;255m", -- Polar selection
+        parent_bg     = "\27[48;2;46;52;64m\27[38;2;216;222;233m",    -- Polar surface
+        syn_keyword   = "\27[1;38;2;129;161;193m",   -- Frost Blue
+        syn_string    = "\27[38;2;163;190;140m",     -- Aurora Green
+        syn_comment   = "\27[38;2;94;105;127m\27[3m", -- Dim slate blue
+        syn_number    = "\27[38;2;208;135;112m",     -- Aurora Orange
+        syn_header    = "\27[1;38;2;136;192;208m",   -- Frost Cyan
+        status_accent = "\27[1;38;2;235;203;139m",   -- Aurora Yellow
+    },
+    monokai = {
+        name          = "Monokai",
+        border_col    = "\27[38;2;117;113;94m",      -- Warm grey
+        border_focus  = "\27[1;38;2;230;219;116m",   -- Yellow bold
+        header_accent = "\27[1;38;2;249;38;114m",    -- Magenta
+        header_path   = "\27[1;38;2;248;248;242m",   -- Cream white
+        dir_col       = "\27[1;38;2;102;217;239m",   -- Cyan bold
+        exec_col      = "\27[1;38;2;166;226;46m",    -- Lime green
+        image_col     = "\27[1;38;2;249;38;114m",    -- Magenta
+        archive_col   = "\27[1;38;2;253;151;31m",    -- Orange
+        code_col      = "\27[38;2;102;217;239m",     -- Cyan
+        file_col      = "\27[38;2;248;248;242m",     -- Cream white
+        symlink_col   = "\27[38;2;166;226;46m",     -- Lime green
+        cursor_bg     = "\27[48;2;62;61;50m\27[1;38;2;255;255;255m", -- Charcoal selection
+        parent_bg     = "\27[48;2;39;40;34m\27[38;2;230;219;116m",    -- Olive surface
+        syn_keyword   = "\27[1;38;2;249;38;114m",    -- Magenta
+        syn_string    = "\27[38;2;230;219;116m",     -- Yellow
+        syn_comment   = "\27[38;2;117;113;94m\27[3m", -- Warm grey
+        syn_number    = "\27[38;2;174;129;255m",     -- Purple
+        syn_header    = "\27[1;38;2;102;217;239m",   -- Cyan
+        status_accent = "\27[1;38;2;253;151;31m",    -- Orange
+    },
+    cyberpunk = {
+        name          = "Cyberpunk",
+        border_col    = "\27[38;2;0;100;140m",       -- Dark neon teal
+        border_focus  = "\27[1;38;2;0;240;255m",     -- Laser cyan bold
+        header_accent = "\27[1;38;2;254;231;21m",    -- Electric yellow
+        header_path   = "\27[1;38;2;255;255;255m",   -- Pure white
+        dir_col       = "\27[1;38;2;0;240;255m",     -- Laser cyan bold
+        exec_col      = "\27[1;38;2;254;231;21m",    -- Electric yellow
+        image_col     = "\27[1;38;2;255;0;85m",      -- Neon pink
+        archive_col   = "\27[1;38;2;255;110;0m",     -- Neon orange
+        code_col      = "\27[38;2;0;240;255m",       -- Laser cyan
+        file_col      = "\27[38;2;230;230;230m",     -- Bright grey
+        symlink_col   = "\27[38;2;255;0;85m",        -- Neon pink
+        cursor_bg     = "\27[48;2;0;60;80m\27[1;38;2;0;240;255m",    -- Dark teal cyan
+        parent_bg     = "\27[48;2;20;25;35m\27[38;2;254;231;21m",    -- Dark surface yellow
+        syn_keyword   = "\27[1;38;2;255;0;85m",      -- Neon pink
+        syn_string    = "\27[38;2;254;231;21m",      -- Electric yellow
+        syn_comment   = "\27[38;2;0;140;180m\27[3m", -- Italic neon teal
+        syn_number    = "\27[38;2;0;240;255m",       -- Laser cyan
+        syn_header    = "\27[1;38;2;254;231;21m",    -- Electric yellow
+        status_accent = "\27[1;38;2;255;0;85m",      -- Neon pink
+    },
+    gruvbox = {
+        name          = "Gruvbox",
+        border_col    = "\27[38;2;102;92;84m",       -- Gruvbox brown
+        border_focus  = "\27[1;38;2;250;189;47m",    -- Yellow/Gold bold
+        header_accent = "\27[1;38;2;254;128;25m",    -- Orange
+        header_path   = "\27[1;38;2;235;219;178m",   -- Beige
+        dir_col       = "\27[1;38;2;131;165;152m",   -- Aqua bold
+        exec_col      = "\27[1;38;2;184;187;38m",    -- Green
+        image_col     = "\27[1;38;2;211;134;155m",   -- Purple
+        archive_col   = "\27[1;38;2;254;128;25m",    -- Orange
+        code_col      = "\27[38;2;142;192;124m",     -- Aqua
+        file_col      = "\27[38;2;235;219;178m",     -- Beige
+        symlink_col   = "\27[38;2;142;192;124m",     -- Aqua
+        cursor_bg     = "\27[48;2;60;56;54m\27[1;38;2;253;244;193m", -- Medium brown
+        parent_bg     = "\27[48;2;40;40;40m\27[38;2;213;196;161m",    -- Surface beige
+        syn_keyword   = "\27[1;38;2;251;73;52m",     -- Red
+        syn_string    = "\27[38;2;184;187;38m",      -- Green
+        syn_comment   = "\27[38;2;146;131;116m\27[3m", -- Italic warm grey
+        syn_number    = "\27[38;2;211;134;155m",     -- Purple
+        syn_header    = "\27[1;38;2;250;189;47m",    -- Yellow/Gold
+        status_accent = "\27[1;38;2;254;128;25m",    -- Orange
+    },
 }
+
+local THEME_ORDER = { "tokyo_night", "dracula", "nord", "monokai", "cyberpunk", "gruvbox" }
+local current_theme_key = "tokyo_night"
+
+local C = {}
+local function set_theme(theme_key)
+    if not theme_key or not THEMES[theme_key] then
+        return false
+    end
+    current_theme_key = theme_key
+    local t = THEMES[theme_key]
+    for k, v in pairs(t) do
+        C[k] = v
+    end
+    C.reset  = "\27[0m"
+    C.bold   = "\27[1m"
+    C.dim    = "\27[2m"
+    C.italic = "\27[3m"
+    return true
+end
+
+local function cycle_theme(step)
+    step = step or 1
+    local cur_idx = 1
+    for idx, key in ipairs(THEME_ORDER) do
+        if key == current_theme_key then
+            cur_idx = idx
+            break
+        end
+    end
+    local new_idx = (cur_idx - 1 + step) % #THEME_ORDER + 1
+    local next_key = THEME_ORDER[new_idx]
+    set_theme(next_key)
+    return next_key
+end
+
+-- Initialize default theme
+set_theme("tokyo_night")
 
 local function visual_len(str)
     local clean = tostring(str):gsub("\27%[[%d;]*[a-zA-Z]", ""):gsub("[\r\n]", "")
@@ -1030,7 +1173,7 @@ end
 -- =========================================================================
 local function draw_pane(out, x, y, w, h, title, is_focused)
     local bcol = is_focused and C.border_focus or C.border_col
-    local title_str = title and string.format(" %s%s%s ", C.bold .. "\27[38;2;241;245;249m", title, bcol) or ""
+    local title_str = title and string.format(" %s%s%s ", C.bold .. (C.header_path or "\27[38;2;241;245;249m"), title, bcol) or ""
     local t_len = title and (visual_len(title) + 2) or 0
     local top_fill = string.rep("─", math.max(0, w - 2 - t_len))
 
@@ -1053,8 +1196,27 @@ end
 -- =========================================================================
 -- 6. Main Interactive Application Loop
 -- =========================================================================
-local function main()
-    local requested_path = arg[1] or "."
+local function main(args)
+    args = args or arg or {}
+    local requested_path = "."
+    local initial_theme = nil
+    local i = 1
+    while i <= #args do
+        local a = args[i]
+        if a == "--theme" and i + 1 <= #args then
+            initial_theme = args[i + 1]
+            i = i + 1
+        elseif a:match("^%-%-theme=(.+)$") then
+            initial_theme = a:match("^%-%-theme=(.+)$")
+        elseif not a:match("^%-") then
+            requested_path = a
+        end
+        i = i + 1
+    end
+    if initial_theme then
+        set_theme(initial_theme)
+    end
+
     local current_dir = resolve_canonical_path(requested_path)
     local initial_selection_name
     local requested_file = io.open(requested_path, "rb")
@@ -1122,10 +1284,22 @@ local function main()
             table.insert(out, "\27[H") -- Home cursor without flash
 
             -- 1. Top Header Bar
-            local header_str = string.format("  %s⚡ LUMINA%s %s│%s %s%s%s %s(%d items)%s\27[K",
-                C.bold .. "\27[38;2;56;189;248m", C.reset, C.dim, C.reset,
-                C.bold .. "\27[38;2;241;245;249m", current_dir, C.reset,
+            local left_info = string.format("  %s⚡ LUMINA%s %s│%s %s%s%s %s(%d items)%s",
+                C.bold .. (C.header_accent or C.border_focus), C.reset, C.dim, C.reset,
+                C.bold .. (C.header_path or "\27[38;2;241;245;249m"), current_dir, C.reset,
                 C.dim, #current_entries, C.reset)
+            local badge_text = string.format("🎨 %s ", C.name or "Theme")
+            local left_len = visual_len(left_info)
+            local badge_len = visual_len(badge_text)
+
+            local header_str
+            if term_w > left_len + badge_len + 4 then
+                local gap = term_w - left_len - badge_len
+                local theme_badge = string.format("%s%s%s", C.syn_header or C.border_focus, badge_text, C.reset)
+                header_str = left_info .. string.rep(" ", gap) .. theme_badge .. "\27[K"
+            else
+                header_str = truncate(left_info, term_w) .. "\27[K"
+            end
             table.insert(out, header_str .. "\n")
 
             -- 2. Miller Columns Geometry
@@ -1213,14 +1387,14 @@ local function main()
             local status_text = ""
             local help_hint = ""
             if is_searching then
-                status_text = string.format("\27[1;38;2;251;191;36m/%s\27[7m \27[0m", search_query)
+                status_text = string.format("%s/%s\27[7m \27[0m", C.status_accent or "\27[1;38;2;251;191;36m", search_query)
                 help_hint = "\27[90m[Enter] Confirm  [Esc] Cancel  [↑/↓] Select\27[0m"
             elseif #filter_query > 0 then
-                status_text = string.format("\27[1;38;2;251;191;36mFilter: /%s\27[0m", filter_query)
-                help_hint = "[h/l] Navigate  [j/k] Move  [/] Search  [Esc] Clear  [q] Quit"
+                status_text = string.format("%sFilter: /%s\27[0m", C.status_accent or "\27[1;38;2;251;191;36m", filter_query)
+                help_hint = "[h/l] Navigate  [j/k] Move  [/] Search  [t] Theme  [Esc] Clear  [q] Quit"
             else
                 status_text = string.format("%s%s%s", C.dim, sel_entry and sel_entry.path or current_dir, C.reset)
-                help_hint = "[h/l/←/→] Navigate  [j/k] Up/Down  [/] Filter  [.] Hidden  [q] Quit"
+                help_hint = "[h/l/←/→] Navigate  [j/k] Up/Down  [/] Filter  [t] Theme  [.] Hidden  [q] Quit"
             end
             local footer_line = string.format("\27[%d;1H\27[2K  %s \27[90m│\27[0m \27[90m%s\27[0m",
                 footer_y, status_text, help_hint)
@@ -1352,6 +1526,16 @@ local function main()
                     reload_current()
                     needs_redraw = true
                 end
+            elseif k == "t" then
+                cycle_theme(1)
+                clear_preview_cache()
+                preview_pending = true
+                needs_redraw = true
+            elseif k == "T" then
+                cycle_theme(-1)
+                clear_preview_cache()
+                preview_pending = true
+                needs_redraw = true
             elseif k == "." then
                 -- Toggle hidden files
                 show_hidden = not show_hidden
@@ -1386,9 +1570,38 @@ local function main()
     print("\n\27[1;36mExited Lumina. Goodbye!\27[0m")
 end
 
-local ok, err = xpcall(main, debug.traceback)
-if not ok then
-    disable_raw_mode()
-    io.stderr:write("\27[1;31mLumina error:\27[0m " .. tostring(err) .. "\n")
-    os.exit(1)
+local M = {
+    THEMES              = THEMES,
+    THEME_ORDER         = THEME_ORDER,
+    set_theme           = set_theme,
+    cycle_theme         = cycle_theme,
+    get_current_theme   = function() return current_theme_key end,
+    get_theme_name      = function() return C.name end,
+    C                   = C,
+    visual_len          = visual_len,
+    truncate            = truncate,
+    format_bytes        = format_bytes,
+    is_text_file        = is_text_file,
+    resolve_text_editor = resolve_text_editor,
+    read_dir_entries    = read_dir_entries,
+    main                = main,
+}
+
+local is_entry_point = false
+if arg and arg[0] then
+    local script_name = arg[0]:match("([^/\\]+)$")
+    if script_name and (script_name == "lumina.lua" or script_name == "lumina") then
+        is_entry_point = true
+    end
 end
+
+if is_entry_point then
+    local ok, err = xpcall(function() return main(arg) end, debug.traceback)
+    if not ok then
+        disable_raw_mode()
+        io.stderr:write("\27[1;31mLumina error:\27[0m " .. tostring(err) .. "\n")
+        os.exit(1)
+    end
+end
+
+return M
