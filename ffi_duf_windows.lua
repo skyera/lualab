@@ -106,17 +106,17 @@ function M.get_mounts()
     local free_ = tonumber(free_q[0].QuadPart)
     local avail = tonumber(avail_q[0].QuadPart)
 
-    -- get filesystem type ("NTFS"→"ntfs", "FAT32"→"fat32", "exFAT"→"exfat", …)
+    -- get filesystem type (keep original casing: "NTFS", "FAT32", "FUSE-SSHFS", …)
     local fstype = "unknown"
     local device = drive
     if k32.GetVolumeInformationW(wdrive, vol_name, 256, nil, nil, nil, fs_name, 64) ~= 0 then
-      fstype = from_wcs(fs_name):lower()
+      fstype = from_wcs(fs_name)
       local vname = from_wcs(vol_name)
       if vname ~= "" then device = vname end
     end
 
-    -- "C:\" → "C:" (drop trailing backslash for display)
-    local mp = drive:gsub("[/\\]+$", "")
+    -- keep trailing backslash: "C:\" matches duf display
+    local mp = drive
 
     table.insert(result, {
       mountpoint = mp,

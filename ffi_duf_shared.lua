@@ -62,18 +62,21 @@ end
 -- ─── Filesystem classification ────────────────────────────────────────────
 
 -- "local" group: real block-device filesystems (Linux + macOS + Windows)
+-- Keys cover both lowercase (Linux/macOS) and uppercase (Windows API) spellings.
 local LOCAL_FS = {
   -- Linux common
   ext2=1, ext3=1, ext4=1,
   btrfs=1, xfs=1, zfs=1, jfs=1, reiserfs=1, nilfs2=1, f2fs=1,
-  -- FAT / optical / Windows
+  -- FAT / optical / Windows (lowercase from Linux/macOS, uppercase from Windows API)
   vfat=1, msdos=1, fat32=1, exfat=1, ntfs=1, refs=1, cdfs=1,
+  FAT32=1, EXFAT=1, NTFS=1, REFS=1, CDFS=1,
   -- Optical / generic
-  udf=1, iso9660=1,
+  udf=1, iso9660=1, UDF=1, CDFS=1,
   -- macOS
   hfs=1, hfsplus=1, apfs=1,
-  -- FUSE
-  fuse=1, fuseblk=1,
+  -- FUSE (lowercase from Linux, uppercase from Windows WinFsp/SSHFS)
+  fuse=1, fuseblk=1, ["fuse-sshfs"]=1,
+  FUSE=1, FUSEBLK=1, ["FUSE-SSHFS"]=1,
   -- Network
   nfs=1, nfs4=1, cifs=1, smb3=1, smbfs=1,
 }
