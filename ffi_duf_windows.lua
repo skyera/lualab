@@ -34,9 +34,13 @@ ffi.cdef[[
           WCHAR       *lpFileSystemNameBuffer,  DWORD nFileSystemNameSize);
 
   DWORD GetDriveTypeW(const WCHAR *lpRootPathName);
+  BOOL  SetConsoleOutputCP(unsigned int wCodePageID);
 ]]
 
 local k32 = ffi.load("kernel32")
+
+-- Switch console to UTF-8 so box-drawing / Unicode characters render correctly
+k32.SetConsoleOutputCP(65001)
 
 -- Drive type constants
 local DRIVE_REMOVABLE = 2
