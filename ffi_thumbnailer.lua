@@ -31,6 +31,7 @@
 ]]
 
 local ffi = require("ffi")
+local bit = require("bit")
 ffi.cdef[[ typedef struct { uint8_t r, g, b; } PixelRGB; ]]
 
 local IS_WIN  = (ffi.os == "Windows")
@@ -144,6 +145,28 @@ do
     else
         -- POSIX (Linux / macOS)
         pcall(ffi.cdef, [[
+            typedef long time_t;
+            struct stat {
+                unsigned long st_dev;
+                unsigned long st_ino;
+                unsigned long st_nlink;
+                unsigned int  st_mode;
+                unsigned int  st_uid;
+                unsigned int  st_gid;
+                unsigned int  __pad0;
+                unsigned long st_rdev;
+                long          st_size;
+                long          st_blksize;
+                long          st_blocks;
+                time_t        st_atime;
+                unsigned long st_atime_nsec;
+                time_t        st_mtime;
+                unsigned long st_mtime_nsec;
+                time_t        st_ctime;
+                unsigned long st_ctime_nsec;
+                long          __unused[3];
+            };
+            int stat(const char *pathname, struct stat *statbuf);
             struct winsize { unsigned short ws_row, ws_col, ws_xpixel, ws_ypixel; };
             int ioctl(int fd, unsigned long request, void *argp);
             int isatty(int fd);
