@@ -597,7 +597,79 @@ local function compute_layout(files, tw, th, force_cols, term_w, term_h)
 end
 
 -- ============================================================
--- 9. TUI thumbnail browser  (interactive, lazy-load + cache)
+-- 9. Full-screen image viewer (Enter key from thumbnail browser)
+-- ============================================================
+local function view_fullscreen(files, initial_idx)
+    local cur_idx = initial_idx
+    local loaded_idx, full_lines, img_info = nil, nil, nil
+
+    while true do
+        local term_w, term_h = get_terminal_size()
+        local cur_f = files[cur_idx]
+
+        if cur_idx ~= loaded_idx then
+            io.write("\27[H\27[2K\27[90m  Loading " .. trunc(cur_f.name, 45) .. "\xe2\x80\xa6\27[0m")
+            io.flush()
+
+            local img, err = load_image(cur_f.path)
+            if img then
+                local max_w = math.max(1, term_w)
+                local max_h = math.max(2, (term_h - 2) * 2)
+                local rw, rh = dimensions_for(img.width, img.height, max_w, max_h)
+                if rh % 2 ~= 0 then rh = rh + 1 end
+                local scaled = resize_bilinear(img, rw, rh)
+                full_lines = render_halfblock(scaled)
+                img_info = {
+                    w = img.width, h = img.height,
+                    rw = rw, rh = rh,
+                    pad = math.max(0, math.floor((term_w - rw) / 2))
+                }
+            else
+                full_lines = nil
+                img_info = { err = err or "decode failed" }
+            end
+            loaded_idx = cur_idx
+        end
+
+        local out = { "\27[H" }
+        out[#out+1] = string.format(
+            "\27[1;36m [%d/%d]\27[0m \27[1;37m%s\27[0m \27[90m(%s%s)\27[0m  \27[93m[Esc/Enter/q]\27[90m Back  \27[93m[\xe2\x86\x90/\xe2\x86\x92/h/l]\27[90m Prev/Next\27[K\n",
+            cur_idx, #files, cur_f.name, cur_f.ext,
+            (img_info and img_info.w) and string.format(" \xc2\xb7 %d\xc3\x97%d px", img_info.w, img_info.h) or ""
+        )
+
+        if full_lines and img_info then
+            local pad_str = string.rep(" ", img_info.pad)
+            for _, line in ipairs(full_lines) do
+                out[#out+1] = pad_str .. line .. "\27[K\n"
+            end
+        else
+            out[#out+1] = string.format("\n\n\27[31m  Error: %s\27[0m\27[K\n", img_info and img_info.err or "unknown")
+        end
+        out[#out+1] = "\27[J"
+        io.write(table.concat(out))
+        io.flush()
+
+        local key = read_key(-1)
+        if key == "q" or key == "Q" or key == "ESC" or key == "ENTER" or key == "BACKSPACE" then
+            break
+        elseif key == "CTRL_C" or key == "CTRL_D" then
+            return nil
+        elseif key == "LEFT" or key == "h" or key == "UP" or key == "k" or key == "PAGE_UP" then
+            cur_idx = math.max(1, cur_idx - 1)
+        elseif key == "RIGHT" or key == "l" or key == "DOWN" or key == "j" or key == "PAGE_DOWN" or key == "SPACE" then
+            cur_idx = math.min(#files, cur_idx + 1)
+        elseif key == "HOME" or key == "g" then
+            cur_idx = 1
+        elseif key == "END" or key == "G" then
+            cur_idx = #files
+        end
+    end
+    return cur_idx
+end
+
+-- ============================================================
+-- 10. TUI thumbnail browser  (interactive, lazy-load + cache)
 -- ============================================================
 local function browse_tui(dir_path, tw, th, force_cols)
     dir_path = (dir_path or "."):gsub("[/\\]+$", "")
@@ -684,7 +756,7 @@ local function browse_tui(dir_path, tw, th, force_cols)
                 "  \27[90m%d images · %d cols · %dx%d px\27[0m\27[K\n",
                 dir_path, #files, L.cols, tw, th)
             out[#out+1] =
-                "\27[90m ↑↓←→ hjkl move · PgUp PgDn · g G top/bot · q Esc quit\27[0m\27[K\n"
+                "\27[90m Enter view · ↑↓←→ hjkl move · PgUp PgDn · g G top/bot · q Esc quit\27[0m\27[K\n"
             out[#out+1] = "\27[K\n"
 
             -- visible grid rows
@@ -704,7 +776,7 @@ local function browse_tui(dir_path, tw, th, force_cols)
             -- footer line 1: selected image info
             local cur_f = files[selected_idx]
             out[#out+1] = string.format(
-                "\27[K\27[90m  Selected \27[1;36m[%d/%d]\27[0m \27[1;37m%s\27[0m \27[90m(%s)\27[0m\n",
+                "\27[K\27[90m  Selected \27[1;36m[%d/%d]\27[0m \27[1;37m%s\27[0m \27[90m(%s)\27[0m  \27[93m[Enter]\27[90m Full Screen\27[0m\n",
                 selected_idx, #files, cur_f and cur_f.name or "", cur_f and cur_f.ext or "")
 
             -- footer line 2: scroll progress bar
@@ -730,6 +802,13 @@ local function browse_tui(dir_path, tw, th, force_cols)
             if key == "q" or key == "Q" or key == "ESC"
             or key == "CTRL_C" or key == "CTRL_D" then
                 running = false
+            elseif key == "ENTER" then
+                local next_idx = view_fullscreen(files, selected_idx)
+                if next_idx == nil then
+                    running = false
+                else
+                    selected_idx = next_idx
+                end
             elseif key == "LEFT"  or key == "h" then
                 selected_idx = math.max(1, selected_idx - 1)
             elseif key == "RIGHT" or key == "l" then
