@@ -482,32 +482,33 @@ end
 --   cache[i]   = nil (unloaded) | { lines, cw, ch, ok }
 --   out        = string accumulator table
 -- ============================================================
-local function render_card_row(out, row_cards, cache, tw, th, margin, gap)
+local function render_card_row(out, row_cards, cache, tw, th, margin, gap, selected_idx)
     local trows = math.floor(th / 2)  -- pixel text rows
 
     -- ── top border ────────────────────────────────────────────
-    -- Visual layout per card (total = cw + 2 cols):
-    --   ┌ [─ [N] name ... ─── EXT ─] ┐
-    --   ^   ^──────── cw ──────────^  ^
     local top = { string.rep(" ", margin) }
     for ri, rc in ipairs(row_cards) do
-        local card = cache[rc.idx]
-        local cw   = card and card.cw or tw
-        local ns   = tostring(rc.idx)
-        local ext  = rc.file.ext
-        -- right chunk " EXT ─" visual cols = 1+#ext+1+1 = #ext+3
-        local rv   = #ext + 3
-        -- left prefix "─ [N] " visual cols = 1+1+1+#N+1+1 = #N+5
-        local lv   = #ns + 5
+        local is_sel = (rc.idx == selected_idx)
+        local card   = cache[rc.idx]
+        local cw     = card and card.cw or tw
+        local ns     = tostring(rc.idx)
+        local ext    = rc.file.ext
+        local rv     = #ext + 3
+        local lv     = #ns + 5
         local max_name = math.max(0, cw - lv - 1 - rv)
-        local nt   = trunc(rc.file.name, max_name)
-        local fill = math.max(0, cw - lv - vlen(nt) - 1 - rv)
-        -- construct inner string (visual width = cw)
-        local inner = "─ [" .. ns .. "] " .. nt .. " " ..
-                      string.rep("─", fill) .. " " .. ext .. " ─"
-        local color = (card and card.ok) and "\27[97m" or
-                      (card           ) and "\27[31m" or "\27[90m"
-        top[#top+1] = "\27[90m┌" .. color .. inner .. "\27[90m┐\27[0m"
+        local nt     = trunc(rc.file.name, max_name)
+        local fill   = math.max(0, cw - lv - vlen(nt) - 1 - rv)
+        local b_h    = is_sel and "━" or "─"
+        local c_tl   = is_sel and "┏" or "┌"
+        local c_tr   = is_sel and "┓" or "┐"
+        local bcolor = is_sel and "\27[1;36m" or "\27[90m"
+
+        local inner = b_h .. " [" .. ns .. "] " .. nt .. " " ..
+                      string.rep(b_h, fill) .. " " .. ext .. " " .. b_h
+        local title_color = is_sel and "\27[1;97m" or
+                            ((card and card.ok) and "\27[97m" or
+                            (card and "\27[31m" or "\27[90m"))
+        top[#top+1] = bcolor .. c_tl .. title_color .. inner .. bcolor .. c_tr .. "\27[0m"
         if ri < #row_cards then top[#top+1] = string.rep(" ", gap) end
     end
     out[#out+1] = table.concat(top) .. "\27[K\n"
@@ -521,16 +522,18 @@ local function render_card_row(out, row_cards, cache, tw, th, margin, gap)
     for tr = 1, max_hrows do
         local pix = { string.rep(" ", margin) }
         for ri, rc in ipairs(row_cards) do
-            local card = cache[rc.idx]
-            local cw   = card and card.cw or tw
+            local is_sel = (rc.idx == selected_idx)
+            local card   = cache[rc.idx]
+            local cw     = card and card.cw or tw
+            local b_v    = is_sel and "┃" or "│"
+            local bcolor = is_sel and "\27[1;36m" or "\27[90m"
             local prow
             if card then
                 prow = card.lines[tr] or ("\27[40m" .. string.rep(" ", cw) .. "\27[0m")
             else
-                -- loading placeholder: dark blue-grey stripe
                 prow = "\27[48;2;25;30;48m" .. string.rep(" ", cw) .. "\27[0m"
             end
-            pix[#pix+1] = "\27[90m│\27[0m" .. prow .. "\27[90m│\27[0m"
+            pix[#pix+1] = bcolor .. b_v .. "\27[0m" .. prow .. bcolor .. b_v .. "\27[0m"
             if ri < #row_cards then pix[#pix+1] = string.rep(" ", gap) end
         end
         out[#out+1] = table.concat(pix) .. "\27[K\n"
@@ -539,14 +542,19 @@ local function render_card_row(out, row_cards, cache, tw, th, margin, gap)
     -- ── bottom border ─────────────────────────────────────────
     local bot = { string.rep(" ", margin) }
     for ri, rc in ipairs(row_cards) do
-        local card = cache[rc.idx]
-        local cw   = card and card.cw or tw
+        local is_sel = (rc.idx == selected_idx)
+        local card   = cache[rc.idx]
+        local cw     = card and card.cw or tw
+        local b_h    = is_sel and "━" or "─"
+        local c_bl   = is_sel and "┗" or "└"
+        local c_br   = is_sel and "┛" or "┘"
+        local bcolor = is_sel and "\27[1;36m" or "\27[90m"
         if card and not card.ok then
-            local msg  = " \27[31m\xe2\x9a\xa0 error\27[90m"   -- ⚠ error
-            local fill = math.max(0, cw - 8)  -- 8 ≈ " ⚠ error" visible cols
-            bot[#bot+1] = "\27[90m└" .. msg .. string.rep("─", fill) .. "┘\27[0m"
+            local msg  = " \27[31m\xe2\x9a\xa0 error" .. bcolor .. " "
+            local fill = math.max(0, cw - 9)
+            bot[#bot+1] = bcolor .. c_bl .. msg .. string.rep(b_h, fill) .. c_br .. "\27[0m"
         else
-            bot[#bot+1] = "\27[90m└" .. string.rep("─", cw) .. "┘\27[0m"
+            bot[#bot+1] = bcolor .. c_bl .. string.rep(b_h, cw) .. c_br .. "\27[0m"
         end
         if ri < #row_cards then bot[#bot+1] = string.rep(" ", gap) end
     end
@@ -555,9 +563,15 @@ local function render_card_row(out, row_cards, cache, tw, th, margin, gap)
     -- ── filename label ────────────────────────────────────────
     local lbl = { string.rep(" ", margin) }
     for ri, rc in ipairs(row_cards) do
-        local card = cache[rc.idx]
-        local cw   = (card and card.cw or tw) + 2
-        lbl[#lbl+1] = "  \27[90m" .. pad_right(trunc(rc.file.name, cw), cw) .. "\27[0m"
+        local is_sel = (rc.idx == selected_idx)
+        local card   = cache[rc.idx]
+        local cw     = (card and card.cw or tw) + 2
+        if is_sel then
+            local text = "► " .. trunc(rc.file.name, math.max(0, cw - 2))
+            lbl[#lbl+1] = "\27[1;36m" .. pad_right(text, cw) .. "\27[0m"
+        else
+            lbl[#lbl+1] = "  \27[90m" .. pad_right(trunc(rc.file.name, cw - 2), cw - 2) .. "\27[0m"
+        end
         if ri < #row_cards then lbl[#lbl+1] = string.rep(" ", gap) end
     end
     out[#out+1] = table.concat(lbl) .. "\27[K\n"
@@ -574,8 +588,8 @@ local function compute_layout(files, tw, th, force_cols, term_w, term_h)
     local trows    = math.floor(th / 2)
     -- row_h: top_border(1) + pixel_rows(trows) + bot_border(1) + label(1) + blank(1)
     local row_h    = trows + 4
-    -- header: title + hints + blank = 3 lines;  footer: scroll bar = 1 line
-    local vis_rows = math.max(1, math.floor((term_h - 3 - 1) / row_h))
+    -- header: 3 lines; footer: 2 lines (file info + scroll bar)
+    local vis_rows = math.max(1, math.floor((term_h - 3 - 2) / row_h))
     local tot_rows = math.ceil(#files / cols)
     return { cols=cols, gap=gap, margin=margin,
              trows=trows, row_h=row_h,
@@ -598,10 +612,11 @@ local function browse_tui(dir_path, tw, th, force_cols)
     end
 
     -- ── State ─────────────────────────────────────────────────
-    local cache      = {}   -- cache[i] = { lines, cw, ch, ok } | nil
-    local cached_n   = 0    -- count of loaded entries (for footer display)
-    local scroll_row = 0    -- 0-indexed topmost visible grid row
-    local running    = true
+    local cache        = {}   -- cache[i] = { lines, cw, ch, ok } | nil
+    local cached_n     = 0    -- count of loaded entries (for footer display)
+    local scroll_row   = 0    -- 0-indexed topmost visible grid row
+    local selected_idx = 1    -- 1-based index of selected image
+    local running      = true
 
     -- ── Lazy loader: decode & cache a range of card indices ───
     local function load_range(vis_start, vis_end)
@@ -612,7 +627,6 @@ local function browse_tui(dir_path, tw, th, force_cols)
         if #needed == 0 then return end
 
         for ni, i in ipairs(needed) do
-            -- progress on top line (we're inside alt screen)
             io.write(string.format(
                 "\27[H\27[2K  \27[90mLoading [%d/%d]  %s\xe2\x80\xa6\27[0m",
                 ni, #needed, trunc(files[i].name, 50)))
@@ -634,18 +648,24 @@ local function browse_tui(dir_path, tw, th, force_cols)
             }
             cached_n = cached_n + 1
         end
-        io.write("\27[H\27[2K"); io.flush()  -- erase progress line
+        io.write("\27[H\27[2K"); io.flush()
     end
 
     -- ── Enter alternate screen ─────────────────────────────────
-    if not enable_raw_mode() then return nil end  -- signal non-TTY to caller
+    if not enable_raw_mode() then return nil end
 
     local ok_loop, err_loop = pcall(function()
         while running do
             local term_w, term_h = get_terminal_size()
             local L = compute_layout(files, tw, th, force_cols, term_w, term_h)
 
-            -- clamp scroll
+            -- Keep scroll in sync with selected_idx
+            local sel_row = math.floor((selected_idx - 1) / L.cols)
+            if sel_row < scroll_row then
+                scroll_row = sel_row
+            elseif sel_row >= scroll_row + L.vis_rows then
+                scroll_row = sel_row - L.vis_rows + 1
+            end
             scroll_row = math.max(0, math.min(scroll_row,
                 math.max(0, L.tot_rows - L.vis_rows)))
 
@@ -656,39 +676,44 @@ local function browse_tui(dir_path, tw, th, force_cols)
             load_range(vis_start, vis_end)
 
             -- ── Build frame ───────────────────────────────────
-            local out = { "\27[H" }  -- move cursor to home (overwrite, no flicker)
+            local out = { "\27[H" }
 
-            -- header (2 lines + blank)
+            -- header
             out[#out+1] = string.format(
                 "\27[1;36m ffi_thumbnailer\27[0m  \27[33m%s\27[0m" ..
                 "  \27[90m%d images · %d cols · %dx%d px\27[0m\27[K\n",
                 dir_path, #files, L.cols, tw, th)
             out[#out+1] =
-                "\27[90m ↑↓ jk · PgUp PgDn bf · g G top/bot · q Esc quit\27[0m\27[K\n"
+                "\27[90m ↑↓←→ hjkl move · PgUp PgDn · g G top/bot · q Esc quit\27[0m\27[K\n"
             out[#out+1] = "\27[K\n"
 
             -- visible grid rows
             for gr = scroll_row, scroll_row + L.vis_rows - 1 do
                 if gr >= L.tot_rows then
-                    -- past end of content: erase stale lines
                     for _ = 1, L.row_h do out[#out+1] = "\27[K\n" end
                 else
                     local row_cards = {}
                     for ci = gr * L.cols + 1, math.min(#files, (gr + 1) * L.cols) do
                         row_cards[#row_cards+1] = { idx=ci, file=files[ci] }
                     end
-                    render_card_row(out, row_cards, cache, tw, th, L.margin, L.gap)
-                    out[#out+1] = "\27[K\n"  -- blank row separator
+                    render_card_row(out, row_cards, cache, tw, th, L.margin, L.gap, selected_idx)
+                    out[#out+1] = "\27[K\n"
                 end
             end
 
-            -- footer: scroll progress bar
+            -- footer line 1: selected image info
+            local cur_f = files[selected_idx]
+            out[#out+1] = string.format(
+                "\27[K\27[90m  Selected \27[1;36m[%d/%d]\27[0m \27[1;37m%s\27[0m \27[90m(%s)\27[0m\n",
+                selected_idx, #files, cur_f and cur_f.name or "", cur_f and cur_f.ext or "")
+
+            -- footer line 2: scroll progress bar
             local pct = L.tot_rows <= L.vis_rows and 100 or
                 math.floor(scroll_row / math.max(1, L.tot_rows - L.vis_rows) * 100)
             local bar_w  = 20
             local filled = math.floor(pct / 100 * bar_w)
             local bar    = string.rep("\xe2\x96\x88", filled) ..
-                           string.rep("\xe2\x96\x91", bar_w - filled)  -- █░ bar
+                           string.rep("\xe2\x96\x91", bar_w - filled)
             out[#out+1] = string.format(
                 "\27[K\27[90m  \27[93m%s\27[90m  rows %d\xe2\x80\x93%d/%d" ..
                 "  cache %d/%d\27[0m",
@@ -696,9 +721,7 @@ local function browse_tui(dir_path, tw, th, force_cols)
                 scroll_row + 1, math.min(scroll_row + L.vis_rows, L.tot_rows),
                 L.tot_rows, cached_n, #files)
 
-            -- erase from cursor to end of screen (clears stale content)
             out[#out+1] = "\27[J"
-
             io.write(table.concat(out)); io.flush()
 
             -- ── Wait for keypress ─────────────────────────────
@@ -707,19 +730,22 @@ local function browse_tui(dir_path, tw, th, force_cols)
             if key == "q" or key == "Q" or key == "ESC"
             or key == "CTRL_C" or key == "CTRL_D" then
                 running = false
+            elseif key == "LEFT"  or key == "h" then
+                selected_idx = math.max(1, selected_idx - 1)
+            elseif key == "RIGHT" or key == "l" then
+                selected_idx = math.min(#files, selected_idx + 1)
             elseif key == "DOWN"  or key == "j" then
-                scroll_row = math.min(math.max(0, L.tot_rows - 1), scroll_row + 1)
+                selected_idx = math.min(#files, selected_idx + L.cols)
             elseif key == "UP"    or key == "k" then
-                scroll_row = math.max(0, scroll_row - 1)
+                selected_idx = math.max(1, selected_idx - L.cols)
             elseif key == "PAGE_DOWN" or key == "SPACE" or key == "f" then
-                scroll_row = math.min(math.max(0, L.tot_rows - L.vis_rows),
-                                      scroll_row + L.vis_rows)
+                selected_idx = math.min(#files, selected_idx + L.cols * L.vis_rows)
             elseif key == "PAGE_UP" or key == "b" then
-                scroll_row = math.max(0, scroll_row - L.vis_rows)
+                selected_idx = math.max(1, selected_idx - L.cols * L.vis_rows)
             elseif key == "HOME" or key == "g" then
-                scroll_row = 0
+                selected_idx = 1
             elseif key == "END"  or key == "G" then
-                scroll_row = math.max(0, L.tot_rows - L.vis_rows)
+                selected_idx = #files
             end
         end
     end)
