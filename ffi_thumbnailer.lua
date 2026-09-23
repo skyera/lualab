@@ -414,10 +414,14 @@ local function resize_bilinear(image, width, height)
             local c = image.pixels[y1 * image.width + x0]
             local d = image.pixels[y1 * image.width + x1]
             local o = pixels[y * width + x]
-            for _, ch in ipairs({"r","g","b"}) do
-                local top = a[ch] + (b[ch] - a[ch]) * fx
-                o[ch] = math.floor(top + (c[ch] + (d[ch] - c[ch]) * fx - top) * fy + 0.5)
-            end
+            local fx_inv, fy_inv = 1 - fx, 1 - fy
+            local w_a = fx_inv * fy_inv
+            local w_b = fx * fy_inv
+            local w_c = fx_inv * fy
+            local w_d = fx * fy
+            o.r = math.floor(a.r * w_a + b.r * w_b + c.r * w_c + d.r * w_d + 0.5)
+            o.g = math.floor(a.g * w_a + b.g * w_b + c.g * w_c + d.g * w_d + 0.5)
+            o.b = math.floor(a.b * w_a + b.b * w_b + c.b * w_c + d.b * w_d + 0.5)
         end
     end
     return { width=width, height=height, pixels=pixels }
@@ -862,7 +866,7 @@ local function browse_tui(dir_path, tw, th, force_cols)
 end
 
 -- ============================================================
--- 10. Flat browser  (non-TTY fallback: load all, print grid)
+-- 11. Flat browser  (non-TTY fallback: load all, print grid)
 -- ============================================================
 local function browse_flat(dir_path, tw, th, force_cols)
     dir_path = (dir_path or "."):gsub("[/\\]+$", "")
@@ -922,7 +926,7 @@ local function browse_flat(dir_path, tw, th, force_cols)
 end
 
 -- ============================================================
--- 11. Module API  (preserved for test_ffi_thumbnailer.lua)
+-- 12. Module API  (preserved for test_ffi_thumbnailer.lua)
 -- ============================================================
 local module = {
     dimensions_for  = dimensions_for,
@@ -933,7 +937,7 @@ local module = {
 if ... == "ffi_thumbnailer" then return module end
 
 -- ============================================================
--- 12. CLI entry point
+-- 13. CLI entry point
 -- ============================================================
 local dir_path   = nil
 local thumb_w    = 48
