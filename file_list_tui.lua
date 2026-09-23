@@ -89,6 +89,32 @@ local function terminal_size()
   return math.max(1, tonumber(size[0].ws_row)), math.max(1, tonumber(size[0].ws_col))
 end
 
+local function read_preview(filepath, max_lines, max_bytes)
+  local f = io.open(filepath, "rb")
+  if not f then return nil, "cannot read file" end
+  local chunk = f:read(max_bytes or 16384)
+  f:close()
+  if not chunk or #chunk == 0 then return { "(empty file)" } end
+  if chunk:find("%z") then return nil, "(binary file)" end
+
+  local lines = {}
+  local pos = 1
+  while pos <= #chunk and #lines < max_lines do
+    local nl = chunk:find("\n", pos, true)
+    local line
+    if nl then
+      line = chunk:sub(pos, nl - 1)
+      pos = nl + 1
+    else
+      line = chunk:sub(pos)
+      pos = #chunk + 1
+    end
+    line = line:gsub("\r$", ""):gsub("\t", "    ")
+    lines[#lines + 1] = clean_name(line)
+  end
+  return lines
+end
+
 local original = ffi.new("struct termios[1]")
 assert(ffi.C.tcgetattr(STDIN, original) == 0, "This program must run in a terminal.")
 local raw = ffi.new("struct termios[1]", original[0])
@@ -134,22 +160,81 @@ local function main()
     if selected > offset + visible then offset = selected - visible end
     offset = math.max(0, offset)
 
+    -- Determine layout (split view if cols >= 50)
+    local split = cols >= 50
+    local list_cols = cols
+    local preview_cols = 0
+    if split then
+      list_cols = math.max(20, math.min(36, math.floor(cols * 0.4)))
+      preview_cols = cols - list_cols - 1 -- 1 column for separator
+    end
+
+    -- Prepare preview for selected item if split view
+    local preview_header = ""
+    local preview_lines = {}
+    if split and entries[selected] then
+      local item = entries[selected]
+      local item_path = path == "/" and "/" .. item.name or path .. "/" .. item.name
+      if item.is_dir then
+        preview_header = " [Directory] " .. item.name
+        preview_lines = { "  (directory)" }
+      else
+        local lines, err = read_preview(item_path, visible - 1)
+        if lines then
+          preview_header = " Preview: " .. item.name
+          preview_lines = lines
+        else
+          preview_header = " File: " .. item.name
+          preview_lines = { "  " .. (err or "cannot preview") }
+        end
+      end
+    end
+
     write(esc("H") .. esc("2J"))
     local title = " luals browser  " .. path
     write(esc("7m") .. title:sub(1, cols) .. string.rep(" ", math.max(0, cols - #title)) .. esc("0m\r\n"))
     for row = 1, visible do
       local index = offset + row
       local item = entries[index]
+      local left_str = ""
       if item then
         local label = (item.is_dir and "[D] " or "    ") .. clean_name(item.name)
-        label = label:sub(1, math.max(0, cols - 1))
-        if index == selected then write(esc("7m> " .. label .. esc("0m"))) else write("  " .. label) end
+        if #label > list_cols - 2 then
+          label = label:sub(1, math.max(0, list_cols - 3)) .. "…"
+        end
+        local pad = string.rep(" ", math.max(0, list_cols - 2 - #label))
+        if index == selected then
+          left_str = esc("7m> " .. label .. pad .. esc("0m"))
+        else
+          left_str = "  " .. label .. pad
+        end
+      else
+        left_str = string.rep(" ", list_cols)
+      end
+
+      if split then
+        local right_str = ""
+        if row == 1 then
+          local hdr = preview_header:sub(1, preview_cols)
+          right_str = esc("7m") .. hdr .. string.rep(" ", math.max(0, preview_cols - #hdr)) .. esc("0m")
+        else
+          local pline = preview_lines[row - 1]
+          if pline then
+            pline = pline:sub(1, preview_cols)
+            right_str = pline .. string.rep(" ", math.max(0, preview_cols - #pline))
+          else
+            right_str = string.rep(" ", preview_cols)
+          end
+        end
+        write(left_str .. "│" .. right_str)
+      else
+        write(left_str)
       end
       write(esc("K\r\n"))
     end
     local status = message or ("%d item%s"):format(#entries, #entries == 1 and "" or "s")
     write(esc("7m") .. status:sub(1, cols) .. esc("K") .. esc("0m\r\n"))
-    write(" ↑↓/j k move  Enter/right open  Backspace/left/h up  q quit" .. esc("K"))
+    write(" ↑↓/j k move  Enter/right/l open  Backspace/left/h up  q quit" .. esc("K"))
     io.stdout:flush()
     last_rows, last_cols = rows, cols
     dirty = false
@@ -206,8 +291,8 @@ local function main()
           if key == "q" or key == "\3" then return end
           if key == "j" then selected = selected + 1 end
           if key == "k" then selected = selected - 1 end
-          if key == "\r" or key == "\n" then open_selected() end
-          if key == "\127" or key == "h" then go_parent() end
+          if key == "l" or key == "\r" or key == "\n" then open_selected() end
+          if key == "h" or key == "\127" then go_parent() end
         end
         selected = math.max(1, math.min(math.max(1, #entries), selected))
         message, dirty = nil, true
