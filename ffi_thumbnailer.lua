@@ -16,6 +16,7 @@
       + / =         increase thumbnail size (zoom in)
       - / _         decrease thumbnail size (zoom out)
       /             search / filter images by name
+      ?             show help overlay (keybindings & features)
       o             open image in OS default viewer
       Enter         view fullscreen
       q / Esc       quit
@@ -697,7 +698,79 @@ local function compute_layout(files, tw, th, force_cols, term_w, term_h)
 end
 
 -- ============================================================
--- 9. Full-screen image viewer (Enter key from thumbnail browser)
+-- 9. Help overlay modal (? key)
+-- ============================================================
+local function show_help()
+    local term_w, term_h = get_terminal_size()
+    local box_w = math.min(68, math.max(40, term_w - 4))
+    local inner_w = box_w - 4
+
+    local help_lines = {
+        { "\27[1;36mNAVIGATION\27[0m", "" },
+        { "  ↑ / k, ↓ / j", "Scroll up / down one row" },
+        { "  ← / h, → / l", "Select left / right image" },
+        { "  PgUp / b, PgDn / Space", "Page up / down" },
+        { "  g / Home, G / End", "Jump to first / last image" },
+        { "", "" },
+        { "\27[1;36mVIEWING & SIZING\27[0m", "" },
+        { "  Enter", "Open selected image fullscreen" },
+        { "  + / =", "Increase thumbnail size (zoom in)" },
+        { "  - / _", "Decrease thumbnail size (zoom out)" },
+        { "  o", "Open in OS default image viewer" },
+        { "", "" },
+        { "\27[1;36mFILTERING & SEARCH\27[0m", "" },
+        { "  /", "Live search filter by name or extension" },
+        { "  Esc", "Clear active filter / dismiss modal" },
+        { "", "" },
+        { "\27[1;36mGENERAL\27[0m", "" },
+        { "  ?, F1", "Toggle this help dialog" },
+        { "  q, Esc, Ctrl+C", "Quit application" },
+    }
+
+    local pad_top = math.max(1, math.floor((term_h - (#help_lines + 4)) / 2))
+    local pad_left = math.max(0, math.floor((term_w - box_w) / 2))
+    local pleft_str = string.rep(" ", pad_left)
+
+    local out = { "\27[H" }
+    for _ = 1, pad_top do out[#out+1] = "\27[K\n" end
+
+    -- Dialog Top Border
+    local title = " ❓ Help & Keybindings "
+    local top_fill = math.max(0, box_w - 2 - vlen(title))
+    out[#out+1] = pleft_str .. "\27[1;36m┏━" .. title .. string.rep("━", top_fill) .. "┓\27[0m\27[K\n"
+
+    -- Dialog Content Lines
+    for _, item in ipairs(help_lines) do
+        local lcol, rcol = item[1], item[2]
+        local row_str
+        if rcol == "" then
+            local fill = math.max(0, inner_w - vlen(lcol))
+            row_str = " " .. lcol .. string.rep(" ", fill) .. " "
+        else
+            local lfill = math.max(0, 26 - vlen(lcol))
+            local left = lcol .. string.rep(" ", lfill)
+            local right = trunc(rcol, math.max(0, inner_w - 26))
+            local fill = math.max(0, inner_w - vlen(left) - vlen(right))
+            row_str = " " .. "\27[1;37m" .. left .. "\27[90m" .. right .. string.rep(" ", fill) .. "\27[0m "
+        end
+        out[#out+1] = pleft_str .. "\27[1;36m┃\27[0m" .. row_str .. "\27[1;36m┃\27[0m\27[K\n"
+    end
+
+    -- Dialog Bottom Border
+    local dismiss = " [Press any key to close] "
+    local bot_fill = math.max(0, box_w - 2 - vlen(dismiss))
+    out[#out+1] = pleft_str .. "\27[1;36m┗" .. string.rep("━", bot_fill) .. "\27[93m" .. dismiss .. "\27[1;36m━┛\27[0m\27[K\n"
+
+    out[#out+1] = "\27[J"
+    io.write(table.concat(out))
+    io.flush()
+
+    -- Wait for dismissal keypress
+    read_key(-1)
+end
+
+-- ============================================================
+-- 10. Full-screen image viewer (Enter key from thumbnail browser)
 -- ============================================================
 local function view_fullscreen(files, initial_idx)
     local cur_idx = initial_idx
@@ -737,12 +810,12 @@ local function view_fullscreen(files, initial_idx)
         local ext_color = EXT_COLORS[cur_f.ext] or "\27[97m"
 
         out[#out+1] = string.format(
-            "\27[1;36m 🖼  [%d/%d]\27[0m \27[1;37m%s\27[0m  [%s%s\27[0m]  \27[90m%s%s%s\27[0m  \27[93m[Esc/Enter/q]\27[90m Back  \27[93m[o]\27[90m Open  \27[93m[←/→/h/l]\27[90m Prev/Next\27[K\n",
+            "\27[1;36m 🖼  [%d/%d]\27[0m \27[1;37m%s\27[0m  [%s%s\27[0m]  \27[90m%s%s%s\27[0m  \27[93m[?] \27[90mHelp  \27[93m[o] \27[90mOpen  \27[93m[Esc/Enter/q] \27[90mBack  \27[93m[←/→/h/l] \27[90mMove\27[K\n",
             cur_idx, #files, cur_f.name,
             ext_color, cur_f.ext,
             dim_str ~= "" and (dim_str .. " · ") or "",
             size_str,
-            cur_f.path and (" · " .. trunc(cur_f.path, 40)) or ""
+            cur_f.path and (" · " .. trunc(cur_f.path, 35)) or ""
         )
 
         if full_lines and img_info then
@@ -762,6 +835,8 @@ local function view_fullscreen(files, initial_idx)
             break
         elseif key == "CTRL_C" or key == "CTRL_D" then
             return nil
+        elseif key == "?" or key == "F1" then
+            show_help()
         elseif key == "o" or key == "O" then
             open_in_viewer(cur_f.path)
         elseif key == "LEFT" or key == "h" or key == "UP" or key == "k" or key == "PAGE_UP" then
@@ -897,7 +972,7 @@ local function browse_tui(dir_path, tw, th, force_cols)
 
             -- Header line 2 (key hint badge)
             out[#out+1] =
-                "\27[90m [Enter] Full · [o] Open · [/] Find · [+/-] Zoom · [↑↓←→/hjkl] Move · [PgUp/PgDn] Page · [q] Quit\27[0m\27[K\n"
+                "\27[90m [?] Help · [Enter] Full · [o] Open · [/] Find · [+/-] Zoom · [↑↓←→/hjkl] Move · [PgUp/PgDn] Page · [q] Quit\27[0m\27[K\n"
             out[#out+1] = "\27[K\n"
 
             -- Visible grid rows
@@ -970,6 +1045,8 @@ local function browse_tui(dir_path, tw, th, force_cols)
                 else
                     selected_idx = next_idx
                 end
+            elseif key == "?" or key == "F1" then
+                show_help()
             elseif (key == "o" or key == "O") and cur_f then
                 open_in_viewer(cur_f.path)
             elseif key == "+" or key == "=" then
