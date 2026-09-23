@@ -13,6 +13,11 @@
       PgDn / Space  scroll down one page
       g / Home      jump to top
       G / End       jump to bottom
+      + / =         increase thumbnail size (zoom in)
+      - / _         decrease thumbnail size (zoom out)
+      /             search / filter images by name
+      o             open image in OS default viewer
+      Enter         view fullscreen
       q / Esc       quit
 
     Options:
@@ -270,6 +275,34 @@ end
 -- ============================================================
 local IMAGE_EXTS = { png=true, jpg=true, jpeg=true, ppm=true, webp=true, gif=true, bmp=true }
 
+local function get_file_size(path)
+    local f = io.open(path, "rb")
+    if not f then return 0 end
+    local sz = f:seek("end") or 0
+    f:close()
+    return sz
+end
+
+local function format_bytes(bytes)
+    if not bytes or bytes <= 0 then return "0 B" end
+    if bytes < 1024 then return string.format("%d B", bytes) end
+    if bytes < 1024 * 1024 then return string.format("%.1f KB", bytes / 1024) end
+    if bytes < 1024 * 1024 * 1024 then return string.format("%.1f MB", bytes / (1024 * 1024)) end
+    return string.format("%.2f GB", bytes / (1024 * 1024 * 1024))
+end
+
+local function open_in_viewer(path)
+    local cmd
+    if IS_WIN then
+        cmd = string.format('start "" "%s"', path:gsub('"', '\\"'))
+    elseif ffi.os == "OSX" then
+        cmd = string.format("open %s >/dev/null 2>&1 &", shell_quote(path))
+    else
+        cmd = string.format("xdg-open %s >/dev/null 2>&1 &", shell_quote(path))
+    end
+    os.execute(cmd)
+end
+
 local scan_dir
 do
     if IS_WIN then
@@ -282,7 +315,8 @@ do
                     local ext   = fname:match("%.([^.]+)$")
                     if ext and IMAGE_EXTS[ext:lower()] then
                         local sep = (dir:sub(-1)=="\\") and "" or "\\"
-                        files[#files+1] = { name=fname, path=dir..sep..fname, ext=ext:upper() }
+                        local fpath = dir .. sep .. fname
+                        files[#files+1] = { name=fname, path=fpath, ext=ext:upper(), size=get_file_size(fpath) }
                     end
                 end
                 p:close()
@@ -309,7 +343,8 @@ do
             local function collect(fname)
                 local ext = fname:match("%.([^.]+)$")
                 if ext and IMAGE_EXTS[ext:lower()] then
-                    files[#files+1] = { name=fname, path=dir..sep..fname, ext=ext:upper() }
+                    local fpath = dir .. sep .. fname
+                    files[#files+1] = { name=fname, path=fpath, ext=ext:upper(), size=get_file_size(fpath) }
                 end
             end
 
@@ -502,86 +537,125 @@ local function parse_size(s)
     local w, h = s:match("^(%d+)[xX](%d+)$"); return tonumber(w), tonumber(h)
 end
 
+-- Extension badge colors
+local EXT_COLORS = {
+    PNG  = "\27[1;34m",  -- bright blue
+    JPG  = "\27[1;33m",  -- bright yellow/orange
+    JPEG = "\27[1;33m",
+    WEBP = "\27[1;35m",  -- bright magenta/purple
+    GIF  = "\27[1;32m",  -- bright green
+    BMP  = "\27[1;36m",  -- bright cyan
+    PPM  = "\27[1;97m",  -- bright white
+}
+
 -- ============================================================
 -- 7. Card row renderer  (shared by TUI + flat fallback)
 --
---   row_cards  = list of { idx, file={name,ext,path} }
---   cache[i]   = nil (unloaded) | { lines, cw, ch, ok }
+--   row_cards  = list of { idx, file={name,ext,path,size} }
+--   cache[i]   = nil (unloaded) | { lines, cw, ch, orig_w, orig_h, ok }
 --   out        = string accumulator table
 -- ============================================================
 local function render_card_row(out, row_cards, cache, tw, th, margin, gap, selected_idx)
-    local trows = math.floor(th / 2)  -- pixel text rows
+    local trows = math.floor(th / 2)  -- target text rows for pixel canvas
 
     -- ── top border ────────────────────────────────────────────
     local top = { string.rep(" ", margin) }
     for ri, rc in ipairs(row_cards) do
         local is_sel = (rc.idx == selected_idx)
         local card   = cache[rc.idx]
-        local cw     = card and card.cw or tw
         local ns     = tostring(rc.idx)
         local ext    = rc.file.ext
-        local rv     = #ext + 3
-        local lv     = #ns + 5
-        local max_name = math.max(0, cw - lv - 1 - rv)
-        local nt     = trunc(rc.file.name, max_name)
-        local fill   = math.max(0, cw - lv - vlen(nt) - 1 - rv)
+        local ext_color = EXT_COLORS[ext] or "\27[97m"
+
+        -- Badge "[EXT]" width = #ext + 2
+        local badge_w = #ext + 2
+        -- Left badge "[#1]" width = #ns + 3
+        local left_w = #ns + 3
+        -- Max room for filename in title
+        local max_name = math.max(0, tw - left_w - badge_w - 4)
+        local nt = trunc(rc.file.name, max_name)
+        local fill = math.max(0, tw - left_w - vlen(nt) - badge_w - 4)
+
         local b_h    = is_sel and "━" or "─"
         local c_tl   = is_sel and "┏" or "┌"
         local c_tr   = is_sel and "┓" or "┐"
         local bcolor = is_sel and "\27[1;36m" or "\27[90m"
-
-        local inner = b_h .. " [" .. ns .. "] " .. nt .. " " ..
-                      string.rep(b_h, fill) .. " " .. ext .. " " .. b_h
         local title_color = is_sel and "\27[1;97m" or
                             ((card and card.ok) and "\27[97m" or
                             (card and "\27[31m" or "\27[90m"))
+
+        local inner = b_h .. " [" .. (is_sel and "\27[1;36m#" or "\27[90m#") .. ns .. title_color .. "] " ..
+                      nt .. " " .. string.rep(b_h, fill) .. " [" .. ext_color .. ext .. title_color .. "] " .. b_h
         top[#top+1] = bcolor .. c_tl .. title_color .. inner .. bcolor .. c_tr .. "\27[0m"
         if ri < #row_cards then top[#top+1] = string.rep(" ", gap) end
     end
     out[#out+1] = table.concat(top) .. "\27[K\n"
 
-    -- ── pixel rows ────────────────────────────────────────────
-    local max_hrows = trows
-    for _, rc in ipairs(row_cards) do
-        local c = cache[rc.idx]
-        if c and #c.lines > max_hrows then max_hrows = #c.lines end
-    end
-    for tr = 1, max_hrows do
+    -- ── pixel rows (centered in tw x trows) ────────────────────
+    for tr = 1, trows do
         local pix = { string.rep(" ", margin) }
         for ri, rc in ipairs(row_cards) do
             local is_sel = (rc.idx == selected_idx)
             local card   = cache[rc.idx]
-            local cw     = card and card.cw or tw
             local b_v    = is_sel and "┃" or "│"
             local bcolor = is_sel and "\27[1;36m" or "\27[90m"
             local prow
+
             if card then
-                prow = card.lines[tr] or ("\27[40m" .. string.rep(" ", cw) .. "\27[0m")
+                local img_lines = card.lines
+                local img_h = #img_lines
+                local img_w = card.cw
+                -- vertical letterbox offset
+                local y_offset = math.max(0, math.floor((trows - img_h) / 2))
+                local img_tr = tr - y_offset
+
+                if img_tr >= 1 and img_tr <= img_h then
+                    local line = img_lines[img_tr] or ""
+                    -- horizontal letterbox padding
+                    local pad_left = math.max(0, math.floor((tw - img_w) / 2))
+                    local pad_right = math.max(0, tw - img_w - pad_left)
+                    local pad_l_str = pad_left > 0 and ("\27[48;2;16;18;24m" .. string.rep(" ", pad_left) .. "\27[0m") or ""
+                    local pad_r_str = pad_right > 0 and ("\27[48;2;16;18;24m" .. string.rep(" ", pad_right) .. "\27[0m") or ""
+                    prow = pad_l_str .. line .. pad_r_str
+                else
+                    prow = "\27[48;2;16;18;24m" .. string.rep(" ", tw) .. "\27[0m"
+                end
             else
-                prow = "\27[48;2;25;30;48m" .. string.rep(" ", cw) .. "\27[0m"
+                prow = "\27[48;2;24;28;38m" .. string.rep(" ", tw) .. "\27[0m"
             end
+
             pix[#pix+1] = bcolor .. b_v .. "\27[0m" .. prow .. bcolor .. b_v .. "\27[0m"
             if ri < #row_cards then pix[#pix+1] = string.rep(" ", gap) end
         end
         out[#out+1] = table.concat(pix) .. "\27[K\n"
     end
 
-    -- ── bottom border ─────────────────────────────────────────
+    -- ── bottom border (with resolution & file size metadata) ───
     local bot = { string.rep(" ", margin) }
     for ri, rc in ipairs(row_cards) do
         local is_sel = (rc.idx == selected_idx)
         local card   = cache[rc.idx]
-        local cw     = card and card.cw or tw
         local b_h    = is_sel and "━" or "─"
         local c_bl   = is_sel and "┗" or "└"
         local c_br   = is_sel and "┛" or "┘"
         local bcolor = is_sel and "\27[1;36m" or "\27[90m"
+
         if card and not card.ok then
             local msg  = " \27[31m\xe2\x9a\xa0 error" .. bcolor .. " "
-            local fill = math.max(0, cw - 9)
+            local fill = math.max(0, tw - 9)
             bot[#bot+1] = bcolor .. c_bl .. msg .. string.rep(b_h, fill) .. c_br .. "\27[0m"
         else
-            bot[#bot+1] = bcolor .. c_bl .. string.rep(b_h, cw) .. c_br .. "\27[0m"
+            local size_str = format_bytes(rc.file.size)
+            local dim_str = (card and card.orig_w) and string.format("%d×%d", card.orig_w, card.orig_h) or ""
+            local meta_left = dim_str ~= "" and (" " .. dim_str .. " ") or ""
+            local meta_right = " " .. size_str .. " "
+            local fill = math.max(0, tw - vlen(meta_left) - vlen(meta_right))
+
+            bot[#bot+1] = bcolor .. c_bl ..
+                          "\27[90m" .. meta_left .. bcolor ..
+                          string.rep(b_h, fill) ..
+                          "\27[90m" .. meta_right .. bcolor ..
+                          c_br .. "\27[0m"
         end
         if ri < #row_cards then bot[#bot+1] = string.rep(" ", gap) end
     end
@@ -591,8 +665,7 @@ local function render_card_row(out, row_cards, cache, tw, th, margin, gap, selec
     local lbl = { string.rep(" ", margin) }
     for ri, rc in ipairs(row_cards) do
         local is_sel = (rc.idx == selected_idx)
-        local card   = cache[rc.idx]
-        local cw     = (card and card.cw or tw) + 2
+        local cw     = tw + 2
         if is_sel then
             local text = "► " .. trunc(rc.file.name, math.max(0, cw - 2))
             lbl[#lbl+1] = "\27[1;36m" .. pad_right(text, cw) .. "\27[0m"
@@ -659,10 +732,17 @@ local function view_fullscreen(files, initial_idx)
         end
 
         local out = { "\27[H" }
+        local size_str = format_bytes(cur_f.size)
+        local dim_str = (img_info and img_info.w) and string.format("%d×%d px", img_info.w, img_info.h) or ""
+        local ext_color = EXT_COLORS[cur_f.ext] or "\27[97m"
+
         out[#out+1] = string.format(
-            "\27[1;36m [%d/%d]\27[0m \27[1;37m%s\27[0m \27[90m(%s%s)\27[0m  \27[93m[Esc/Enter/q]\27[90m Back  \27[93m[\xe2\x86\x90/\xe2\x86\x92/h/l]\27[90m Prev/Next\27[K\n",
-            cur_idx, #files, cur_f.name, cur_f.ext,
-            (img_info and img_info.w) and string.format(" \xc2\xb7 %d\xc3\x97%d px", img_info.w, img_info.h) or ""
+            "\27[1;36m 🖼  [%d/%d]\27[0m \27[1;37m%s\27[0m  [%s%s\27[0m]  \27[90m%s%s%s\27[0m  \27[93m[Esc/Enter/q]\27[90m Back  \27[93m[o]\27[90m Open  \27[93m[←/→/h/l]\27[90m Prev/Next\27[K\n",
+            cur_idx, #files, cur_f.name,
+            ext_color, cur_f.ext,
+            dim_str ~= "" and (dim_str .. " · ") or "",
+            size_str,
+            cur_f.path and (" · " .. trunc(cur_f.path, 40)) or ""
         )
 
         if full_lines and img_info then
@@ -682,6 +762,8 @@ local function view_fullscreen(files, initial_idx)
             break
         elseif key == "CTRL_C" or key == "CTRL_D" then
             return nil
+        elseif key == "o" or key == "O" then
+            open_in_viewer(cur_f.path)
         elseif key == "LEFT" or key == "h" or key == "UP" or key == "k" or key == "PAGE_UP" then
             cur_idx = math.max(1, cur_idx - 1)
         elseif key == "RIGHT" or key == "l" or key == "DOWN" or key == "j" or key == "PAGE_DOWN" or key == "SPACE" then
@@ -704,46 +786,71 @@ local function browse_tui(dir_path, tw, th, force_cols)
     if th % 2 ~= 0 then th = th + 1 end
 
     -- ── Scan ─────────────────────────────────────────────────
-    local files = scan_dir(dir_path)
-    if #files == 0 then
+    local all_files = scan_dir(dir_path)
+    if #all_files == 0 then
         io.write("\27[33mNo images found in: " .. dir_path .. "\27[0m\n")
         return false
     end
 
     -- ── State ─────────────────────────────────────────────────
-    local cache        = {}   -- cache[i] = { lines, cw, ch, ok } | nil
-    local cached_n     = 0    -- count of loaded entries (for footer display)
+    local filter_query = ""
+    local files        = all_files
+    local cache        = {}   -- cache[path] = { lines, cw, ch, orig_w, orig_h, ok, err }
+    local cached_n     = 0
     local scroll_row   = 0    -- 0-indexed topmost visible grid row
-    local selected_idx = 1    -- 1-based index of selected image
+    local selected_idx = 1    -- 1-based index in current 'files' list
     local running      = true
+
+    local function apply_filter(q)
+        filter_query = q
+        if q == "" then
+            files = all_files
+        else
+            local lq = q:lower()
+            local filtered = {}
+            for _, f in ipairs(all_files) do
+                if f.name:lower():find(lq, 1, true) or f.ext:lower():find(lq, 1, true) then
+                    filtered[#filtered+1] = f
+                end
+            end
+            files = filtered
+        end
+        selected_idx = math.max(1, math.min(#files, selected_idx))
+        scroll_row = 0
+    end
 
     -- ── Lazy loader: decode & cache a range of card indices ───
     local function load_range(vis_start, vis_end)
         local needed = {}
         for i = vis_start, vis_end do
-            if not cache[i] then needed[#needed+1] = i end
+            local f = files[i]
+            if f and not cache[f.path] then needed[#needed+1] = f end
         end
         if #needed == 0 then return end
 
-        for ni, i in ipairs(needed) do
+        for ni, f in ipairs(needed) do
             io.write(string.format(
                 "\27[H\27[2K  \27[90mLoading [%d/%d]  %s\xe2\x80\xa6\27[0m",
-                ni, #needed, trunc(files[i].name, 50)))
+                ni, #needed, trunc(f.name, 50)))
             io.flush()
 
-            local img, err = load_image(files[i].path)
+            local img, err = load_image(f.path)
             local ok, thumb = false, nil
+            local orig_w, orig_h = nil, nil
             if img then
+                orig_w, orig_h = img.width, img.height
                 local rw, rh = dimensions_for(img.width, img.height, tw, th)
                 if rh % 2 ~= 0 then rh = rh + 1 end
                 thumb = resize_bilinear(img, rw, rh)
                 ok    = true
             end
-            cache[i] = {
-                lines = render_halfblock(ok and thumb or make_error_thumb(tw, th)),
-                cw    = ok and thumb.width  or tw,
-                ch    = ok and thumb.height or th,
-                ok    = ok, err = err,
+            cache[f.path] = {
+                lines  = render_halfblock(ok and thumb or make_error_thumb(tw, th)),
+                cw     = ok and thumb.width  or tw,
+                ch     = ok and thumb.height or th,
+                orig_w = orig_w,
+                orig_h = orig_h,
+                ok     = ok, err = err,
             }
             cached_n = cached_n + 1
         end
@@ -758,55 +865,77 @@ local function browse_tui(dir_path, tw, th, force_cols)
             local term_w, term_h = get_terminal_size()
             local L = compute_layout(files, tw, th, force_cols, term_w, term_h)
 
-            -- Keep scroll in sync with selected_idx
-            local sel_row = math.floor((selected_idx - 1) / L.cols)
-            if sel_row < scroll_row then
-                scroll_row = sel_row
-            elseif sel_row >= scroll_row + L.vis_rows then
-                scroll_row = sel_row - L.vis_rows + 1
+            if #files > 0 then
+                -- Keep scroll in sync with selected_idx
+                local sel_row = math.floor((selected_idx - 1) / L.cols)
+                if sel_row < scroll_row then
+                    scroll_row = sel_row
+                elseif sel_row >= scroll_row + L.vis_rows then
+                    scroll_row = sel_row - L.vis_rows + 1
+                end
+                scroll_row = math.max(0, math.min(scroll_row,
+                    math.max(0, L.tot_rows - L.vis_rows)))
+
+                local vis_start = scroll_row * L.cols + 1
+                local vis_end   = math.min(#files, (scroll_row + L.vis_rows) * L.cols)
+                load_range(vis_start, vis_end)
+            else
+                scroll_row = 0
             end
-            scroll_row = math.max(0, math.min(scroll_row,
-                math.max(0, L.tot_rows - L.vis_rows)))
-
-            local vis_start = scroll_row * L.cols + 1
-            local vis_end   = math.min(#files, (scroll_row + L.vis_rows) * L.cols)
-
-            -- lazy-load visible cards not yet in cache
-            load_range(vis_start, vis_end)
 
             -- ── Build frame ───────────────────────────────────
             local out = { "\27[H" }
 
-            -- header
+            -- Header line 1
+            local q_badge = filter_query ~= ""
+                and ("  \27[1;33m[Filter: /" .. filter_query .. "]\27[0m")
+                or ""
             out[#out+1] = string.format(
-                "\27[1;36m ffi_thumbnailer\27[0m  \27[33m%s\27[0m" ..
-                "  \27[90m%d images · %d cols · %dx%d px\27[0m\27[K\n",
-                dir_path, #files, L.cols, tw, th)
+                "\27[1;36m 🖼  ffi_thumbnailer\27[0m  \27[33m📁 %s\27[0m" ..
+                "  \27[90m%d/%d images · %d cols · %d×%d px\27[0m%s\27[K\n",
+                dir_path, #files, #all_files, L.cols, tw, th, q_badge)
+
+            -- Header line 2 (key hint badge)
             out[#out+1] =
-                "\27[90m Enter view · ↑↓←→ hjkl move · PgUp PgDn · g G top/bot · q Esc quit\27[0m\27[K\n"
+                "\27[90m [Enter] Full · [o] Open · [/] Find · [+/-] Zoom · [↑↓←→/hjkl] Move · [PgUp/PgDn] Page · [q] Quit\27[0m\27[K\n"
             out[#out+1] = "\27[K\n"
 
-            -- visible grid rows
-            for gr = scroll_row, scroll_row + L.vis_rows - 1 do
-                if gr >= L.tot_rows then
-                    for _ = 1, L.row_h do out[#out+1] = "\27[K\n" end
-                else
-                    local row_cards = {}
-                    for ci = gr * L.cols + 1, math.min(#files, (gr + 1) * L.cols) do
-                        row_cards[#row_cards+1] = { idx=ci, file=files[ci] }
+            -- Visible grid rows
+            if #files == 0 then
+                out[#out+1] = string.format("\n\27[33m    No images match filter: '%s'\27[0m\27[K\n\n", filter_query)
+                for _ = 1, math.max(1, L.vis_rows * L.row_h - 4) do out[#out+1] = "\27[K\n" end
+            else
+                for gr = scroll_row, scroll_row + L.vis_rows - 1 do
+                    if gr >= L.tot_rows then
+                        for _ = 1, L.row_h do out[#out+1] = "\27[K\n" end
+                    else
+                        local row_cards = {}
+                        local row_cache = {}
+                        for ci = gr * L.cols + 1, math.min(#files, (gr + 1) * L.cols) do
+                            local f = files[ci]
+                            row_cards[#row_cards+1] = { idx=ci, file=f }
+                            row_cache[ci] = cache[f.path]
+                        end
+                        render_card_row(out, row_cards, row_cache, tw, th, L.margin, L.gap, selected_idx)
+                        out[#out+1] = "\27[K\n"
                     end
-                    render_card_row(out, row_cards, cache, tw, th, L.margin, L.gap, selected_idx)
-                    out[#out+1] = "\27[K\n"
                 end
             end
 
-            -- footer line 1: selected image info
+            -- Footer line 1: selected image info
             local cur_f = files[selected_idx]
-            out[#out+1] = string.format(
-                "\27[K\27[90m  Selected \27[1;36m[%d/%d]\27[0m \27[1;37m%s\27[0m \27[90m(%s)\27[0m  \27[93m[Enter]\27[90m Full Screen\27[0m\n",
-                selected_idx, #files, cur_f and cur_f.name or "", cur_f and cur_f.ext or "")
+            local card  = cur_f and cache[cur_f.path]
+            local res_info = (card and card.orig_w) and string.format(" \xc2\xb7 %d×%d px", card.orig_w, card.orig_h) or ""
+            local size_info = cur_f and string.format(" \xc2\xb7 %s", format_bytes(cur_f.size)) or ""
+            local ext_color = cur_f and (EXT_COLORS[cur_f.ext] or "\27[97m") or ""
 
-            -- footer line 2: scroll progress bar
+            out[#out+1] = string.format(
+                "\27[K\27[90m  Selected \27[1;36m[%d/%d]\27[0m \27[1;37m%s\27[0m  [%s%s\27[0m]%s%s  \27[93m[Enter]\27[90m View  \27[93m[o]\27[90m Open\27[0m\n",
+                selected_idx, #files, cur_f and cur_f.name or "",
+                ext_color, cur_f and cur_f.ext or "",
+                res_info, size_info)
+
+            -- Footer line 2: scroll progress bar & cache status
             local pct = L.tot_rows <= L.vis_rows and 100 or
                 math.floor(scroll_row / math.max(1, L.tot_rows - L.vis_rows) * 100)
             local bar_w  = 20
@@ -817,8 +946,9 @@ local function browse_tui(dir_path, tw, th, force_cols)
                 "\27[K\27[90m  \27[93m%s\27[90m  rows %d\xe2\x80\x93%d/%d" ..
                 "  cache %d/%d\27[0m",
                 bar,
-                scroll_row + 1, math.min(scroll_row + L.vis_rows, L.tot_rows),
-                L.tot_rows, cached_n, #files)
+                #files > 0 and (scroll_row + 1) or 0,
+                math.min(scroll_row + L.vis_rows, L.tot_rows),
+                L.tot_rows, cached_n, #all_files)
 
             out[#out+1] = "\27[J"
             io.write(table.concat(out)); io.flush()
@@ -828,13 +958,64 @@ local function browse_tui(dir_path, tw, th, force_cols)
 
             if key == "q" or key == "Q" or key == "ESC"
             or key == "CTRL_C" or key == "CTRL_D" then
-                running = false
-            elseif key == "ENTER" then
+                if filter_query ~= "" and key == "ESC" then
+                    apply_filter("")
+                else
+                    running = false
+                end
+            elseif key == "ENTER" and #files > 0 then
                 local next_idx = view_fullscreen(files, selected_idx)
                 if next_idx == nil then
                     running = false
                 else
                     selected_idx = next_idx
+                end
+            elseif (key == "o" or key == "O") and cur_f then
+                open_in_viewer(cur_f.path)
+            elseif key == "+" or key == "=" then
+                -- Zoom in
+                if tw + 8 <= 128 and th + 5 <= 80 then
+                    tw = tw + 8
+                    th = th + 5
+                    if th % 2 ~= 0 then th = th + 1 end
+                    cache = {}  -- invalidate cache on resolution change
+                    cached_n = 0
+                end
+            elseif key == "-" or key == "_" then
+                -- Zoom out
+                if tw - 8 >= 16 and th - 5 >= 10 then
+                    tw = tw - 8
+                    th = th - 5
+                    if th % 2 ~= 0 then th = th + 1 end
+                    cache = {}  -- invalidate cache on resolution change
+                    cached_n = 0
+                end
+            elseif key == "/" then
+                -- Interactive prompt for filter
+                io.write("\27[H\27[2K\27[1;33m/ Search filter (Enter to submit, Esc to clear): \27[0m")
+                io.flush()
+                local qchars = {}
+                while true do
+                    local fk = read_key(-1)
+                    if fk == "ENTER" then
+                        apply_filter(table.concat(qchars))
+                        break
+                    elseif fk == "ESC" then
+                        apply_filter("")
+                        break
+                    elseif fk == "CTRL_C" or fk == "CTRL_D" then
+                        break
+                    elseif fk == "BACKSPACE" then
+                        if #qchars > 0 then
+                            qchars[#qchars] = nil
+                            io.write("\8 \8")
+                            io.flush()
+                        end
+                    elseif fk and #fk == 1 and fk:byte(1) >= 32 and fk:byte(1) <= 126 then
+                        qchars[#qchars+1] = fk
+                        io.write(fk)
+                        io.flush()
+                    end
                 end
             elseif key == "LEFT"  or key == "h" then
                 selected_idx = math.max(1, selected_idx - 1)
@@ -897,13 +1078,16 @@ local function browse_flat(dir_path, tw, th, force_cols)
         io.flush()
         local img, err = load_image(f.path)
         local ok, thumb = false, nil
+        local orig_w, orig_h = nil, nil
         if img then
+            orig_w, orig_h = img.width, img.height
             local rw, rh = dimensions_for(img.width, img.height, tw, th)
             if rh % 2 ~= 0 then rh = rh + 1 end
             thumb = resize_bilinear(img, rw, rh); ok = true
         end
         cache[i] = { lines = render_halfblock(ok and thumb or make_error_thumb(tw, th)),
                      cw = ok and thumb.width or tw, ch = ok and thumb.height or th,
+                     orig_w = orig_w, orig_h = orig_h,
                      ok = ok, err = err }
     end
     io.write("\27[2K"); io.flush()
