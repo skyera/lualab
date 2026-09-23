@@ -839,10 +839,14 @@ local function view_fullscreen(files, initial_idx)
             show_help()
         elseif key == "o" or key == "O" then
             open_in_viewer(cur_f.path)
-        elseif key == "LEFT" or key == "h" or key == "UP" or key == "k" or key == "PAGE_UP" then
+        elseif key == "LEFT" or key == "h" or key == "UP" or key == "k" then
             cur_idx = math.max(1, cur_idx - 1)
-        elseif key == "RIGHT" or key == "l" or key == "DOWN" or key == "j" or key == "PAGE_DOWN" or key == "SPACE" then
+        elseif key == "RIGHT" or key == "l" or key == "DOWN" or key == "j" then
             cur_idx = math.min(#files, cur_idx + 1)
+        elseif key == "PAGE_UP" or key == "b" then
+            cur_idx = math.max(1, cur_idx - 10)
+        elseif key == "PAGE_DOWN" or key == "SPACE" or key == "f" then
+            cur_idx = math.min(#files, cur_idx + 10)
         elseif key == "HOME" or key == "g" then
             cur_idx = 1
         elseif key == "END" or key == "G" then
@@ -1103,9 +1107,11 @@ local function browse_tui(dir_path, tw, th, force_cols)
             elseif key == "UP"    or key == "k" then
                 selected_idx = math.max(1, selected_idx - L.cols)
             elseif key == "PAGE_DOWN" or key == "SPACE" or key == "f" then
-                selected_idx = math.min(#files, selected_idx + L.cols * L.vis_rows)
+                local page_step = L.cols * math.max(2, L.vis_rows)
+                selected_idx = math.min(#files, selected_idx + page_step)
             elseif key == "PAGE_UP" or key == "b" then
-                selected_idx = math.max(1, selected_idx - L.cols * L.vis_rows)
+                local page_step = L.cols * math.max(2, L.vis_rows)
+                selected_idx = math.max(1, selected_idx - page_step)
             elseif key == "HOME" or key == "g" then
                 selected_idx = 1
             elseif key == "END"  or key == "G" then
