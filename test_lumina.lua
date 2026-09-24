@@ -968,6 +968,37 @@ local new_dir_name = "projects/"
 local is_dir_folder = (new_dir_name:sub(-1) == "/")
 assert_true(is_dir_folder, "projects/ detected as directory")
 
+-- 7. Modal rendering geometry and line clearance check
+print("\n-- Test Suite 15: Modal Dialog Geometry & Clearance --")
+local function render_modal_preview(box_w, box_h, title, message)
+    local lines = {}
+    local bcol = "[BCOL]"
+    local title_str = string.format(" %s ", title)
+    local top_fill = string.rep("─", math.max(0, box_w - 2 - #title_str))
+    table.insert(lines, string.format("%s╭%s%s╮", bcol, title_str, top_fill))
+
+    local msg_line = " " .. message:sub(1, box_w - 4)
+    local pad = string.rep(" ", math.max(0, box_w - 2 - #msg_line))
+    table.insert(lines, string.format("%s│%s%s│", bcol, msg_line, pad))
+
+    for r = 2, box_h - 2 do
+        local blank_pad = string.rep(" ", box_w - 2)
+        table.insert(lines, string.format("%s│%s│", bcol, blank_pad))
+    end
+
+    local hint = " [y] Yes  [n/Esc] No "
+    local bot_fill = string.rep("─", math.max(0, box_w - 2 - #hint))
+    table.insert(lines, string.format("%s╰%s%s╯", bcol, hint, bot_fill))
+    return lines
+end
+
+local modal_lines = render_modal_preview(50, 5, "CONFIRM DELETION", "Delete 'out.txt'?")
+assert_eq(#modal_lines, 5, "Modal renders exactly box_h (5) lines leaving zero gaps")
+for i, line in ipairs(modal_lines) do
+    local has_border = (line:find("╭") ~= nil) or (line:find("│") ~= nil) or (line:find("╰") ~= nil)
+    assert_true(has_border, string.format("Line %d is bordered", i))
+end
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)

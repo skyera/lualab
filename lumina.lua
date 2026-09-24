@@ -1440,7 +1440,7 @@ local function show_input_modal(title, prompt_label, default_text)
 
         for r = 2, box_h - 2 do
             local blank_pad = string.rep(" ", box_w - 2)
-            table.insert(out, string.format("\27[%d;%dH%s│%s│%s", start_y + r, start_x, bcol, blank_pad, C.reset))
+            table.insert(out, string.format("\27[%d;%dH%s│%s%s│%s", start_y + r, start_x, bcol, blank_pad, bcol, C.reset))
         end
 
         local hint = " [Enter] Confirm  [Esc] Cancel "
@@ -1480,7 +1480,7 @@ end
 local function show_confirm_modal(title, message)
     local term_w, term_h = get_terminal_size()
     local box_w = math.max(40, math.min(term_w - 8, 64))
-    local box_h = 6
+    local box_h = 5
     local start_x = math.floor((term_w - box_w) / 2)
     local start_y = math.floor((term_h - box_h) / 2)
     local bcol = "\27[1;38;2;239;68;68m" -- red accent
@@ -1493,11 +1493,13 @@ local function show_confirm_modal(title, message)
 
     local msg_line = " " .. truncate(message, box_w - 4)
     local pad = string.rep(" ", math.max(0, box_w - 2 - visual_len(msg_line)))
-    table.insert(out, string.format("\27[%d;%dH%s│%s%s%s│%s",
-        start_y + 1, start_x, bcol, msg_line, pad, bcol, C.reset))
+    table.insert(out, string.format("\27[%d;%dH%s│%s%s%s%s│%s",
+        start_y + 1, start_x, bcol, C.reset .. msg_line, pad, bcol, C.reset))
 
-    local blank_pad = string.rep(" ", box_w - 2)
-    table.insert(out, string.format("\27[%d;%dH%s│%s│%s", start_y + 2, start_x, bcol, blank_pad, C.reset))
+    for r = 2, box_h - 2 do
+        local blank_pad = string.rep(" ", box_w - 2)
+        table.insert(out, string.format("\27[%d;%dH%s│%s%s│%s", start_y + r, start_x, bcol, blank_pad, bcol, C.reset))
+    end
 
     local hint = " [y] Yes  [n/Esc] No "
     local bot_fill = string.rep("─", math.max(0, box_w - 2 - visual_len(hint)))
