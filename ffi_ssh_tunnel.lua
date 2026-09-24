@@ -138,13 +138,25 @@ local ws2_32 = nil
 local kernel32 = nil
 local msvcrt = nil
 
+local function get_kernel32()
+    if not kernel32 then
+        pcall(function() kernel32 = ffi.load("kernel32") end)
+    end
+    return kernel32
+end
+
+local function get_msvcrt()
+    if not msvcrt then
+        pcall(function() msvcrt = ffi.load("msvcrt") end)
+    end
+    return msvcrt
+end
+
 local function sleep_ms(ms)
     if is_windows then
-        if not kernel32 then
-            pcall(function() kernel32 = ffi.load("kernel32") end)
-        end
-        if kernel32 then
-            kernel32.Sleep(ms)
+        local k32 = get_kernel32()
+        if k32 then
+            k32.Sleep(ms)
         else
             local t0 = os.clock()
             while os.clock() - t0 < (ms / 1000) do end
@@ -934,20 +946,6 @@ local TUI = {}
 local orig_win_in_mode = nil
 local orig_win_out_mode = nil
 
-local function get_kernel32()
-    if not kernel32 then
-        pcall(function() kernel32 = ffi.load("kernel32") end)
-    end
-    return kernel32
-end
-
-local function get_msvcrt()
-    if not msvcrt then
-        pcall(function() msvcrt = ffi.load("msvcrt") end)
-    end
-    return msvcrt
-end
-
 function TUI.set_raw_mode(enable)
     if is_windows then
         local k32 = get_kernel32()
@@ -1605,6 +1603,10 @@ local function run_self_tests()
     assert_true("Export contains Host tunnel-pg-tunnel", exported:find("Host tunnel%-pg%-tunnel") ~= nil)
     assert_true("Export contains LocalForward", exported:find("LocalForward 127%.0%.0%.1:5432 db%.internal:5432") ~= nil)
     assert_true("Export contains DynamicForward", exported:find("DynamicForward 0%.0%.0%.0:1080") ~= nil)
+
+    -- 7. Cross-Platform File Exists Verification
+    assert_true("file_exists on current script", file_exists("ffi_ssh_tunnel.lua"))
+    assert_true("file_exists returns false on nonexistent", not file_exists("/nonexistent_dummy_file_path_12345"))
 
     print("--------------------------------------------------------------------------------")
     print(string.format("Total: %d | Passed: %d | Failed: %d", passed + failed, passed, failed))
