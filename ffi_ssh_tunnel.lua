@@ -55,6 +55,9 @@ if is_windows then
         BOOL SetConsoleMode(HANDLE hConsoleHandle, DWORD dwMode);
         DWORD GetFileAttributesA(const char *lpFileName);
         void Sleep(DWORD dwMilliseconds);
+        HANDLE OpenProcess(DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD dwProcessId);
+        BOOL TerminateProcess(HANDLE hProcess, uint32_t uExitCode);
+        BOOL CloseHandle(HANDLE hObject);
 
         // Win32 CRT input
         int _kbhit(void);
@@ -292,6 +295,25 @@ local function find_pid_by_port(port)
     return nil
 end
 
+-- Force terminate a process on Windows using direct Win32 API and multi-stage taskkill fallbacks
+local function win32_kill_pid(pid)
+    local killed = false
+    local k32 = get_kernel32()
+    if k32 and k32.OpenProcess and k32.TerminateProcess then
+        local PROCESS_TERMINATE = 0x0001
+        local hProc = k32.OpenProcess(PROCESS_TERMINATE, 0, pid)
+        if hProc ~= nil and hProc ~= ffi.cast("HANDLE", 0) then
+            local res = k32.TerminateProcess(hProc, 1)
+            k32.CloseHandle(hProc)
+            if res ~= 0 then killed = true end
+        end
+    end
+    -- Fallbacks via taskkill: standard and full system root path
+    os.execute(string.format("taskkill /F /PID %d >nul 2>&1", pid))
+    os.execute(string.format("%%SystemRoot%%\\System32\\taskkill.exe /F /T /PID %d >nul 2>&1", pid))
+    return killed
+end
+
 -- Release/kill process holding a given port
 local function release_port(port, host)
     port = tonumber(port)
@@ -306,17 +328,37 @@ local function release_port(port, host)
     local pid = find_pid_by_port(port)
 
     if is_windows then
-        if not pid then
-            return false, string.format("Could not determine PID holding port %d to terminate.", port)
-        end
-        -- Terminate process forcefully via taskkill on Windows
-        os.execute(string.format("taskkill /F /PID %d >nul 2>&1", pid))
-        sleep_ms(200)
-        local now_free = probe_port_available(port, host)
-        if now_free then
-            return true, string.format("Terminated PID %d. Port %d is now FREE & AVAILABLE!", pid, port)
+        if pid then
+            win32_kill_pid(pid)
         else
-            return false, string.format("Executed taskkill on PID %d, but port %d is still in use.", pid, port)
+            -- If PID couldn't be parsed from netstat, try killing any hanging background ssh.exe
+            os.execute("taskkill /F /IM ssh.exe >nul 2>&1")
+            os.execute("%SystemRoot%\\System32\\taskkill.exe /F /IM ssh.exe >nul 2>&1")
+        end
+
+        -- Give Windows TCP stack and kernel up to 400ms to release socket binding
+        for _ = 1, 4 do
+            sleep_ms(100)
+            local now_free = probe_port_available(port, host)
+            if now_free then
+                if pid then
+                    return true, string.format("Terminated PID %d. Port %d is now FREE & AVAILABLE!", pid, port)
+                else
+                    return true, string.format("Terminated ssh processes. Port %d is now FREE & AVAILABLE!", port)
+                end
+            end
+        end
+
+        -- Check one more time
+        local final_free = probe_port_available(port, host)
+        if final_free then
+            return true, string.format("Port %d is now FREE & AVAILABLE!", port)
+        else
+            if pid then
+                return false, string.format("Attempted to terminate PID %d, but port %d is still in use.", pid, port)
+            else
+                return false, string.format("Could not determine PID holding port %d to terminate.", port)
+            end
         end
     end
 
