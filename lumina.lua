@@ -760,6 +760,25 @@ local function edit_text_file(path)
     return ok
 end
 
+local function spawn_subshell(target_dir)
+    local shell = os.getenv("SHELL") or (is_windows and (os.getenv("COMSPEC") or "cmd.exe") or "sh")
+    disable_raw_mode()
+    io.write("\27[H\27[2J")
+    io.flush()
+    print(string.format("\27[1;36m[Lumina] Spawning subshell in %s (type 'exit' to return)...\27[0m\n", target_dir))
+    local cmd
+    if is_windows then
+        cmd = string.format('cd /d %s && %s', shell_quote(target_dir), shell)
+    else
+        cmd = string.format('cd %s && %s', shell_quote(target_dir), shell)
+    end
+    local ok = os.execute(cmd)
+    enable_raw_mode()
+    io.write("\27[H\27[2J")
+    io.flush()
+    return ok
+end
+
 local function get_file_type_info(entry)
     if entry.is_dir then
         return "📁", C.dir_col
@@ -2331,6 +2350,13 @@ local function main(args)
                 else
                     needs_redraw = true
                 end
+            elseif k == "S" then
+                -- S: Spawn interactive subshell in current directory
+                spawn_subshell(current_dir)
+                clear_preview_cache()
+                preview_pending = true
+                reload_current()
+                needs_redraw = true
             elseif k == "y" then
                 -- y: Yank (Copy) tagged items or current item
                 local targets = get_targets_for_op()

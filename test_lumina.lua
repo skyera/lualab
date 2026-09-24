@@ -1151,6 +1151,26 @@ if sim_jump_mode_2 and missing_key:match("^[a-zA-Z0-9]$") then
 end
 assert_eq(sim_curr_dir, "/home/user/projects/lualab", "Current dir unchanged when jumping to unset mark")
 
+-- Test Suite 19: Subshell (S) Command Construction
+print("\n-- Test Suite 19: Subshell Spawning --")
+local function build_subshell_cmd(target_dir, shell_bin, is_win)
+    local function sim_shell_quote(path)
+        if is_win then return '"' .. path:gsub('"', '\\"') .. '"' end
+        return "'" .. path:gsub("'", "'\\''") .. "'"
+    end
+    if is_win then
+        return string.format('cd /d %s && %s', sim_shell_quote(target_dir), shell_bin)
+    else
+        return string.format('cd %s && %s', sim_shell_quote(target_dir), shell_bin)
+    end
+end
+
+local posix_cmd = build_subshell_cmd("/home/user/my folder", "/bin/bash", false)
+assert_eq(posix_cmd, "cd '/home/user/my folder' && /bin/bash", "POSIX subshell command quotes directory properly")
+
+local win_cmd = build_subshell_cmd("C:\\My Projects", "cmd.exe", true)
+assert_eq(win_cmd, 'cd /d "C:\\My Projects" && cmd.exe', "Windows subshell command uses /d and quotes properly")
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)
