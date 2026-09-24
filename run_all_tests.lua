@@ -28,6 +28,7 @@ local test_suites = {
     { file = "test_lumina.lua", description = "lumina — Miller Columns File Manager Suite" },
     { file = "test_ffi_thumbnailer.lua", description = "ffi_thumbnailer — TUI Image Thumbnail Browser Suite" },
     { file = "test_ffi_midi_keyboard.lua", description = "ffi_midi_keyboard — Real-time Synthesizer & Piano Suite" },
+    { file = "test_ffi_elf_inspector.lua", description = "ffi_elf_inspector — Linux ELF Binary Analyzer & Symbol Disassembler Suite" },
 }
 
 local luajit_bin = "luajit"

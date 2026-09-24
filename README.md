@@ -74,6 +74,7 @@ make
   ./LuaJIT/src/luajit ffi_image_defect_detector.lua --demo # Optical defect inspector & dynamic PCB image diff engine
   ./LuaJIT/src/luajit ffi_wafer_d2d_inspector.lua # Semiconductor 300mm wafer Die-to-Die (D2D) inspection & KLARF exporter
   ./LuaJIT/src/luajit ffi_midi_keyboard.lua       # Real-time interactive synthesizer, visual piano keyboard & oscilloscope
+  ./LuaJIT/src/luajit ffi_elf_inspector.lua <bin> # Interactive ELF binary analyzer, symbol inspector & disassembler
   ```
 
 - **Run Unit Tests:**
