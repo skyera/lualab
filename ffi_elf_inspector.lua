@@ -694,27 +694,17 @@ local function run_tui(elf_info)
         local sub_pad = string.rep(" ", math.max(0, cols - #sub:gsub("\27%[[0-9;]*m", "")))
         table.insert(buf, "\27[48;5;234m" .. sub .. sub_pad .. "\27[0m\n")
 
-        -- Tab Navigation & Search Bar
+        -- Tab Navigation Bar
         local t1 = (state.tab == 1 and "\27[7m [1] Functions \27[0m" or " [1] Functions ")
         local t2 = (state.tab == 2 and "\27[7m [2] Sections \27[0m" or " [2] Sections ")
         local t3 = (state.tab == 3 and "\27[7m [3] Imports \27[0m" or " [3] Imports ")
         local t4 = (state.tab == 4 and "\27[7m [4] Top Bloat \27[0m" or " [4] Top Bloat ")
         local tabs = t1 .. t2 .. t3 .. t4
 
-        local search_str = ""
-        if state.is_searching then
-            search_str = string.format(" \27[33mSearch: %s_\27[0m", state.filter_text)
-        elseif #state.filter_text > 0 then
-            search_str = string.format(" \27[36mFilter: %s (Esc to clear)\27[0m", state.filter_text)
-        else
-            search_str = " \27[90m[/] Search\27[0m"
-        end
-
         local left_w = math.floor(cols * 0.48)
         local right_w = cols - left_w - 3
-        local tab_line = string.format("%s%s", tabs, search_str)
-        local tab_clean_len = #tab_line:gsub("\27%[[0-9;]*m", "")
-        table.insert(buf, tab_line .. string.rep(" ", math.max(0, cols - tab_clean_len)) .. "\n")
+        local tab_clean_len = #tabs:gsub("\27%[[0-9;]*m", "")
+        table.insert(buf, tabs .. string.rep(" ", math.max(0, cols - tab_clean_len)) .. "\n")
 
         -- Divider Line
         local div_left = string.rep("─", left_w)
@@ -843,12 +833,22 @@ local function run_tui(elf_info)
             table.insert(buf, full_left .. "\27[90m│\27[0m" .. r_line .. pad_right .. "\27[0m\n")
         end
 
-        -- Footer Status Bar
-        local footer_bg = "\27[48;5;236m\27[38;5;250m"
-        local item_count = string.format(" [%d/%d items] ", #list > 0 and state.cursor or 0, #list)
-        local hints = " [Tab] Next Tab  [Shift-Tab] Prev Tab  [←/→/p] Pane  [d] Disasm  [h] Hex  [?] Help  [q] Quit "
-        local f_pad = string.rep(" ", math.max(0, cols - #item_count - #hints))
-        table.insert(buf, footer_bg .. item_count .. f_pad .. hints .. "\27[0m")
+        -- Footer Status Bar (Vim-style bottom line)
+        if state.is_searching then
+            local prompt = string.format(" /%s\27[7m \27[0m", state.filter_text)
+            local match_info = string.format(" [%d matches | Enter: Accept | Esc: Cancel] ", #list)
+            local clean_prompt = #prompt:gsub("\27%[[0-9;]*m", "")
+            local f_pad = string.rep(" ", math.max(0, cols - clean_prompt - #match_info))
+            table.insert(buf, "\27[48;5;234m\27[38;5;255m\27[1m" .. prompt .. "\27[0m\27[48;5;234m\27[38;5;244m" .. f_pad .. match_info .. "\27[0m")
+        else
+            local footer_bg = "\27[48;5;236m\27[38;5;250m"
+            local filter_tag = (#state.filter_text > 0) and string.format(" \27[33m[Filter: \"%s\" (Esc to clear)]\27[0m", state.filter_text) or ""
+            local item_count = string.format(" [%d/%d items]%s ", #list > 0 and state.cursor or 0, #list, filter_tag)
+            local hints = " [/] Search  [Tab] Next Tab  [←/→/p] Pane  [d] Disasm  [h] Hex  [?] Help  [q] Quit "
+            local clean_count = #item_count:gsub("\27%[[0-9;]*m", "")
+            local f_pad = string.rep(" ", math.max(0, cols - clean_count - #hints))
+            table.insert(buf, footer_bg .. item_count .. f_pad .. hints .. "\27[0m")
+        end
 
         -- Help Modal Overlay
         if state.show_help then
@@ -940,21 +940,26 @@ local function run_tui(elf_info)
                     state.show_help = false
                 end
             elseif state.is_searching then
-            if k == "enter" or k == "esc" then
-                state.is_searching = false
-            elseif k == "backspace" then
-                if #state.filter_text > 0 then
-                    state.filter_text = state.filter_text:sub(1, -2)
+                if k == "enter" then
+                    state.is_searching = false
+                elseif k == "esc" then
+                    state.is_searching = false
+                    state.filter_text = ""
                     state.cursor = 1
                     state.scroll = 0
-                else
-                    state.is_searching = false
+                elseif k == "backspace" then
+                    if #state.filter_text > 0 then
+                        state.filter_text = state.filter_text:sub(1, -2)
+                        state.cursor = 1
+                        state.scroll = 0
+                    else
+                        state.is_searching = false
+                    end
+                elseif k and #k == 1 and k:byte(1) >= 32 and k:byte(1) <= 126 then
+                    state.filter_text = state.filter_text .. k
+                    state.cursor = 1
+                    state.scroll = 0
                 end
-            elseif k and #k == 1 and k:byte(1) >= 32 and k:byte(1) <= 126 then
-                state.filter_text = state.filter_text .. k
-                state.cursor = 1
-                state.scroll = 0
-            end
         else
             if k == "?" then
                 state.show_help = true
@@ -987,6 +992,9 @@ local function run_tui(elf_info)
                 state.view_mode = "hex"; state.right_scroll = 0
             elseif k == "/" then
                 state.is_searching = true
+                state.filter_text = ""
+                state.cursor = 1
+                state.scroll = 0
             elseif k == "esc" then
                 if #state.filter_text > 0 then
                     state.filter_text = ""

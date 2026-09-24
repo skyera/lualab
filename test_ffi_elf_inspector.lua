@@ -73,6 +73,11 @@ local tests = {
         name = "TUI [?] interactive help cheat sheet modal defined",
         cmd = "grep -n \"ELF Inspector Keybindings Help\" ffi_elf_inspector.lua",
         expect = "ELF Inspector Keybindings Help"
+    },
+    {
+        name = "Vim-style bottom line search bar definition",
+        cmd = "grep -n \"Vim-style bottom line\" ffi_elf_inspector.lua",
+        expect = "Vim-style bottom line"
     }
 }
 
