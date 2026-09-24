@@ -27,6 +27,7 @@
       * /                : Instant fuzzy in-directory filter
       * f / Ctrl+P       : Global recursive fuzzy file finder
       * t / T            : Cycle color theme forward / backward
+      * s                : Sort mode menu (Name, Size, Time, Ext)
       * .                : Toggle hidden files (dotfiles)
       * r                : Refresh current directory
       * q / ESC          : Quit
@@ -797,6 +798,7 @@ if is_windows then
                 local is_dir = (bit.band(fd.dwFileAttributes, 0x10) ~= 0)
                 local is_symlink = (bit.band(fd.dwFileAttributes, 0x400) ~= 0)
                 local size = tonumber(fd.nFileSizeHigh) * 4294967296 + tonumber(fd.nFileSizeLow)
+                local mtime = tonumber(fd.ftLastWriteTime.dwHighDateTime) * 4294967296 + tonumber(fd.ftLastWriteTime.dwLowDateTime)
 
                 local ext = name:match("%.([^.]+)$")
                 ext = ext and ext:lower() or ""
@@ -807,6 +809,7 @@ if is_windows then
                     path = full_path,
                     ext = ext,
                     size = size,
+                    mtime = mtime,
                     size_str = format_bytes(size),
                     is_dir = is_dir,
                     is_exec = is_exec,
@@ -868,6 +871,7 @@ else
             if name ~= "." and name ~= ".." and (show_hidden or name:sub(1, 1) ~= ".") then
                 local full_path = (dir_path == "/" and ("/" .. name) or (dir_path .. "/" .. name))
                 local size = 0
+                local mtime = 0
                 local is_dir = (ent.d_type == 4) -- DT_DIR
                 local is_exec = false
                 local is_symlink = (ent.d_type == 10) -- DT_LNK
@@ -877,6 +881,7 @@ else
                     is_dir = (bit.band(mode, 0xF000) == 0x4000) -- S_ISDIR
                     is_exec = (bit.band(mode, 0x49) ~= 0)        -- S_IXUSR / S_IXGRP / S_IXOTH
                     size = tonumber(st.st_size)
+                    mtime = tonumber(st.st_mtime)
                 end
 
                 local ext = name:match("%.([^.]+)$")
@@ -887,6 +892,7 @@ else
                     path = full_path,
                     ext = ext,
                     size = size,
+                    mtime = mtime,
                     size_str = format_bytes(size),
                     is_dir = is_dir,
                     is_exec = is_exec,
@@ -921,6 +927,38 @@ else
         if not parent or parent == "" then return "/" end
         return parent
     end
+end
+
+local function sort_entries(entries, mode)
+    mode = mode or "name_asc"
+    table.sort(entries, function(a, b)
+        if a.is_dir ~= b.is_dir then
+            return a.is_dir
+        end
+        if mode == "name_desc" then
+            return a.name:lower() > b.name:lower()
+        elseif mode == "size" then
+            if a.size ~= b.size then
+                return a.size > b.size
+            end
+            return a.name:lower() < b.name:lower()
+        elseif mode == "mtime" then
+            if (a.mtime or 0) ~= (b.mtime or 0) then
+                return (a.mtime or 0) > (b.mtime or 0)
+            end
+            return a.name:lower() < b.name:lower()
+        elseif mode == "ext" then
+            local a_ext = (a.ext or ""):lower()
+            local b_ext = (b.ext or ""):lower()
+            if a_ext ~= b_ext then
+                return a_ext < b_ext
+            end
+            return a.name:lower() < b.name:lower()
+        else -- default name_asc
+            return a.name:lower() < b.name:lower()
+        end
+    end)
+    return entries
 end
 
 local function is_root_dir(p)
@@ -1510,10 +1548,18 @@ local function main(args)
     end
     local show_hidden = false
     local filter_query = ""
+    local sort_mode = "name_asc"
+    local sort_labels = {
+        name_asc  = "Name ↑",
+        name_desc = "Name ↓",
+        size      = "Size ↓",
+        mtime     = "Time ↓",
+        ext       = "Ext ↑",
+    }
     local start_dir = current_dir
 
     local sel_index = 1
-    local current_entries = read_dir_entries(current_dir, show_hidden)
+    local current_entries = sort_entries(read_dir_entries(current_dir, show_hidden), sort_mode)
     if initial_selection_name then
         for idx, entry in ipairs(current_entries) do
             if entry.name == initial_selection_name then
@@ -1530,6 +1576,7 @@ local function main(args)
     local needs_redraw = true
     local is_searching = false
     local search_query = ""
+    local is_sorting = false
     local g_prefix = false
     local preview_pending = true
     local last_w, last_h = get_terminal_size()
@@ -1560,6 +1607,8 @@ local function main(args)
                 table.insert(filtered, item.entry)
             end
             current_entries = filtered
+        else
+            current_entries = sort_entries(current_entries, sort_mode)
         end
         parent_dir = get_parent_dir(current_dir)
         parent_entries = is_root_dir(current_dir) and {} or read_dir_entries(parent_dir, show_hidden)
@@ -1630,7 +1679,7 @@ local function main(args)
             end
 
             -- Column 2: Current Directory (Active Cursor)
-            local cur_title = get_dir_display_name(current_dir)
+            local cur_title = string.format("%s [%s]", get_dir_display_name(current_dir), sort_labels[sort_mode] or sort_mode)
             draw_pane(out, col2_x, start_y, col2_w, usable_h, cur_title, true)
 
             -- Scroll offset for current directory
@@ -1685,12 +1734,16 @@ local function main(args)
             if is_searching then
                 status_text = string.format("%s/%s\27[7m \27[0m", C.status_accent or "\27[1;38;2;251;191;36m", search_query)
                 help_hint = "\27[90m[Enter] Confirm  [Esc] Cancel  [↑/↓] Select\27[0m"
+            elseif is_sorting then
+                status_text = string.format("%sSORT BY:%s [n] Name  [s] Size  [m] Time  [e] Ext  [r] Reverse",
+                    C.bold .. (C.status_accent or "\27[1;38;2;251;191;36m"), C.reset)
+                help_hint = "\27[90m[Esc] Cancel\27[0m"
             elseif #filter_query > 0 then
                 status_text = string.format("%sFilter: /%s\27[0m", C.status_accent or "\27[1;38;2;251;191;36m", filter_query)
-                help_hint = "[h/l] Nav  [H] Start  [j/k] Move  [/] Filter  [f] Find  [Esc] Clear  [q] Quit"
+                help_hint = "[h/l] Nav  [H] Start  [s] Sort  [j/k] Move  [/] Filter  [f] Find  [Esc] Clear  [q] Quit"
             else
                 status_text = string.format("%s%s%s", C.dim, sel_entry and sel_entry.path or current_dir, C.reset)
-                help_hint = "[h/l] Nav  [H/gh] Start  [~] Home  [j/k] Move  [/] Filter  [f] Find  [q] Quit"
+                help_hint = "[h/l] Nav  [H/gh] Start  [~] Home  [s] Sort  [j/k] Move  [/] Filter  [f] Find  [q] Quit"
             end
             local footer_line = string.format("\27[%d;1H\27[2K  %s \27[90m│\27[0m \27[90m%s\27[0m",
                 footer_y, status_text, help_hint)
@@ -1740,6 +1793,28 @@ local function main(args)
                     sel_index = 1
                     reload_current()
                 end
+            elseif is_sorting then
+                is_sorting = false
+                if k == "n" then
+                    sort_mode = (sort_mode == "name_asc") and "name_desc" or "name_asc"
+                    reload_current()
+                elseif k == "s" then
+                    sort_mode = "size"
+                    reload_current()
+                elseif k == "m" or k == "t" then
+                    sort_mode = "mtime"
+                    reload_current()
+                elseif k == "e" then
+                    sort_mode = "ext"
+                    reload_current()
+                elseif k == "r" then
+                    if sort_mode == "name_asc" then sort_mode = "name_desc"
+                    elseif sort_mode == "name_desc" then sort_mode = "name_asc"
+                    end
+                    reload_current()
+                end
+            elseif k == "s" and not g_prefix then
+                is_sorting = true
             elseif k == "q" or k == "ESC" then
                 if #filter_query > 0 then
                     filter_query = ""
@@ -1950,6 +2025,7 @@ local M = {
     is_text_file        = is_text_file,
     resolve_text_editor = resolve_text_editor,
     read_dir_entries    = read_dir_entries,
+    sort_entries        = sort_entries,
     main                = main,
 }
 

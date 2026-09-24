@@ -702,9 +702,115 @@ sim_cur_dir = "/usr/local/bin"
 sim_nav_key("~")
 assert_eq(sim_cur_dir, sim_home_dir, "Pressing '~' jumps to user home directory")
 
+-- Test Suite 12: Directory Sorting Modes (Name, Size, Time, Ext)
+print("\n-- Test Suite 12: Directory Sorting Modes (Name, Size, Time, Ext) --")
+
+local dummy_entries = {
+    { name = "zeta.txt",   path = "/test/zeta.txt",   ext = "txt",  size = 500,  mtime = 1000, is_dir = false },
+    { name = "alpha.lua",  path = "/test/alpha.lua",  ext = "lua",  size = 2000, mtime = 3000, is_dir = false },
+    { name = "beta.c",     path = "/test/beta.c",     ext = "c",    size = 100,  mtime = 2000, is_dir = false },
+    { name = "dir_b",      path = "/test/dir_b",      ext = "",     size = 4096, mtime = 500,  is_dir = true },
+    { name = "dir_a",      path = "/test/dir_a",      ext = "",     size = 4096, mtime = 800,  is_dir = true },
+}
+
+local function clone_dummy()
+    local t = {}
+    for _, e in ipairs(dummy_entries) do
+        table.insert(t, {
+            name = e.name, path = e.path, ext = e.ext,
+            size = e.size, mtime = e.mtime, is_dir = e.is_dir,
+        })
+    end
+    return t
+end
+
+-- 1. Sort by name_asc: Directories first (dir_a, dir_b), then files (alpha.lua, beta.c, zeta.txt)
+local s1 = lumina.sort_entries(clone_dummy(), "name_asc")
+assert_true(s1[1].is_dir and s1[1].name == "dir_a", "name_asc: first item is dir_a")
+assert_true(s1[2].is_dir and s1[2].name == "dir_b", "name_asc: second item is dir_b")
+assert_eq(s1[3].name, "alpha.lua", "name_asc: third item is alpha.lua")
+assert_eq(s1[4].name, "beta.c", "name_asc: fourth item is beta.c")
+assert_eq(s1[5].name, "zeta.txt", "name_asc: fifth item is zeta.txt")
+
+-- 2. Sort by name_desc: Directories first (dir_b, dir_a), then files (zeta.txt, beta.c, alpha.lua)
+local s2 = lumina.sort_entries(clone_dummy(), "name_desc")
+assert_true(s2[1].is_dir and s2[1].name == "dir_b", "name_desc: first item is dir_b")
+assert_true(s2[2].is_dir and s2[2].name == "dir_a", "name_desc: second item is dir_a")
+assert_eq(s2[3].name, "zeta.txt", "name_desc: third item is zeta.txt")
+assert_eq(s2[4].name, "beta.c", "name_desc: fourth item is beta.c")
+assert_eq(s2[5].name, "alpha.lua", "name_desc: fifth item is alpha.lua")
+
+-- 3. Sort by size (descending size for files): alpha.lua (2000), zeta.txt (500), beta.c (100)
+local s3 = lumina.sort_entries(clone_dummy(), "size")
+assert_true(s3[1].is_dir and s3[2].is_dir, "size: directories remain on top")
+assert_eq(s3[3].name, "alpha.lua", "size: largest file is alpha.lua (2000 bytes)")
+assert_eq(s3[4].name, "zeta.txt", "size: middle file is zeta.txt (500 bytes)")
+assert_eq(s3[5].name, "beta.c", "size: smallest file is beta.c (100 bytes)")
+
+-- 4. Sort by mtime (newest first): alpha.lua (3000), beta.c (2000), zeta.txt (1000)
+local s4 = lumina.sort_entries(clone_dummy(), "mtime")
+assert_true(s4[1].is_dir and s4[2].is_dir, "mtime: directories remain on top")
+assert_eq(s4[3].name, "alpha.lua", "mtime: newest file is alpha.lua (mtime 3000)")
+assert_eq(s4[4].name, "beta.c", "mtime: middle file is beta.c (mtime 2000)")
+assert_eq(s4[5].name, "zeta.txt", "mtime: oldest file is zeta.txt (mtime 1000)")
+
+-- 5. Sort by ext: c (beta.c), lua (alpha.lua), txt (zeta.txt)
+local s5 = lumina.sort_entries(clone_dummy(), "ext")
+assert_true(s5[1].is_dir and s5[2].is_dir, "ext: directories remain on top")
+assert_eq(s5[3].name, "beta.c", "ext: first ext is .c (beta.c)")
+assert_eq(s5[4].name, "alpha.lua", "ext: second ext is .lua (alpha.lua)")
+assert_eq(s5[5].name, "zeta.txt", "ext: third ext is .txt (zeta.txt)")
+
+-- 6. Interactive sort state machine simulation
+local sim_mode = "name_asc"
+local sim_sorting = false
+local function sim_sort_event(k)
+    if sim_sorting then
+        sim_sorting = false
+        if k == "n" then
+            sim_mode = (sim_mode == "name_asc") and "name_desc" or "name_asc"
+        elseif k == "s" then
+            sim_mode = "size"
+        elseif k == "m" or k == "t" then
+            sim_mode = "mtime"
+        elseif k == "e" then
+            sim_mode = "ext"
+        elseif k == "r" then
+            if sim_mode == "name_asc" then sim_mode = "name_desc"
+            elseif sim_mode == "name_desc" then sim_mode = "name_asc" end
+        end
+    elseif k == "s" then
+        sim_sorting = true
+    end
+end
+
+assert_false(sim_sorting, "Sorting modal inactive initially")
+sim_sort_event("s")
+assert_true(sim_sorting, "Pressing 's' activates sort prompt")
+sim_sort_event("s")
+assert_false(sim_sorting, "Sort prompt closed after option selection")
+assert_eq(sim_mode, "size", "Sort mode changed to 'size'")
+
+sim_sort_event("s")
+sim_sort_event("m")
+assert_eq(sim_mode, "mtime", "Sort mode changed to 'mtime'")
+
+sim_sort_event("s")
+sim_sort_event("e")
+assert_eq(sim_mode, "ext", "Sort mode changed to 'ext'")
+
+sim_sort_event("s")
+sim_sort_event("n")
+assert_eq(sim_mode, "name_asc", "Sort mode changed to 'name_asc'")
+
+sim_sort_event("s")
+sim_sort_event("n")
+assert_eq(sim_mode, "name_desc", "Pressing 'n' again toggles to 'name_desc'")
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)
 end
+
 
 
