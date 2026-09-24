@@ -1493,7 +1493,7 @@ local function show_confirm_modal(title, message)
 
     local msg_line = " " .. truncate(message, box_w - 4)
     local pad = string.rep(" ", math.max(0, box_w - 2 - visual_len(msg_line)))
-    table.insert(out, string.format("\27[%d;%dH%s│%s%s%s%s│%s",
+    table.insert(out, string.format("\27[%d;%dH%s│%s%s%s│%s",
         start_y + 1, start_x, bcol, C.reset .. msg_line, pad, bcol, C.reset))
 
     for r = 2, box_h - 2 do

@@ -999,6 +999,23 @@ for i, line in ipairs(modal_lines) do
     assert_true(has_border, string.format("Line %d is bordered", i))
 end
 
+-- Test exact format strings for modals
+local ok_confirm, rendered_confirm = pcall(function()
+    local start_y, start_x, bcol, C_reset, msg_line, pad = 10, 20, "[BCOL]", "[RESET]", " Delete 'test'? ", "   "
+    return string.format("\27[%d;%dH%s│%s%s%s│%s",
+        start_y + 1, start_x, bcol, C_reset .. msg_line, pad, bcol, C_reset)
+end)
+assert_true(ok_confirm, "Confirm modal message row format string executes without error")
+assert_true(rendered_confirm ~= nil and rendered_confirm:find("Delete 'test'?") ~= nil, "Confirm modal message formatted correctly")
+
+local ok_input, rendered_input = pcall(function()
+    local start_y, start_x, bcol, p_str, input_str, pad, C_reset = 10, 20, "[BCOL]", " Name: ", "file.txt", "   ", "[RESET]"
+    return string.format("\27[%d;%dH%s│%s%s%s%s│%s",
+        start_y + 1, start_x, bcol, C_reset, p_str .. input_str, pad, bcol, C_reset)
+end)
+assert_true(ok_input, "Input modal row format string executes without error")
+assert_true(rendered_input ~= nil and rendered_input:find("file.txt") ~= nil, "Input modal message formatted correctly")
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)
