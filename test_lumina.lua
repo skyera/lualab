@@ -1171,6 +1171,34 @@ assert_eq(posix_cmd, "cd '/home/user/my folder' && /bin/bash", "POSIX subshell c
 local win_cmd = build_subshell_cmd("C:\\My Projects", "cmd.exe", true)
 assert_eq(win_cmd, 'cd /d "C:\\My Projects" && cmd.exe', "Windows subshell command uses /d and quotes properly")
 
+-- Test Suite 20: Fast Scanner (fd / find) & Exclusions
+print("\n-- Test Suite 20: Fast Scanner & Exclusions --")
+local function build_fd_cmd(root_dir, show_hidden)
+    local hidden_flag = show_hidden and "-H " or ""
+    return string.format("fd -t f %s-E .git -E node_modules -E .hg -E .svn -E .cache . '%s'",
+        hidden_flag, root_dir)
+end
+
+local function build_find_cmd(root_dir, show_hidden)
+    local prune_hidden = show_hidden and "" or "-o -name '.*'"
+    return string.format("find '%s' -type d \\( -name .git -o -name node_modules -o -name .hg -o -name .svn -o -name .cache %s \\) -prune -o -type f -print",
+        root_dir, prune_hidden)
+end
+
+local fd_c = build_fd_cmd("/home/zliu/test", false)
+assert_true(fd_c:find("-E .git") ~= nil, "fd command ignores .git")
+assert_true(fd_c:find("-E node_modules") ~= nil, "fd command ignores node_modules")
+assert_true(fd_c:find("-E .cache") ~= nil, "fd command ignores .cache")
+assert_true(fd_c:find("-H") == nil, "fd command does not include -H when show_hidden is false")
+
+local fd_c_hidden = build_fd_cmd("/home/zliu/test", true)
+assert_true(fd_c_hidden:find("-H") ~= nil, "fd command includes -H when show_hidden is true")
+
+local find_c = build_find_cmd("/home/zliu/test", false)
+assert_true(find_c:find("-name .git") ~= nil, "find command prunes .git")
+assert_true(find_c:find("-name node_modules") ~= nil, "find command prunes node_modules")
+assert_true(find_c:find("-prune") ~= nil, "find command uses -prune")
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)

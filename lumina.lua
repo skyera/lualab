@@ -997,19 +997,125 @@ end
 
 -- =========================================================================
 -- Recursive Directory Scanner for Global Fuzzy Search
--- Traverses subdirectories up to max_depth and max_files to ensure responsiveness.
+-- Uses native 'fd' or 'find' when available, ignoring .git, node_modules, etc.,
+-- with no artificial max_files limits.
 -- =========================================================================
-local function scan_files_recursive(root_dir, max_files, max_depth, show_hidden)
-    max_files = max_files or 2000
-    max_depth = max_depth or 5
-    local results = {}
+local function create_file_entry_from_path(full_path, root_dir)
+    local name = full_path:match("([^/\\]+)[/\\]?$") or full_path
+    local ext = name:match("%.([^.]+)$")
+    ext = ext and ext:lower() or ""
 
+    local rel_path = full_path
+    if rel_path:sub(1, #root_dir) == root_dir then
+        rel_path = rel_path:sub(#root_dir + 1):gsub("^[/\\]+", "")
+    end
+    rel_path = (#rel_path > 0) and rel_path or name
+
+    local size = 0
+    local mtime = 0
+    local is_dir = false
+    local is_exec = false
+    local is_symlink = false
+
+    if is_windows then
+        local fd = ffi.new("WIN32_FIND_DATAA")
+        local hFind = kernel32.FindFirstFileA(full_path, fd)
+        if hFind ~= ffi.cast("void*", -1) and hFind ~= nil then
+            is_dir = (bit.band(fd.dwFileAttributes, 0x10) ~= 0)
+            is_symlink = (bit.band(fd.dwFileAttributes, 0x400) ~= 0)
+            size = tonumber(fd.nFileSizeHigh) * 4294967296 + tonumber(fd.nFileSizeLow)
+            mtime = tonumber(fd.ftLastWriteTime.dwHighDateTime) * 4294967296 + tonumber(fd.ftLastWriteTime.dwLowDateTime)
+            kernel32.FindClose(hFind)
+        end
+        is_exec = (ext == "exe" or ext == "bat" or ext == "cmd" or ext == "ps1")
+    else
+        local st = ffi.new("struct stat")
+        if posix_stat(full_path, st) == 0 then
+            local mode = tonumber(st.st_mode)
+            is_dir = (bit.band(mode, 0xF000) == 0x4000)
+            is_exec = (bit.band(mode, 0x49) ~= 0)
+            size = tonumber(st.st_size)
+            mtime = tonumber(st.st_mtime)
+        end
+    end
+
+    return {
+        name = name,
+        path = full_path,
+        rel_path = rel_path,
+        ext = ext,
+        size = size,
+        mtime = mtime,
+        size_str = format_bytes(size),
+        is_dir = is_dir,
+        is_exec = is_exec,
+        is_symlink = is_symlink,
+    }
+end
+
+local function scan_files_recursive(root_dir, show_hidden)
+    local results = {}
+    local seen = {}
+
+    -- 1. Try 'fd' or 'fdfind'
+    local fd_cmd_name = nil
+    if is_command_available("fd") then
+        fd_cmd_name = "fd"
+    elseif is_command_available("fdfind") then
+        fd_cmd_name = "fdfind"
+    end
+
+    if fd_cmd_name then
+        local hidden_flag = show_hidden and "-H " or ""
+        local cmd = string.format("%s -t f %s-E .git -E node_modules -E .hg -E .svn -E .cache . %s 2>%s",
+            fd_cmd_name, hidden_flag, shell_quote(root_dir), devnull)
+        local pipe = io.popen(cmd, "r")
+        if pipe then
+            for line in pipe:lines() do
+                line = line:gsub("[\r\n]", "")
+                if #line > 0 then
+                    -- If fd returns relative path, resolve against root_dir
+                    local full_path
+                    if line:sub(1, 1) == "/" or line:match("^[a-zA-Z]:") then
+                        full_path = line
+                    else
+                        full_path = (root_dir == "/" and ("/" .. line) or (root_dir .. "/" .. line))
+                    end
+                    if not seen[full_path] then
+                        seen[full_path] = true
+                        table.insert(results, create_file_entry_from_path(full_path, root_dir))
+                    end
+                end
+            end
+            pipe:close()
+            if #results > 0 then return results end
+        end
+    end
+
+    -- 2. Try POSIX 'find' if on Linux/macOS
+    if not is_windows and is_command_available("find") then
+        local prune_hidden = show_hidden and "" or "-o -name '.*'"
+        local cmd = string.format("find %s -type d \\( -name .git -o -name node_modules -o -name .hg -o -name .svn -o -name .cache %s \\) -prune -o -type f -print 2>%s",
+            shell_quote(root_dir), prune_hidden, devnull)
+        local pipe = io.popen(cmd, "r")
+        if pipe then
+            for line in pipe:lines() do
+                line = line:gsub("[\r\n]", "")
+                if #line > 0 and not seen[line] then
+                    seen[line] = true
+                    table.insert(results, create_file_entry_from_path(line, root_dir))
+                end
+            end
+            pipe:close()
+            if #results > 0 then return results end
+        end
+    end
+
+    -- 3. Fallback: Pure Lua recursive walker without artificial max_files cap
     local function walk(dir, depth)
-        if depth > max_depth or #results >= max_files then return end
+        if depth > 24 then return end
         local entries = read_dir_entries(dir, show_hidden)
         for _, e in ipairs(entries) do
-            if #results >= max_files then break end
-            -- Compute relative path from root_dir for cleaner display and matching
             local rel_path = e.path
             if rel_path:sub(1, #root_dir) == root_dir then
                 rel_path = rel_path:sub(#root_dir + 1):gsub("^[/\\]+", "")
@@ -1018,8 +1124,7 @@ local function scan_files_recursive(root_dir, max_files, max_depth, show_hidden)
             table.insert(results, e)
 
             if e.is_dir and not e.is_symlink then
-                -- Avoid recursive descent into version control or node_modules
-                if e.name ~= ".git" and e.name ~= "node_modules" and e.name ~= ".hg" and e.name ~= ".svn" then
+                if e.name ~= ".git" and e.name ~= "node_modules" and e.name ~= ".hg" and e.name ~= ".svn" and e.name ~= ".cache" then
                     walk(e.path, depth + 1)
                 end
             end
@@ -1283,7 +1388,7 @@ end
 -- Recursive fuzzy file search across project tree with live ranking and instant preview
 -- =========================================================================
 local function show_fuzzy_finder(root_dir, show_hidden)
-    local all_files = scan_files_recursive(root_dir, 3000, 6, show_hidden)
+    local all_files = scan_files_recursive(root_dir, show_hidden)
     local query = ""
     local sel_idx = 1
     local scroll_offset = 0
