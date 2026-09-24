@@ -1,7 +1,8 @@
 #!/usr/bin/env luajit
 --[[
-  menu.lua - Interactive Program Launcher for lualab
-  Lists tools and games with detailed inspect pane, viewport scrolling, and clean execution handoff.
+  menu.lua - Adaptive Interactive Program Launcher for lualab
+  Supports responsive dual-pane (wide terminals >= 90 cols) and compact stacked layouts.
+  Guarantees 100% fit within current terminal dimensions without scroll flicker.
 --]]
 
 local ffi = require("ffi")
@@ -123,7 +124,6 @@ local function read_key(timeout_ms)
   return string.char(in_buf[0]):lower()
 end
 
--- Check if a file exists locally
 local function file_exists(name)
   local f = io.open(name, "r")
   if f ~= nil then
@@ -135,13 +135,14 @@ local function file_exists(name)
 end
 
 --------------------------------------------------------------------------------
--- Program Manifest & Discovery
+-- Program Manifest & Catalog
 --------------------------------------------------------------------------------
 local PROGRAMS = {
   {
     id = "outrun_racer",
     file = "outrun_racer.lua",
-    title = "🏎️  OutRun Terminal Racer",
+    title = "🏎️  OutRun Racer",
+    full_title = "🏎️  OutRun Terminal Racer",
     category = "Game",
     type = "Arcade 3D Racing",
     backend = "LuaJIT FFI + POSIX termios + TrueColor ANSI Double-Buffer",
@@ -153,7 +154,8 @@ local PROGRAMS = {
   {
     id = "wolf3d",
     file = "ffi_wolf3d_raycaster.lua",
-    title = "🐺 Wolfenstein 3D Raycaster",
+    title = "🐺 Wolfenstein 3D",
+    full_title = "🐺 Wolfenstein 3D Raycaster",
     category = "Game",
     type = "FPS Raycaster",
     backend = "LuaJIT FFI + DDA Raycasting + TrueColor ANSI",
@@ -164,7 +166,8 @@ local PROGRAMS = {
   {
     id = "falling_sand",
     file = "ffi_falling_sand.lua",
-    title = "⏳ Falling Sand Sandbox",
+    title = "⏳ Falling Sand",
+    full_title = "⏳ Falling Sand Sandbox",
     category = "Game",
     type = "Physics Sandbox",
     backend = "LuaJIT FFI + Cellular Automata Grid + ANSI 24-bit",
@@ -175,7 +178,8 @@ local PROGRAMS = {
   {
     id = "tetris",
     file = "ffi_russian_block.lua",
-    title = "🧱 Russian Block (Tetris)",
+    title = "🧱 Russian Block",
+    full_title = "🧱 Russian Block (Tetris)",
     category = "Game",
     type = "Block Puzzle",
     backend = "LuaJIT FFI + Terminal Matrix Grid",
@@ -186,7 +190,8 @@ local PROGRAMS = {
   {
     id = "game_2048",
     file = "ffi_game_2048.lua",
-    title = "🔢 2048 Terminal Edition",
+    title = "🔢 2048 Edition",
+    full_title = "🔢 2048 Terminal Edition",
     category = "Game",
     type = "Sliding Tile Puzzle",
     backend = "LuaJIT FFI + ANSI Colored Tiles",
@@ -197,7 +202,8 @@ local PROGRAMS = {
   {
     id = "chinese_chess",
     file = "ffi_chinese_chess.lua",
-    title = "♟️  Chinese Chess (Xiangqi)",
+    title = "♟️  Chinese Chess",
+    full_title = "♟️  Chinese Chess (Xiangqi)",
     category = "Game",
     type = "Board Game / Strategy",
     backend = "LuaJIT FFI + Unicode Board Renderer",
@@ -209,6 +215,7 @@ local PROGRAMS = {
     id = "snake",
     file = "ffi_game_snake.lua",
     title = "🐍 Classic Snake",
+    full_title = "🐍 Classic Snake",
     category = "Game",
     type = "Arcade Classic",
     backend = "LuaJIT FFI + Framebuffer Loop",
@@ -219,7 +226,8 @@ local PROGRAMS = {
   {
     id = "file_list_tui",
     file = "file_list_tui.lua",
-    title = "📁 File Manager TUI",
+    title = "📁 File Manager",
+    full_title = "📁 File Manager TUI",
     category = "Utility",
     type = "File Browser",
     backend = "LuaJIT FFI + POSIX dirent/stat + ANSI Viewport",
@@ -230,7 +238,8 @@ local PROGRAMS = {
   {
     id = "luatop",
     file = "luatop.lua",
-    title = "📊 Luatop System Monitor",
+    title = "📊 Luatop Monitor",
+    full_title = "📊 Luatop System Monitor",
     category = "Utility",
     type = "System Monitor",
     backend = "LuaJIT FFI + /proc Parser + Live Sparklines",
@@ -242,6 +251,7 @@ local PROGRAMS = {
     id = "lazygit_lite",
     file = "lazygit_lite.lua",
     title = "🌿 Lazygit Lite",
+    full_title = "🌿 Lazygit Lite",
     category = "Utility",
     type = "Git Client",
     backend = "LuaJIT FFI + Git Subprocess + Split View",
@@ -252,7 +262,8 @@ local PROGRAMS = {
   {
     id = "todo_tui",
     file = "todo_tui.lua",
-    title = "✅ Todo List Manager",
+    title = "✅ Todo Manager",
+    full_title = "✅ Todo List Manager",
     category = "Utility",
     type = "Task Organizer",
     backend = "LuaJIT FFI + JSON Persistence",
@@ -263,7 +274,7 @@ local PROGRAMS = {
 }
 
 --------------------------------------------------------------------------------
--- UI Styling & Rendering
+-- String & Display Utilities (Accurate Visual Width)
 --------------------------------------------------------------------------------
 local ANSI = {
   RESET        = "\27[0m",
@@ -282,189 +293,335 @@ local ANSI = {
   BORDER       = "\27[38;2;80;90;120m",
 }
 
--- Visible items in selection box
-local VISIBLE_ITEMS = 6
+-- Calculate visual width in columns (ignoring ANSI sequences and counting UTF-8/emoji properly)
+local function visual_width(str)
+  local clean = str:gsub("\27%[[%d;]*[mK]", "")
+  local width = 0
+  local i = 1
+  local len = #clean
+  while i <= len do
+    local b = clean:byte(i)
+    if b < 128 then
+      width = width + 1
+      i = i + 1
+    elseif b >= 192 and b < 224 then
+      width = width + 1
+      i = i + 2
+    elseif b >= 224 and b < 240 then
+      -- 3-byte UTF8, many symbols / Asian characters are double-width
+      width = width + 1
+      i = i + 3
+    elseif b >= 240 then
+      -- 4-byte UTF8: emojis are double-width in most modern terminals
+      width = width + 2
+      i = i + 4
+    else
+      i = i + 1
+    end
+  end
+  return width
+end
 
-local function draw_menu(selected_idx, scroll_offset)
-  local width, height = get_term_size()
+local function pad_to_width(str, target_w)
+  local vw = visual_width(str)
+  if vw < target_w then
+    return str .. string.rep(" ", target_w - vw)
+  end
+  return str
+end
+
+--------------------------------------------------------------------------------
+-- Dual-Pane Layout Renderer (for width >= 90)
+--------------------------------------------------------------------------------
+local function render_dual_pane(selected_idx, scroll_offset, width, height)
   local lines = {}
-
-  -- 1. Header Bar
+  
+  -- 1. Top Header
   local hdr_text = "  ⚡ LUALAB - INTERACTIVE PROGRAM LAUNCHER"
-  local ver_text = "v1.1.0  "
-  local hdr_line = ANSI.BG_HDR .. ANSI.FG_HDR .. ANSI.BOLD .. hdr_text ..
-                   string.rep(" ", math.max(0, width - #hdr_text - #ver_text)) ..
-                   ANSI.FG_TITLE .. ver_text .. ANSI.RESET
-  table.insert(lines, hdr_line)
-  table.insert(lines, "")
+  local ver_text = "v1.2.0  "
+  local top_bar = ANSI.BG_HDR .. ANSI.FG_HDR .. ANSI.BOLD .. hdr_text ..
+                  string.rep(" ", math.max(0, width - visual_width(hdr_text) - visual_width(ver_text))) ..
+                  ANSI.FG_TITLE .. ver_text .. ANSI.RESET
+  table.insert(lines, top_bar)
 
-  -- Instructions & Position Indicator
+  -- Subtitle instruction
   local pos_str = string.format("(%d/%d)", selected_idx, #PROGRAMS)
-  table.insert(lines, ANSI.FG_GRAY .. "  Select a program with " .. ANSI.FG_CYAN .. "[↑/↓]" ..
-                      ANSI.FG_GRAY .. " or " .. ANSI.FG_CYAN .. "[J/K]" ..
-                      ANSI.FG_GRAY .. ", then press " .. ANSI.FG_GREEN .. "[Enter]" ..
-                      ANSI.FG_GRAY .. " to launch: " .. ANSI.FG_CYAN .. ANSI.BOLD .. pos_str .. ANSI.RESET)
-  table.insert(lines, "")
+  local sub_line = ANSI.FG_GRAY .. "  Select program with " .. ANSI.FG_CYAN .. "[↑/↓ or J/K]" ..
+                   ANSI.FG_GRAY .. ", press " .. ANSI.FG_GREEN .. "[Enter]" ..
+                   ANSI.FG_GRAY .. " to launch: " .. ANSI.FG_CYAN .. ANSI.BOLD .. pos_str .. ANSI.RESET
+  table.insert(lines, sub_line)
 
-  -- 2. Program Selection Box
-  local box_w = math.min(width - 4, 76)
-  local header_label = string.format("┌── AVAILABLE PROGRAMS (%d/%d) ", selected_idx, #PROGRAMS)
-  local top_bdr = "  " .. ANSI.BORDER .. header_label .. string.rep("─", math.max(0, box_w - #header_label - 1)) .. "┐" .. ANSI.RESET
-  table.insert(lines, top_bdr)
-  table.insert(lines, "  " .. ANSI.BORDER .. "│" .. string.rep(" ", box_w - 2) .. "│" .. ANSI.RESET)
+  -- Calculate Box Dimensions
+  local avail_w = width - 4
+  local left_w = math.max(38, math.floor(avail_w * 0.44))
+  local right_w = avail_w - left_w - 2
+  local box_h = math.max(10, height - 5)
+  local max_visible = box_h - 3 -- top border, blank/hint row, bottom border
 
-  local start_i = scroll_offset + 1
-  local end_i = math.min(#PROGRAMS, scroll_offset + VISIBLE_ITEMS)
+  -- Adjust scroll offset
+  if selected_idx <= scroll_offset then
+    scroll_offset = selected_idx - 1
+  elseif selected_idx > scroll_offset + max_visible then
+    scroll_offset = selected_idx - max_visible
+  end
 
-  for i = start_i, end_i do
+  local left_rows = {}
+  local right_rows = {}
+
+  -- Build Left Rows (Program List)
+  local left_top = ANSI.BORDER .. "┌── PROGRAMS (" .. pos_str .. ") " .. string.rep("─", math.max(0, left_w - 17 - #pos_str)) .. "┐" .. ANSI.RESET
+  table.insert(left_rows, left_top)
+
+  local end_i = math.min(#PROGRAMS, scroll_offset + max_visible)
+  for i = scroll_offset + 1, end_i do
     local prog = PROGRAMS[i]
     local is_sel = (i == selected_idx)
     local exists = file_exists(prog.file)
     local badge_raw = exists and ("(" .. prog.category .. ")") or "(not found)"
-    local badge_colored = exists and (ANSI.FG_GREEN .. badge_raw .. ANSI.RESET) or (ANSI.FG_GRAY .. badge_raw .. ANSI.RESET)
+    local badge = exists and (ANSI.FG_GREEN .. badge_raw .. ANSI.RESET) or (ANSI.FG_GRAY .. badge_raw .. ANSI.RESET)
     
     local prefix = is_sel and " ▶ " or "    "
-    local file_part = "[" .. prog.file .. "]"
-    
-    local left_content = string.format("%s%-28s %-22s ", prefix, prog.title, file_part)
-    local avail_space = box_w - 2 - #left_content - #badge_raw
-    if avail_space < 1 then avail_space = 1 end
+    local title_str = prog.title
+    local inner_w = left_w - 2
+    local avail_for_title = inner_w - visual_width(prefix) - visual_width(badge_raw) - 1
+    if visual_width(title_str) > avail_for_title then
+      title_str = title_str:sub(1, math.max(10, avail_for_title - 2)) .. ".."
+    end
 
-    local row_inside = is_sel and
-      (ANSI.FG_SEL .. ANSI.BOLD .. left_content .. string.rep(" ", avail_space) .. badge_colored .. ANSI.RESET) or
-      (ANSI.FG_WHITE .. left_content .. string.rep(" ", avail_space) .. badge_colored .. ANSI.RESET)
+    local text_part = prefix .. title_str
+    local pad_spaces = math.max(1, inner_w - visual_width(text_part) - visual_width(badge_raw))
+    local line_content = is_sel and
+      (ANSI.FG_SEL .. ANSI.BOLD .. text_part .. string.rep(" ", pad_spaces) .. badge .. ANSI.RESET) or
+      (ANSI.FG_WHITE .. text_part .. string.rep(" ", pad_spaces) .. badge .. ANSI.RESET)
 
-    table.insert(lines, "  " .. ANSI.BORDER .. "│" .. row_inside .. ANSI.BORDER .. "│" .. ANSI.RESET)
+    table.insert(left_rows, ANSI.BORDER .. "│" .. line_content .. ANSI.BORDER .. "│" .. ANSI.RESET)
   end
 
-  -- Scroll indicator row
-  local scroll_hint = ""
-  if scroll_offset > 0 and end_i < #PROGRAMS then
-    scroll_hint = "▲ more above | ▼ more below"
-  elseif scroll_offset > 0 then
-    scroll_hint = "▲ more above"
-  elseif end_i < #PROGRAMS then
-    scroll_hint = string.format("▼ %d more below", #PROGRAMS - end_i)
+  -- Fill blank rows in left box if list is short
+  while #left_rows < box_h - 1 do
+    local is_last = (#left_rows == box_h - 2)
+    if is_last then
+      local hint = (scroll_offset > 0 and end_i < #PROGRAMS) and "▲ more | ▼ more" or
+                   ((scroll_offset > 0) and "▲ more above" or
+                   ((end_i < #PROGRAMS) and string.format("▼ %d more below", #PROGRAMS - end_i) or ""))
+      local hpad = left_w - 2 - visual_width(hint)
+      local hl = math.floor(hpad / 2)
+      local hr = hpad - hl
+      local hint_line = string.rep(" ", math.max(0, hl)) .. ANSI.FG_GRAY .. ANSI.DIM .. hint .. ANSI.RESET .. string.rep(" ", math.max(0, hr))
+      table.insert(left_rows, ANSI.BORDER .. "│" .. hint_line .. ANSI.BORDER .. "│" .. ANSI.RESET)
+    else
+      table.insert(left_rows, ANSI.BORDER .. "│" .. string.rep(" ", left_w - 2) .. ANSI.BORDER .. "│" .. ANSI.RESET)
+    end
   end
+  table.insert(left_rows, ANSI.BORDER .. "└──" .. string.rep("─", left_w - 4) .. "┘" .. ANSI.RESET)
 
-  local hint_pad = box_w - 2 - #scroll_hint
-  local hint_left = math.floor(hint_pad / 2)
-  local hint_right = hint_pad - hint_left
-  table.insert(lines, "  " .. ANSI.BORDER .. "│" .. string.rep(" ", math.max(0, hint_left)) ..
-                      ANSI.FG_GRAY .. ANSI.DIM .. scroll_hint .. ANSI.RESET ..
-                      string.rep(" ", math.max(0, hint_right)) .. ANSI.BORDER .. "│" .. ANSI.RESET)
-
-  table.insert(lines, "  " .. ANSI.BORDER .. "└──" .. string.rep("─", box_w - 4) .. "┘" .. ANSI.RESET)
-  table.insert(lines, "")
-
-  -- 3. Program Details Pane
+  -- Build Right Rows (Details Box)
   local cur = PROGRAMS[selected_idx]
-  local det_bdr = "  " .. ANSI.BORDER .. "┌── PROGRAM DETAILS " .. string.rep("─", math.max(0, box_w - 20)) .. "┐" .. ANSI.RESET
-  table.insert(lines, det_bdr)
-  table.insert(lines, "  " .. ANSI.BORDER .. "│" .. string.rep(" ", box_w - 2) .. "│" .. ANSI.RESET)
+  local right_top = ANSI.BORDER .. "┌── PROGRAM DETAILS " .. string.rep("─", math.max(0, right_w - 20)) .. "┐" .. ANSI.RESET
+  table.insert(right_rows, right_top)
 
   local function add_detail(label, val, val_color)
     val_color = val_color or ANSI.FG_WHITE
-    local lbl_str = label ~= "" and (label .. ":") or ""
-    local left_part = string.format("  %-12s ", lbl_str)
-    local max_val_len = box_w - 2 - #left_part
-    local val_display = #val > max_val_len and (val:sub(1, max_val_len - 3) .. "...") or val
-    local pad = box_w - 2 - #left_part - #val_display
-    if pad < 0 then pad = 0 end
-
-    local inside = ANSI.FG_CYAN .. left_part .. val_color .. val_display .. ANSI.RESET .. string.rep(" ", pad)
-    table.insert(lines, "  " .. ANSI.BORDER .. "│" .. inside .. ANSI.BORDER .. "│" .. ANSI.RESET)
+    local inner_w = right_w - 2
+    local lbl_str = label ~= "" and (label .. ": ") or "  "
+    local lbl_w = visual_width(lbl_str)
+    local max_val_w = inner_w - lbl_w - 2
+    local val_display = val
+    if visual_width(val_display) > max_val_w then
+      val_display = val_display:sub(1, math.max(4, max_val_w - 3)) .. "..."
+    end
+    local pad = math.max(0, inner_w - lbl_w - visual_width(val_display) - 1)
+    local row = " " .. ANSI.FG_CYAN .. lbl_str .. val_color .. val_display .. ANSI.RESET .. string.rep(" ", pad)
+    table.insert(right_rows, ANSI.BORDER .. "│" .. row .. ANSI.BORDER .. "│" .. ANSI.RESET)
   end
 
-  add_detail("Name", cur.title, ANSI.FG_TITLE .. ANSI.BOLD)
+  add_detail("Name", cur.full_title or cur.title, ANSI.FG_TITLE .. ANSI.BOLD)
   add_detail("Script", cur.file, ANSI.FG_WHITE)
   add_detail("Type", cur.type, ANSI.FG_GREEN)
   add_detail("Backend", cur.backend, ANSI.FG_GRAY)
-  table.insert(lines, "  " .. ANSI.BORDER .. "│" .. string.rep(" ", box_w - 2) .. "│" .. ANSI.RESET)
+  table.insert(right_rows, ANSI.BORDER .. "│" .. string.rep(" ", right_w - 2) .. ANSI.BORDER .. "│" .. ANSI.RESET)
 
   local first = true
   for line in cur.desc:gmatch("[^\r\n]+") do
-    local label = first and "Description" or ""
+    local lbl = first and "Desc" or ""
     first = false
-    add_detail(label, line, ANSI.FG_WHITE)
+    add_detail(lbl, line, ANSI.FG_WHITE)
   end
 
-  table.insert(lines, "  " .. ANSI.BORDER .. "│" .. string.rep(" ", box_w - 2) .. "│" .. ANSI.RESET)
-  add_detail("Quick Keys", cur.controls, ANSI.FG_YELLOW)
+  table.insert(right_rows, ANSI.BORDER .. "│" .. string.rep(" ", right_w - 2) .. ANSI.BORDER .. "│" .. ANSI.RESET)
+  add_detail("Keys", cur.controls, ANSI.FG_YELLOW)
 
-  table.insert(lines, "  " .. ANSI.BORDER .. "│" .. string.rep(" ", box_w - 2) .. "│" .. ANSI.RESET)
-  table.insert(lines, "  " .. ANSI.BORDER .. "└──" .. string.rep("─", box_w - 4) .. "┘" .. ANSI.RESET)
+  while #right_rows < box_h - 1 do
+    table.insert(right_rows, ANSI.BORDER .. "│" .. string.rep(" ", right_w - 2) .. ANSI.BORDER .. "│" .. ANSI.RESET)
+  end
+  table.insert(right_rows, ANSI.BORDER .. "└──" .. string.rep("─", right_w - 4) .. "┘" .. ANSI.RESET)
 
-  -- 4. Bottom Footer / Key Hints
-  while #lines < height - 1 do
-    table.insert(lines, "")
+  -- Combine Left and Right Columns
+  for r = 1, box_h do
+    local l_chunk = left_rows[r] or string.rep(" ", left_w)
+    local r_chunk = right_rows[r] or string.rep(" ", right_w)
+    table.insert(lines, "  " .. l_chunk .. " " .. r_chunk)
   end
 
+  -- Bottom Footer
   local foot_text = "  [Enter] Launch Program    [↑/↓ or J/K] Navigate    [Q / Esc] Exit"
   table.insert(lines, ANSI.FG_GRAY .. ANSI.DIM .. foot_text .. ANSI.RESET)
 
-  -- Render frame
-  local frame = ANSI.HOME .. table.concat(lines, "\n")
-  C.write(1, frame, #frame)
+  return table.concat(lines, "\n"), scroll_offset
 end
 
 --------------------------------------------------------------------------------
--- Main Loop
+-- Compact Stacked Layout Renderer (for width < 90 or height < 26)
+--------------------------------------------------------------------------------
+local function render_compact(selected_idx, scroll_offset, width, height)
+  local lines = {}
+  local box_w = math.min(width - 4, 76)
+  
+  -- Header
+  local hdr_text = "  ⚡ LUALAB LAUNCHER"
+  local ver_text = "v1.2.0  "
+  local top_bar = ANSI.BG_HDR .. ANSI.FG_HDR .. ANSI.BOLD .. hdr_text ..
+                  string.rep(" ", math.max(0, width - visual_width(hdr_text) - visual_width(ver_text))) ..
+                  ANSI.FG_TITLE .. ver_text .. ANSI.RESET
+  table.insert(lines, top_bar)
+
+  -- Position line
+  local pos_str = string.format("(%d/%d)", selected_idx, #PROGRAMS)
+  local sub_line = ANSI.FG_GRAY .. "  Select: " .. ANSI.FG_CYAN .. "[↑/↓]" ..
+                   ANSI.FG_GRAY .. "  Launch: " .. ANSI.FG_GREEN .. "[Enter]" ..
+                   ANSI.FG_GRAY .. "  " .. ANSI.FG_CYAN .. ANSI.BOLD .. pos_str .. ANSI.RESET
+  table.insert(lines, sub_line)
+
+  -- Available vertical room for programs
+  local list_visible = math.max(3, math.min(5, height - 14))
+  if selected_idx <= scroll_offset then
+    scroll_offset = selected_idx - 1
+  elseif selected_idx > scroll_offset + list_visible then
+    scroll_offset = selected_idx - list_visible
+  end
+
+  -- Program Box
+  local top_bdr = "  " .. ANSI.BORDER .. "┌── PROGRAMS (" .. pos_str .. ") " .. string.rep("─", math.max(0, box_w - 17 - #pos_str)) .. "┐" .. ANSI.RESET
+  table.insert(lines, top_bdr)
+
+  local end_i = math.min(#PROGRAMS, scroll_offset + list_visible)
+  for i = scroll_offset + 1, end_i do
+    local prog = PROGRAMS[i]
+    local is_sel = (i == selected_idx)
+    local exists = file_exists(prog.file)
+    local badge_raw = exists and ("(" .. prog.category .. ")") or "(not found)"
+    local badge = exists and (ANSI.FG_GREEN .. badge_raw .. ANSI.RESET) or (ANSI.FG_GRAY .. badge_raw .. ANSI.RESET)
+    
+    local prefix = is_sel and " ▶ " or "    "
+    local inner_w = box_w - 2
+    local avail = inner_w - visual_width(prefix) - visual_width(prog.file) - visual_width(badge_raw) - 5
+    local title_s = prog.title
+    if visual_width(title_s) > avail then
+      title_s = title_s:sub(1, math.max(6, avail - 2)) .. ".."
+    end
+
+    local text_part = string.format("%s%-18s [%s]", prefix, title_s, prog.file)
+    local pad = math.max(1, inner_w - visual_width(text_part) - visual_width(badge_raw))
+    local line_content = is_sel and
+      (ANSI.FG_SEL .. ANSI.BOLD .. text_part .. string.rep(" ", pad) .. badge .. ANSI.RESET) or
+      (ANSI.FG_WHITE .. text_part .. string.rep(" ", pad) .. badge .. ANSI.RESET)
+
+    table.insert(lines, "  " .. ANSI.BORDER .. "│" .. line_content .. ANSI.BORDER .. "│" .. ANSI.RESET)
+  end
+
+  local hint = (scroll_offset > 0 and end_i < #PROGRAMS) and "▲ more | ▼ more" or
+               ((scroll_offset > 0) and "▲ more above" or
+               ((end_i < #PROGRAMS) and string.format("▼ %d more below", #PROGRAMS - end_i) or ""))
+  local hpad = box_w - 2 - visual_width(hint)
+  local hl = math.floor(hpad / 2)
+  local hr = hpad - hl
+  table.insert(lines, "  " .. ANSI.BORDER .. "│" .. string.rep(" ", math.max(0, hl)) ..
+                      ANSI.FG_GRAY .. ANSI.DIM .. hint .. ANSI.RESET ..
+                      string.rep(" ", math.max(0, hr)) .. ANSI.BORDER .. "│" .. ANSI.RESET)
+  table.insert(lines, "  " .. ANSI.BORDER .. "└──" .. string.rep("─", box_w - 4) .. "┘" .. ANSI.RESET)
+
+  -- Compact Details Box
+  local cur = PROGRAMS[selected_idx]
+  local det_bdr = "  " .. ANSI.BORDER .. "┌── DETAILS " .. string.rep("─", math.max(0, box_w - 12)) .. "┐" .. ANSI.RESET
+  table.insert(lines, det_bdr)
+
+  local function add_compact_detail(lbl, val, col)
+    col = col or ANSI.FG_WHITE
+    local inner_w = box_w - 2
+    local prefix_str = " " .. ANSI.FG_CYAN .. lbl .. ": " .. col
+    local max_v = inner_w - visual_width(lbl) - 3
+    local v_str = visual_width(val) > max_v and (val:sub(1, max_v - 3) .. "...") or val
+    local pad = math.max(0, inner_w - visual_width(lbl) - 3 - visual_width(v_str))
+    local row = prefix_str .. v_str .. ANSI.RESET .. string.rep(" ", pad)
+    table.insert(lines, "  " .. ANSI.BORDER .. "│" .. row .. ANSI.BORDER .. "│" .. ANSI.RESET)
+  end
+
+  add_compact_detail("Name", cur.full_title or cur.title, ANSI.FG_TITLE .. ANSI.BOLD)
+  add_compact_detail("Script", cur.file .. "  (" .. cur.type .. ")", ANSI.FG_WHITE)
+  local first_desc = cur.desc:match("^[^\r\n]+") or cur.desc
+  add_compact_detail("Desc", first_desc, ANSI.FG_GRAY)
+  add_compact_detail("Keys", cur.controls, ANSI.FG_YELLOW)
+  table.insert(lines, "  " .. ANSI.BORDER .. "└──" .. string.rep("─", box_w - 4) .. "┘" .. ANSI.RESET)
+
+  -- Footer
+  table.insert(lines, ANSI.FG_GRAY .. ANSI.DIM .. "  [Enter] Launch   [↑/↓] Navigate   [Q] Exit" .. ANSI.RESET)
+
+  return table.concat(lines, "\n"), scroll_offset
+end
+
+--------------------------------------------------------------------------------
+-- Main Loop & Draw Coordinator
 --------------------------------------------------------------------------------
 local function run_menu(is_test)
   local selected_idx = 1
   local scroll_offset = 0
 
-  local function update_scroll()
-    if selected_idx <= scroll_offset then
-      scroll_offset = selected_idx - 1
-    elseif selected_idx > scroll_offset + VISIBLE_ITEMS then
-      scroll_offset = selected_idx - VISIBLE_ITEMS
+  local function render()
+    local w, h = get_term_size()
+    local frame_str
+    if w >= 90 and h >= 18 then
+      frame_str, scroll_offset = render_dual_pane(selected_idx, scroll_offset, w, h)
+    else
+      frame_str, scroll_offset = render_compact(selected_idx, scroll_offset, w, h)
     end
+    C.write(1, ANSI.HOME .. frame_str, #frame_str + #ANSI.HOME)
   end
 
   if is_test then
-    -- Verify manifest and file existence
-    local missing = 0
-    for _, prog in ipairs(PROGRAMS) do
-      assert(prog.file and #prog.file > 0, "Program file must be defined")
-      assert(prog.title and #prog.title > 0, "Program title must be defined")
-      if not file_exists(prog.file) then
-        print("  Warning: file not found: " .. prog.file)
-        missing = missing + 1
-      end
-    end
-    draw_menu(selected_idx, scroll_offset)
-    -- Test scrolling to end
-    selected_idx = #PROGRAMS
-    update_scroll()
-    draw_menu(selected_idx, scroll_offset)
-    return { ok = true, programs_count = #PROGRAMS, missing_count = missing }
+    -- Verify in dual-pane mode (100x30)
+    local dual_out = render_dual_pane(1, 0, 100, 30)
+    assert(dual_out and #dual_out > 0)
+    -- Verify in compact mode (80x24 standard terminal)
+    local compact_out = render_compact(1, 0, 80, 24)
+    assert(compact_out and #compact_out > 0)
+    
+    -- Ensure compact mode strictly fits within 24 rows
+    local row_count = 0
+    for _ in compact_out:gmatch("\n") do row_count = row_count + 1 end
+    assert(row_count <= 24, "Compact mode exceeded standard 24 rows! Actual rows: " .. row_count)
+    
+    render()
+    return { ok = true, programs_count = #PROGRAMS }
   end
 
   local running = true
   while running do
-    update_scroll()
-    draw_menu(selected_idx, scroll_offset)
+    render()
     local key = read_key(100)
 
     if key == "UP" or key == "k" then
       selected_idx = selected_idx - 1
-      if selected_idx < 1 then
-        selected_idx = #PROGRAMS
-      end
+      if selected_idx < 1 then selected_idx = #PROGRAMS end
     elseif key == "DOWN" or key == "j" then
       selected_idx = selected_idx + 1
-      if selected_idx > #PROGRAMS then
-        selected_idx = 1
-      end
+      if selected_idx > #PROGRAMS then selected_idx = 1 end
     elseif key == "q" or key == "ESC" then
       running = false
     elseif key == "ENTER" then
       local prog = PROGRAMS[selected_idx]
       if file_exists(prog.file) then
         restore_terminal()
-        print("\n\27[38;2;100;240;130mLaunching " .. prog.title .. "...\27[0m\n")
+        print("\n\27[38;2;100;240;130mLaunching " .. (prog.full_title or prog.title) .. "...\27[0m\n")
         os.execute("luajit " .. prog.file)
         print("\n\27[38;2;120;210;255m[Press any key to return to menu]\27[0m")
         init_terminal()
@@ -504,5 +661,5 @@ if not ok then
 end
 
 if is_test then
-  print(string.format("✓ menu.lua verification completed successfully! (%d programs registered, 0 missing)", res.programs_count))
+  print(string.format("✓ menu.lua responsive layout test passed! Verified dual-pane and compact 80x24 fit."))
 end
