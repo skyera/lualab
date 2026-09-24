@@ -71,6 +71,11 @@ local tests = {
         expect = "LocalForward 127.0.0.1:5432 db.internal:5432"
     },
     {
+        name = "CLI connect command error on missing profile",
+        cmd = env_prefix .. luajit_bin .. " ffi_ssh_tunnel.lua connect nonexistent-target",
+        expect = "Profile 'nonexistent-target' not found"
+    },
+    {
         name = "Interactive TUI start and exit (tui)",
         cmd = "printf 'q' | " .. env_prefix .. luajit_bin .. " ffi_ssh_tunnel.lua tui",
         expect = "LuaJIT SSH Tunnel & ProxyJump Studio"

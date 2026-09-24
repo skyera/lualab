@@ -759,6 +759,54 @@ local function stop_tunnel(profile_name)
     return out
 end
 
+-- Build interactive SSH shell command (reusing active ControlMaster socket if UP)
+local function build_interactive_ssh_command(p, extra_cmd_args)
+    local parts = {"ssh"}
+
+    -- Check if mux socket exists and is UP
+    local st = get_tunnel_status(p.name)
+    local mux_path = get_mux_socket_path(p.name)
+    if st.is_up then
+        table.insert(parts, "-S")
+        table.insert(parts, mux_path)
+    else
+        -- ProxyJump (-J)
+        if p.proxy_jump and p.proxy_jump:match("%S+") then
+            table.insert(parts, "-J")
+            table.insert(parts, (p.proxy_jump:gsub("%s+", "")))
+        end
+
+        -- Identity key (-i)
+        if p.identity_key and #p.identity_key > 0 then
+            table.insert(parts, "-i")
+            table.insert(parts, p.identity_key)
+        end
+
+        -- Custom SSH port
+        if p.ssh_port and tonumber(p.ssh_port) and tonumber(p.ssh_port) ~= 22 then
+            table.insert(parts, "-p")
+            table.insert(parts, tostring(p.ssh_port))
+        end
+    end
+
+    -- Target host
+    local target = ""
+    if p.ssh_user and #p.ssh_user > 0 then
+        target = p.ssh_user .. "@"
+    end
+    target = target .. (p.ssh_host or "localhost")
+    table.insert(parts, target)
+
+    -- Extra remote command arguments (if any)
+    if extra_cmd_args and #extra_cmd_args > 0 then
+        for _, arg in ipairs(extra_cmd_args) do
+            table.insert(parts, arg)
+        end
+    end
+
+    return parts
+end
+
 -- Start a tunnel
 local function start_tunnel(p)
     -- First check port conflicts if local or socks
@@ -1088,7 +1136,7 @@ function TUI.render_dashboard(profiles, cursor_idx, status_msg)
     end
 
     -- Keybindings help bar
-    local keys_bar = pad_right("\27[1;32m[Enter]\27[0m Toggle  \27[1;32m[n]\27[0m New  \27[1;32m[e]\27[0m Edit  \27[1;32m[k]\27[0m Release Port  \27[1;32m[v]\27[0m View Cmd  \27[1;32m[d]\27[0m Del  \27[1;32m[c]\27[0m Port  \27[1;32m[x]\27[0m Exp  \27[1;31m[q]\27[0m Quit", W - 2)
+    local keys_bar = pad_right("\27[1;32m[Enter]\27[0m Toggle  \27[1;32m[s]\27[0m Connect  \27[1;32m[n]\27[0m New  \27[1;32m[e]\27[0m Edit  \27[1;32m[k]\27[0m Release Port  \27[1;32m[v]\27[0m View Cmd  \27[1;32m[d]\27[0m Del  \27[1;31m[q]\27[0m Quit", W - 2)
     io.write(string.format("║ %s ║\n", keys_bar))
     io.write("\27[1;36m╚" .. line_box .. "╝\27[0m\n")
 
@@ -1261,6 +1309,8 @@ Commands:
   up <name>             Start an SSH tunnel by profile name (with port collision check)
   down <name>           Stop an active tunnel via ControlMaster socket
   restart <name>        Restart a tunnel
+  connect <name> [cmd]  Open interactive SSH session or run remote command (via proxy/mux)
+  ssh <name> [cmd]      Alias for connect
   check <port> [host]   Probe if a local TCP port is free or occupied using FFI sockets
   release <port>        Release/terminate the process holding an occupied TCP port
   export                Export all profiles to standard OpenSSH ~/.ssh/config format
@@ -1274,6 +1324,8 @@ Examples:
   ./ffi_ssh_tunnel.lua list
   ./ffi_ssh_tunnel.lua check 5432
   ./ffi_ssh_tunnel.lua up prod-postgres
+  ./ffi_ssh_tunnel.lua connect prod-postgres
+  ./ffi_ssh_tunnel.lua connect prod-postgres uptime
   ./ffi_ssh_tunnel.lua down prod-postgres
   ./ffi_ssh_tunnel.lua export
 ]])
@@ -1346,6 +1398,20 @@ local function run_tui()
                     local port = tonumber(sel.local_port) or 8080
                     local free, res = probe_port_available(port, sel.local_bind)
                     status_msg = string.format("Port %d on %s: %s", port, sel.local_bind or "127.0.0.1", res)
+                end
+            elseif key == "s" then
+                local sel = data.profiles[cursor]
+                if sel then
+                    local cmd_parts = build_interactive_ssh_command(sel)
+                    local cmd = command_parts_to_string(cmd_parts)
+                    TUI.set_raw_mode(false)
+                    TUI.clear()
+                    print("\27[1;36m=== Connecting to '" .. sel.name .. "' ===\27[0m")
+                    print("\27[2mExecuting: " .. cmd .. "\27[0m\n")
+                    os.execute(cmd)
+                    print("\n\27[1;33m[Session closed. Press any key to return to dashboard...]\27[0m")
+                    TUI.set_raw_mode(true)
+                    TUI.read_key()
                 end
             elseif key == "k" then
                 local sel = data.profiles[cursor]
@@ -1474,7 +1540,19 @@ local function run_self_tests()
     local s_str = command_parts_to_string(s_parts)
     assert_true("Command contains -D forward", s_str:find("%-D 0%.0%.0%.0:1080") ~= nil)
 
-    -- 5. Socket Port Probing via FFI
+    -- 5. Interactive SSH Command Generation (Direct & with remote command)
+    local conn_parts = build_interactive_ssh_command(p_local)
+    local conn_str = command_parts_to_string(conn_parts)
+    assert_true("Interactive command uses ssh binary", conn_str:find("^ssh") ~= nil)
+    assert_true("Interactive command includes -J ProxyJump", conn_str:find("%-J jump1%.corp%.com,jump2%.corp%.com") ~= nil)
+    assert_true("Interactive command includes -p 2222", conn_str:find("%-p 2222") ~= nil)
+    assert_true("Interactive command target host", conn_str:find("admin@gateway%.corp%.com$") ~= nil)
+
+    local conn_with_cmd = build_interactive_ssh_command(p_local, {"uptime"})
+    local conn_cmd_str = command_parts_to_string(conn_with_cmd)
+    assert_true("Interactive command appends remote command", conn_cmd_str:find("admin@gateway%.corp%.com uptime$") ~= nil)
+
+    -- 6. Socket Port Probing via FFI
     -- Bind an ephemeral listening socket, verify probe detects OCCUPIED, then close and verify AVAILABLE
     local sock_api = get_sock_api()
     assert_true("Socket subsystem initialized", sock_api ~= nil)
@@ -1609,6 +1687,29 @@ local function main(args)
         end
         print("Profile not found.")
         os.exit(1)
+    elseif cmd == "connect" or cmd == "ssh" then
+        local name = args[2]
+        if not name then
+            print("Error: Missing profile name. Usage: ffi_ssh_tunnel.lua connect <name> [remote_cmd...]")
+            os.exit(1)
+        end
+        local data = load_profiles()
+        local found = nil
+        for _, p in ipairs(data.profiles) do
+            if p.name == name then found = p; break end
+        end
+        if not found then
+            print(string.format("Error: Profile '%s' not found.", name))
+            os.exit(1)
+        end
+        local extra_args = {}
+        for i = 3, #args do
+            table.insert(extra_args, args[i])
+        end
+        local cmd_parts = build_interactive_ssh_command(found, extra_args)
+        local full_cmd = command_parts_to_string(cmd_parts)
+        local ret = os.execute(full_cmd)
+        os.exit(ret == 0 and 0 or 1)
     elseif cmd == "check" then
         local port = tonumber(args[2])
         if not port then
@@ -1688,6 +1789,7 @@ if pcall(debug.getlocal, 4, 1) then
     -- Required as a module
     return {
         build_ssh_command = build_ssh_command,
+        build_interactive_ssh_command = build_interactive_ssh_command,
         command_parts_to_string = command_parts_to_string,
         probe_port_available = probe_port_available,
         export_ssh_config = export_ssh_config,
