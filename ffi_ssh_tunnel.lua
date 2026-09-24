@@ -401,21 +401,21 @@ local function build_ssh_command(p, extra_flags)
     local mode = (p.type or "local"):lower()
     if mode == "local" or mode == "-l" then
         local bind = p.local_bind or "127.0.0.1"
-        local lport = p.local_port or 8080
+        local lport = tonumber(p.local_port) or 0
         local rhost = p.remote_host or "127.0.0.1"
-        local rport = p.remote_port or 8080
+        local rport = tonumber(p.remote_port) or 0
         table.insert(parts, "-L")
         table.insert(parts, string.format("%s:%d:%s:%d", bind, lport, rhost, rport))
     elseif mode == "remote" or mode == "-r" then
         local rbind = p.remote_bind or "0.0.0.0"
-        local rport = p.remote_port or 8080
+        local rport = tonumber(p.remote_port) or 0
         local lhost = p.local_host or "127.0.0.1"
-        local lport = p.local_port or 8080
+        local lport = tonumber(p.local_port) or 0
         table.insert(parts, "-R")
         table.insert(parts, string.format("%s:%d:%s:%d", rbind, rport, lhost, lport))
     elseif mode == "socks" or mode == "dynamic" or mode == "-d" then
         local bind = p.local_bind or "127.0.0.1"
-        local lport = p.local_port or 1080
+        local lport = tonumber(p.local_port) or 0
         table.insert(parts, "-D")
         table.insert(parts, string.format("%s:%d", bind, lport))
     end
@@ -621,6 +621,7 @@ function TUI.read_key()
     elseif s == "\27" then return "ESC"
     elseif s == "\r" or s == "\n" then return "ENTER"
     elseif s == "\t" then return "TAB"
+    elseif s == "\27[Z" then return "SHIFT_TAB"
     elseif s == "\127" or s == "\8" then return "BACKSPACE"
     else return s end
 end
@@ -769,6 +770,8 @@ function TUI.edit_profile_modal(existing_profile)
             local val_str = tostring(p[fld.key] or "")
             if fld.type == "choice" then
                 val_str = string.format("[%s] (local / remote / socks)", val_str:upper())
+            elseif p.type == "socks" and (fld.key == "remote_host" or fld.key == "remote_port") then
+                val_str = "\27[2;37m(Dynamic SOCKS5 - resolved by client)\27[0m"
             end
 
             local line
@@ -799,7 +802,7 @@ function TUI.edit_profile_modal(existing_profile)
         elseif key == "TAB" or key == "DOWN" then
             field_idx = field_idx + 1
             if field_idx > #fields then field_idx = 1 end
-        elseif key == "UP" then
+        elseif key == "UP" or key == "SHIFT_TAB" then
             field_idx = field_idx - 1
             if field_idx < 1 then field_idx = #fields end
         elseif key == "ENTER" then
@@ -818,8 +821,11 @@ function TUI.edit_profile_modal(existing_profile)
                 p[fields[field_idx].key] = cur_val:sub(1, #cur_val - 1)
             end
         elseif key and #key == 1 and string.byte(key) >= 32 and string.byte(key) <= 126 then
-            local cur_val = tostring(p[fields[field_idx].key] or "")
-            p[fields[field_idx].key] = cur_val .. key
+            local fld = fields[field_idx]
+            if fld.type ~= "number" or key:match("%d") then
+                local cur_val = tostring(p[fld.key] or "")
+                p[fld.key] = cur_val .. key
+            end
         end
     end
 end
