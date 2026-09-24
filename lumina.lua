@@ -22,7 +22,8 @@
       * Enter            : Open directory, edit text, or view images
       * j / ↓            : Move cursor down
       * k / ↑            : Move cursor up
-      * g / G            : Jump to top / bottom
+      * H / gh           : Jump to start directory (where Lumina was launched)
+      * ~                : Jump to user's home directory ($HOME)
       * /                : Instant fuzzy in-directory filter
       * f / Ctrl+P       : Global recursive fuzzy file finder
       * t / T            : Cycle color theme forward / backward
@@ -1509,6 +1510,7 @@ local function main(args)
     end
     local show_hidden = false
     local filter_query = ""
+    local start_dir = current_dir
 
     local sel_index = 1
     local current_entries = read_dir_entries(current_dir, show_hidden)
@@ -1528,6 +1530,7 @@ local function main(args)
     local needs_redraw = true
     local is_searching = false
     local search_query = ""
+    local g_prefix = false
     local preview_pending = true
     local last_w, last_h = get_terminal_size()
 
@@ -1684,10 +1687,10 @@ local function main(args)
                 help_hint = "\27[90m[Enter] Confirm  [Esc] Cancel  [↑/↓] Select\27[0m"
             elseif #filter_query > 0 then
                 status_text = string.format("%sFilter: /%s\27[0m", C.status_accent or "\27[1;38;2;251;191;36m", filter_query)
-                help_hint = "[h/l] Navigate  [j/k] Move  [/] Filter  [f] Find  [Esc] Clear  [q] Quit"
+                help_hint = "[h/l] Nav  [H] Start  [j/k] Move  [/] Filter  [f] Find  [Esc] Clear  [q] Quit"
             else
                 status_text = string.format("%s%s%s", C.dim, sel_entry and sel_entry.path or current_dir, C.reset)
-                help_hint = "[h/l] Navigate  [j/k] Move  [/] Filter  [f] Find  [t] Theme  [.] Hidden  [q] Quit"
+                help_hint = "[h/l] Nav  [H/gh] Start  [~] Home  [j/k] Move  [/] Filter  [f] Find  [q] Quit"
             end
             local footer_line = string.format("\27[%d;1H\27[2K  %s \27[90m│\27[0m \27[90m%s\27[0m",
                 footer_y, status_text, help_hint)
@@ -1770,11 +1773,54 @@ local function main(args)
             elseif k == "\2" or k == "CTRL_B" then
                 local _, term_h = get_terminal_size()
                 sel_index = math.max(1, sel_index - math.max(4, term_h - 6))
-            elseif k == "HOME" or k == "g" then
+            elseif k == "HOME" then
                 sel_index = 1
             elseif k == "END" or k == "G" then
                 sel_index = math.max(1, #current_entries)
+            elseif k == "g" then
+                if g_prefix then
+                    -- 'gg': jump to top
+                    sel_index = 1
+                    g_prefix = false
+                else
+                    g_prefix = true
+                end
+            elseif g_prefix and (k == "h" or k == "s") then
+                -- 'gh' or 'gs': Jump straight to Start Directory
+                g_prefix = false
+                current_dir = start_dir
+                filter_query = ""
+                sel_index = 1
+                clear_preview_cache()
+                preview_pending = true
+                io.write("\27[H\27[2J")
+                io.flush()
+                reload_current()
+            elseif k == "H" then
+                -- 'H': Jump straight to Start Directory
+                g_prefix = false
+                current_dir = start_dir
+                filter_query = ""
+                sel_index = 1
+                clear_preview_cache()
+                preview_pending = true
+                io.write("\27[H\27[2J")
+                io.flush()
+                reload_current()
+            elseif k == "~" then
+                -- '~': Jump straight to User's Home Directory
+                g_prefix = false
+                local home_dir = os.getenv("HOME") or os.getenv("USERPROFILE") or "/"
+                current_dir = resolve_canonical_path(home_dir)
+                filter_query = ""
+                sel_index = 1
+                clear_preview_cache()
+                preview_pending = true
+                io.write("\27[H\27[2J")
+                io.flush()
+                reload_current()
             elseif k == "LEFT" or k == "h" or k == "BACKSPACE" then
+                g_prefix = false
                 -- Move to parent directory
                 if not is_root_dir(current_dir) then
                     local prev_dir = current_dir

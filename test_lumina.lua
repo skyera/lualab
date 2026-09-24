@@ -652,6 +652,56 @@ assert_false(file_is_dir, "'lumina.lua' is correctly detected as a file")
 assert_true(file_dir:match("lualab$") ~= nil, "File target resolves to parent directory")
 assert_eq(file_sel, "lumina.lua", "File target sets initial selection name to 'lumina.lua'")
 
+-- Test Suite 11: Jump to Start Directory (H / gh) and Home (~)
+print("\n-- Test Suite 11: Jump to Start Directory (H / gh) and Home (~) --")
+
+local sim_start_dir = "/home/user/workspace/lualab"
+local sim_home_dir = "/home/user"
+local sim_cur_dir = sim_start_dir
+local sim_g_prefix = false
+
+local function sim_nav_key(k)
+    if k == "H" then
+        sim_g_prefix = false
+        sim_cur_dir = sim_start_dir
+    elseif k == "~" then
+        sim_g_prefix = false
+        sim_cur_dir = sim_home_dir
+    elseif k == "g" then
+        if sim_g_prefix then
+            sim_g_prefix = false -- 'gg'
+        else
+            sim_g_prefix = true
+        end
+    elseif sim_g_prefix and (k == "h" or k == "s") then
+        sim_g_prefix = false
+        sim_cur_dir = sim_start_dir
+    else
+        sim_g_prefix = false
+    end
+end
+
+-- Simulate navigating into deep directory
+sim_cur_dir = "/home/user/workspace/lualab/sub/deep/folder"
+assert_eq(sim_cur_dir, "/home/user/workspace/lualab/sub/deep/folder", "Navigated to deep subfolder")
+
+-- 1. Press 'H' to jump to start_dir
+sim_nav_key("H")
+assert_eq(sim_cur_dir, sim_start_dir, "Pressing 'H' immediately returns to start_dir")
+
+-- 2. Navigate away and press 'gh'
+sim_cur_dir = "/var/log/nginx"
+sim_nav_key("g")
+assert_true(sim_g_prefix, "Pressing 'g' sets g_prefix")
+sim_nav_key("h")
+assert_false(sim_g_prefix, "Pressing 'h' after 'g' resets g_prefix")
+assert_eq(sim_cur_dir, sim_start_dir, "Pressing 'gh' returns to start_dir")
+
+-- 3. Navigate away and press '~'
+sim_cur_dir = "/usr/local/bin"
+sim_nav_key("~")
+assert_eq(sim_cur_dir, sim_home_dir, "Pressing '~' jumps to user home directory")
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)
