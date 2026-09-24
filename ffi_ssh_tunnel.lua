@@ -631,13 +631,15 @@ end
 
 -- Build SSH command from profile
 local function build_ssh_command(p, extra_flags)
-    local parts = {"ssh", "-N", "-f"}
-    
-    -- ControlMaster multiplexing
-    local mux_path = get_mux_socket_path(p.name)
-    table.insert(parts, "-M")
-    table.insert(parts, "-S")
-    table.insert(parts, mux_path)
+    local parts = {"ssh", "-N"}
+    if not is_windows then
+        table.insert(parts, "-f")
+        -- ControlMaster multiplexing (POSIX only)
+        local mux_path = get_mux_socket_path(p.name)
+        table.insert(parts, "-M")
+        table.insert(parts, "-S")
+        table.insert(parts, mux_path)
+    end
     table.insert(parts, "-o")
     table.insert(parts, "ExitOnForwardFailure=yes")
 
@@ -749,40 +751,68 @@ local function file_exists(path)
     end
 end
 
--- Check live status of an OpenSSH control socket
-local function get_tunnel_status(profile_name)
+-- Check live status of a profile (via OpenSSH control socket or local port fallback)
+local function get_tunnel_status(profile_or_name)
+    local p = (type(profile_or_name) == "table") and profile_or_name or nil
+    local profile_name = p and p.name or profile_or_name
     local mux_path = get_mux_socket_path(profile_name)
-    -- Check if socket file exists (UNIX domain socket safe via access)
-    if not file_exists(mux_path) then
-        return { is_up = false, status = "DOWN", pid = nil }
+
+    -- Strategy 1: Check ControlMaster socket (Linux/macOS)
+    if file_exists(mux_path) then
+        local cmd = string.format("ssh -O check -S '%s' dummy_host 2>&1", mux_path)
+        local pipe = io.popen(cmd)
+        local output = pipe and pipe:read("*a") or ""
+        if pipe then pipe:close() end
+
+        local pid = output:match("pid=(%d+)")
+        if pid then
+            return { is_up = true, status = "UP", pid = tonumber(pid) }
+        elseif output:lower():match("running") then
+            return { is_up = true, status = "UP", pid = nil }
+        end
     end
 
-    -- Check with ssh -O check
-    local cmd = string.format("ssh -O check -S '%s' dummy_host 2>&1", mux_path)
-    local pipe = io.popen(cmd)
-    local output = pipe and pipe:read("*a") or ""
-    if pipe then pipe:close() end
-
-    local pid = output:match("pid=(%d+)")
-    if pid then
-        return { is_up = true, status = "UP", pid = tonumber(pid) }
-    elseif output:lower():match("running") then
-        return { is_up = true, status = "UP", pid = nil }
-    else
-        return { is_up = false, status = "DOWN", pid = nil }
+    -- Strategy 2: Fallback to local listening port inspection (Windows or direct background tunnels)
+    if p and p.local_port then
+        local port = tonumber(p.local_port)
+        if port then
+            local pid = find_pid_by_port(port)
+            if pid then
+                return { is_up = true, status = "UP", pid = pid }
+            end
+        end
     end
+
+    return { is_up = false, status = "DOWN", pid = nil }
 end
 
--- Stop a tunnel gracefully via ssh -O exit
-local function stop_tunnel(profile_name)
+-- Stop a tunnel gracefully via ssh -O exit or port termination
+local function stop_tunnel(profile_or_name)
+    local p = (type(profile_or_name) == "table") and profile_or_name or nil
+    local profile_name = p and p.name or profile_or_name
     local mux_path = get_mux_socket_path(profile_name)
-    local cmd = string.format("ssh -O exit -S '%s' dummy_host 2>&1", mux_path)
-    local pipe = io.popen(cmd)
-    local out = pipe and pipe:read("*a") or ""
-    if pipe then pipe:close() end
+    local out = ""
 
-    -- Clean up lingering socket file if necessary
-    os.remove(mux_path)
+    if file_exists(mux_path) then
+        local cmd = string.format("ssh -O exit -S '%s' dummy_host 2>&1", mux_path)
+        local pipe = io.popen(cmd)
+        out = pipe and pipe:read("*a") or ""
+        if pipe then pipe:close() end
+        os.remove(mux_path)
+    end
+
+    -- If profile has local port, ensure port is released
+    if p and p.local_port then
+        local port = tonumber(p.local_port)
+        if port then
+            local ok_free, _ = probe_port_available(port, p.local_bind)
+            if not ok_free then
+                local _, rel_msg = release_port(port, p.local_bind)
+                if #out > 0 then out = out .. " " .. rel_msg else out = rel_msg end
+            end
+        end
+    end
+
     return out
 end
 
@@ -849,11 +879,14 @@ local function start_tunnel(p)
 
     local parts = build_ssh_command(p)
     local cmd = command_parts_to_string(parts)
+    if is_windows then
+        cmd = 'start /B "" ' .. cmd
+    end
     local ret = os.execute(cmd)
     if ret == 0 then
-        -- Small pause to allow socket creation
-        sleep_ms(150)
-        local status = get_tunnel_status(p.name)
+        -- Small pause to allow socket creation / port binding
+        sleep_ms(250)
+        local status = get_tunnel_status(p)
         if status.is_up then
             return true, string.format("Tunnel '%s' active! (PID %s)", p.name, tostring(status.pid or "unknown"))
         else
@@ -1092,7 +1125,7 @@ function TUI.render_dashboard(profiles, cursor_idx, status_msg)
     else
         for i, p in ipairs(profiles) do
             local marker = (i == cursor_idx) and "▶" or " "
-            local st = get_tunnel_status(p.name)
+            local st = get_tunnel_status(p)
             local status_str = st.is_up and "\27[1;32m● UP\27[0m" or "\27[1;31m○ DOWN\27[0m"
 
             local type_str = (p.type or "local"):upper()
@@ -1370,9 +1403,9 @@ local function run_tui()
             elseif key == "ENTER" then
                 local sel = data.profiles[cursor]
                 if sel then
-                    local st = get_tunnel_status(sel.name)
+                    local st = get_tunnel_status(sel)
                     if st.is_up then
-                        stop_tunnel(sel.name)
+                        stop_tunnel(sel)
                         status_msg = string.format("Stopped tunnel '%s'.", sel.name)
                     else
                         local success, msg = start_tunnel(sel)
@@ -1400,7 +1433,7 @@ local function run_tui()
             elseif key == "d" then
                 local sel = data.profiles[cursor]
                 if sel then
-                    stop_tunnel(sel.name)
+                    stop_tunnel(sel)
                     table.remove(data.profiles, cursor)
                     save_profiles(data)
                     status_msg = string.format("Deleted profile '%s'.", sel.name)
@@ -1646,7 +1679,7 @@ local function main(args)
             "NAME", "TYPE", "LOCAL", "TARGET", "VIA (JUMP)", "STATUS"))
         print(string.rep("─", 102))
         for _, p in ipairs(data.profiles) do
-            local st = get_tunnel_status(p.name)
+            local st = get_tunnel_status(p)
             local status_str = st.is_up and (st.pid and string.format("UP (PID %d)", st.pid) or "UP") or "DOWN"
 
             local type_str = (p.type or "local"):upper()
@@ -1684,7 +1717,12 @@ local function main(args)
             print("Error: Missing profile name. Usage: ffi_ssh_tunnel.lua down <name>")
             os.exit(1)
         end
-        local out = stop_tunnel(name)
+        local data = load_profiles()
+        local found = nil
+        for _, p in ipairs(data.profiles) do
+            if p.name == name then found = p; break end
+        end
+        local out = stop_tunnel(found or name)
         print(string.format("Tunnel '%s' stopped. %s", name, out:gsub("%s+", " ")))
     elseif cmd == "restart" then
         local name = args[2]
@@ -1692,7 +1730,12 @@ local function main(args)
             print("Error: Missing profile name. Usage: ffi_ssh_tunnel.lua restart <name>")
             os.exit(1)
         end
-        stop_tunnel(name)
+        local data = load_profiles()
+        local found = nil
+        for _, p in ipairs(data.profiles) do
+            if p.name == name then found = p; break end
+        end
+        stop_tunnel(found or name)
         sleep_ms(200)
         local data = load_profiles()
         for _, p in ipairs(data.profiles) do
@@ -1782,11 +1825,12 @@ local function main(args)
         local name = args[2]
         local data = load_profiles()
         local idx = nil
+        local found = nil
         for i, p in ipairs(data.profiles) do
-            if p.name == name then idx = i; break end
+            if p.name == name then idx = i; found = p; break end
         end
         if idx then
-            stop_tunnel(name)
+            stop_tunnel(found or name)
             table.remove(data.profiles, idx)
             save_profiles(data)
             print(string.format("Deleted profile '%s'.", name))
