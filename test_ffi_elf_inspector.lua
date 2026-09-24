@@ -78,6 +78,11 @@ local tests = {
         name = "Vim-style bottom line search bar definition",
         cmd = "grep -n \"Vim-style bottom line\" ffi_elf_inspector.lua",
         expect = "Vim-style bottom line"
+    },
+    {
+        name = "Sticky table column headers and tab badge counts",
+        cmd = "grep -n \"SYMBOL NAME\" ffi_elf_inspector.lua",
+        expect = "SYMBOL NAME"
     }
 }
 

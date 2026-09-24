@@ -458,7 +458,7 @@ local function generate_hex_dump(raw_bytes, base_addr, max_lines)
 
     for offset = 0, total_len - 1, 16 do
         if #lines >= max_lines then
-            table.insert(lines, string.format("  ... (%d more bytes)", total_len - offset))
+            table.insert(lines, string.format("  \27[38;5;244m... (%d more bytes)\27[0m", total_len - offset))
             break
         end
         local hex_parts = {}
@@ -467,11 +467,16 @@ local function generate_hex_dump(raw_bytes, base_addr, max_lines)
 
         for i = 1, chunk_len do
             local b = raw_bytes:byte(offset + i)
-            table.insert(hex_parts, string.format("%02x", b))
-            if b >= 32 and b <= 126 then
-                table.insert(ascii_parts, string.char(b))
+            if b == 0 then
+                table.insert(hex_parts, "\27[38;5;240m00\27[0m")
             else
-                table.insert(ascii_parts, ".")
+                table.insert(hex_parts, string.format("\27[38;5;255m%02x\27[0m", b))
+            end
+
+            if b >= 32 and b <= 126 then
+                table.insert(ascii_parts, string.format("\27[38;5;117m%c\27[0m", b))
+            else
+                table.insert(ascii_parts, "\27[38;5;240m.\27[0m")
             end
         end
 
@@ -486,11 +491,40 @@ local function generate_hex_dump(raw_bytes, base_addr, max_lines)
             hex_parts[9], hex_parts[10], hex_parts[11], hex_parts[12],
             hex_parts[13], hex_parts[14], hex_parts[15], hex_parts[16])
 
-        local line = string.format("  %08x  %-48s |%s|",
+        local line = string.format("  \27[38;5;67m%08x\27[0m  %s  \27[90m|\27[0m%s\27[90m|\27[0m",
             base_addr + offset, hex_str, table.concat(ascii_parts))
         table.insert(lines, line)
     end
     return lines
+end
+
+-- Syntax coloring helper for assembly instructions
+local function colorize_asm_line(line)
+    local addr, spaces, rest = line:match("^%s*(%x+:)(%s+)(.*)$")
+    if not addr then return "  " .. line:gsub("^%s+", "") end
+
+    local comment = ""
+    local hash_idx = rest:find("#")
+    if hash_idx then
+        comment = "\27[38;5;244m" .. rest:sub(hash_idx) .. "\27[0m"
+        rest = rest:sub(1, hash_idx - 1)
+    end
+
+    local mnem, ops = rest:match("^(%S+)(.*)$")
+    mnem = mnem or ""
+    ops = ops or ""
+
+    local mnem_color = "\27[38;5;150m"
+    local jmps = {call=true, jmp=true, je=true, jne=true, jz=true, jnz=true, ja=true, jb=true, jae=true, jbe=true, js=true, jns=true, ret=true, retq=true}
+    local moves = {mov=true, lea=true, push=true, pop=true, xor=true, add=true, sub=true, cmp=true, test=true, and_op=true}
+    if jmps[mnem:lower()] then
+        mnem_color = "\27[1;38;5;214m"
+    elseif moves[mnem:lower()] then
+        mnem_color = "\27[38;5;75m"
+    end
+
+    return string.format("  \27[38;5;67m%s\27[0m%s%-7s\27[0m\27[38;5;253m%s\27[0m %s",
+        addr, mnem_color, mnem, ops, comment)
 end
 
 -- Disassemble function instructions using system objdump
@@ -512,9 +546,9 @@ local function disassemble_function(filepath, func_entry, max_instructions)
         if line:find("<" .. func_entry.name .. ">:") or line:find("Disassembly of section") then
             started = true
         elseif started and line:match("^%s*%x+:") then
-            table.insert(lines, "  " .. line:gsub("^%s+", ""))
+            table.insert(lines, colorize_asm_line(line))
             if #lines >= max_instructions then
-                table.insert(lines, string.format("  ... (%d instructions shown, use CLI for full dump)", max_instructions))
+                table.insert(lines, string.format("  \27[38;5;244m... (%d instructions shown, use CLI for full dump)\27[0m", max_instructions))
                 break
             end
         end
@@ -529,7 +563,7 @@ local function disassemble_function(filepath, func_entry, max_instructions)
         if p2 then
             for line in p2:lines() do
                 if line:match("^%s*%x+:") then
-                    table.insert(lines, "  " .. line:gsub("^%s+", ""))
+                    table.insert(lines, colorize_asm_line(line))
                     if #lines >= max_instructions then break end
                 end
             end
@@ -672,7 +706,7 @@ local function run_tui(elf_info)
         if state.cursor < 1 and #list > 0 then state.cursor = 1 end
 
         -- Adjust scroll
-        local list_height = rows - 6
+        local list_height = rows - 8
         if state.cursor <= state.scroll then
             state.scroll = math.max(0, state.cursor - 1)
         elseif state.cursor > state.scroll + list_height then
@@ -694,12 +728,17 @@ local function run_tui(elf_info)
         local sub_pad = string.rep(" ", math.max(0, cols - #sub:gsub("\27%[[0-9;]*m", "")))
         table.insert(buf, "\27[48;5;234m" .. sub .. sub_pad .. "\27[0m\n")
 
-        -- Tab Navigation Bar
-        local t1 = (state.tab == 1 and "\27[7m [1] Functions \27[0m" or " [1] Functions ")
-        local t2 = (state.tab == 2 and "\27[7m [2] Sections \27[0m" or " [2] Sections ")
-        local t3 = (state.tab == 3 and "\27[7m [3] Imports \27[0m" or " [3] Imports ")
-        local t4 = (state.tab == 4 and "\27[7m [4] Top Bloat \27[0m" or " [4] Top Bloat ")
-        local tabs = t1 .. t2 .. t3 .. t4
+        -- Tab Navigation Bar with Live Item Counts
+        local n_funcs = #elf_info.functions
+        local n_secs = #elf_info.sections
+        local n_imps = #elf_info.imports
+        local n_bloat = math.min(10, #bloat_funcs)
+
+        local t1 = (state.tab == 1 and string.format(" \27[48;5;31m\27[1;38;5;255m [1] Functions (%d) \27[0m", n_funcs) or string.format(" \27[38;5;250m[1] Functions (%d)\27[0m", n_funcs))
+        local t2 = (state.tab == 2 and string.format(" \27[48;5;31m\27[1;38;5;255m [2] Sections (%d) \27[0m", n_secs) or string.format(" \27[38;5;250m[2] Sections (%d)\27[0m", n_secs))
+        local t3 = (state.tab == 3 and string.format(" \27[48;5;31m\27[1;38;5;255m [3] Imports (%d) \27[0m", n_imps) or string.format(" \27[38;5;250m[3] Imports (%d)\27[0m", n_imps))
+        local t4 = (state.tab == 4 and string.format(" \27[48;5;31m\27[1;38;5;255m [4] Top Bloat (%d) \27[0m", n_bloat) or string.format(" \27[38;5;250m[4] Top Bloat (%d)\27[0m", n_bloat))
+        local tabs = t1 .. " " .. t2 .. " " .. t3 .. " " .. t4
 
         local left_w = math.floor(cols * 0.48)
         local right_w = cols - left_w - 3
@@ -710,6 +749,27 @@ local function run_tui(elf_info)
         local div_left = string.rep("─", left_w)
         local div_right = string.rep("─", right_w)
         table.insert(buf, "\27[90m" .. div_left .. "┬" .. div_right .. "\27[0m\n")
+
+        -- Column Header Row
+        local col_head = ""
+        if state.tab == 1 then
+            col_head = string.format("  \27[1;38;5;248m%-5s %-10s %-8s %s\27[0m", "TYPE", "ADDRESS", "SIZE", "SYMBOL NAME")
+        elseif state.tab == 2 then
+            col_head = string.format("  \27[1;38;5;248m%-5s %-16s %-8s %s\27[0m", "FLAGS", "SECTION NAME", "SIZE", "TYPE")
+        elseif state.tab == 3 then
+            col_head = string.format("  \27[1;38;5;248m%-7s %s\27[0m", "BIND", "IMPORTED SYMBOL")
+        elseif state.tab == 4 then
+            col_head = string.format("  \27[1;38;5;248m%-7s %-8s %-10s %s\27[0m", "SIZE", "% .TEXT", "BAR", "FUNCTION NAME")
+        end
+        local col_head_clean = #col_head:gsub("\27%[[0-9;]*m", "")
+        local col_pad = string.rep(" ", math.max(0, left_w - col_head_clean))
+
+        local r_header = "  \27[1;38;5;248mDETAILS & CODE INSPECTOR\27[0m"
+        local r_head_clean = #r_header:gsub("\27%[[0-9;]*m", "")
+        local r_pad = string.rep(" ", math.max(0, right_w - r_head_clean))
+
+        table.insert(buf, col_head .. col_pad .. "\27[90m│\27[0m" .. r_header .. r_pad .. "\27[0m\n")
+        table.insert(buf, "\27[90m" .. div_left .. "┼" .. div_right .. "\27[0m\n")
 
         -- Active Item for Right Pane
         local active_item = list[state.cursor]
