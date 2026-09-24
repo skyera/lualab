@@ -258,12 +258,12 @@ else
         struct stat {
             unsigned long  st_dev;
             unsigned long  st_ino;
+            unsigned long  st_nlink;
             unsigned int   st_mode;
-            unsigned int   st_nlink;
             unsigned int   st_uid;
             unsigned int   st_gid;
+            unsigned int   __pad0;
             unsigned long  st_rdev;
-            unsigned long  __pad1;
             long           st_size;
             long           st_blksize;
             long           st_blocks;
