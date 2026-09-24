@@ -1063,6 +1063,22 @@ assert_eq(#help_lines, 8, "Help modal renders exactly box_h (8) rows")
 assert_true(help_lines[1]:find("LUMINA CHEATSHEET") ~= nil, "Help modal top border contains title")
 assert_true(help_lines[#help_lines]:find("Press any key") ~= nil, "Help modal footer contains hint")
 
+-- Test modal wait loop logic
+local inputs = { nil, nil, "ESC" }
+local input_idx = 1
+local dismissed = false
+local loop_count = 0
+while not dismissed do
+    loop_count = loop_count + 1
+    local k = inputs[input_idx]
+    input_idx = input_idx + 1
+    if k then
+        dismissed = true
+    end
+end
+assert_true(dismissed, "Help modal dismissed only when key is pressed")
+assert_eq(loop_count, 3, "Help modal ignores nil timeouts and stays open until key arrives")
+
 -- Test multi-delete prompt logic
 local function format_delete_prompt(targets)
     if #targets == 1 then

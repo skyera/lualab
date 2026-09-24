@@ -1721,9 +1721,14 @@ local function show_help_modal()
     io.write(table.concat(out))
     io.flush()
 
-    read_key()
-    io.write("\27[H\27[2J")
-    io.flush()
+    while true do
+        local k = read_key()
+        if k then
+            io.write("\27[H\27[2J")
+            io.flush()
+            break
+        end
+    end
 end
 
 local PREVIEW_CACHE_LIMIT = 64
