@@ -1215,6 +1215,33 @@ assert_true(find_c:find("-name .git") ~= nil, "find command prunes .git")
 assert_true(find_c:find("-name node_modules") ~= nil, "find command prunes node_modules")
 assert_true(find_c:find("-prune") ~= nil, "find command uses -prune")
 
+-- Test Suite 21: Search Engine Cycling & Badges
+print("\n-- Test Suite 21: Search Engine Cycling & Badges --")
+local ENGINES = { "fd", "find", "lua" }
+local eng_idx = 1
+assert_eq(ENGINES[eng_idx], "fd", "Default search engine is 'fd'")
+
+-- Test Tab cycle 1: fd -> find
+eng_idx = (eng_idx % #ENGINES) + 1
+assert_eq(ENGINES[eng_idx], "find", "Tab cycles from 'fd' to 'find'")
+
+-- Test Tab cycle 2: find -> lua
+eng_idx = (eng_idx % #ENGINES) + 1
+assert_eq(ENGINES[eng_idx], "lua", "Tab cycles from 'find' to 'lua'")
+
+-- Test Tab cycle 3: lua -> fd
+eng_idx = (eng_idx % #ENGINES) + 1
+assert_eq(ENGINES[eng_idx], "fd", "Tab wraps back to 'fd'")
+
+-- Test header title with engine badge
+local function format_search_title(matches_cnt, total_cnt, engine_name)
+    local badge = string.format("[%s]", engine_name)
+    return string.format(" FUZZY FILE SEARCH (%d/%d) %s ", matches_cnt, total_cnt, badge)
+end
+local title_preview = format_search_title(15, 120, "fd")
+assert_true(title_preview:find("%[fd%]") ~= nil, "Modal title contains [fd] badge")
+assert_true(title_preview:find("15/120") ~= nil, "Modal title contains match count")
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)

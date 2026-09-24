@@ -359,6 +359,8 @@ else
                     return "ESC"
                 elseif c0 == 10 or c0 == 13 then
                     return "ENTER"
+                elseif c0 == 9 then
+                    return "TAB"
                 elseif c0 == 127 or c0 == 8 then
                     return "BACKSPACE"
                 elseif c0 == 32 then
@@ -1053,11 +1055,12 @@ local function create_file_entry_from_path(full_path, root_dir)
     }
 end
 
-local function scan_files_recursive(root_dir, show_hidden)
+local function scan_files_recursive(root_dir, show_hidden, preferred_engine)
+    preferred_engine = preferred_engine or "fd"
     local results = {}
     local seen = {}
 
-    -- 1. Try 'fd' or 'fdfind'
+    -- 1. Try 'fd' or 'fdfind' if requested or fallback
     local fd_cmd_name = nil
     if is_command_available("fd") then
         fd_cmd_name = "fd"
@@ -1065,7 +1068,7 @@ local function scan_files_recursive(root_dir, show_hidden)
         fd_cmd_name = "fdfind"
     end
 
-    if fd_cmd_name then
+    if (preferred_engine == "fd" or preferred_engine == "auto") and fd_cmd_name then
         local hidden_flag = show_hidden and "-H " or ""
         local cmd = string.format("%s -t f %s-E .git -E node_modules -E .hg -E .svn -E .cache . %s 2>%s",
             fd_cmd_name, hidden_flag, shell_quote(root_dir), devnull)
@@ -1088,12 +1091,12 @@ local function scan_files_recursive(root_dir, show_hidden)
                 end
             end
             pipe:close()
-            if #results > 0 then return results end
+            return results, "fd"
         end
     end
 
-    -- 2. Try POSIX 'find' if on Linux/macOS
-    if not is_windows and is_command_available("find") then
+    -- 2. Try POSIX 'find' if on Linux/macOS and (preferred is 'find' or fallback)
+    if (preferred_engine == "find" or preferred_engine == "fd" or preferred_engine == "auto") and not is_windows and is_command_available("find") then
         local prune_hidden = show_hidden and "" or "-o -name '.*'"
         local cmd = string.format("find %s -type d \\( -name .git -o -name node_modules -o -name .hg -o -name .svn -o -name .cache %s \\) -prune -o -type f -print 2>%s",
             shell_quote(root_dir), prune_hidden, devnull)
@@ -1107,11 +1110,11 @@ local function scan_files_recursive(root_dir, show_hidden)
                 end
             end
             pipe:close()
-            if #results > 0 then return results end
+            return results, "find"
         end
     end
 
-    -- 3. Fallback: Pure Lua recursive walker without artificial max_files cap
+    -- 3. Fallback / Built-in Lua recursive walker without artificial max_files cap
     local function walk(dir, depth)
         if depth > 24 then return end
         local entries = read_dir_entries(dir, show_hidden)
@@ -1132,7 +1135,7 @@ local function scan_files_recursive(root_dir, show_hidden)
     end
 
     walk(root_dir, 1)
-    return results
+    return results, "lua"
 end
 
 local function get_dir_display_name(p)
@@ -1388,7 +1391,11 @@ end
 -- Recursive fuzzy file search across project tree with live ranking and instant preview
 -- =========================================================================
 local function show_fuzzy_finder(root_dir, show_hidden)
-    local all_files = scan_files_recursive(root_dir, show_hidden)
+    local ENGINES = { "fd", "find", "lua" }
+    local engine_idx = 1
+    local current_engine = ENGINES[engine_idx]
+
+    local all_files, active_engine = scan_files_recursive(root_dir, show_hidden, current_engine)
     local query = ""
     local sel_idx = 1
     local scroll_offset = 0
@@ -1432,8 +1439,9 @@ local function show_fuzzy_finder(root_dir, show_hidden)
         local out = {}
         local bcol = C.border_focus
 
-        -- Header
-        local title_str = string.format(" FUZZY FILE SEARCH (%d/%d) ", #matches, #all_files)
+        -- Header with live engine badge
+        local engine_badge = string.format("[%s]", active_engine or current_engine)
+        local title_str = string.format(" FUZZY FILE SEARCH (%d/%d) %s ", #matches, #all_files, engine_badge)
         local top_fill = string.rep("─", math.max(0, box_w - 2 - visual_len(title_str)))
         table.insert(out, string.format("\27[%d;%dH%s╭%s%s%s%s╮%s",
             start_y, start_x, bcol, C.bold .. C.header_path, title_str, bcol, top_fill, C.reset))
@@ -1483,7 +1491,7 @@ local function show_fuzzy_finder(root_dir, show_hidden)
         end
 
         -- Footer / Key Hints
-        local hint_text = " [Enter] Jump to File  [↑/↓] Select  [Esc] Cancel "
+        local hint_text = " [Enter] Open  [Tab] Engine  [↑/↓] Select  [Esc] Cancel "
         local hint_pad = string.rep("─", math.max(0, box_w - 2 - visual_len(hint_text)))
         table.insert(out, string.format("\27[%d;%dH%s╰%s%s%s%s╯%s",
             start_y + box_h - 1, start_x, bcol, C.dim, hint_text, bcol, hint_pad, C.reset))
@@ -1506,6 +1514,15 @@ local function show_fuzzy_finder(root_dir, show_hidden)
                 io.write("\27[H\27[2J")
                 io.flush()
                 return matches[sel_idx]
+            elseif k == "TAB" then
+                -- Cycle find engine: fd -> find -> lua
+                engine_idx = (engine_idx % #ENGINES) + 1
+                current_engine = ENGINES[engine_idx]
+                all_files, active_engine = scan_files_recursive(root_dir, show_hidden, current_engine)
+                matches = get_matches()
+                sel_idx = 1
+                scroll_offset = 0
+                render_modal(matches)
             elseif k == "UP" then
                 if sel_idx > 1 then
                     sel_idx = sel_idx - 1
