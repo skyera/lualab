@@ -1523,6 +1523,85 @@ local function show_confirm_modal(title, message)
     end
 end
 
+local function show_help_modal()
+    local term_w, term_h = get_terminal_size()
+    local box_w = math.max(50, math.min(term_w - 6, 74))
+    local cheatsheet = {
+        { section = "NAVIGATION" },
+        { key = "h, l, Enter", desc = "Enter / Leave directory or open file" },
+        { key = "j, k, ↑, ↓",  desc = "Move cursor down / up" },
+        { key = "gg, G",       desc = "Jump to top / bottom of list" },
+        { key = "H, gh",       desc = "Return to startup directory" },
+        { key = "~",           desc = "Jump to user home directory" },
+        { section = "SELECTION & CLIPBOARD" },
+        { key = "Space, v",    desc = "Tag / Untag item (multi-selection)" },
+        { key = "V",           desc = "Invert all item tags" },
+        { key = "y, d, x",     desc = "Copy / Cut tagged or current items" },
+        { key = "p",           desc = "Paste clipboard items here" },
+        { key = "a",           desc = "Create new file (append / for dir)" },
+        { key = "R",           desc = "Rename item" },
+        { key = "D",           desc = "Delete tagged or current item" },
+        { section = "PREVIEW & TOOLS" },
+        { key = "J, K",        desc = "Scroll preview pane down / up" },
+        { key = "m<key>, '<key>", desc = "Set / Jump to directory bookmark" },
+        { key = "S",           desc = "Spawn interactive shell in current dir" },
+        { key = "f, Ctrl+P",   desc = "Recursive fuzzy file search" },
+        { key = "/",           desc = "Filter entries in current directory" },
+        { key = "s",           desc = "Sort menu (Name, Size, Time, Ext)" },
+        { key = "t, T",        desc = "Cycle themes forward / backward" },
+        { key = ".",           desc = "Toggle hidden dotfiles" },
+        { key = "?",           desc = "Show this cheatsheet overlay" },
+        { key = "q, Esc",      desc = "Quit Lumina or close modal" },
+    }
+
+    local box_h = math.min(term_h - 4, #cheatsheet + 4)
+    local start_x = math.floor((term_w - box_w) / 2)
+    local start_y = math.floor((term_h - box_h) / 2)
+    local bcol = C.border_focus
+
+    local out = {}
+    local title_str = " LUMINA CHEATSHEET "
+    local top_fill = string.rep("─", math.max(0, box_w - 2 - visual_len(title_str)))
+    table.insert(out, string.format("\27[%d;%dH%s╭%s%s%s%s╮%s",
+        start_y, start_x, bcol, C.bold .. C.header_path, title_str, bcol, top_fill, C.reset))
+
+    local content_lines = box_h - 2
+    for r = 1, content_lines do
+        local item = cheatsheet[r]
+        local row_y = start_y + r
+        if item then
+            if item.section then
+                local s_str = " " .. C.bold .. (C.status_accent or "\27[1;38;2;251;191;36m") .. item.section .. C.reset .. " "
+                local pad = string.rep("─", math.max(0, box_w - 2 - visual_len(item.section) - 2))
+                local full = s_str .. C.dim .. pad .. C.reset
+                table.insert(out, string.format("\27[%d;%dH%s│%s%s│%s", row_y, start_x, bcol, full, bcol, C.reset))
+            else
+                local k_str = "   " .. C.bold .. string.format("%-14s", item.key) .. C.reset
+                local d_str = " " .. item.desc
+                local total_vlen = visual_len(string.format("   %-14s %s", item.key, item.desc))
+                local pad = string.rep(" ", math.max(0, box_w - 2 - total_vlen))
+                table.insert(out, string.format("\27[%d;%dH%s│%s%s%s%s│%s",
+                    row_y, start_x, bcol, k_str, d_str, pad, bcol, C.reset))
+            end
+        else
+            local blank_pad = string.rep(" ", box_w - 2)
+            table.insert(out, string.format("\27[%d;%dH%s│%s%s│%s", row_y, start_x, bcol, blank_pad, bcol, C.reset))
+        end
+    end
+
+    local hint = " Press any key or Esc to close "
+    local bot_fill = string.rep("─", math.max(0, box_w - 2 - visual_len(hint)))
+    table.insert(out, string.format("\27[%d;%dH%s╰%s%s%s%s╯%s",
+        start_y + box_h - 1, start_x, bcol, C.dim, hint, bcol, bot_fill, C.reset))
+
+    io.write(table.concat(out))
+    io.flush()
+
+    read_key()
+    io.write("\27[H\27[2J")
+    io.flush()
+end
+
 local PREVIEW_CACHE_LIMIT = 64
 local preview_cache = {}
 local preview_cache_order = {}
@@ -1929,7 +2008,7 @@ local function main(args)
             else
                 status_text = string.format("%s%s%s%s%s", clip_badge, sel_badge, C.dim, sel_entry and sel_entry.path or current_dir, C.reset)
                 local op_hint = (clip_cnt > 0) and "  [p] Paste" or ""
-                help_hint = string.format("[h/l] Nav  [Space/v] Tag  [y/d] Copy/Cut%s  [a] New  [R] Ren  [D] Del  [q] Quit", op_hint)
+                help_hint = string.format("[?] Help  [h/l] Nav  [Space] Tag  [y/d] Copy/Cut%s  [a] New  [D] Del  [q] Quit", op_hint)
             end
             local footer_line = string.format("\27[%d;1H\27[2K  %s \27[90m│\27[0m \27[90m%s\27[0m",
                 footer_y, status_text, help_hint)
@@ -2306,6 +2385,9 @@ local function main(args)
                         reload_current()
                     end
                 end
+                needs_redraw = true
+            elseif k == "?" then
+                show_help_modal()
                 needs_redraw = true
             end
             if current_dir ~= previous_dir then

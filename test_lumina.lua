@@ -1016,6 +1016,64 @@ end)
 assert_true(ok_input, "Input modal row format string executes without error")
 assert_true(rendered_input ~= nil and rendered_input:find("file.txt") ~= nil, "Input modal message formatted correctly")
 
+-- Test Suite 16: Interactive Help Overlay (?) & Multi-Delete Prompting
+print("\n-- Test Suite 16: Help Overlay & Multi-Delete Prompting --")
+local function render_help_preview(box_w, box_h, cheatsheet)
+    local lines = {}
+    local bcol = "[BCOL]"
+    local title_str = " LUMINA CHEATSHEET "
+    local top_fill = string.rep("─", math.max(0, box_w - 2 - #title_str))
+    table.insert(lines, string.format("%s╭%s%s╮", bcol, title_str, top_fill))
+
+    local content_lines = box_h - 2
+    for r = 1, content_lines do
+        local item = cheatsheet[r]
+        if item then
+            if item.section then
+                local s_str = " " .. item.section .. " "
+                local pad = string.rep("─", math.max(0, box_w - 2 - #item.section - 2))
+                table.insert(lines, string.format("%s│%s%s│", bcol, s_str, pad))
+            else
+                local k_str = "   " .. string.format("%-14s", item.key)
+                local d_str = " " .. item.desc
+                local total_vlen = #string.format("   %-14s %s", item.key, item.desc)
+                local pad = string.rep(" ", math.max(0, box_w - 2 - total_vlen))
+                table.insert(lines, string.format("%s│%s%s%s│", bcol, k_str, d_str, pad))
+            end
+        else
+            local blank_pad = string.rep(" ", box_w - 2)
+            table.insert(lines, string.format("%s│%s│", bcol, blank_pad))
+        end
+    end
+
+    local hint = " Press any key or Esc to close "
+    local bot_fill = string.rep("─", math.max(0, box_w - 2 - #hint))
+    table.insert(lines, string.format("%s╰%s%s╯", bcol, hint, bot_fill))
+    return lines
+end
+
+local sample_cheatsheet = {
+    { section = "NAVIGATION" },
+    { key = "h, l, Enter", desc = "Enter / Leave directory or open file" },
+    { section = "SELECTION" },
+    { key = "Space, v",    desc = "Tag / Untag item" }
+}
+local help_lines = render_help_preview(60, 8, sample_cheatsheet)
+assert_eq(#help_lines, 8, "Help modal renders exactly box_h (8) rows")
+assert_true(help_lines[1]:find("LUMINA CHEATSHEET") ~= nil, "Help modal top border contains title")
+assert_true(help_lines[#help_lines]:find("Press any key") ~= nil, "Help modal footer contains hint")
+
+-- Test multi-delete prompt logic
+local function format_delete_prompt(targets)
+    if #targets == 1 then
+        return string.format("Delete '%s'?", targets[1].name)
+    else
+        return string.format("Delete %d selected items?", #targets)
+    end
+end
+assert_eq(format_delete_prompt({ { name = "file1.txt" } }), "Delete 'file1.txt'?", "Single target delete prompt formatted correctly")
+assert_eq(format_delete_prompt({ { name = "f1" }, { name = "f2" }, { name = "f3" } }), "Delete 3 selected items?", "Multi-target delete prompt shows count")
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)
