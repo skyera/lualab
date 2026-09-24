@@ -243,21 +243,21 @@ local function find_pid_by_port(port)
     if not port then return nil end
 
     if is_windows then
-        -- netstat -ano -p tcp on Windows
+        -- netstat -ano -p tcp on Windows (line-by-line check)
         local pipe = io.popen("netstat -ano -p tcp 2>nul")
         if pipe then
             local out = pipe:read("*a") or ""
             pipe:close()
-            -- Looking for lines like: TCP    127.0.0.1:8080    0.0.0.0:0    LISTENING    1234
-            local pattern = ":(" .. tostring(port) .. ")%s+.-%s+LISTENING%s+(%d+)"
-            local _, pid = out:match(pattern)
-            if not pid then
-                -- Match any state if listening wasn't explicitly found
-                local alt_pattern = ":(" .. tostring(port) .. ")%s+.-%s+(%d+)%s*[\r\n]"
-                local _, alt_pid = out:match(alt_pattern)
-                pid = alt_pid
+            local port_str = tostring(port)
+            for line in out:gmatch("[^\r\n]+") do
+                local laddr, faddr, state, pid = line:match("%s*TCP%s+(%S+)%s+(%S+)%s+(%S+)%s+(%d+)")
+                if laddr and (laddr:match(":" .. port_str .. "$") or laddr:match(":" .. port_str .. "%s*$")) then
+                    local npid = tonumber(pid)
+                    if npid and npid > 0 then
+                        return npid
+                    end
+                end
             end
-            if pid then return tonumber(pid) end
         end
         return nil
     end
@@ -1458,13 +1458,17 @@ local function run_tui()
                     print("\n\27[1;33m[Session closed. Press any key to return to dashboard...]\27[0m")
                     TUI.set_raw_mode(true)
                     TUI.read_key()
+                    local post_st = get_tunnel_status(sel)
+                    status_msg = string.format("Exited SSH session '%s'. Tunnel status: %s", sel.name, post_st.is_up and "● UP" or "○ DOWN")
                 end
             elseif key == "k" then
                 local sel = data.profiles[cursor]
                 if sel then
                     local port = tonumber(sel.local_port) or 8080
                     local ok, msg = release_port(port, sel.local_bind)
-                    status_msg = msg
+                    sleep_ms(200)
+                    local post_st = get_tunnel_status(sel)
+                    status_msg = msg .. string.format(" (Tunnel: %s)", post_st.is_up and "● UP" or "○ DOWN")
                 else
                     status_msg = "No profile selected to release port."
                 end
