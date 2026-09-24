@@ -1483,11 +1483,29 @@ local function main(args)
 
     local current_dir = resolve_canonical_path(requested_path)
     local initial_selection_name
-    local requested_file = io.open(requested_path, "rb")
-    if requested_file then
-        requested_file:close()
-        initial_selection_name = requested_path:match("([^/\\]+)$")
-        current_dir = get_parent_dir(requested_path)
+
+    local is_directory = false
+    if is_windows then
+        local fd = ffi.new("WIN32_FIND_DATAA")
+        local hFind = kernel32.FindFirstFileA(requested_path, fd)
+        if hFind ~= ffi.cast("void*", -1) and hFind ~= nil then
+            is_directory = (bit.band(fd.dwFileAttributes, 0x10) ~= 0)
+            kernel32.FindClose(hFind)
+        end
+    else
+        local st = ffi.new("struct stat")
+        if posix_stat(requested_path, st) == 0 then
+            is_directory = (bit.band(tonumber(st.st_mode), 0xF000) == 0x4000)
+        end
+    end
+
+    if not is_directory then
+        local requested_file = io.open(requested_path, "rb")
+        if requested_file then
+            requested_file:close()
+            initial_selection_name = requested_path:match("([^/\\]+)$")
+            current_dir = get_parent_dir(requested_path)
+        end
     end
     local show_hidden = false
     local filter_query = ""

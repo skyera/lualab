@@ -580,8 +580,81 @@ local matched_empty, score_empty = test_fuzzy_score("", "anything.lua")
 assert_true(matched_empty, "Empty pattern matches with zero score")
 assert_eq(score_empty, 0, "Empty pattern score is 0")
 
+-- Test Suite 10: Startup Directory & File Resolution
+print("\n-- Test Suite 10: Startup Directory & File Resolution --")
+
+local bit = require("bit")
+pcall(function()
+    ffi.cdef[[
+        struct stat {
+            unsigned long  st_dev;
+            unsigned long  st_ino;
+            unsigned long  st_nlink;
+            unsigned int   st_mode;
+            unsigned int   st_uid;
+            unsigned int   st_gid;
+            unsigned int   __pad0;
+            unsigned long  st_rdev;
+            long           st_size;
+            long           st_blksize;
+            long           st_blocks;
+            long           st_atime;
+            unsigned long  st_atime_nsec;
+            long           st_mtime;
+            unsigned long  st_mtime_nsec;
+            long           st_ctime;
+            unsigned long  st_ctime_nsec;
+            long           __unused[3];
+        };
+        int stat(const char *pathname, struct stat *statbuf);
+        char *realpath(const char *path, char *resolved_path);
+    ]]
+end)
+
+local function resolve_startup_path(requested_path)
+    local buf = ffi.new("char[4096]")
+    local canonical = requested_path
+    if ffi.C.realpath(requested_path, buf) ~= nil then
+        canonical = ffi.string(buf)
+    end
+
+    local is_directory = false
+    local st = ffi.new("struct stat")
+    if ffi.C.stat(requested_path, st) == 0 then
+        is_directory = (bit.band(tonumber(st.st_mode), 0xF000) == 0x4000)
+    end
+
+    local current_dir = canonical
+    local initial_selection_name = nil
+
+    if not is_directory then
+        local requested_file = io.open(requested_path, "rb")
+        if requested_file then
+            requested_file:close()
+            initial_selection_name = requested_path:match("([^/\\]+)$")
+            local parent = canonical:match("^(.*)/[^/]+$") or "/"
+            current_dir = parent
+        end
+    end
+
+    return current_dir, initial_selection_name, is_directory
+end
+
+-- Test 10.1: Current directory "." opens as directory itself
+local cur_dir, sel_name, is_dir = resolve_startup_path(".")
+assert_true(is_dir, "'.' is correctly detected as a directory")
+assert_true(cur_dir:match("lualab$") ~= nil, "Startup in '.' resolves to lualab, not parent dir")
+assert_eq(sel_name, nil, "No initial file selection when opening directory directly")
+
+-- Test 10.2: File path opens parent directory with file selected
+local file_dir, file_sel, file_is_dir = resolve_startup_path("lumina.lua")
+assert_false(file_is_dir, "'lumina.lua' is correctly detected as a file")
+assert_true(file_dir:match("lualab$") ~= nil, "File target resolves to parent directory")
+assert_eq(file_sel, "lumina.lua", "File target sets initial selection name to 'lumina.lua'")
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)
 end
+
 
