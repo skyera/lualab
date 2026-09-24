@@ -681,11 +681,11 @@ local function run_tui(elf_info)
 
         -- Header Bar
         local header_bg = "\27[48;5;236m\27[38;5;255m"
-        local title = string.format(" 🔬 ELF Inspector: %s (%s) ",
-            elf_info.filepath:match("([^/]+)$") or elf_info.filepath, elf_info.machine)
-        local status_right = string.format("[1-4] Tabs  [d] Disasm  [h] Hex  [?] Help  [q] Quit ")
+        local title = string.format(" 🔬 ELF Inspector: %s ",
+            elf_info.filepath:match("([^/]+)$") or elf_info.filepath)
+        local status_right = string.format("[%s • %s] ", elf_info.is_64bit and "ELF64" or "ELF32", elf_info.machine)
         local pad = string.rep(" ", math.max(0, cols - #title - #status_right))
-        table.insert(buf, header_bg .. "\27[1m" .. title .. pad .. status_right .. "\27[0m\n")
+        table.insert(buf, header_bg .. "\27[1m" .. title .. pad .. "\27[38;5;248m" .. status_right .. "\27[0m\n")
 
         -- Subheader: Binary Architecture & Specs
         local sub = string.format(" Type: %-18s | Entry: 0x%08x | Sections: %-2d | Functions: %-4d | Stripped: %s",
