@@ -29,6 +29,12 @@
       * t / T            : Cycle color theme forward / backward
       * Space / v        : Toggle selection tag on current entry and step down
       * V                : Invert selection tags in current directory
+      * y                : Yank (copy) current item or tagged items
+      * d / x            : Cut current item or tagged items
+      * p                : Paste clipboard items into current directory
+      * a                : Create new file or folder (add trailing / for folder)
+      * R                : Rename selected item
+      * D                : Delete selected or tagged items (with confirmation)
       * s                : Sort mode menu (Name, Size, Time, Ext)
       * .                : Toggle hidden files (dotfiles)
       * r                : Refresh current directory
@@ -1405,6 +1411,116 @@ local function show_fuzzy_finder(root_dir, show_hidden)
     end
 end
 
+-- =========================================================================
+-- Generic Modal Dialogs (Text Input & Confirmation)
+-- =========================================================================
+local function show_input_modal(title, prompt_label, default_text)
+    local text = default_text or ""
+    local term_w, term_h = get_terminal_size()
+    local box_w = math.max(40, math.min(term_w - 8, 64))
+    local box_h = 7
+    local start_x = math.floor((term_w - box_w) / 2)
+    local start_y = math.floor((term_h - box_h) / 2)
+    local bcol = C.border_focus
+
+    local function render()
+        local out = {}
+        local title_str = string.format(" %s ", title)
+        local top_fill = string.rep("─", math.max(0, box_w - 2 - visual_len(title_str)))
+        table.insert(out, string.format("\27[%d;%dH%s╭%s%s%s%s╮%s",
+            start_y, start_x, bcol, C.bold .. C.header_path, title_str, bcol, top_fill, C.reset))
+
+        local p_str = " " .. prompt_label .. " "
+        local cur = "\27[7m \27[0m"
+        local input_str = C.bold .. (C.status_accent or "\27[1;38;2;251;191;36m") .. text .. cur .. C.reset
+        local content_w = visual_len(p_str) + visual_len(text) + 1
+        local pad = string.rep(" ", math.max(0, box_w - 2 - content_w))
+        table.insert(out, string.format("\27[%d;%dH%s│%s%s%s%s│%s",
+            start_y + 1, start_x, bcol, C.reset, p_str .. input_str, pad, bcol, C.reset))
+
+        for r = 2, box_h - 2 do
+            local blank_pad = string.rep(" ", box_w - 2)
+            table.insert(out, string.format("\27[%d;%dH%s│%s│%s", start_y + r, start_x, bcol, blank_pad, C.reset))
+        end
+
+        local hint = " [Enter] Confirm  [Esc] Cancel "
+        local bot_fill = string.rep("─", math.max(0, box_w - 2 - visual_len(hint)))
+        table.insert(out, string.format("\27[%d;%dH%s╰%s%s%s%s╯%s",
+            start_y + box_h - 1, start_x, bcol, C.dim, hint, bcol, bot_fill, C.reset))
+
+        io.write(table.concat(out))
+        io.flush()
+    end
+
+    render()
+    while true do
+        local k = read_key()
+        if k then
+            if k == "ESC" then
+                io.write("\27[H\27[2J")
+                io.flush()
+                return nil
+            elseif k == "ENTER" then
+                io.write("\27[H\27[2J")
+                io.flush()
+                return text
+            elseif k == "BACKSPACE" then
+                if #text > 0 then
+                    text = text:sub(1, -2)
+                    render()
+                end
+            elseif #k == 1 and k:byte(1) >= 32 and k:byte(1) <= 126 then
+                text = text .. k
+                render()
+            end
+        end
+    end
+end
+
+local function show_confirm_modal(title, message)
+    local term_w, term_h = get_terminal_size()
+    local box_w = math.max(40, math.min(term_w - 8, 64))
+    local box_h = 6
+    local start_x = math.floor((term_w - box_w) / 2)
+    local start_y = math.floor((term_h - box_h) / 2)
+    local bcol = "\27[1;38;2;239;68;68m" -- red accent
+
+    local out = {}
+    local title_str = string.format(" %s ", title)
+    local top_fill = string.rep("─", math.max(0, box_w - 2 - visual_len(title_str)))
+    table.insert(out, string.format("\27[%d;%dH%s╭%s%s%s%s╮%s",
+        start_y, start_x, bcol, C.bold .. "\27[1;31m", title_str, bcol, top_fill, C.reset))
+
+    local msg_line = " " .. truncate(message, box_w - 4)
+    local pad = string.rep(" ", math.max(0, box_w - 2 - visual_len(msg_line)))
+    table.insert(out, string.format("\27[%d;%dH%s│%s%s%s│%s",
+        start_y + 1, start_x, bcol, msg_line, pad, bcol, C.reset))
+
+    local blank_pad = string.rep(" ", box_w - 2)
+    table.insert(out, string.format("\27[%d;%dH%s│%s│%s", start_y + 2, start_x, bcol, blank_pad, C.reset))
+
+    local hint = " [y] Yes  [n/Esc] No "
+    local bot_fill = string.rep("─", math.max(0, box_w - 2 - visual_len(hint)))
+    table.insert(out, string.format("\27[%d;%dH%s╰%s%s%s%s╯%s",
+        start_y + box_h - 1, start_x, bcol, C.dim, hint, bcol, bot_fill, C.reset))
+
+    io.write(table.concat(out))
+    io.flush()
+
+    while true do
+        local k = read_key()
+        if k then
+            io.write("\27[H\27[2J")
+            io.flush()
+            if k == "y" or k == "Y" then
+                return true
+            else
+                return false
+            end
+        end
+    end
+end
+
 local PREVIEW_CACHE_LIMIT = 64
 local preview_cache = {}
 local preview_cache_order = {}
@@ -1564,6 +1680,58 @@ local function main(args)
         local c = 0
         for _ in pairs(selected_paths) do c = c + 1 end
         return c
+    end
+
+    local clipboard = { mode = nil, items = {} }
+    local function count_clipboard()
+        return clipboard.items and #clipboard.items or 0
+    end
+
+    local function get_targets_for_op()
+        local targets = {}
+        if count_selected() > 0 then
+            for _, item in pairs(selected_paths) do
+                table.insert(targets, item)
+            end
+        else
+            local cur = current_entries[sel_index]
+            if cur then
+                table.insert(targets, cur)
+            end
+        end
+        return targets
+    end
+
+    local function copy_file_or_dir(src, dst)
+        if is_windows then
+            local cmd = string.format('xcopy /E /I /Y %q %q >nul 2>&1 || copy /Y %q %q >nul 2>&1',
+                src, dst, src, dst)
+            return os.execute(cmd)
+        else
+            local cmd = string.format('cp -r %s %s 2>/dev/null', shell_quote(src), shell_quote(dst))
+            return os.execute(cmd)
+        end
+    end
+
+    local function move_file_or_dir(src, dst)
+        if is_windows then
+            local cmd = string.format('move /Y %q %q >nul 2>&1', src, dst)
+            return os.execute(cmd)
+        else
+            local cmd = string.format('mv %s %s 2>/dev/null', shell_quote(src), shell_quote(dst))
+            return os.execute(cmd)
+        end
+    end
+
+    local function delete_file_or_dir(target_path, is_dir)
+        if is_windows then
+            local cmd = is_dir and string.format('rmdir /S /Q %q >nul 2>&1', target_path)
+                               or string.format('del /F /Q %q >nul 2>&1', target_path)
+            return os.execute(cmd)
+        else
+            local cmd = string.format('rm -rf %s 2>/dev/null', shell_quote(target_path))
+            return os.execute(cmd)
+        end
     end
 
     local sel_index = 1
@@ -1743,6 +1911,9 @@ local function main(args)
             local help_hint = ""
             local sel_cnt = count_selected()
             local sel_badge = (sel_cnt > 0) and string.format("\27[1;32m(%d tagged)\27[0m ", sel_cnt) or ""
+            local clip_cnt = count_clipboard()
+            local clip_badge = (clip_cnt > 0) and string.format("\27[1;33m[%s %d]\27[0m ",
+                clipboard.mode == "cut" and "CUT" or "YANK", clip_cnt) or ""
             if is_searching then
                 status_text = string.format("%s/%s\27[7m \27[0m", C.status_accent or "\27[1;38;2;251;191;36m", search_query)
                 help_hint = "\27[90m[Enter] Confirm  [Esc] Cancel  [↑/↓] Select\27[0m"
@@ -1754,8 +1925,9 @@ local function main(args)
                 status_text = string.format("%sFilter: /%s\27[0m", C.status_accent or "\27[1;38;2;251;191;36m", filter_query)
                 help_hint = "[h/l] Nav  [Space/v] Tag  [s] Sort  [j/k] Move  [/] Filter  [f] Find  [Esc] Clear"
             else
-                status_text = string.format("%s%s%s%s", sel_badge, C.dim, sel_entry and sel_entry.path or current_dir, C.reset)
-                help_hint = "[h/l] Nav  [Space/v] Tag  [s] Sort  [j/k] Move  [/] Filter  [f] Find  [q] Quit"
+                status_text = string.format("%s%s%s%s%s", clip_badge, sel_badge, C.dim, sel_entry and sel_entry.path or current_dir, C.reset)
+                local op_hint = (clip_cnt > 0) and "  [p] Paste" or ""
+                help_hint = string.format("[h/l] Nav  [Space/v] Tag  [y/d] Copy/Cut%s  [a] New  [R] Ren  [D] Del  [q] Quit", op_hint)
             end
             local footer_line = string.format("\27[%d;1H\27[2K  %s \27[90m│\27[0m \27[90m%s\27[0m",
                 footer_y, status_text, help_hint)
@@ -2027,6 +2199,112 @@ local function main(args)
                 else
                     needs_redraw = true
                 end
+            elseif k == "y" then
+                -- y: Yank (Copy) tagged items or current item
+                local targets = get_targets_for_op()
+                if #targets > 0 then
+                    clipboard = { mode = "copy", items = targets }
+                    selected_paths = {}
+                    needs_redraw = true
+                end
+            elseif k == "d" or k == "x" then
+                -- d / x: Cut tagged items or current item
+                local targets = get_targets_for_op()
+                if #targets > 0 then
+                    clipboard = { mode = "cut", items = targets }
+                    selected_paths = {}
+                    needs_redraw = true
+                end
+            elseif k == "p" then
+                -- p: Paste clipboard items into current_dir
+                if clipboard.items and #clipboard.items > 0 then
+                    for _, item in ipairs(clipboard.items) do
+                        local item_name = item.name or item.path:match("([^/\\]+)$")
+                        local dst_path = (current_dir == "/" and ("/" .. item_name) or (current_dir .. "/" .. item_name))
+                        if item.path ~= dst_path then
+                            if clipboard.mode == "cut" then
+                                move_file_or_dir(item.path, dst_path)
+                            else
+                                copy_file_or_dir(item.path, dst_path)
+                            end
+                        end
+                    end
+                    if clipboard.mode == "cut" then
+                        clipboard = { mode = nil, items = {} }
+                    end
+                    clear_preview_cache()
+                    preview_pending = true
+                    reload_current()
+                end
+            elseif k == "a" then
+                -- a: Create new file or folder (ending with '/' creates folder)
+                local name = show_input_modal("CREATE NEW FILE / DIRECTORY", "Name (add / for dir):", "")
+                if name and #name > 0 then
+                    name = name:gsub("^%s+", ""):gsub("%s+$", "")
+                    if #name > 0 then
+                        local is_new_dir = (name:sub(-1) == "/" or name:sub(-1) == "\\")
+                        local clean_name = name:gsub("[/\\]+$", "")
+                        local target = (current_dir == "/" and ("/" .. clean_name) or (current_dir .. "/" .. clean_name))
+                        if is_new_dir then
+                            if is_windows then
+                                os.execute(string.format('mkdir %q >nul 2>&1', target))
+                            else
+                                os.execute(string.format('mkdir -p %s 2>/dev/null', shell_quote(target)))
+                            end
+                        else
+                            local f = io.open(target, "a")
+                            if f then f:close() end
+                        end
+                        clear_preview_cache()
+                        preview_pending = true
+                        reload_current()
+                        for idx, e in ipairs(current_entries) do
+                            if e.name == clean_name then
+                                sel_index = idx
+                                break
+                            end
+                        end
+                    end
+                end
+                needs_redraw = true
+            elseif k == "R" then
+                -- R: Rename selected item
+                local cur = current_entries[sel_index]
+                if cur then
+                    local new_name = show_input_modal("RENAME ITEM", "New name:", cur.name)
+                    if new_name and #new_name > 0 and new_name ~= cur.name then
+                        new_name = new_name:gsub("^%s+", ""):gsub("%s+$", "")
+                        local new_path = (current_dir == "/" and ("/" .. new_name) or (current_dir .. "/" .. new_name))
+                        move_file_or_dir(cur.path, new_path)
+                        clear_preview_cache()
+                        preview_pending = true
+                        reload_current()
+                        for idx, e in ipairs(current_entries) do
+                            if e.name == new_name then
+                                sel_index = idx
+                                break
+                            end
+                        end
+                    end
+                end
+                needs_redraw = true
+            elseif k == "D" then
+                -- D: Delete tagged items or current item with confirmation
+                local targets = get_targets_for_op()
+                if #targets > 0 then
+                    local prompt_msg = (#targets == 1) and string.format("Delete '%s'?", targets[1].name)
+                                                      or string.format("Delete %d selected items?", #targets)
+                    if show_confirm_modal("CONFIRM DELETION", prompt_msg) then
+                        for _, item in ipairs(targets) do
+                            delete_file_or_dir(item.path, item.is_dir)
+                            selected_paths[item.path] = nil
+                        end
+                        clear_preview_cache()
+                        preview_pending = true
+                        reload_current()
+                    end
+                end
+                needs_redraw = true
             end
             if current_dir ~= previous_dir then
                 clear_preview_cache()

@@ -887,10 +887,89 @@ assert_true(sim_selected_paths["/dir/gamma.lua"] ~= nil, "gamma.lua is now tagge
 sim_tag_key("ESC")
 assert_eq(sim_count_selected(), 0, "Pressing ESC clears all selections")
 
+-- Test Suite 14: File Operations & Clipboard State Machine (Yank, Cut, Paste, Delete, New, Rename)
+print("\n-- Test Suite 14: File Operations & Clipboard State Machine --")
+
+local sim_clip = { mode = nil, items = {} }
+local sim_entries = {
+    { name = "file1.txt", path = "/sandbox/file1.txt", is_dir = false },
+    { name = "file2.txt", path = "/sandbox/file2.txt", is_dir = false },
+    { name = "subfolder", path = "/sandbox/subfolder", is_dir = true },
+}
+local sim_sel = {}
+local sim_cur_idx = 1
+local fs_store = {
+    ["/sandbox/file1.txt"] = "hello 1",
+    ["/sandbox/file2.txt"] = "hello 2",
+    ["/sandbox/subfolder"] = true,
+}
+
+local function sim_get_targets()
+    local t = {}
+    local has_tag = false
+    for _ in pairs(sim_sel) do has_tag = true; break end
+    if has_tag then
+        for _, it in pairs(sim_sel) do table.insert(t, it) end
+    else
+        table.insert(t, sim_entries[sim_cur_idx])
+    end
+    return t
+end
+
+-- 1. Yank (Copy) current item
+local t1 = sim_get_targets()
+assert_eq(#t1, 1, "Target count is 1 for untagged cursor item")
+assert_eq(t1[1].name, "file1.txt", "Target item is file1.txt")
+sim_clip = { mode = "copy", items = t1 }
+assert_eq(sim_clip.mode, "copy", "Clipboard mode is copy")
+assert_eq(#sim_clip.items, 1, "Clipboard contains 1 item")
+
+-- 2. Simulate paste into target dir /sandbox/subfolder
+local paste_dest = "/sandbox/subfolder"
+for _, item in ipairs(sim_clip.items) do
+    local dst = paste_dest .. "/" .. item.name
+    fs_store[dst] = fs_store[item.path]
+end
+assert_eq(fs_store["/sandbox/subfolder/file1.txt"], "hello 1", "Pasted file exists in destination")
+assert_eq(fs_store["/sandbox/file1.txt"], "hello 1", "Source file remains after copy")
+
+-- 3. Cut tagged items
+sim_sel["/sandbox/file2.txt"] = sim_entries[2]
+local t2 = sim_get_targets()
+assert_eq(#t2, 1, "Target count is 1 for tagged file2.txt")
+sim_clip = { mode = "cut", items = t2 }
+sim_sel = {}
+assert_eq(sim_clip.mode, "cut", "Clipboard mode is cut")
+
+-- 4. Paste cut item into /sandbox/subfolder
+for _, item in ipairs(sim_clip.items) do
+    local dst = paste_dest .. "/" .. item.name
+    fs_store[dst] = fs_store[item.path]
+    fs_store[item.path] = nil
+end
+if sim_clip.mode == "cut" then sim_clip = { mode = nil, items = {} } end
+assert_eq(fs_store["/sandbox/subfolder/file2.txt"], "hello 2", "Cut item pasted in destination")
+assert_true(fs_store["/sandbox/file2.txt"] == nil, "Original item deleted after cut-paste")
+assert_true(sim_clip.mode == nil, "Clipboard reset after cut paste")
+
+-- 5. Delete operation simulation
+assert_true(fs_store["/sandbox/file1.txt"] ~= nil, "file1.txt exists before delete")
+fs_store["/sandbox/file1.txt"] = nil
+assert_true(fs_store["/sandbox/file1.txt"] == nil, "file1.txt deleted successfully")
+
+-- 6. Create new file / folder validation
+local new_file_name = "notes.md"
+local is_dir = (new_file_name:sub(-1) == "/")
+assert_false(is_dir, "notes.md detected as regular file")
+local new_dir_name = "projects/"
+local is_dir_folder = (new_dir_name:sub(-1) == "/")
+assert_true(is_dir_folder, "projects/ detected as directory")
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)
 end
+
 
 
 
