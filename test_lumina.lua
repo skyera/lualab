@@ -1108,6 +1108,49 @@ local new_selection = 2
 scroll_off = 0
 assert_eq(scroll_off, 0, "Scroll offset resets to 0 when cursor moves")
 
+-- Test Suite 18: Directory Bookmarks (m<key> & '<key>)
+print("\n-- Test Suite 18: Directory Bookmarks --")
+local sim_bookmarks = {}
+local sim_curr_dir = "/home/user/projects/lualab"
+
+-- Test mark mode
+local sim_mark_mode = true
+local pressed_key = "p"
+if sim_mark_mode and pressed_key:match("^[a-zA-Z0-9]$") then
+    sim_bookmarks[pressed_key:lower()] = sim_curr_dir
+    sim_mark_mode = false
+end
+assert_eq(sim_bookmarks["p"], "/home/user/projects/lualab", "Bookmark 'p' saved current directory")
+assert_false(sim_mark_mode, "Mark mode exited after setting bookmark")
+
+-- Change directory
+sim_curr_dir = "/tmp/sandbox"
+
+-- Test jump mode
+local sim_jump_mode = true
+local jump_key = "p"
+if sim_jump_mode and jump_key:match("^[a-zA-Z0-9]$") then
+    local target = sim_bookmarks[jump_key:lower()]
+    if target then
+        sim_curr_dir = target
+    end
+    sim_jump_mode = false
+end
+assert_eq(sim_curr_dir, "/home/user/projects/lualab", "Jumped to bookmarked directory 'p'")
+assert_false(sim_jump_mode, "Jump mode exited after jump")
+
+-- Test invalid / nonexistent mark key
+local sim_jump_mode_2 = true
+local missing_key = "z"
+if sim_jump_mode_2 and missing_key:match("^[a-zA-Z0-9]$") then
+    local target = sim_bookmarks[missing_key:lower()]
+    if target then
+        sim_curr_dir = target
+    end
+    sim_jump_mode_2 = false
+end
+assert_eq(sim_curr_dir, "/home/user/projects/lualab", "Current dir unchanged when jumping to unset mark")
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)

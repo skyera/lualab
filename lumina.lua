@@ -1759,6 +1759,9 @@ local function main(args)
     local start_dir = current_dir
     local selected_paths = {}
     local preview_scroll_offset = 0
+    local bookmarks = {}
+    local mark_mode = false
+    local jump_mode = false
     local function count_selected()
         local c = 0
         for _ in pairs(selected_paths) do c = c + 1 end
@@ -2011,6 +2014,14 @@ local function main(args)
                 status_text = string.format("%sSORT BY:%s [n] Name  [s] Size  [m] Time  [e] Ext  [r] Reverse",
                     C.bold .. (C.status_accent or "\27[1;38;2;251;191;36m"), C.reset)
                 help_hint = "\27[90m[Esc] Cancel\27[0m"
+            elseif mark_mode then
+                status_text = string.format("%sSET BOOKMARK:%s Press any letter (a-z) to mark current folder",
+                    C.bold .. (C.status_accent or "\27[1;38;2;251;191;36m"), C.reset)
+                help_hint = "\27[90m[Esc] Cancel\27[0m"
+            elseif jump_mode then
+                status_text = string.format("%sJUMP TO BOOKMARK:%s Press bookmark letter (a-z)",
+                    C.bold .. (C.status_accent or "\27[1;38;2;251;191;36m"), C.reset)
+                help_hint = "\27[90m[Esc] Cancel\27[0m"
             elseif #filter_query > 0 then
                 status_text = string.format("%sFilter: /%s\27[0m", C.status_accent or "\27[1;38;2;251;191;36m", filter_query)
                 help_hint = "[h/l] Nav  [Space/v] Tag  [s] Sort  [j/k] Move  [/] Filter  [f] Find  [Esc] Clear"
@@ -2087,6 +2098,29 @@ local function main(args)
                     end
                     reload_current()
                 end
+            elseif mark_mode then
+                mark_mode = false
+                if k and #k == 1 and k:match("^[a-zA-Z0-9]$") then
+                    bookmarks[k:lower()] = current_dir
+                end
+            elseif jump_mode then
+                jump_mode = false
+                if k and #k == 1 and k:match("^[a-zA-Z0-9]$") then
+                    local target = bookmarks[k:lower()]
+                    if target then
+                        current_dir = target
+                        filter_query = ""
+                        sel_index = 1
+                        clear_preview_cache()
+                        preview_scroll_offset = 0
+                        preview_pending = true
+                        reload_current()
+                    end
+                end
+            elseif k == "m" then
+                mark_mode = true
+            elseif k == "'" or k == "`" then
+                jump_mode = true
             elseif k == "s" and not g_prefix then
                 is_sorting = true
             elseif k == " " or k == "v" then
