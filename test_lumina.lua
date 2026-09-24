@@ -173,6 +173,9 @@ assert_true(content:find("set_theme%(") ~= nil, "lumina.lua defines set_theme fu
 assert_true(content:find("cycle_theme%(") ~= nil, "lumina.lua defines cycle_theme function")
 assert_true(content:find('k%s*==%s*"t"') ~= nil, "lumina.lua binds 't' key to cycle theme")
 assert_true(content:find('k%s*==%s*"T"') ~= nil, "lumina.lua binds 'T' key to reverse cycle theme")
+local pos_entries = content:find("local current_entries =")
+local pos_targets = content:find("local function get_targets_for_op")
+assert_true(pos_entries and pos_targets and pos_entries < pos_targets, "current_entries declared before get_targets_for_op")
 
 -- Test Suite 4: Vim-style Search State Machine Simulation
 print("\n-- Test Suite 4: Vim-Style Search State Machine Simulation --")

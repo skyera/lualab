@@ -1682,6 +1682,19 @@ local function main(args)
         return c
     end
 
+    local sel_index = 1
+    local current_entries = sort_entries(read_dir_entries(current_dir, show_hidden), sort_mode)
+    if initial_selection_name then
+        for idx, entry in ipairs(current_entries) do
+            if entry.name == initial_selection_name then
+                sel_index = idx
+                break
+            end
+        end
+    end
+    local parent_dir = get_parent_dir(current_dir)
+    local parent_entries = read_dir_entries(parent_dir, show_hidden)
+
     local clipboard = { mode = nil, items = {} }
     local function count_clipboard()
         return clipboard.items and #clipboard.items or 0
@@ -1733,19 +1746,6 @@ local function main(args)
             return os.execute(cmd)
         end
     end
-
-    local sel_index = 1
-    local current_entries = sort_entries(read_dir_entries(current_dir, show_hidden), sort_mode)
-    if initial_selection_name then
-        for idx, entry in ipairs(current_entries) do
-            if entry.name == initial_selection_name then
-                sel_index = idx
-                break
-            end
-        end
-    end
-    local parent_dir = get_parent_dir(current_dir)
-    local parent_entries = read_dir_entries(parent_dir, show_hidden)
 
     enable_raw_mode()
 
