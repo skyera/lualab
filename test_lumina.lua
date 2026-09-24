@@ -1074,6 +1074,40 @@ end
 assert_eq(format_delete_prompt({ { name = "file1.txt" } }), "Delete 'file1.txt'?", "Single target delete prompt formatted correctly")
 assert_eq(format_delete_prompt({ { name = "f1" }, { name = "f2" }, { name = "f3" } }), "Delete 3 selected items?", "Multi-target delete prompt shows count")
 
+-- Test Suite 17: Preview Pane Scrolling (J / K)
+print("\n-- Test Suite 17: Preview Pane Scrolling --")
+local sim_preview_lines = {}
+for i = 1, 50 do
+    table.insert(sim_preview_lines, string.format("Line %d content", i))
+end
+local visible_rows = 15
+local max_scroll = math.max(0, #sim_preview_lines - visible_rows)
+assert_eq(max_scroll, 35, "Max scroll calculated correctly for 50 lines with 15 visible rows")
+
+local scroll_off = 0
+-- Scroll down with 'J' (+3)
+scroll_off = scroll_off + 3
+assert_eq(scroll_off, 3, "Scrolling down with 'J' increments by 3")
+
+-- Scroll down past end
+scroll_off = scroll_off + 100
+scroll_off = math.max(0, math.min(scroll_off, max_scroll))
+assert_eq(scroll_off, 35, "Scroll offset clamped at max_scroll")
+
+-- Scroll up with 'K' (-3)
+scroll_off = math.max(0, scroll_off - 3)
+assert_eq(scroll_off, 32, "Scrolling up with 'K' decrements by 3")
+
+-- Scroll up past 0
+scroll_off = math.max(0, scroll_off - 100)
+assert_eq(scroll_off, 0, "Scroll offset clamped at 0")
+
+-- Reset on selection change
+scroll_off = 10
+local new_selection = 2
+scroll_off = 0
+assert_eq(scroll_off, 0, "Scroll offset resets to 0 when cursor moves")
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)

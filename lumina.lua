@@ -1626,11 +1626,12 @@ local function preview_cache_put(key, lines)
 end
 
 local function generate_preview(entry, max_lines, max_cols, show_hidden)
+    local buffer_lines = math.max(max_lines * 5, 200)
     local key = table.concat({
         entry.path,
         entry.ext,
         tostring(entry.size),
-        tostring(max_lines),
+        tostring(buffer_lines),
         tostring(max_cols),
         show_hidden and "hidden" or "visible",
     }, "\31")
@@ -1639,11 +1640,11 @@ local function generate_preview(entry, max_lines, max_cols, show_hidden)
 
     local lines
     if entry.is_dir then
-        lines = generate_dir_preview(entry.path, max_lines, show_hidden)
+        lines = generate_dir_preview(entry.path, buffer_lines, show_hidden)
     elseif IMAGE_EXTS[entry.ext] then
         lines = generate_image_preview(entry.path, max_cols, max_lines)
     elseif CODE_EXTS[entry.ext] or entry.ext == "txt" then
-        lines = generate_text_preview(entry.path, entry.ext, max_lines, max_cols)
+        lines = generate_text_preview(entry.path, entry.ext, buffer_lines, max_cols)
     elseif entry.size > 0 and entry.size < 1024 * 1024 * 5 then
         local test_f = io.open(entry.path, "rb")
         local first_bytes = test_f and test_f:read(512) or ""
@@ -1658,9 +1659,9 @@ local function generate_preview(entry, max_lines, max_cols, show_hidden)
             end
         end
         if is_binary then
-            lines = generate_hex_preview(entry.path, max_lines)
+            lines = generate_hex_preview(entry.path, buffer_lines)
         else
-            lines = generate_text_preview(entry.path, entry.ext, max_lines, max_cols)
+            lines = generate_text_preview(entry.path, entry.ext, buffer_lines, max_cols)
         end
     else
         lines = { C.dim .. "Large / Binary File (" .. entry.size_str .. ")" .. C.reset }
@@ -1757,6 +1758,7 @@ local function main(args)
     }
     local start_dir = current_dir
     local selected_paths = {}
+    local preview_scroll_offset = 0
     local function count_selected()
         local c = 0
         for _ in pairs(selected_paths) do c = c + 1 end
@@ -1966,9 +1968,6 @@ local function main(args)
 
             -- Column 3: Live Preview Pane
             local sel_entry = current_entries[sel_index]
-            local preview_title = sel_entry and sel_entry.name or "Preview"
-            draw_pane(out, col3_x, start_y, col3_w, usable_h, preview_title, false)
-
             local preview_lines
             if preview_pending then
                 preview_lines = {
@@ -1981,8 +1980,18 @@ local function main(args)
                 preview_lines = { C.dim .. "(Empty Directory)" .. C.reset }
             end
 
+            local max_scroll = math.max(0, #preview_lines - visible_rows)
+            preview_scroll_offset = math.max(0, math.min(preview_scroll_offset, max_scroll))
+
+            local preview_title = sel_entry and sel_entry.name or "Preview"
+            if #preview_lines > visible_rows then
+                local pct = math.floor((preview_scroll_offset / math.max(1, max_scroll)) * 100)
+                preview_title = string.format("%s (%d%%)", preview_title, pct)
+            end
+            draw_pane(out, col3_x, start_y, col3_w, usable_h, preview_title, false)
+
             for i = 1, visible_rows do
-                local pline = preview_lines[i] or ""
+                local pline = preview_lines[preview_scroll_offset + i] or ""
                 table.insert(out, draw_row(col3_x, start_y + i, col3_w, pline))
             end
 
@@ -2119,6 +2128,14 @@ local function main(args)
                 if sel_index > 1 then
                     sel_index = sel_index - 1
                 end
+            elseif k == "J" then
+                -- J: Scroll preview pane down
+                preview_scroll_offset = preview_scroll_offset + 3
+                needs_redraw = true
+            elseif k == "K" then
+                -- K: Scroll preview pane up
+                preview_scroll_offset = math.max(0, preview_scroll_offset - 3)
+                needs_redraw = true
             elseif k == "PAGE_DOWN" then
                 local _, term_h = get_terminal_size()
                 sel_index = math.min(#current_entries, sel_index + math.max(4, term_h - 6))
@@ -2392,10 +2409,12 @@ local function main(args)
             end
             if current_dir ~= previous_dir then
                 clear_preview_cache()
+                preview_scroll_offset = 0
                 preview_pending = true
                 io.write("\27[H\27[2J")
                 io.flush()
             elseif sel_index ~= previous_selection then
+                preview_scroll_offset = 0
                 preview_pending = true
             end
         elseif preview_pending then
