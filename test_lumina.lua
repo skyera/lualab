@@ -807,10 +807,91 @@ sim_sort_event("s")
 sim_sort_event("n")
 assert_eq(sim_mode, "name_desc", "Pressing 'n' again toggles to 'name_desc'")
 
+-- Test Suite 13: Multi-Selection Tagging (Space, v, V, and ESC clear)
+print("\n-- Test Suite 13: Multi-Selection Tagging (Space, v, V, and ESC clear) --")
+
+local sim_sel_entries = {
+    { name = "alpha.lua", path = "/dir/alpha.lua" },
+    { name = "beta.lua",  path = "/dir/beta.lua" },
+    { name = "gamma.lua", path = "/dir/gamma.lua" },
+}
+
+local sim_selected_paths = {}
+local sim_cursor = 1
+
+local function sim_count_selected()
+    local c = 0
+    for _ in pairs(sim_selected_paths) do c = c + 1 end
+    return c
+end
+
+local function sim_tag_key(k)
+    if k == " " or k == "v" then
+        local cur_entry = sim_sel_entries[sim_cursor]
+        if cur_entry then
+            if sim_selected_paths[cur_entry.path] then
+                sim_selected_paths[cur_entry.path] = nil
+            else
+                sim_selected_paths[cur_entry.path] = cur_entry
+            end
+            if sim_cursor < #sim_sel_entries then
+                sim_cursor = sim_cursor + 1
+            end
+        end
+    elseif k == "V" then
+        for _, e in ipairs(sim_sel_entries) do
+            if sim_selected_paths[e.path] then
+                sim_selected_paths[e.path] = nil
+            else
+                sim_selected_paths[e.path] = e
+            end
+        end
+    elseif k == "ESC" then
+        if sim_count_selected() > 0 then
+            sim_selected_paths = {}
+        end
+    end
+end
+
+-- 1. Initial state
+assert_eq(sim_count_selected(), 0, "Initial selection count is 0")
+assert_eq(sim_cursor, 1, "Initial cursor is at 1")
+
+-- 2. Tag first item with 'Space'
+sim_tag_key(" ")
+assert_eq(sim_count_selected(), 1, "After Space, 1 item is selected")
+assert_true(sim_selected_paths["/dir/alpha.lua"] ~= nil, "alpha.lua is tagged")
+assert_eq(sim_cursor, 2, "Cursor stepped down to index 2 (beta.lua)")
+
+-- 3. Tag second item with 'v'
+sim_tag_key("v")
+assert_eq(sim_count_selected(), 2, "After 'v', 2 items are selected")
+assert_true(sim_selected_paths["/dir/beta.lua"] ~= nil, "beta.lua is tagged")
+assert_eq(sim_cursor, 3, "Cursor stepped down to index 3 (gamma.lua)")
+
+-- 4. Untag second item by navigating back and pressing 'v'
+sim_cursor = 2
+sim_tag_key("v")
+assert_eq(sim_count_selected(), 1, "Untagging beta.lua reduces selection count to 1")
+assert_true(sim_selected_paths["/dir/beta.lua"] == nil, "beta.lua is no longer tagged")
+assert_true(sim_selected_paths["/dir/alpha.lua"] ~= nil, "alpha.lua remains tagged")
+
+-- 5. Invert selection with 'V'
+sim_tag_key("V")
+assert_eq(sim_count_selected(), 2, "Inverting selection results in 2 tagged items")
+assert_true(sim_selected_paths["/dir/alpha.lua"] == nil, "alpha.lua is now untagged")
+assert_true(sim_selected_paths["/dir/beta.lua"] ~= nil, "beta.lua is now tagged")
+assert_true(sim_selected_paths["/dir/gamma.lua"] ~= nil, "gamma.lua is now tagged")
+
+-- 6. Clear all tags with 'ESC'
+sim_tag_key("ESC")
+assert_eq(sim_count_selected(), 0, "Pressing ESC clears all selections")
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)
 end
+
 
 
 

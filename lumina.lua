@@ -27,10 +27,12 @@
       * /                : Instant fuzzy in-directory filter
       * f / Ctrl+P       : Global recursive fuzzy file finder
       * t / T            : Cycle color theme forward / backward
+      * Space / v        : Toggle selection tag on current entry and step down
+      * V                : Invert selection tags in current directory
       * s                : Sort mode menu (Name, Size, Time, Ext)
       * .                : Toggle hidden files (dotfiles)
       * r                : Refresh current directory
-      * q / ESC          : Quit
+      * q / ESC          : Quit (or clear selection/filter)
 ]]
 
 local ffi = require("ffi")
@@ -1557,6 +1559,12 @@ local function main(args)
         ext       = "Ext ↑",
     }
     local start_dir = current_dir
+    local selected_paths = {}
+    local function count_selected()
+        local c = 0
+        for _ in pairs(selected_paths) do c = c + 1 end
+        return c
+    end
 
     local sel_index = 1
     local current_entries = sort_entries(read_dir_entries(current_dir, show_hidden), sort_mode)
@@ -1693,8 +1701,10 @@ local function main(args)
                 local e = current_entries[idx]
                 if e then
                     local is_sel = (idx == sel_index)
+                    local is_tagged = selected_paths[e.path]
                     local icon, col = get_file_type_info(e)
-                    local line_content = string.format(" %s %-20s %s", icon, e.name, e.size_str)
+                    local tag_badge = is_tagged and "\27[1;32m[✓]\27[0m " or ""
+                    local line_content = string.format(" %s%s %-18s %s", tag_badge, icon, e.name, e.size_str)
                     if is_sel then
                         table.insert(out, draw_row(col2_x, start_y + i, col2_w, C.cursor_bg .. "▶" .. line_content .. C.reset))
                     else
@@ -1731,6 +1741,8 @@ local function main(args)
             local footer_y = term_h - 1
             local status_text = ""
             local help_hint = ""
+            local sel_cnt = count_selected()
+            local sel_badge = (sel_cnt > 0) and string.format("\27[1;32m(%d tagged)\27[0m ", sel_cnt) or ""
             if is_searching then
                 status_text = string.format("%s/%s\27[7m \27[0m", C.status_accent or "\27[1;38;2;251;191;36m", search_query)
                 help_hint = "\27[90m[Enter] Confirm  [Esc] Cancel  [↑/↓] Select\27[0m"
@@ -1740,10 +1752,10 @@ local function main(args)
                 help_hint = "\27[90m[Esc] Cancel\27[0m"
             elseif #filter_query > 0 then
                 status_text = string.format("%sFilter: /%s\27[0m", C.status_accent or "\27[1;38;2;251;191;36m", filter_query)
-                help_hint = "[h/l] Nav  [H] Start  [s] Sort  [j/k] Move  [/] Filter  [f] Find  [Esc] Clear  [q] Quit"
+                help_hint = "[h/l] Nav  [Space/v] Tag  [s] Sort  [j/k] Move  [/] Filter  [f] Find  [Esc] Clear"
             else
-                status_text = string.format("%s%s%s", C.dim, sel_entry and sel_entry.path or current_dir, C.reset)
-                help_hint = "[h/l] Nav  [H/gh] Start  [~] Home  [s] Sort  [j/k] Move  [/] Filter  [f] Find  [q] Quit"
+                status_text = string.format("%s%s%s%s", sel_badge, C.dim, sel_entry and sel_entry.path or current_dir, C.reset)
+                help_hint = "[h/l] Nav  [Space/v] Tag  [s] Sort  [j/k] Move  [/] Filter  [f] Find  [q] Quit"
             end
             local footer_line = string.format("\27[%d;1H\27[2K  %s \27[90m│\27[0m \27[90m%s\27[0m",
                 footer_y, status_text, help_hint)
@@ -1815,10 +1827,34 @@ local function main(args)
                 end
             elseif k == "s" and not g_prefix then
                 is_sorting = true
+            elseif k == " " or k == "v" then
+                -- Space / v: Toggle tagging for current entry and advance cursor
+                local cur_entry = current_entries[sel_index]
+                if cur_entry then
+                    if selected_paths[cur_entry.path] then
+                        selected_paths[cur_entry.path] = nil
+                    else
+                        selected_paths[cur_entry.path] = cur_entry
+                    end
+                    if sel_index < #current_entries then
+                        sel_index = sel_index + 1
+                    end
+                end
+            elseif k == "V" then
+                -- V: Invert selection in current directory
+                for _, e in ipairs(current_entries) do
+                    if selected_paths[e.path] then
+                        selected_paths[e.path] = nil
+                    else
+                        selected_paths[e.path] = e
+                    end
+                end
             elseif k == "q" or k == "ESC" then
                 if #filter_query > 0 then
                     filter_query = ""
                     reload_current()
+                elseif count_selected() > 0 and k == "ESC" then
+                    selected_paths = {}
                 else
                     break
                 end
