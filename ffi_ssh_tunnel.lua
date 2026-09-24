@@ -908,22 +908,39 @@ function TUI.edit_profile_modal(existing_profile)
             port_probe_res = "\27[1;34mℹ Remote reverse bind port\27[0m"
         end
 
+        local box_width = 38
         for idx, fld in ipairs(fields) do
             local marker = (idx == field_idx) and "▶" or " "
-            local val_str = tostring(p[fld.key] or "")
-            if fld.type == "choice" then
-                val_str = string.format("[%s] (local / remote / socks)", val_str:upper())
-            elseif p.type == "socks" and (fld.key == "remote_host" or fld.key == "remote_port") then
-                val_str = "\27[2;37m(Dynamic SOCKS5 - resolved by client)\27[0m"
-            end
-
+            local val_raw = tostring(p[fld.key] or "")
             local fld_label = pad_right(fld.label, 18)
             local row_content
-            if idx == field_idx then
-                row_content = string.format("%s \27[1;33m%s: \27[1;37m%s\27[0m", marker, fld_label, val_str)
+
+            if fld.type == "choice" then
+                local opt_local  = (p.type == "local")  and "(\27[1;32m●\27[0m) LOCAL"  or "( ) LOCAL"
+                local opt_remote = (p.type == "remote") and "(\27[1;32m●\27[0m) REMOTE" or "( ) REMOTE"
+                local opt_socks  = (p.type == "socks")  and "(\27[1;32m●\27[0m) SOCKS5" or "( ) SOCKS5"
+                local choice_str = string.format("%s  %s  %s", opt_local, opt_remote, opt_socks)
+                if idx == field_idx then
+                    row_content = string.format("%s \27[1;33m%s: \27[1;37m%s \27[2m<Space to cycle>\27[0m", marker, fld_label, choice_str)
+                else
+                    row_content = string.format("%s %s: %s", marker, fld_label, choice_str)
+                end
+            elseif p.type == "socks" and (fld.key == "remote_host" or fld.key == "remote_port") then
+                row_content = string.format("%s %s: \27[2;37m[ N/A - Destination resolved dynamically by SOCKS5 client ]\27[0m", marker, fld_label)
             else
-                row_content = string.format("%s %s: %s", marker, fld_label, val_str)
+                if idx == field_idx then
+                    -- Focused active input box with block cursor and blue highlight
+                    local cursor_str = val_raw .. "█"
+                    local edit_box = "[\27[1;37;44m " .. pad_right(cursor_str, box_width) .. " \27[0m]"
+                    local hint = (fld.type == "number") and "\27[2m(Type digits, Backspace)\27[0m" or "\27[2m(Type to edit, Backspace)\27[0m"
+                    row_content = string.format("%s \27[1;33m%s: \27[0m%s %s", marker, fld_label, edit_box, hint)
+                else
+                    -- Idle input box
+                    local edit_box = "[ " .. pad_right(val_raw, box_width) .. " ]"
+                    row_content = string.format("%s %s: %s", marker, fld_label, edit_box)
+                end
             end
+
             io.write(string.format("║ %s ║\n", pad_right(row_content, inner_w - 2)))
         end
 
