@@ -355,7 +355,7 @@ end
 -- 3. Profile Management & Command Generation
 -- ============================================================================
 
-local DEFAULT_CONFIG_PATH = os.getenv("HOME") .. "/.config/lualab/ssh_tunnels.json"
+local DEFAULT_CONFIG_PATH = os.getenv("SSH_TUNNEL_CONFIG") or ((os.getenv("HOME") or "/tmp") .. "/.config/lualab/ssh_tunnels.json")
 local MUX_DIR = "/tmp"
 
 local function ensure_dir(path)
@@ -523,48 +523,7 @@ local function load_profiles(filepath)
     filepath = filepath or DEFAULT_CONFIG_PATH
     local f = io.open(filepath, "r")
     if not f then
-        -- Return rich sample default profiles
-        return {
-            profiles = {
-                {
-                    name = "prod-postgres",
-                    type = "local",
-                    local_bind = "127.0.0.1",
-                    local_port = 5432,
-                    remote_host = "db-prod.internal.net",
-                    remote_port = 5432,
-                    ssh_user = "ubuntu",
-                    ssh_host = "app-server.prod.company.com",
-                    ssh_port = 22,
-                    proxy_jump = "bastion1.corp.com,jump2.vpc.corp.com",
-                    identity_key = "~/.ssh/id_ed25519"
-                },
-                {
-                    name = "dev-socks5",
-                    type = "socks",
-                    local_bind = "127.0.0.1",
-                    local_port = 1080,
-                    ssh_user = "developer",
-                    ssh_host = "aws-bastion.cloud.io",
-                    ssh_port = 22,
-                    proxy_jump = "",
-                    identity_key = ""
-                },
-                {
-                    name = "webhook-expose",
-                    type = "remote",
-                    remote_bind = "0.0.0.0",
-                    remote_port = 8000,
-                    local_host = "127.0.0.1",
-                    local_port = 8000,
-                    ssh_user = "root",
-                    ssh_host = "public-vps.net",
-                    ssh_port = 22,
-                    proxy_jump = "",
-                    identity_key = ""
-                }
-            }
-        }
+        return { profiles = {} }
     end
     local content = f:read("*a")
     f:close()
@@ -1132,6 +1091,11 @@ local function main(args)
         os.exit(0)
     elseif cmd == "list" or cmd == "ls" then
         local data = load_profiles()
+        if #data.profiles == 0 then
+            print("No tunnel profiles configured yet.")
+            print("Run 'ffi_ssh_tunnel.lua tui' (press [n]) or edit ~/.config/lualab/ssh_tunnels.json to add one.")
+            return
+        end
         print(string.format("%-18s %-8s %-18s %-24s %-22s %-8s",
             "NAME", "TYPE", "LOCAL", "TARGET", "VIA (JUMP)", "STATUS"))
         print(string.rep("─", 102))
@@ -1207,6 +1171,31 @@ local function main(args)
         else
             print(string.format("[CHECK] Port %d on %s is OCCUPIED (%s)", port, host, reason))
         end
+    elseif cmd == "add" then
+        local raw = args[2]
+        if not raw then
+            print("Usage: ffi_ssh_tunnel.lua add '{\"name\":\"my-tunnel\",\"type\":\"local\",...}'")
+            os.exit(1)
+        end
+        local new_p = json.decode(raw)
+        if not new_p or not new_p.name then
+            print("Error: Invalid JSON profile object.")
+            os.exit(1)
+        end
+        local data = load_profiles()
+        local replaced = false
+        for i, p in ipairs(data.profiles) do
+            if p.name == new_p.name then
+                data.profiles[i] = new_p
+                replaced = true
+                break
+            end
+        end
+        if not replaced then
+            table.insert(data.profiles, new_p)
+        end
+        save_profiles(data)
+        print(string.format("Saved profile '%s'.", new_p.name))
     elseif cmd == "export" then
         local data = load_profiles()
         print(export_ssh_config(data.profiles))
