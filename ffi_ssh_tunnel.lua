@@ -8,80 +8,173 @@
 local ffi = require("ffi")
 local bit = require("bit")
 
--- ============================================================================
--- 1. FFI C-Declarations (POSIX sockets, processes, terminal)
--- ============================================================================
-ffi.cdef[[
-    // Sockets & Network probing
-    int socket(int domain, int type, int protocol);
-    int bind(int sockfd, const void *addr, uint32_t addrlen);
-    int listen(int sockfd, int backlog);
-    int connect(int sockfd, const void *addr, uint32_t addrlen);
-    int close(int fd);
-    int fcntl(int fd, int cmd, ...);
-    int setsockopt(int sockfd, int level, int optname, const void *optval, uint32_t optlen);
-    int getsockname(int sockfd, void *addr, uint32_t *addrlen);
-    uint32_t inet_addr(const char *cp);
+local is_windows = (ffi.os == "Windows")
 
-    // Socket address structures
-    struct in_addr {
-        uint32_t s_addr;
-    };
-    struct sockaddr_in {
-        uint16_t       sin_family;
-        uint16_t       sin_port;
-        struct in_addr sin_addr;
-        char           sin_zero[8];
-    };
+if is_windows then
+    ffi.cdef[[
+        // Win32 Sockets (ws2_32.dll)
+        typedef uintptr_t SOCKET;
+        typedef struct {
+            uint16_t wVersion;
+            uint16_t wHighVersion;
+            char szDescription[257];
+            char szSystemStatus[129];
+            unsigned short iMaxSockets;
+            unsigned short iMaxUdpDg;
+            char *lpVendorInfo;
+        } WSADATA;
 
-    // Process & signal management
-    int kill(int pid, int sig);
+        int WSAStartup(uint16_t wVersionRequested, WSADATA *lpWSAData);
+        int WSACleanup(void);
+        SOCKET socket(int af, int type, int protocol);
+        int bind(SOCKET s, const void *name, int namelen);
+        int listen(SOCKET s, int backlog);
+        int connect(SOCKET s, const void *name, int namelen);
+        int closesocket(SOCKET s);
+        int setsockopt(SOCKET s, int level, int optname, const void *optval, int optlen);
+        int getsockname(SOCKET s, void *name, int *namelen);
+        uint32_t inet_addr(const char *cp);
 
-    // POSIX I/O
-    int read(int fd, void *buf, size_t count);
-    int write(int fd, const void *buf, size_t count);
+        struct in_addr {
+            uint32_t s_addr;
+        };
+        struct sockaddr_in {
+            int16_t        sin_family;
+            uint16_t       sin_port;
+            struct in_addr sin_addr;
+            char           sin_zero[8];
+        };
 
-    // Terminal raw mode (termios)
-    typedef unsigned char  cc_t;
-    typedef unsigned int   speed_t;
-    typedef unsigned int   tcflag_t;
+        // Win32 Console & Process (kernel32.dll)
+        typedef void *HANDLE;
+        typedef uint32_t DWORD;
+        typedef int BOOL;
 
-    struct termios {
-        tcflag_t c_iflag;
-        tcflag_t c_oflag;
-        tcflag_t c_cflag;
-        tcflag_t c_lflag;
-        cc_t     c_line;
-        cc_t     c_cc[32];
-        speed_t  c_ispeed;
-        speed_t  c_ospeed;
-    };
+        HANDLE GetStdHandle(DWORD nStdHandle);
+        BOOL GetConsoleMode(HANDLE hConsoleHandle, DWORD *lpMode);
+        BOOL SetConsoleMode(HANDLE hConsoleHandle, DWORD dwMode);
+        void Sleep(DWORD dwMilliseconds);
 
-    int tcgetattr(int fd, struct termios *termios_p);
-    int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
-    int isatty(int fd);
+        // Win32 CRT input
+        int _kbhit(void);
+        int _getch(void);
+    ]]
+else
+    ffi.cdef[[
+        // Sockets & Network probing
+        int socket(int domain, int type, int protocol);
+        int bind(int sockfd, const void *addr, uint32_t addrlen);
+        int listen(int sockfd, int backlog);
+        int connect(int sockfd, const void *addr, uint32_t addrlen);
+        int close(int fd);
+        int fcntl(int fd, int cmd, ...);
+        int setsockopt(int sockfd, int level, int optname, const void *optval, uint32_t optlen);
+        int getsockname(int sockfd, void *addr, uint32_t *addrlen);
+        uint32_t inet_addr(const char *cp);
 
-    // High resolution timer
-    struct timespec {
-        long tv_sec;
-        long tv_nsec;
-    };
-    int clock_gettime(int clk_id, struct timespec *tp);
-    int usleep(unsigned int usec);
-]]
+        // Socket address structures
+        struct in_addr {
+            uint32_t s_addr;
+        };
+        struct sockaddr_in {
+            uint16_t       sin_family;
+            uint16_t       sin_port;
+            struct in_addr sin_addr;
+            char           sin_zero[8];
+        };
 
+        // Process & signal management
+        int kill(int pid, int sig);
+
+        // POSIX I/O
+        int read(int fd, void *buf, size_t count);
+        int write(int fd, const void *buf, size_t count);
+
+        // Terminal raw mode (termios)
+        typedef unsigned char  cc_t;
+        typedef unsigned int   speed_t;
+        typedef unsigned int   tcflag_t;
+
+        struct termios {
+            tcflag_t c_iflag;
+            tcflag_t c_oflag;
+            tcflag_t c_cflag;
+            tcflag_t c_lflag;
+            cc_t     c_line;
+            cc_t     c_cc[32];
+            speed_t  c_ispeed;
+            speed_t  c_ospeed;
+        };
+
+        int tcgetattr(int fd, struct termios *termios_p);
+        int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
+        int isatty(int fd);
+
+        // High resolution timer & sleep
+        struct timespec {
+            long tv_sec;
+            long tv_nsec;
+        };
+        int clock_gettime(int clk_id, struct timespec *tp);
+        int usleep(unsigned int usec);
+    ]]
+end
+
+-- Network socket constants
 local AF_INET = 2
 local SOCK_STREAM = 1
-local SOL_SOCKET = 1
-local SO_REUSEADDR = 2
-local F_GETFL = 3
-local F_SETFL = 4
-local O_NONBLOCK = 2048
+local SOL_SOCKET = is_windows and 0xFFFF or 1
+local SO_REUSEADDR = is_windows and 0x0004 or 2
+local INVALID_SOCKET = is_windows and ffi.cast("uintptr_t", -1) or -1
 
 local TCSANOW = 0
 local ICANON  = 2
 local ECHO    = 8
-local CLOCK_MONOTONIC = 1
+
+-- Windows dynamic libraries
+local ws2_32 = nil
+local kernel32 = nil
+local msvcrt = nil
+
+local function sleep_ms(ms)
+    if is_windows then
+        if not kernel32 then
+            pcall(function() kernel32 = ffi.load("kernel32") end)
+        end
+        if kernel32 then
+            kernel32.Sleep(ms)
+        else
+            local t0 = os.clock()
+            while os.clock() - t0 < (ms / 1000) do end
+        end
+    else
+        ffi.C.usleep(ms * 1000)
+    end
+end
+
+local function init_windows_sockets()
+    if not is_windows then return true end
+    if not ws2_32 then
+        local ok, lib = pcall(ffi.load, "ws2_32")
+        if not ok then return false, "Failed to load ws2_32.dll" end
+        ws2_32 = lib
+        local wsaData = ffi.new("WSADATA")
+        local res = ws2_32.WSAStartup(0x0202, wsaData)
+        if res ~= 0 then
+            return false, "WSAStartup failed with code " .. tostring(res)
+        end
+    end
+    return true
+end
+
+local function get_sock_api()
+    if is_windows then
+        init_windows_sockets()
+        return ws2_32
+    else
+        return ffi.C
+    end
+end
 
 -- ============================================================================
 -- 2. Utilities: Byte order, Port Probing, JSON parser/serializer
@@ -98,21 +191,31 @@ end
 -- Fast port availability check using LuaJIT FFI sockets
 local function probe_port_available(port, host)
     host = host or "127.0.0.1"
-    local fd = ffi.C.socket(AF_INET, SOCK_STREAM, 0)
-    if fd < 0 then
+    local sock_api = get_sock_api()
+    if not sock_api then
+        return false, "network subsystem unavailable"
+    end
+
+    local fd = sock_api.socket(AF_INET, SOCK_STREAM, 0)
+    if fd == INVALID_SOCKET or fd < 0 then
         return false, "failed to create socket"
     end
 
     local optval = ffi.new("int[1]", 1)
-    ffi.C.setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, optval, ffi.sizeof("int"))
+    sock_api.setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, ffi.cast("const void*", optval), ffi.sizeof("int"))
 
     local addr = ffi.new("struct sockaddr_in")
     addr.sin_family = AF_INET
     addr.sin_port = htons(port)
-    addr.sin_addr.s_addr = ffi.C.inet_addr(host)
+    addr.sin_addr.s_addr = sock_api.inet_addr(host)
 
-    local res = ffi.C.bind(fd, ffi.cast("const void*", addr), ffi.sizeof("struct sockaddr_in"))
-    ffi.C.close(fd)
+    local res = sock_api.bind(fd, ffi.cast("const void*", addr), ffi.sizeof("struct sockaddr_in"))
+    if is_windows then
+        sock_api.closesocket(fd)
+    else
+        sock_api.close(fd)
+    end
+
     if res == 0 then
         return true, "AVAILABLE"
     else
@@ -125,7 +228,27 @@ local function find_pid_by_port(port)
     port = tonumber(port)
     if not port then return nil end
 
-    -- Try fuser first
+    if is_windows then
+        -- netstat -ano -p tcp on Windows
+        local pipe = io.popen("netstat -ano -p tcp 2>nul")
+        if pipe then
+            local out = pipe:read("*a") or ""
+            pipe:close()
+            -- Looking for lines like: TCP    127.0.0.1:8080    0.0.0.0:0    LISTENING    1234
+            local pattern = ":(" .. tostring(port) .. ")%s+.-%s+LISTENING%s+(%d+)"
+            local _, pid = out:match(pattern)
+            if not pid then
+                -- Match any state if listening wasn't explicitly found
+                local alt_pattern = ":(" .. tostring(port) .. ")%s+.-%s+(%d+)%s*[\r\n]"
+                local _, alt_pid = out:match(alt_pattern)
+                pid = alt_pid
+            end
+            if pid then return tonumber(pid) end
+        end
+        return nil
+    end
+
+    -- POSIX: Try fuser first
     local pipe = io.popen(string.format("fuser %d/tcp 2>/dev/null", port))
     if pipe then
         local out = pipe:read("*a") or ""
@@ -134,7 +257,7 @@ local function find_pid_by_port(port)
         if pid then return tonumber(pid) end
     end
 
-    -- Try ss
+    -- POSIX: Try ss
     local pipe2 = io.popen(string.format("ss -tulpn 2>/dev/null | grep ':%d '", port))
     if pipe2 then
         local out2 = pipe2:read("*a") or ""
@@ -143,7 +266,7 @@ local function find_pid_by_port(port)
         if pid2 then return tonumber(pid2) end
     end
 
-    -- Try lsof
+    -- POSIX: Try lsof
     local pipe3 = io.popen(string.format("lsof -ti tcp:%d 2>/dev/null", port))
     if pipe3 then
         local out3 = pipe3:read("*a") or ""
@@ -167,10 +290,27 @@ local function release_port(port, host)
     end
 
     local pid = find_pid_by_port(port)
+
+    if is_windows then
+        if not pid then
+            return false, string.format("Could not determine PID holding port %d to terminate.", port)
+        end
+        -- Terminate process forcefully via taskkill on Windows
+        os.execute(string.format("taskkill /F /PID %d >nul 2>&1", pid))
+        sleep_ms(200)
+        local now_free = probe_port_available(port, host)
+        if now_free then
+            return true, string.format("Terminated PID %d. Port %d is now FREE & AVAILABLE!", pid, port)
+        else
+            return false, string.format("Executed taskkill on PID %d, but port %d is still in use.", pid, port)
+        end
+    end
+
+    -- POSIX termination logic
     if not pid then
         -- Fallback to fuser -k
         os.execute(string.format("fuser -k %d/tcp >/dev/null 2>&1", port))
-        ffi.C.usleep(150000)
+        sleep_ms(150)
         local now_free = probe_port_available(port, host)
         if now_free then
             return true, string.format("Port %d successfully released via fuser!", port)
@@ -189,13 +329,13 @@ local function release_port(port, host)
 
     -- Terminate process gracefully first with SIGTERM (15)
     ffi.C.kill(pid, 15)
-    ffi.C.usleep(150000)
+    sleep_ms(150)
 
     -- If still alive, terminate with SIGKILL (9)
     local now_free = probe_port_available(port, host)
     if not now_free then
         ffi.C.kill(pid, 9)
-        ffi.C.usleep(200000)
+        sleep_ms(200)
     end
 
     now_free = probe_port_available(port, host)
@@ -442,11 +582,32 @@ end
 -- 3. Profile Management & Command Generation
 -- ============================================================================
 
-local DEFAULT_CONFIG_PATH = os.getenv("SSH_TUNNEL_CONFIG") or ((os.getenv("HOME") or "/tmp") .. "/.config/lualab/ssh_tunnels.json")
-local MUX_DIR = "/tmp"
+local DEFAULT_CONFIG_PATH = os.getenv("SSH_TUNNEL_CONFIG") or (function()
+    if is_windows then
+        local base = os.getenv("USERPROFILE") or os.getenv("LOCALAPPDATA") or os.getenv("APPDATA") or "C:"
+        return base:gsub("\\", "/") .. "/.config/lualab/ssh_tunnels.json"
+    else
+        return (os.getenv("HOME") or "/tmp") .. "/.config/lualab/ssh_tunnels.json"
+    end
+end)()
+
+local MUX_DIR = (function()
+    if is_windows then
+        local tmp = os.getenv("TEMP") or os.getenv("TMP") or "C:/Windows/Temp"
+        return tmp:gsub("\\", "/")
+    else
+        return "/tmp"
+    end
+end)()
 
 local function ensure_dir(path)
-    os.execute("mkdir -p '" .. path:gsub("/[^/]+$", "") .. "' 2>/dev/null")
+    local dir = path:gsub("/[^/]+$", "")
+    if is_windows then
+        local win_dir = dir:gsub("/", "\\")
+        os.execute('if not exist "' .. win_dir .. '" mkdir "' .. win_dir .. '" >nul 2>&1')
+    else
+        os.execute("mkdir -p '" .. dir .. "' 2>/dev/null")
+    end
 end
 
 local function get_mux_socket_path(profile_name)
@@ -616,7 +777,7 @@ local function start_tunnel(p)
     local ret = os.execute(cmd)
     if ret == 0 then
         -- Small pause to allow socket creation
-        ffi.C.usleep(150000)
+        sleep_ms(150)
         local status = get_tunnel_status(p.name)
         if status.is_up then
             return true, string.format("Tunnel '%s' active! (PID %s)", p.name, tostring(status.pid or "unknown"))
@@ -707,7 +868,60 @@ end
 
 local TUI = {}
 
+local orig_win_in_mode = nil
+local orig_win_out_mode = nil
+
+local function get_kernel32()
+    if not kernel32 then
+        pcall(function() kernel32 = ffi.load("kernel32") end)
+    end
+    return kernel32
+end
+
+local function get_msvcrt()
+    if not msvcrt then
+        pcall(function() msvcrt = ffi.load("msvcrt") end)
+    end
+    return msvcrt
+end
+
 function TUI.set_raw_mode(enable)
+    if is_windows then
+        local k32 = get_kernel32()
+        if not k32 then return end
+        local STD_INPUT_HANDLE = ffi.cast("uint32_t", -10)
+        local STD_OUTPUT_HANDLE = ffi.cast("uint32_t", -11)
+        local hIn = k32.GetStdHandle(STD_INPUT_HANDLE)
+        local hOut = k32.GetStdHandle(STD_OUTPUT_HANDLE)
+
+        if enable then
+            local in_mode = ffi.new("DWORD[1]")
+            local out_mode = ffi.new("DWORD[1]")
+            if k32.GetConsoleMode(hIn, in_mode) ~= 0 then
+                orig_win_in_mode = in_mode[0]
+                -- ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200
+                -- Clear ENABLE_LINE_INPUT (0x0002) and ENABLE_ECHO_INPUT (0x0004)
+                local new_in = bit.band(in_mode[0], bit.bnot(0x0002 + 0x0004))
+                new_in = bit.bor(new_in, 0x0200)
+                k32.SetConsoleMode(hIn, new_in)
+            end
+            if k32.GetConsoleMode(hOut, out_mode) ~= 0 then
+                orig_win_out_mode = out_mode[0]
+                -- ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+                local new_out = bit.bor(out_mode[0], 0x0004)
+                k32.SetConsoleMode(hOut, new_out)
+            end
+        else
+            if orig_win_in_mode then
+                k32.SetConsoleMode(hIn, orig_win_in_mode)
+            end
+            if orig_win_out_mode then
+                k32.SetConsoleMode(hOut, orig_win_out_mode)
+            end
+        end
+        return
+    end
+
     local termios = ffi.new("struct termios")
     if ffi.C.tcgetattr(0, termios) ~= 0 then return end
     if enable then
@@ -720,6 +934,39 @@ function TUI.set_raw_mode(enable)
 end
 
 function TUI.read_key()
+    if is_windows then
+        local crt = get_msvcrt()
+        if crt then
+            local c = crt._getch()
+            if c == 0 or c == 224 then
+                local code = crt._getch()
+                if code == 72 then return "UP"
+                elseif code == 80 then return "DOWN"
+                elseif code == 75 then return "LEFT"
+                elseif code == 77 then return "RIGHT"
+                elseif code == 15 then return "SHIFT_TAB"
+                end
+            elseif c == 13 or c == 10 then
+                return "ENTER"
+            elseif c == 27 then
+                return "ESC"
+            elseif c == 9 then
+                return "TAB"
+            elseif c == 8 then
+                return "BACKSPACE"
+            else
+                return string.char(c)
+            end
+        end
+        -- Fallback to standard input read
+        local ch = io.read(1)
+        if ch == "\r" or ch == "\n" then return "ENTER"
+        elseif ch == "\27" then return "ESC"
+        elseif ch == "\t" then return "TAB"
+        elseif ch == "\8" then return "BACKSPACE"
+        else return ch end
+    end
+
     local buf = ffi.new("char[16]")
     local n = ffi.C.read(0, buf, 16)
     if n <= 0 then return nil end
@@ -1229,19 +1476,21 @@ local function run_self_tests()
 
     -- 5. Socket Port Probing via FFI
     -- Bind an ephemeral listening socket, verify probe detects OCCUPIED, then close and verify AVAILABLE
-    local test_fd = ffi.C.socket(AF_INET, SOCK_STREAM, 0)
-    assert_true("Created test socket", test_fd >= 0)
+    local sock_api = get_sock_api()
+    assert_true("Socket subsystem initialized", sock_api ~= nil)
+    local test_fd = sock_api.socket(AF_INET, SOCK_STREAM, 0)
+    assert_true("Created test socket", test_fd ~= INVALID_SOCKET and test_fd >= 0)
     local test_addr = ffi.new("struct sockaddr_in")
     test_addr.sin_family = AF_INET
     test_addr.sin_port = htons(0) -- ephemeral port
-    test_addr.sin_addr.s_addr = ffi.C.inet_addr("127.0.0.1")
-    local b_res = ffi.C.bind(test_fd, ffi.cast("const void*", test_addr), ffi.sizeof("struct sockaddr_in"))
+    test_addr.sin_addr.s_addr = sock_api.inet_addr("127.0.0.1")
+    local b_res = sock_api.bind(test_fd, ffi.cast("const void*", test_addr), ffi.sizeof("struct sockaddr_in"))
     assert_eq("Ephemeral socket bind success", b_res, 0)
-    ffi.C.listen(test_fd, 1)
+    sock_api.listen(test_fd, 1)
 
     -- Find allocated port
-    local addr_len = ffi.new("uint32_t[1]", ffi.sizeof("struct sockaddr_in"))
-    ffi.C.getsockname(test_fd, ffi.cast("void*", test_addr), addr_len)
+    local addr_len = ffi.new("int[1]", ffi.sizeof("struct sockaddr_in"))
+    sock_api.getsockname(test_fd, ffi.cast("void*", test_addr), addr_len)
     local bound_port = ntohs(test_addr.sin_port)
     assert_true("Bound to valid port", bound_port > 0)
 
@@ -1249,7 +1498,11 @@ local function run_self_tests()
     assert_eq("Bound port is OCCUPIED", ok_busy, false)
     assert_eq("Bound port status OCCUPIED", busy_msg, "OCCUPIED")
 
-    ffi.C.close(test_fd)
+    if is_windows then
+        sock_api.closesocket(test_fd)
+    else
+        sock_api.close(test_fd)
+    end
 
     local ok_free, free_msg = probe_port_available(bound_port, "127.0.0.1")
     assert_true("Freed port is now AVAILABLE", ok_free)
@@ -1345,7 +1598,7 @@ local function main(args)
             os.exit(1)
         end
         stop_tunnel(name)
-        ffi.C.usleep(200000)
+        sleep_ms(200)
         local data = load_profiles()
         for _, p in ipairs(data.profiles) do
             if p.name == name then
