@@ -53,6 +53,7 @@ if is_windows then
         HANDLE GetStdHandle(DWORD nStdHandle);
         BOOL GetConsoleMode(HANDLE hConsoleHandle, DWORD *lpMode);
         BOOL SetConsoleMode(HANDLE hConsoleHandle, DWORD dwMode);
+        DWORD GetFileAttributesA(const char *lpFileName);
         void Sleep(DWORD dwMilliseconds);
 
         // Win32 CRT input
@@ -109,6 +110,7 @@ else
         int tcgetattr(int fd, struct termios *termios_p);
         int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
         int isatty(int fd);
+        int access(const char *pathname, int mode);
 
         // High resolution timer & sleep
         struct timespec {
@@ -720,15 +722,28 @@ local function wrap_command_lines(cmd_str, max_width)
     return lines
 end
 
+local function file_exists(path)
+    if is_windows then
+        local k32 = get_kernel32()
+        if k32 then
+            local attr = k32.GetFileAttributesA(path)
+            return attr ~= 0xFFFFFFFF
+        end
+        local f = io.open(path, "r")
+        if f then f:close(); return true end
+        return false
+    else
+        return ffi.C.access(path, 0) == 0
+    end
+end
+
 -- Check live status of an OpenSSH control socket
 local function get_tunnel_status(profile_name)
     local mux_path = get_mux_socket_path(profile_name)
-    -- Check if socket file exists
-    local f = io.open(mux_path, "r")
-    if not f then
+    -- Check if socket file exists (UNIX domain socket safe via access)
+    if not file_exists(mux_path) then
         return { is_up = false, status = "DOWN", pid = nil }
     end
-    f:close()
 
     -- Check with ssh -O check
     local cmd = string.format("ssh -O check -S '%s' dummy_host 2>&1", mux_path)
