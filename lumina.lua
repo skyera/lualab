@@ -23,7 +23,8 @@
       * j / ↓            : Move cursor down
       * k / ↑            : Move cursor up
       * g / G            : Jump to top / bottom
-      * /                : Instant filter / search
+      * /                : Instant fuzzy in-directory filter
+      * f / Ctrl+P       : Global recursive fuzzy file finder
       * t / T            : Cycle color theme forward / backward
       * .                : Toggle hidden files (dotfiles)
       * r                : Refresh current directory
@@ -602,6 +603,82 @@ local function format_bytes(bytes)
 end
 
 -- =========================================================================
+-- Fuzzy Search Algorithm
+-- Computes case-insensitive fuzzy matching with word-boundary, acronym, and
+-- consecutive-character bonus scoring.
+-- =========================================================================
+local function fuzzy_score(pattern, str)
+    if not pattern or #pattern == 0 then return true, 0 end
+    if not str or #str == 0 then return false, 0 end
+
+    local pat_l = pattern:lower()
+    local str_l = str:lower()
+    local pat_len = #pat_l
+    local str_len = #str_l
+
+    if pat_len > str_len then return false, 0 end
+
+    -- Quick exact substring check
+    local sub_pos = str_l:find(pat_l, 1, true)
+    local is_exact_prefix = (sub_pos == 1)
+
+    local score = 0
+    local p_idx = 1
+    local prev_match_idx = -1
+    local consecutive = 0
+
+    for s_idx = 1, str_len do
+        local p_char = pat_l:byte(p_idx)
+        local s_char = str_l:byte(s_idx)
+
+        if p_char == s_char then
+            local char_score = 10
+
+            -- Consecutive match bonus
+            if prev_match_idx == s_idx - 1 then
+                consecutive = consecutive + 1
+                char_score = char_score + (consecutive * 12)
+            else
+                consecutive = 0
+            end
+
+            -- Word boundary bonuses (start of string or preceded by _, -, ., /, or space)
+            if s_idx == 1 then
+                char_score = char_score + 35
+            else
+                local prev_byte = str_l:byte(s_idx - 1)
+                if prev_byte == 95 or prev_byte == 45 or prev_byte == 46 or prev_byte == 47 or prev_byte == 32 then
+                    char_score = char_score + 30
+                end
+            end
+
+            -- Exact case match bonus
+            if pattern:byte(p_idx) == str:byte(s_idx) then
+                char_score = char_score + 3
+            end
+
+            score = score + char_score
+            prev_match_idx = s_idx
+            p_idx = p_idx + 1
+
+            if p_idx > pat_len then
+                -- Match completed!
+                if is_exact_prefix then
+                    score = score + 50
+                elseif sub_pos then
+                    score = score + 25
+                end
+                -- Penalty for extra length (shorter matching names score higher)
+                score = score - math.floor((str_len - pat_len) * 0.5)
+                return true, score
+            end
+        end
+    end
+
+    return false, 0
+end
+
+-- =========================================================================
 -- 3. File System & Directory Inspection via FFI
 -- =========================================================================
 local IMAGE_EXTS = { png = true, jpg = true, jpeg = true, gif = true, webp = true, bmp = true, ppm = true }
@@ -852,6 +929,41 @@ local function is_root_dir(p)
     return false
 end
 
+-- =========================================================================
+-- Recursive Directory Scanner for Global Fuzzy Search
+-- Traverses subdirectories up to max_depth and max_files to ensure responsiveness.
+-- =========================================================================
+local function scan_files_recursive(root_dir, max_files, max_depth, show_hidden)
+    max_files = max_files or 2000
+    max_depth = max_depth or 5
+    local results = {}
+
+    local function walk(dir, depth)
+        if depth > max_depth or #results >= max_files then return end
+        local entries = read_dir_entries(dir, show_hidden)
+        for _, e in ipairs(entries) do
+            if #results >= max_files then break end
+            -- Compute relative path from root_dir for cleaner display and matching
+            local rel_path = e.path
+            if rel_path:sub(1, #root_dir) == root_dir then
+                rel_path = rel_path:sub(#root_dir + 1):gsub("^[/\\]+", "")
+            end
+            e.rel_path = (#rel_path > 0) and rel_path or e.name
+            table.insert(results, e)
+
+            if e.is_dir and not e.is_symlink then
+                -- Avoid recursive descent into version control or node_modules
+                if e.name ~= ".git" and e.name ~= "node_modules" and e.name ~= ".hg" and e.name ~= ".svn" then
+                    walk(e.path, depth + 1)
+                end
+            end
+        end
+    end
+
+    walk(root_dir, 1)
+    return results
+end
+
 local function get_dir_display_name(p)
     if not p or is_root_dir(p) then return p or "/" end
     local name = p:match("([^/\\]+)[/\\]?$")
@@ -1100,6 +1212,158 @@ local function show_image_fullscreen(images, selected_idx)
     end
 end
 
+-- =========================================================================
+-- Modal Interactive Fuzzy File Finder
+-- Recursive fuzzy file search across project tree with live ranking and instant preview
+-- =========================================================================
+local function show_fuzzy_finder(root_dir, show_hidden)
+    local all_files = scan_files_recursive(root_dir, 3000, 6, show_hidden)
+    local query = ""
+    local sel_idx = 1
+    local scroll_offset = 0
+
+    local function get_matches()
+        if #query == 0 then
+            return all_files
+        end
+        local scored = {}
+        for _, file in ipairs(all_files) do
+            local matched, score = fuzzy_score(query, file.rel_path or file.name)
+            if matched then
+                table.insert(scored, { file = file, score = score })
+            end
+        end
+        table.sort(scored, function(a, b)
+            if a.score ~= b.score then return a.score > b.score end
+            return (a.file.rel_path or a.file.name):lower() < (b.file.rel_path or b.file.name):lower()
+        end)
+        local res = {}
+        for _, item in ipairs(scored) do
+            table.insert(res, item.file)
+        end
+        return res
+    end
+
+    local function render_modal(matches)
+        local term_w, term_h = get_terminal_size()
+        local box_w = math.max(40, math.min(term_w - 6, 88))
+        local box_h = math.max(12, math.min(term_h - 4, 22))
+        local start_x = math.floor((term_w - box_w) / 2)
+        local start_y = math.floor((term_h - box_h) / 2)
+
+        local visible_rows = box_h - 5 -- border, prompt, divider, list rows, footer
+        if sel_idx <= scroll_offset then
+            scroll_offset = sel_idx - 1
+        elseif sel_idx > scroll_offset + visible_rows then
+            scroll_offset = sel_idx - visible_rows
+        end
+
+        local out = {}
+        local bcol = C.border_focus
+
+        -- Header
+        local title_str = string.format(" FUZZY FILE SEARCH (%d/%d) ", #matches, #all_files)
+        local top_fill = string.rep("─", math.max(0, box_w - 2 - visual_len(title_str)))
+        table.insert(out, string.format("\27[%d;%dH%s╭%s%s%s%s╮%s",
+            start_y, start_x, bcol, C.bold .. C.header_path, title_str, bcol, top_fill, C.reset))
+
+        -- Prompt Input Line
+        local prompt_prefix = "  > "
+        local cur_cursor = "\27[7m \27[0m"
+        local input_display = C.bold .. (C.status_accent or "\27[1;38;2;251;191;36m") .. query .. cur_cursor .. C.reset
+        local prompt_w = visual_len(prompt_prefix) + visual_len(query) + 1
+        local prompt_pad = string.rep(" ", math.max(0, box_w - 2 - prompt_w))
+        table.insert(out, string.format("\27[%d;%dH%s│%s%s%s%s│%s",
+            start_y + 1, start_x, bcol, C.reset, prompt_prefix .. input_display, prompt_pad, bcol, C.reset))
+
+        -- Divider
+        local div_fill = string.rep("─", math.max(0, box_w - 2))
+        table.insert(out, string.format("\27[%d;%dH%s├%s┤%s", start_y + 2, start_x, bcol, div_fill, C.reset))
+
+        -- File List Rows
+        local end_idx = math.min(#matches, scroll_offset + visible_rows)
+        for r = 1, visible_rows do
+            local item_idx = scroll_offset + r
+            local file = matches[item_idx]
+            local row_y = start_y + 2 + r
+            if file then
+                local is_sel = (item_idx == sel_idx)
+                local icon, col = get_file_type_info(file)
+                local prefix = is_sel and " ▶ " or "   "
+                local name_display = file.rel_path or file.name
+                local avail_w = box_w - 2 - visual_len(prefix) - 4 - visual_len(file.size_str) - 2
+                if visual_len(name_display) > avail_w then
+                    name_display = "..." .. name_display:sub(-math.max(10, avail_w - 4))
+                end
+
+                local text_part = prefix .. icon .. " " .. name_display
+                local pad = math.max(1, box_w - 2 - visual_len(text_part) - visual_len(file.size_str))
+                local row_content
+                if is_sel then
+                    row_content = C.cursor_bg .. text_part .. string.rep(" ", pad) .. file.size_str .. C.reset
+                else
+                    row_content = col .. text_part .. string.rep(" ", pad) .. C.dim .. file.size_str .. C.reset
+                end
+                table.insert(out, string.format("\27[%d;%dH%s│%s%s│%s", row_y, start_x, bcol, row_content, bcol, C.reset))
+            else
+                local blank_pad = string.rep(" ", box_w - 2)
+                table.insert(out, string.format("\27[%d;%dH%s│%s%s│%s", row_y, start_x, bcol, blank_pad, bcol, C.reset))
+            end
+        end
+
+        -- Footer / Key Hints
+        local hint_text = " [Enter] Jump to File  [↑/↓] Select  [Esc] Cancel "
+        local hint_pad = string.rep("─", math.max(0, box_w - 2 - visual_len(hint_text)))
+        table.insert(out, string.format("\27[%d;%dH%s╰%s%s%s%s╯%s",
+            start_y + box_h - 1, start_x, bcol, C.dim, hint_text, bcol, hint_pad, C.reset))
+
+        io.write(table.concat(out))
+        io.flush()
+    end
+
+    local matches = get_matches()
+    render_modal(matches)
+
+    while true do
+        local k = read_key()
+        if k then
+            if k == "ESC" then
+                io.write("\27[H\27[2J")
+                io.flush()
+                return nil
+            elseif k == "ENTER" then
+                io.write("\27[H\27[2J")
+                io.flush()
+                return matches[sel_idx]
+            elseif k == "UP" then
+                if sel_idx > 1 then
+                    sel_idx = sel_idx - 1
+                    render_modal(matches)
+                end
+            elseif k == "DOWN" then
+                if sel_idx < #matches then
+                    sel_idx = sel_idx + 1
+                    render_modal(matches)
+                end
+            elseif k == "BACKSPACE" then
+                if #query > 0 then
+                    query = query:sub(1, -2)
+                    matches = get_matches()
+                    sel_idx = 1
+                    scroll_offset = 0
+                    render_modal(matches)
+                end
+            elseif #k == 1 and k:byte(1) >= 32 and k:byte(1) <= 126 then
+                query = query .. k
+                matches = get_matches()
+                sel_idx = 1
+                scroll_offset = 0
+                render_modal(matches)
+            end
+        end
+    end
+end
+
 local PREVIEW_CACHE_LIMIT = 64
 local preview_cache = {}
 local preview_cache_order = {}
@@ -1255,13 +1519,24 @@ local function main(args)
 
     local function reload_current()
         current_entries = read_dir_entries(current_dir, show_hidden)
-        -- Filter if query exists
+        -- Filter if query exists using fuzzy scoring
         if #filter_query > 0 then
-            local filtered = {}
+            local scored = {}
             for _, e in ipairs(current_entries) do
-                if e.name:lower():find(filter_query:lower(), 1, true) then
-                    table.insert(filtered, e)
+                local matched, score = fuzzy_score(filter_query, e.name)
+                if matched then
+                    table.insert(scored, { entry = e, score = score })
                 end
+            end
+            table.sort(scored, function(a, b)
+                if a.score ~= b.score then
+                    return a.score > b.score
+                end
+                return a.entry.name:lower() < b.entry.name:lower()
+            end)
+            local filtered = {}
+            for _, item in ipairs(scored) do
+                table.insert(filtered, item.entry)
             end
             current_entries = filtered
         end
@@ -1391,10 +1666,10 @@ local function main(args)
                 help_hint = "\27[90m[Enter] Confirm  [Esc] Cancel  [↑/↓] Select\27[0m"
             elseif #filter_query > 0 then
                 status_text = string.format("%sFilter: /%s\27[0m", C.status_accent or "\27[1;38;2;251;191;36m", filter_query)
-                help_hint = "[h/l] Navigate  [j/k] Move  [/] Search  [t] Theme  [Esc] Clear  [q] Quit"
+                help_hint = "[h/l] Navigate  [j/k] Move  [/] Filter  [f] Find  [Esc] Clear  [q] Quit"
             else
                 status_text = string.format("%s%s%s", C.dim, sel_entry and sel_entry.path or current_dir, C.reset)
-                help_hint = "[h/l/←/→] Navigate  [j/k] Up/Down  [/] Filter  [t] Theme  [.] Hidden  [q] Quit"
+                help_hint = "[h/l] Navigate  [j/k] Move  [/] Filter  [f] Find  [t] Theme  [.] Hidden  [q] Quit"
             end
             local footer_line = string.format("\27[%d;1H\27[2K  %s \27[90m│\27[0m \27[90m%s\27[0m",
                 footer_y, status_text, help_hint)
@@ -1544,12 +1819,39 @@ local function main(args)
                 -- Refresh
                 reload_current()
             elseif k == "/" then
-                -- In-TUI Vim-style search prompt
+                -- In-TUI Vim-style fuzzy search filter
                 is_searching = true
                 search_query = ""
                 filter_query = ""
                 sel_index = 1
                 reload_current()
+            elseif k == "f" or k == "\16" then
+                -- Global recursive fuzzy file finder (f / Ctrl+P)
+                local found = show_fuzzy_finder(current_dir, show_hidden)
+                if found then
+                    if found.is_dir then
+                        current_dir = found.path
+                        filter_query = ""
+                        sel_index = 1
+                    else
+                        current_dir = get_parent_dir(found.path)
+                        filter_query = ""
+                        reload_current()
+                        sel_index = 1
+                        for idx, e in ipairs(current_entries) do
+                            if e.path == found.path or e.name == found.name then
+                                sel_index = idx
+                                break
+                            end
+                        end
+                    end
+                    clear_preview_cache()
+                    preview_pending = true
+                    reload_current()
+                    needs_redraw = true
+                else
+                    needs_redraw = true
+                end
             end
             if current_dir ~= previous_dir then
                 clear_preview_cache()

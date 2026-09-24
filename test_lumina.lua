@@ -486,7 +486,102 @@ assert_false(sim_searching, "Exited search mode")
 sim_event("t")
 assert_eq(sim_theme, "nord", "Pressing 't' after exiting search resumes cycling")
 
+-- Test Suite 9: Fuzzy Scoring Algorithm & Recursive File Search
+print("\n-- Test Suite 9: Fuzzy Scoring Algorithm & Recursive File Search --")
+
+-- Extract fuzzy_score from lumina.lua logic
+local function test_fuzzy_score(pattern, str)
+    if not pattern or #pattern == 0 then return true, 0 end
+    if not str or #str == 0 then return false, 0 end
+    local pat_l = pattern:lower()
+    local str_l = str:lower()
+    local pat_len = #pat_l
+    local str_len = #str_l
+    if pat_len > str_len then return false, 0 end
+
+    local sub_pos = str_l:find(pat_l, 1, true)
+    local is_exact_prefix = (sub_pos == 1)
+    local score = 0
+    local p_idx = 1
+    local prev_match_idx = -1
+    local consecutive = 0
+
+    for s_idx = 1, str_len do
+        local p_char = pat_l:byte(p_idx)
+        local s_char = str_l:byte(s_idx)
+
+        if p_char == s_char then
+            local char_score = 10
+            if prev_match_idx == s_idx - 1 then
+                consecutive = consecutive + 1
+                char_score = char_score + (consecutive * 12)
+            else
+                consecutive = 0
+            end
+
+            if s_idx == 1 then
+                char_score = char_score + 35
+            else
+                local prev_byte = str_l:byte(s_idx - 1)
+                if prev_byte == 95 or prev_byte == 45 or prev_byte == 46 or prev_byte == 47 or prev_byte == 32 then
+                    char_score = char_score + 30
+                end
+            end
+
+            if pattern:byte(p_idx) == str:byte(s_idx) then
+                char_score = char_score + 3
+            end
+
+            score = score + char_score
+            prev_match_idx = s_idx
+            p_idx = p_idx + 1
+
+            if p_idx > pat_len then
+                if is_exact_prefix then
+                    score = score + 50
+                elseif sub_pos then
+                    score = score + 25
+                end
+                score = score - math.floor((str_len - pat_len) * 0.5)
+                return true, score
+            end
+        end
+    end
+    return false, 0
+end
+
+-- Test 9.1: Exact and Substring matches
+local matched, score = test_fuzzy_score("lumina", "lumina.lua")
+assert_true(matched, "Fuzzy match: 'lumina' matches 'lumina.lua'")
+assert_true(score > 100, "Exact prefix match receives high score bonus")
+
+-- Test 9.2: Acronym / boundary match
+local matched_fsand, score_fsand = test_fuzzy_score("fsand", "ffi_falling_sand.lua")
+assert_true(matched_fsand, "Fuzzy match: 'fsand' matches 'ffi_falling_sand.lua'")
+
+local matched_oracer, score_oracer = test_fuzzy_score("oracer", "outrun_racer.lua")
+assert_true(matched_oracer, "Fuzzy match: 'oracer' matches 'outrun_racer.lua'")
+
+-- Test 9.3: Non-matching queries
+local matched_fail, _ = test_fuzzy_score("xyz123", "lumina.lua")
+assert_false(matched_fail, "Fuzzy non-match correctly returns false")
+
+-- Test 9.4: Prefix / exact score ranks higher than scattered match
+local _, score_exact = test_fuzzy_score("lua", "luatop.lua")
+local _, score_scattered = test_fuzzy_score("lua", "demo_guess_number.lua")
+assert_true(score_exact > score_scattered, "Prefix match scores higher than end-of-string match")
+
+-- Test 9.5: Case-insensitive matching
+local matched_case, _ = test_fuzzy_score("WOLF3D", "ffi_wolf3d_raycaster.lua")
+assert_true(matched_case, "Case-insensitive fuzzy match succeeds for uppercase query")
+
+-- Test 9.6: Empty pattern matches everything
+local matched_empty, score_empty = test_fuzzy_score("", "anything.lua")
+assert_true(matched_empty, "Empty pattern matches with zero score")
+assert_eq(score_empty, 0, "Empty pattern score is 0")
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)
 end
+
