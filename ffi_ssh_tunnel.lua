@@ -449,6 +449,29 @@ local function command_parts_to_string(parts)
     return table.concat(quoted, " ")
 end
 
+local function wrap_command_lines(cmd_str, max_width)
+    max_width = max_width or 70
+    local words = {}
+    for w in cmd_str:gmatch("%S+") do
+        table.insert(words, w)
+    end
+    if #words == 0 then return {""} end
+
+    local lines = {}
+    local cur_line = words[1]
+    for i = 2, #words do
+        local w = words[i]
+        if #cur_line + 1 + #w <= max_width then
+            cur_line = cur_line .. " " .. w
+        else
+            table.insert(lines, cur_line)
+            cur_line = w
+        end
+    end
+    table.insert(lines, cur_line)
+    return lines
+end
+
 -- Check live status of an OpenSSH control socket
 local function get_tunnel_status(profile_name)
     local mux_path = get_mux_socket_path(profile_name)
@@ -631,31 +654,51 @@ function TUI.clear()
     io.flush()
 end
 
+local function visual_len(s)
+    local clean = tostring(s):gsub("\27%[[%d;]*[mK]", "")
+    local _, count = clean:gsub("[%z\1-\127\194-\244][\128-\191]*", "")
+    return count
+end
+
+local function pad_right(s, width)
+    local vlen = visual_len(s)
+    if vlen >= width then return s end
+    return s .. string.rep(" ", width - vlen)
+end
+
 -- Render the Main Dashboard
 function TUI.render_dashboard(profiles, cursor_idx, status_msg)
     TUI.clear()
-    local W = 88
+    local W = 100
     local line_sep = string.rep("─", W)
     local line_box = string.rep("═", W)
 
     io.write("\27[1;36m╔" .. line_box .. "╗\27[0m\n")
-    io.write(string.format("\27[1;36m║\27[1;37m %-86s \27[1;36m║\27[0m\n", "🚀 LuaJIT SSH Tunnel & ProxyJump Studio"))
-    io.write(string.format("\27[1;36m║\27[0;33m Profiles: %-2d │ Socket Mux: %-30s │ OS: %-12s \27[1;36m║\27[0m\n",
-        #profiles, MUX_DIR .. "/ssh_mux_*", ffi.os))
+    local title_content = pad_right("🚀 LuaJIT SSH Tunnel & ProxyJump Studio", W - 2)
+    io.write(string.format("\27[1;36m║\27[1;37m %s \27[1;36m║\27[0m\n", title_content))
+    local meta_str = string.format("Profiles: %-2d │ Socket Mux: %-30s │ OS: %s",
+        #profiles, MUX_DIR .. "/ssh_mux_*", ffi.os)
+    io.write(string.format("\27[1;36m║\27[0;33m %s \27[1;36m║\27[0m\n", pad_right(meta_str, W - 2)))
     io.write("\27[1;36m╠" .. line_sep .. "╣\27[0m\n")
 
-    -- Header row
-    io.write(string.format("\27[1;37m║ %-3s │ %-16s │ %-8s │ %-17s │ %-20s │ %-8s ║\27[0m\n",
-        "#", "Profile Name", "Type", "Local Endpoint", "Target / Route", "Status"))
+    -- Header row (exact column widths: 4, 18, 10, 18, 22, 10; separators: 15; borders: 2; total W = 100)
+    local hdr_row = "║ " .. pad_right("#", 4) .. " │ "
+                         .. pad_right("Profile Name", 18) .. " │ "
+                         .. pad_right("Type", 10) .. " │ "
+                         .. pad_right("Local Endpoint", 18) .. " │ "
+                         .. pad_right("Target / Route", 22) .. " │ "
+                         .. pad_right("Status", 10) .. " ║"
+    io.write("\27[1;37m" .. hdr_row .. "\27[0m\n")
     io.write("\27[1;36m╟" .. line_sep .. "╢\27[0m\n")
 
     if #profiles == 0 then
-        io.write(string.format("║ %-86s ║\n", "  (No profiles configured. Press [n] to create a new profile!)"))
+        local empty_msg = pad_right("  (No profiles configured. Press [n] to create a new profile!)", W - 2)
+        io.write(string.format("║ %s ║\n", empty_msg))
     else
         for i, p in ipairs(profiles) do
             local marker = (i == cursor_idx) and "▶" or " "
             local st = get_tunnel_status(p.name)
-            local status_str = st.is_up and "\27[1;32m● UP   \27[0m" or "\27[1;31m○ DOWN \27[0m"
+            local status_str = st.is_up and "\27[1;32m● UP\27[0m" or "\27[1;31m○ DOWN\27[0m"
 
             local type_str = (p.type or "local"):upper()
             if type_str == "LOCAL" then type_str = "-L Local"
@@ -673,15 +716,19 @@ function TUI.render_dashboard(profiles, cursor_idx, status_msg)
                 target_ep = "[Dynamic SOCKS5]"
             end
 
-            local row_fmt
+            local c1 = pad_right(string.format("%s %d", marker, i), 4)
+            local c2 = pad_right(p.name:sub(1, 18), 18)
+            local c3 = pad_right(type_str:sub(1, 10), 10)
+            local c4 = pad_right(local_ep:sub(1, 18), 18)
+            local c5 = pad_right(target_ep:sub(1, 22), 22)
+            local c6 = pad_right(status_str, 10)
+
+            local row_line = "║ " .. c1 .. " │ " .. c2 .. " │ " .. c3 .. " │ " .. c4 .. " │ " .. c5 .. " │ " .. c6 .. " ║"
             if i == cursor_idx then
-                row_fmt = string.format("\27[1;33m║ %s%-2d │ %-16s │ %-8s │ %-17s │ %-20s │ %s \27[1;33m║\27[0m\n",
-                    marker, i, p.name:sub(1, 16), type_str:sub(1, 8), local_ep:sub(1, 17), target_ep:sub(1, 20), status_str)
+                io.write("\27[1;33m" .. row_line .. "\27[0m\n")
             else
-                row_fmt = string.format("║ %s%-2d │ %-16s │ %-8s │ %-17s │ %-20s │ %s ║\n",
-                    marker, i, p.name:sub(1, 16), type_str:sub(1, 8), local_ep:sub(1, 17), target_ep:sub(1, 20), status_str)
+                io.write(row_line .. "\n")
             end
-            io.write(row_fmt)
         end
     end
 
@@ -693,15 +740,22 @@ function TUI.render_dashboard(profiles, cursor_idx, status_msg)
         local jump_str = (sel.proxy_jump and #sel.proxy_jump > 0) and sel.proxy_jump or "(Direct / None)"
         local ssh_tgt = string.format("%s@%s:%s", sel.ssh_user or "", sel.ssh_host or "localhost", tostring(sel.ssh_port or 22))
         local cmd = command_parts_to_string(build_ssh_command(sel))
-        if #cmd > 82 then cmd = cmd:sub(1, 79) .. "..." end
+        local route_content = pad_right(string.format("\27[1;34mRoute Detail:\27[0m ProxyJump: %-30s SSH Host: %s", jump_str:sub(1, 30), ssh_tgt), W - 2)
+        io.write(string.format("║ %s ║\n", route_content))
 
-        io.write(string.format("║ \27[1;34mRoute Detail:\27[0m ProxyJump: %-30s SSH Host: %-25s ║\n", jump_str:sub(1, 30), ssh_tgt:sub(1, 25)))
-        io.write(string.format("║ \27[1;34mCommand:     \27[0;37m%-72s\27[0m ║\n", cmd))
+        local wrapped = wrap_command_lines(cmd, W - 16)
+        for line_idx, line_txt in ipairs(wrapped) do
+            local prefix = (line_idx == 1) and "\27[1;34mCommand:     \27[0;37m" or "             \27[0;37m"
+            local suffix = (line_idx < #wrapped) and " \\" or ""
+            local display_txt = pad_right(prefix .. line_txt .. suffix, W - 2)
+            io.write(string.format("║ %s\27[0m ║\n", display_txt))
+        end
         io.write("\27[1;36m╠" .. line_sep .. "╣\27[0m\n")
     end
 
     -- Keybindings help bar
-    io.write("║ \27[1;32m[Enter]\27[0m Toggle  \27[1;32m[n]\27[0m New  \27[1;32m[e]\27[0m Edit  \27[1;32m[d]\27[0m Delete  \27[1;32m[c]\27[0m Check Port  \27[1;32m[x]\27[0m Export SSH  \27[1;31m[q]\27[0m Quit ║\n")
+    local keys_bar = pad_right("\27[1;32m[Enter]\27[0m Toggle  \27[1;32m[n]\27[0m New  \27[1;32m[e]\27[0m Edit  \27[1;32m[v]\27[0m View Cmd  \27[1;32m[d]\27[0m Delete  \27[1;32m[c]\27[0m Port  \27[1;32m[x]\27[0m Export  \27[1;31m[q]\27[0m Quit", W - 2)
+    io.write(string.format("║ %s ║\n", keys_bar))
     io.write("\27[1;36m╚" .. line_box .. "╝\27[0m\n")
 
     if status_msg and #status_msg > 0 then
@@ -744,12 +798,14 @@ function TUI.edit_profile_modal(existing_profile)
 
     while true do
         TUI.clear()
-        local W = 84
-        local box_top = string.rep("═", W)
-        local box_mid = string.rep("─", W)
+        local W = 88
+        local inner_w = W - 2
+        local box_top = string.rep("═", inner_w)
+        local box_mid = string.rep("─", inner_w)
 
         io.write("\27[1;35m╔" .. box_top .. "╗\27[0m\n")
-        io.write(string.format("\27[1;35m║\27[1;37m %-82s \27[1;35m║\27[0m\n", "✏️  SSH Tunnel Profile Editor (Tab: Move, Space: Cycle Type, Enter: Save)"))
+        local header_txt = pad_right("✏️  SSH Tunnel Profile Editor (Tab: Move, Space: Cycle Type, Enter: Save)", inner_w - 2)
+        io.write(string.format("\27[1;35m║\27[1;37m %s \27[1;35m║\27[0m\n", header_txt))
         io.write("\27[1;35m╠" .. box_mid .. "╣\27[0m\n")
 
         -- Port status preview
@@ -766,7 +822,7 @@ function TUI.edit_profile_modal(existing_profile)
         end
 
         for idx, fld in ipairs(fields) do
-            local marker = (idx == field_idx) and "\27[1;33m▶\27[0m " or "  "
+            local marker = (idx == field_idx) and "▶" or " "
             local val_str = tostring(p[fld.key] or "")
             if fld.type == "choice" then
                 val_str = string.format("[%s] (local / remote / socks)", val_str:upper())
@@ -774,25 +830,33 @@ function TUI.edit_profile_modal(existing_profile)
                 val_str = "\27[2;37m(Dynamic SOCKS5 - resolved by client)\27[0m"
             end
 
-            local line
+            local fld_label = pad_right(fld.label, 18)
+            local row_content
             if idx == field_idx then
-                line = string.format("║ %s\27[1;33m%-18s: \27[1;37m%-58s\27[1;35m ║\27[0m", marker, fld.label, val_str)
+                row_content = string.format("%s \27[1;33m%s: \27[1;37m%s\27[0m", marker, fld_label, val_str)
             else
-                line = string.format("║ %s%-18s: %-58s ║", marker, fld.label, val_str)
+                row_content = string.format("%s %s: %s", marker, fld_label, val_str)
             end
-            io.write(line .. "\n")
+            io.write(string.format("║ %s ║\n", pad_right(row_content, inner_w - 2)))
         end
 
         io.write("\27[1;35m╠" .. box_mid .. "╣\27[0m\n")
-        io.write(string.format("║  Local Port Probe : %-67s ║\n", port_probe_res))
+        local probe_line = pad_right("  Local Port Probe : " .. port_probe_res, inner_w - 2)
+        io.write(string.format("║ %s ║\n", probe_line))
         
         -- Live Command Preview
         local cmd = command_parts_to_string(build_ssh_command(p))
-        if #cmd > 76 then cmd = cmd:sub(1, 73) .. "..." end
-        io.write(string.format("║  Preview Command  : \27[0;36m%-63s\27[0m ║\n", cmd))
+        local wrapped = wrap_command_lines(cmd, inner_w - 24)
+        for line_idx, line_txt in ipairs(wrapped) do
+            local prefix = (line_idx == 1) and "  Preview Command  : \27[0;36m" or "                     \27[0;36m"
+            local suffix = (line_idx < #wrapped) and " \\" or ""
+            local display_txt = pad_right(prefix .. line_txt .. suffix, inner_w - 2)
+            io.write(string.format("║ %s\27[0m ║\n", display_txt))
+        end
 
         io.write("\27[1;35m╠" .. box_mid .. "╣\27[0m\n")
-        io.write("║  \27[1;32m[Tab/Shift-Tab]\27[0m Next/Prev Field   \27[1;32m[Space]\27[0m Cycle Option   \27[1;32m[Enter]\27[0m Save   \27[1;31m[Esc]\27[0m Cancel  ║\n")
+        local help_line = pad_right("  \27[1;32m[Tab/Shift-Tab]\27[0m Next/Prev Field   \27[1;32m[Space]\27[0m Cycle Option   \27[1;32m[Enter]\27[0m Save   \27[1;31m[Esc]\27[0m Cancel", inner_w - 2)
+        io.write(string.format("║ %s ║\n", help_line))
         io.write("\27[1;35m╚" .. box_top .. "╝\27[0m\n")
         io.flush()
 
@@ -930,6 +994,20 @@ local function run_tui()
                     local port = tonumber(sel.local_port) or 8080
                     local free, res = probe_port_available(port, sel.local_bind)
                     status_msg = string.format("Port %d on %s: %s", port, sel.local_bind or "127.0.0.1", res)
+                end
+            elseif key == "v" then
+                local sel = data.profiles[cursor]
+                if sel then
+                    local cmd = command_parts_to_string(build_ssh_command(sel))
+                    TUI.clear()
+                    print("\27[1;36m╔══════════════════════════════════════════════════════════════════════════════╗\27[0m")
+                    print(string.format("\27[1;36m║\27[1;37m %-76s \27[1;36m║\27[0m", "📋 Complete SSH Command for Profile: " .. sel.name))
+                    print("\27[1;36m╠══════════════════════════════════════════════════════════════════════════════╣\27[0m")
+                    print("\n\27[1;32m" .. cmd .. "\27[0m\n")
+                    print("\27[1;36m╚══════════════════════════════════════════════════════════════════════════════╝\27[0m")
+                    io.write("\n\27[1;33m(Ready to copy/paste) Press any key to return to dashboard...\27[0m")
+                    io.flush()
+                    TUI.read_key()
                 end
             elseif key == "x" then
                 local exp = export_ssh_config(data.profiles)
