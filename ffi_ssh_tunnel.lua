@@ -120,6 +120,93 @@ local function probe_port_available(port, host)
     end
 end
 
+-- Find PID holding a local TCP port via system inspection
+local function find_pid_by_port(port)
+    port = tonumber(port)
+    if not port then return nil end
+
+    -- Try fuser first
+    local pipe = io.popen(string.format("fuser %d/tcp 2>/dev/null", port))
+    if pipe then
+        local out = pipe:read("*a") or ""
+        pipe:close()
+        local pid = out:match("(%d+)")
+        if pid then return tonumber(pid) end
+    end
+
+    -- Try ss
+    local pipe2 = io.popen(string.format("ss -tulpn 2>/dev/null | grep ':%d '", port))
+    if pipe2 then
+        local out2 = pipe2:read("*a") or ""
+        pipe2:close()
+        local pid2 = out2:match("pid=(%d+)")
+        if pid2 then return tonumber(pid2) end
+    end
+
+    -- Try lsof
+    local pipe3 = io.popen(string.format("lsof -ti tcp:%d 2>/dev/null", port))
+    if pipe3 then
+        local out3 = pipe3:read("*a") or ""
+        pipe3:close()
+        local pid3 = out3:match("(%d+)")
+        if pid3 then return tonumber(pid3) end
+    end
+
+    return nil
+end
+
+-- Release/kill process holding a given port
+local function release_port(port, host)
+    port = tonumber(port)
+    if not port then return false, "Invalid port" end
+    host = host or "127.0.0.1"
+
+    local is_free, _ = probe_port_available(port, host)
+    if is_free then
+        return true, string.format("Port %d is already free.", port)
+    end
+
+    local pid = find_pid_by_port(port)
+    if not pid then
+        -- Fallback to fuser -k
+        os.execute(string.format("fuser -k %d/tcp >/dev/null 2>&1", port))
+        ffi.C.usleep(150000)
+        local now_free = probe_port_available(port, host)
+        if now_free then
+            return true, string.format("Port %d successfully released via fuser!", port)
+        else
+            return false, string.format("Could not determine PID holding port %d to terminate.", port)
+        end
+    end
+
+    -- Get process name
+    local comm = ""
+    local f_comm = io.open(string.format("/proc/%d/comm", pid), "r")
+    if f_comm then
+        comm = f_comm:read("*l") or ""
+        f_comm:close()
+    end
+
+    -- Terminate process gracefully first with SIGTERM (15)
+    ffi.C.kill(pid, 15)
+    ffi.C.usleep(150000)
+
+    -- If still alive, terminate with SIGKILL (9)
+    local now_free = probe_port_available(port, host)
+    if not now_free then
+        ffi.C.kill(pid, 9)
+        ffi.C.usleep(200000)
+    end
+
+    now_free = probe_port_available(port, host)
+    if now_free then
+        local name_info = #comm > 0 and string.format(" (%s)", comm) or ""
+        return true, string.format("Terminated PID %d%s. Port %d is now FREE & AVAILABLE!", pid, name_info, port)
+    else
+        return false, string.format("Sent kill signal to PID %d, but port %d is still in use.", pid, port)
+    end
+end
+
 -- Minimalist, robust JSON encoder / decoder for standalone usage
 local json = {}
 
@@ -754,7 +841,7 @@ function TUI.render_dashboard(profiles, cursor_idx, status_msg)
     end
 
     -- Keybindings help bar
-    local keys_bar = pad_right("\27[1;32m[Enter]\27[0m Toggle  \27[1;32m[n]\27[0m New  \27[1;32m[e]\27[0m Edit  \27[1;32m[v]\27[0m View Cmd  \27[1;32m[d]\27[0m Delete  \27[1;32m[c]\27[0m Port  \27[1;32m[x]\27[0m Export  \27[1;31m[q]\27[0m Quit", W - 2)
+    local keys_bar = pad_right("\27[1;32m[Enter]\27[0m Toggle  \27[1;32m[n]\27[0m New  \27[1;32m[e]\27[0m Edit  \27[1;32m[k]\27[0m Release Port  \27[1;32m[v]\27[0m View Cmd  \27[1;32m[d]\27[0m Del  \27[1;32m[c]\27[0m Port  \27[1;32m[x]\27[0m Exp  \27[1;31m[q]\27[0m Quit", W - 2)
     io.write(string.format("║ %s ║\n", keys_bar))
     io.write("\27[1;36m╚" .. line_box .. "╝\27[0m\n")
 
@@ -911,6 +998,7 @@ Commands:
   down <name>           Stop an active tunnel via ControlMaster socket
   restart <name>        Restart a tunnel
   check <port> [host]   Probe if a local TCP port is free or occupied using FFI sockets
+  release <port>        Release/terminate the process holding an occupied TCP port
   export                Export all profiles to standard OpenSSH ~/.ssh/config format
   add <json_str>        Add or update a profile from JSON string
   del <name>            Delete a tunnel profile
@@ -994,6 +1082,15 @@ local function run_tui()
                     local port = tonumber(sel.local_port) or 8080
                     local free, res = probe_port_available(port, sel.local_bind)
                     status_msg = string.format("Port %d on %s: %s", port, sel.local_bind or "127.0.0.1", res)
+                end
+            elseif key == "k" then
+                local sel = data.profiles[cursor]
+                if sel then
+                    local port = tonumber(sel.local_port) or 8080
+                    local ok, msg = release_port(port, sel.local_bind)
+                    status_msg = msg
+                else
+                    status_msg = "No profile selected to release port."
                 end
             elseif key == "v" then
                 local sel = data.profiles[cursor]
@@ -1255,6 +1352,16 @@ local function main(args)
         else
             print(string.format("[CHECK] Port %d on %s is OCCUPIED (%s)", port, host, reason))
         end
+    elseif cmd == "release" or cmd == "kill-port" then
+        local port = tonumber(args[2])
+        if not port then
+            print("Usage: ffi_ssh_tunnel.lua release <port> [host]")
+            os.exit(1)
+        end
+        local host = args[3] or "127.0.0.1"
+        local ok, msg = release_port(port, host)
+        print(msg)
+        os.exit(ok and 0 or 1)
     elseif cmd == "add" then
         local raw = args[2]
         if not raw then

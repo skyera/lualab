@@ -51,6 +51,11 @@ local tests = {
         expect = "is AVAILABLE"
     },
     {
+        name = "Release free port returns already free",
+        cmd = luajit_bin .. " ffi_ssh_tunnel.lua release 58194",
+        expect = "is already free"
+    },
+    {
         name = "Export OpenSSH ~/.ssh/config format",
         cmd = env_prefix .. luajit_bin .. " ffi_ssh_tunnel.lua export",
         expect = "Host tunnel-my-db"
