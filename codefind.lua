@@ -1918,13 +1918,11 @@ function TUI.run(db, initial_query)
         else
             right_head_title = " 📄 Preview: (No file selected)"
         end
-        local mode_badge = (vim_mode == "INSERT") and "\27[1;36m[INSERT]\27[0m" or "\27[1;33m[NORMAL]\27[0m"
-        local pane_badge = (focus_pane == "preview") and "\27[1;32m[PREVIEW]\27[0m" or "\27[1;34m[RESULTS]\27[0m"
-        local badges = pane_badge .. " " .. mode_badge
-        local fbadge_w = visual_len(badges)
+        local pane_badge = (focus_pane == "preview") and "\27[1;32;40m [PREVIEW / BROWSE] \27[0m" or "\27[1;36;40m [SEARCH / TYPING] \27[0m"
+        local fbadge_w = visual_len(pane_badge)
         local right_head = ""
         if right_col_w > fbadge_w + 4 then
-            right_head = pad_to(right_head_title, right_col_w - fbadge_w) .. badges
+            right_head = pad_to(right_head_title, right_col_w - fbadge_w) .. pane_badge
         else
             right_head = pad_to(right_head_title, right_col_w)
         end
@@ -2008,25 +2006,23 @@ function TUI.run(db, initial_query)
             emit_row(status_y, string.format("%s│\27[1;30;47m%s\27[0m%s│\27[0m", neutral_border, padded_status, neutral_border))
         else
             local pills = {}
-            if vim_mode == "INSERT" then
+            if focus_pane == "search" then
                 pills = {
                     {"Enter", "Open"},
-                    {"Tab", "Pane"},
-                    {"n/N", "Match"},
+                    {"Tab", "Browse (q quits)"},
+                    {"Esc", #query > 0 and "Clear" or "Exit"},
                     {"@ext", "Filter"},
                     {"^W", "Del Word"},
-                    {"^U", "Clear"},
                     {"F1/?", "Help"}
                 }
             else
                 pills = {
-                    {"Enter/o", "Open"},
-                    {"n/N", "Match"},
-                    {"j/k", "Nav"},
-                    {"Tab", "Pane"},
-                    {"i or /", "Search"},
-                    {"y", "Yank"},
                     {"q", "Quit"},
+                    {"n/N", "Next/Prev Match"},
+                    {"j/k", "Scroll"},
+                    {"Tab", "Search Box"},
+                    {"y", "Copy Path"},
+                    {"Enter", "Open"},
                     {"?", "Help"}
                 }
             end
@@ -2071,10 +2067,22 @@ function TUI.run(db, initial_query)
             if key == "CTRL_C" then
                 running = false
             elseif key == "ESC" then
-                if vim_mode == "INSERT" then
-                    vim_mode = "NORMAL"
-                    set_status("NORMAL mode")
+                if focus_pane == "preview" then
+                    -- If in preview pane, ESC switches back to search box
+                    focus_pane = "search"
+                    vim_mode = "INSERT"
+                    set_status("Active Pane: SEARCH")
+                    needs_redraw = true
+                elseif #query > 0 then
+                    -- If search box has text, ESC clears it
+                    query = ""
+                    selected_idx = 1
+                    vim_mode = "INSERT"
+                    render_query_prompt_instant()
+                    set_status("Query cleared (Press Esc again or q in preview to exit)")
+                    needs_redraw = true
                 else
+                    -- Query is already empty: ESC quits
                     running = false
                 end
             elseif key == "UP" or key == "CTRL_P" or (vim_mode == "INSERT" and key == "CTRL_K") then
@@ -2138,8 +2146,16 @@ function TUI.run(db, initial_query)
                 clamp_scroll()
                 needs_redraw = true
             elseif key == "TAB" then
-                focus_pane = (focus_pane == "search") and "preview" or "search"
-                set_status("Active Pane: " .. focus_pane:upper())
+                if focus_pane == "search" then
+                    focus_pane = "preview"
+                    vim_mode = "NORMAL"
+                    set_status("PREVIEW / BROWSE: [q] Quit  [n/N] Matches  [j/k] Scroll  [Tab] Search")
+                else
+                    focus_pane = "search"
+                    vim_mode = "INSERT"
+                    set_status("SEARCH BOX: Type to filter  [Tab] Preview  [Esc] Clear/Exit")
+                end
+                needs_redraw = true
             elseif key == "CTRL_U" then
                 query = ""
                 selected_idx = 1
@@ -2320,19 +2336,21 @@ function TUI.run(db, initial_query)
             elseif key == "F1" then
                 set_status("Shortcuts: [Tab] Pane, [n/N] Match, [PgUp/Dn] Scroll, [@ext] Filter, [^W] Del Word, [^U] Clear")
                 needs_redraw = true
-            elseif #key == 1 and (vim_mode == "INSERT" or (vim_mode == "NORMAL" and focus_pane == "search")) then
-                if vim_mode == "NORMAL" then
+            elseif #key == 1 and focus_pane == "search" then
+                -- When query is empty and user presses 'q', quit cleanly instead of searching 'q'
+                if key == "q" and #query == 0 then
+                    running = false
+                else
                     vim_mode = "INSERT"
-                    focus_pane = "search"
+                    query = query .. key
+                    -- Drain any additional pending single-character keys from the queue
+                    while #key_queue > 0 and #key_queue[1] == 1 do
+                        query = query .. table.remove(key_queue, 1)
+                    end
+                    selected_idx = 1
+                    -- Instant 0ms visual echo to the prompt bar
+                    render_query_prompt_instant()
                 end
-                query = query .. key
-                -- Drain any additional pending single-character keys from the queue
-                while #key_queue > 0 and #key_queue[1] == 1 do
-                    query = query .. table.remove(key_queue, 1)
-                end
-                selected_idx = 1
-                -- Instant 0ms visual echo to the prompt bar
-                render_query_prompt_instant()
             end
         else
             -- Check if status bar message timed out
