@@ -1019,16 +1019,48 @@ function TUI.run(db, initial_query)
 
     refresh_search()
 
-    local function strip_ansi(str)
-        return str:gsub("\27%[[%d;]*m", "")
+    local function visual_len(str)
+        local clean = tostring(str):gsub("\27%[[%d;]*[mK]", "")
+        local _, count = clean:gsub("[%z\1-\127\194-\244][\128-\191]*", "")
+        return count
+    end
+
+    local function truncate(str, max_w)
+        local len = visual_len(str)
+        if len <= max_w then return str end
+        if max_w <= 3 then return string.rep(".", math.max(0, max_w)) end
+
+        local out = {}
+        local curr = 0
+        local pos = 1
+        local raw = tostring(str)
+        while pos <= #raw and curr < max_w - 3 do
+            local ansi = raw:match("^\27%[[%d;]*[mK]", pos)
+            if ansi then
+                table.insert(out, ansi)
+                pos = pos + #ansi
+            else
+                local c = raw:match("^[%z\1-\127\194-\244][\128-\191]*", pos)
+                if c then
+                    table.insert(out, c)
+                    curr = curr + 1
+                    pos = pos + #c
+                else
+                    break
+                end
+            end
+        end
+        local has_ansi = (raw:find("\27[", 1, true) ~= nil)
+        return table.concat(out) .. "..." .. (has_ansi and "\27[0m" or "")
     end
 
     local function pad_to(str, target_width)
-        local vis_len = #strip_ansi(str)
-        if vis_len < target_width then
-            return str .. string.rep(" ", target_width - vis_len)
+        local s = truncate(str, target_width)
+        local vlen = visual_len(s)
+        if vlen < target_width then
+            return s .. string.rep(" ", target_width - vlen)
         else
-            return str
+            return s
         end
     end
 
@@ -1038,9 +1070,11 @@ function TUI.run(db, initial_query)
         if needs_redraw then
             needs_redraw = false
             local cols, rows = get_term_size()
-            local inner_cols = cols - 2
-            local left_col_w = math.max(28, math.floor(inner_cols * 0.38))
-            local right_col_w = inner_cols - left_col_w - 3 -- 3 for " │ "
+            cols = math.max(60, cols)
+            rows = math.max(15, rows)
+
+            local left_col_w = math.max(24, math.floor((cols - 3) * 0.38))
+            local right_col_w = cols - 3 - left_col_w
             local list_height = rows - 6
 
             if selected_idx < list_scroll_offset + 1 then
@@ -1064,13 +1098,19 @@ function TUI.run(db, initial_query)
             -- Cursor Home (never use \27[2J clear in the loop to avoid flashing!)
             emit("\27[H")
 
-            -- Row 1: Top Border
-            emit(neutral_border .. "┌" .. left_col_border .. string.rep("─", left_col_w + 2) .. neutral_border .. "┬" .. right_col_border .. string.rep("─", right_col_w + 2) .. neutral_border .. "┐\27[0m\n")
+            -- Row 1: Top Border (Exact visual width: 1 + left_col_w + 1 + right_col_w + 1 = cols)
+            emit(neutral_border .. "┌" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┬" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┐\27[0m\n")
 
             -- Row 2: Header Information Bar
             local query_prompt = " > " .. query .. "_"
             local matches_badge = string.format("[%d Matches]", #results)
-            local left_head = pad_to(query_prompt, left_col_w - #matches_badge) .. matches_badge
+            local badge_w = visual_len(matches_badge)
+            local left_head = ""
+            if left_col_w > badge_w + 4 then
+                left_head = pad_to(query_prompt, left_col_w - badge_w) .. matches_badge
+            else
+                left_head = pad_to(query_prompt, left_col_w)
+            end
 
             local right_head_title = ""
             if current_preview_file then
@@ -1083,9 +1123,15 @@ function TUI.run(db, initial_query)
                 right_head_title = " 📄 Preview: (No file selected)"
             end
             local focus_badge = (focus_pane == "preview") and "\27[1;32m[PREVIEW ACTIVE]\27[0m" or "\27[1;36m[SEARCH ACTIVE]\27[0m"
-            local right_head = pad_to(right_head_title, right_col_w - #strip_ansi(focus_badge)) .. focus_badge
+            local fbadge_w = visual_len(focus_badge)
+            local right_head = ""
+            if right_col_w > fbadge_w + 4 then
+                right_head = pad_to(right_head_title, right_col_w - fbadge_w) .. focus_badge
+            else
+                right_head = pad_to(right_head_title, right_col_w)
+            end
 
-            emit(string.format("%s│\27[0m \27[1;37m%s\27[0m %s│\27[0m %s %s│\27[0m\n",
+            emit(string.format("%s│\27[0m%s%s│\27[0m%s%s│\27[0m\n",
                 left_col_border,
                 pad_to(left_head, left_col_w),
                 neutral_border,
@@ -1093,7 +1139,7 @@ function TUI.run(db, initial_query)
                 right_col_border))
 
             -- Row 3: Split Divider
-            emit(neutral_border .. "├" .. left_col_border .. string.rep("─", left_col_w + 2) .. neutral_border .. "┼" .. right_col_border .. string.rep("─", right_col_w + 2) .. neutral_border .. "┤\27[0m\n")
+            emit(neutral_border .. "├" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┼" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┤\27[0m\n")
 
             -- Rows 4 .. (4 + list_height - 1): Content rows
             for i = 1, list_height do
@@ -1107,17 +1153,15 @@ function TUI.run(db, initial_query)
                     local marker = is_sel and "▶ " or "  "
                     local clean_path = res_item.filepath
                     local max_p_len = left_col_w - 4
-                    if #clean_path > max_p_len then
+                    if #clean_path > max_p_len and max_p_len > 6 then
                         clean_path = "..." .. clean_path:sub(#clean_path - (max_p_len - 4))
                     end
 
+                    local full_text = marker .. clean_path
+                    local padded = pad_to(full_text, left_col_w)
                     if is_sel then
-                        local sel_text = marker .. clean_path
-                        local padded = sel_text .. string.rep(" ", math.max(0, left_col_w - #sel_text))
                         left_cell = "\27[1;30;43m" .. padded .. "\27[0m"
                     else
-                        local norm_text = marker .. clean_path
-                        local padded = norm_text .. string.rep(" ", math.max(0, left_col_w - #norm_text))
                         left_cell = "\27[37m" .. padded .. "\27[0m"
                     end
                 elseif #results == 0 and i == 2 then
@@ -1135,21 +1179,18 @@ function TUI.run(db, initial_query)
                         local line_content = current_preview_lines[file_line_num] or ""
                         local is_hit = current_match_lines[file_line_num]
 
-                        local max_code_w = right_col_w - 9
-                        if #line_content > max_code_w then
-                            line_content = line_content:sub(1, max_code_w - 3) .. "..."
-                        end
-
-                        local line_pad = string.rep(" ", math.max(0, max_code_w - #line_content))
+                        local max_code_w = math.max(0, right_col_w - 9)
+                        local code_str = truncate(line_content, max_code_w)
+                        local line_pad = string.rep(" ", math.max(0, max_code_w - visual_len(code_str)))
 
                         if is_hit then
                             for tok in query:gmatch("[%w_%-]+") do
                                 local pat = tok:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1")
-                                line_content = line_content:gsub("(" .. pat .. ")", "\27[1;33;4m%1\27[0;1;37m")
+                                code_str = code_str:gsub("(" .. pat .. ")", "\27[1;33;4m%1\27[0;1;37m")
                             end
-                            right_cell = string.format("\27[1;33m> \27[90m%4d │\27[1;37m %s%s\27[0m", file_line_num, line_content, line_pad)
+                            right_cell = string.format("\27[1;33m> \27[90m%4d │\27[1;37m %s%s\27[0m", file_line_num, code_str, line_pad)
                         else
-                            right_cell = string.format("  \27[90m%4d │\27[0;37m %s%s\27[0m", file_line_num, line_content, line_pad)
+                            right_cell = string.format("  \27[90m%4d │\27[0;37m %s%s\27[0m", file_line_num, code_str, line_pad)
                         end
                     else
                         right_cell = string.rep(" ", right_col_w)
@@ -1158,24 +1199,24 @@ function TUI.run(db, initial_query)
                     right_cell = string.rep(" ", right_col_w)
                 end
 
-                emit(string.format("%s│\27[0m %s %s│\27[0m %s %s│\27[0m\n", left_col_border, left_cell, neutral_border, right_cell, right_col_border))
+                emit(string.format("%s│\27[0m%s%s│\27[0m%s%s│\27[0m\n", left_col_border, left_cell, neutral_border, right_cell, right_col_border))
             end
 
             -- Row Bottom Divider
-            emit(neutral_border .. "├" .. left_col_border .. string.rep("─", left_col_w + 2) .. neutral_border .. "┴" .. right_col_border .. string.rep("─", right_col_w + 2) .. neutral_border .. "┤\27[0m\n")
+            emit(neutral_border .. "├" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┴" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┤\27[0m\n")
 
             -- Row Footer / Keybindings
             local status_text = status_bar_msg
             if not status_text or (os.clock() - status_bar_time > 3.0) then
-                status_text = "[Type] Search  [↑/↓] Results  [Tab] Focus  [PgUp/Dn] Scroll  [^U] Clear  [^R] Reindex  [Enter] Open  [Esc] Quit"
+                status_text = " [Type] Search  [↑/↓] Results  [Tab] Focus  [PgUp/Dn] Scroll  [^U] Clear  [^R] Reindex  [Enter] Open  [Esc] Quit"
+            else
+                status_text = " " .. status_text
             end
-            local status_vis = " " .. status_text
-            local status_pad = string.rep(" ", math.max(0, cols - 4 - #strip_ansi(status_vis)))
-            emit(string.format("%s│\27[1;30;47m%s%s\27[0m%s│\27[0m\n", neutral_border, status_vis, status_pad, neutral_border))
+            local padded_status = pad_to(status_text, cols - 2)
+            emit(string.format("%s│\27[1;30;47m%s\27[0m%s│\27[0m\n", neutral_border, padded_status, neutral_border))
 
             -- Final Bottom Border
-            local bot_border = "└" .. string.rep("─", cols - 2) .. "┘"
-            emit(neutral_border .. bot_border:sub(1, cols) .. "\27[0m")
+            emit(neutral_border .. "└" .. string.rep("─", cols - 2) .. "┘\27[0m")
 
             -- Atomically write frame buffer (Zero flicker)
             io.write(table.concat(frame_buf))
