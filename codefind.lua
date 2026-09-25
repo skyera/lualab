@@ -876,56 +876,81 @@ function TUI.run(db, initial_query)
     end
 
     local pfd = ffi.new("struct pollfd", { fd = 0, events = 1, revents = 0 })
-    local key_buf = ffi.new("char[32]")
+    local key_buf = ffi.new("char[128]")
+    local key_queue = {}
 
     local function read_key(timeout_ms)
+        if #key_queue > 0 then
+            return table.remove(key_queue, 1)
+        end
         timeout_ms = timeout_ms or 30
         local ret = ffi.C.poll(pfd, 1, timeout_ms)
         if ret > 0 and bit.band(pfd.revents, 1) ~= 0 then
-            local n = ffi.C.read(0, key_buf, 32)
+            local n = ffi.C.read(0, key_buf, 128)
             if n > 0 then
-                local c0 = key_buf[0]
-                if c0 == 27 then -- ESC sequence
-                    if n == 1 then
-                        -- Check if more bytes are coming rapidly (within 20ms)
-                        local more = ffi.C.poll(pfd, 1, 20)
-                        if more > 0 and bit.band(pfd.revents, 1) ~= 0 then
-                            local got = ffi.C.read(0, key_buf + 1, 31)
-                            if got > 0 then n = n + got end
+                local idx = 0
+                while idx < n do
+                    local c0 = key_buf[idx]
+                    if c0 == 27 then -- ESC sequence
+                        if idx + 2 < n and key_buf[idx + 1] == 91 then -- '['
+                            local c2 = key_buf[idx + 2]
+                            if c2 == 65 then table.insert(key_queue, "UP"); idx = idx + 3
+                            elseif c2 == 66 then table.insert(key_queue, "DOWN"); idx = idx + 3
+                            elseif c2 == 67 then table.insert(key_queue, "RIGHT"); idx = idx + 3
+                            elseif c2 == 68 then table.insert(key_queue, "LEFT"); idx = idx + 3
+                            elseif c2 == 53 and idx + 3 < n and key_buf[idx + 3] == 126 then table.insert(key_queue, "PAGE_UP"); idx = idx + 4
+                            elseif c2 == 54 and idx + 3 < n and key_buf[idx + 3] == 126 then table.insert(key_queue, "PAGE_DOWN"); idx = idx + 4
+                            elseif c2 == 72 then table.insert(key_queue, "HOME"); idx = idx + 3
+                            elseif c2 == 70 then table.insert(key_queue, "END"); idx = idx + 3
+                            else table.insert(key_queue, "ESC"); idx = idx + 1 end
+                        elseif idx + 1 == n then
+                            -- Only 1 byte ESC at end of buffer
+                            local more = ffi.C.poll(pfd, 1, 15)
+                            if more > 0 and bit.band(pfd.revents, 1) ~= 0 then
+                                local got = ffi.C.read(0, key_buf + n, 128 - n)
+                                if got > 0 then
+                                    n = n + got
+                                else
+                                    table.insert(key_queue, "ESC")
+                                    idx = idx + 1
+                                end
+                            else
+                                table.insert(key_queue, "ESC")
+                                idx = idx + 1
+                            end
                         else
-                            return "ESC"
+                            table.insert(key_queue, "ESC")
+                            idx = idx + 1
                         end
+                    elseif c0 == 10 or c0 == 13 then
+                        table.insert(key_queue, "ENTER")
+                        idx = idx + 1
+                    elseif c0 == 9 then
+                        table.insert(key_queue, "TAB")
+                        idx = idx + 1
+                    elseif c0 == 127 or c0 == 8 then
+                        table.insert(key_queue, "BACKSPACE")
+                        idx = idx + 1
+                    elseif c0 == 21 then -- Ctrl-U
+                        table.insert(key_queue, "CTRL_U")
+                        idx = idx + 1
+                    elseif c0 == 18 then -- Ctrl-R
+                        table.insert(key_queue, "CTRL_R")
+                        idx = idx + 1
+                    elseif c0 == 3 then -- Ctrl-C
+                        table.insert(key_queue, "CTRL_C")
+                        idx = idx + 1
+                    elseif c0 >= 32 and c0 <= 126 then
+                        table.insert(key_queue, string.char(c0))
+                        idx = idx + 1
+                    else
+                        idx = idx + 1
                     end
-
-                    if n >= 3 and key_buf[1] == 91 then -- '['
-                        local c2 = key_buf[2]
-                        if c2 == 65 then return "UP"
-                        elseif c2 == 66 then return "DOWN"
-                        elseif c2 == 67 then return "RIGHT"
-                        elseif c2 == 68 then return "LEFT"
-                        elseif c2 == 53 and n >= 4 and key_buf[3] == 126 then return "PAGE_UP"
-                        elseif c2 == 54 and n >= 4 and key_buf[3] == 126 then return "PAGE_DOWN"
-                        elseif c2 == 72 then return "HOME"
-                        elseif c2 == 70 then return "END"
-                        end
-                    end
-                    return "ESC"
-                elseif c0 == 10 or c0 == 13 then
-                    return "ENTER"
-                elseif c0 == 9 then
-                    return "TAB"
-                elseif c0 == 127 or c0 == 8 then
-                    return "BACKSPACE"
-                elseif c0 == 21 then -- Ctrl-U
-                    return "CTRL_U"
-                elseif c0 == 18 then -- Ctrl-R
-                    return "CTRL_R"
-                elseif c0 == 3 then -- Ctrl-C
-                    return "CTRL_C"
-                elseif c0 >= 32 and c0 <= 126 then
-                    return string.char(c0)
                 end
             end
+        end
+        if #key_queue > 0 then
+            return table.remove(key_queue, 1)
         end
         return nil
     end
@@ -1330,6 +1355,10 @@ function TUI.run(db, initial_query)
                     end
                 else
                     query = query .. key
+                    -- Drain any additional pending single-character keys from the queue
+                    while #key_queue > 0 and #key_queue[1] == 1 do
+                        query = query .. table.remove(key_queue, 1)
+                    end
                     selected_idx = 1
                     refresh_search()
                 end
