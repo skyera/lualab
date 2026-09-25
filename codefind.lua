@@ -1214,6 +1214,12 @@ function TUI.run(db, initial_query)
                         return "BACKSPACE"
                     elseif c0 == 21 then -- Ctrl-U
                         return "CTRL_U"
+                    elseif c0 == 23 then -- Ctrl-W
+                        return "CTRL_W"
+                    elseif c0 == 1 then  -- Ctrl-A
+                        return "CTRL_A"
+                    elseif c0 == 5 then  -- Ctrl-E
+                        return "CTRL_E"
                     elseif c0 == 14 then -- Ctrl-N
                         return "CTRL_N"
                     elseif c0 == 16 then -- Ctrl-P
@@ -1285,6 +1291,15 @@ function TUI.run(db, initial_query)
                         idx = idx + 1
                     elseif c0 == 21 then -- Ctrl-U
                         table.insert(key_queue, "CTRL_U")
+                        idx = idx + 1
+                    elseif c0 == 23 then -- Ctrl-W
+                        table.insert(key_queue, "CTRL_W")
+                        idx = idx + 1
+                    elseif c0 == 1 then -- Ctrl-A
+                        table.insert(key_queue, "CTRL_A")
+                        idx = idx + 1
+                    elseif c0 == 5 then -- Ctrl-E
+                        table.insert(key_queue, "CTRL_E")
                         idx = idx + 1
                     elseif c0 == 14 then -- Ctrl-N
                         table.insert(key_queue, "CTRL_N")
@@ -1433,8 +1448,25 @@ function TUI.run(db, initial_query)
         }
     end
 
+    local active_ext_filter = nil
+
     local function refresh_search()
-        if #query == 0 then
+        local raw_query = query or ""
+        local ext_filt = nil
+        local fts_q = raw_query
+        fts_q = fts_q:gsub("@([%w_%-]+)", function(e)
+            ext_filt = e:lower()
+            return ""
+        end)
+        fts_q = fts_q:gsub("ext:([%w_%-]+)", function(e)
+            ext_filt = e:lower()
+            return ""
+        end)
+        fts_q = fts_q:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+
+        active_ext_filter = ext_filt
+
+        if #raw_query == 0 then
             results = {}
             error_msg = nil
             current_preview_file = nil
@@ -1447,7 +1479,11 @@ function TUI.run(db, initial_query)
             needs_redraw = true
             return
         end
-        local res, err = db:search(query, { limit = 100 })
+
+        local search_opts = { limit = 100 }
+        if ext_filt then search_opts.extension = ext_filt end
+
+        local res, err = db:search(#fts_q > 0 and fts_q or "*", search_opts)
         if err then
             error_msg = err
             results = {}
@@ -1456,10 +1492,10 @@ function TUI.run(db, initial_query)
             results = res
             if selected_idx > #results then selected_idx = math.max(1, #results) end
             if #results > 0 and results[selected_idx] then
-                load_preview_for(results[selected_idx].filepath, query)
+                load_preview_for(results[selected_idx].filepath, fts_q)
             end
         end
-        last_searched_query = query
+        last_searched_query = raw_query
         needs_redraw = true
     end
 
@@ -1587,6 +1623,71 @@ function TUI.run(db, initial_query)
         end
     end
 
+    -- Lightweight fast syntax highlighter
+    local SYNTAX_KEYWORDS = {
+        ["local"] = true, ["function"] = true, ["return"] = true, ["end"] = true,
+        ["if"] = true, ["then"] = true, ["else"] = true, ["elseif"] = true,
+        ["for"] = true, ["while"] = true, ["do"] = true, ["repeat"] = true, ["until"] = true,
+        ["break"] = true, ["not"] = true, ["and"] = true, ["or"] = true,
+        ["nil"] = true, ["true"] = true, ["false"] = true,
+        ["int"] = true, ["char"] = true, ["void"] = true, ["const"] = true, ["static"] = true,
+        ["struct"] = true, ["typedef"] = true, ["sizeof"] = true, ["uint8_t"] = true,
+        ["uint16_t"] = true, ["uint32_t"] = true, ["uint64_t"] = true, ["int64_t"] = true,
+        ["class"] = true, ["public"] = true, ["private"] = true, ["virtual"] = true,
+        ["def"] = true, ["import"] = true, ["from"] = true, ["class"] = true,
+        ["var"] = true, ["let"] = true, ["export"] = true, ["default"] = true
+    }
+
+    local function highlight_code_line(raw_line, ext, patterns, is_hit)
+        local line = raw_line
+        -- 1. Check for whole line or trailing comments
+        local comment_pos = nil
+        if ext == "c" or ext == "h" or ext == "cpp" or ext == "js" or ext == "ts" then
+            comment_pos = line:find("//", 1, true)
+        elseif ext == "lua" then
+            comment_pos = line:find("%-%-")
+        elseif ext == "py" or ext == "sh" or ext == "bash" or ext == "yaml" or ext == "toml" then
+            comment_pos = line:find("#", 1, true)
+        end
+
+        local code_part = line
+        local comment_part = ""
+        if comment_pos then
+            code_part = line:sub(1, comment_pos - 1)
+            comment_part = "\27[90;3m" .. line:sub(comment_pos) .. "\27[0m"
+        end
+
+        -- 2. Strings ("..." or '...')
+        code_part = code_part:gsub('(".-")', "\27[32m%1\27[0m")
+        code_part = code_part:gsub("('.-')", "\27[32m%1\27[0m")
+
+        -- 3. Preprocessor directives
+        if ext == "c" or ext == "h" or ext == "cpp" then
+            code_part = code_part:gsub("^(%s*#%w+)", "\27[1;35m%1\27[0m")
+        end
+
+        -- 4. Keywords
+        code_part = code_part:gsub("([%a_][%w_]*)", function(word)
+            if SYNTAX_KEYWORDS[word] then
+                return "\27[1;34m" .. word .. "\27[0m"
+            end
+            return word
+        end)
+
+        -- 5. Numbers
+        code_part = code_part:gsub("(%f[%w_]%d+%f[^%w_])", "\27[36m%1\27[0m")
+
+        local result = code_part .. comment_part
+
+        -- 6. Highlight search hits with bright yellow bold underline
+        if is_hit and patterns and #patterns > 0 then
+            for _, pat in ipairs(patterns) do
+                result = result:gsub("(" .. pat .. ")", "\27[1;30;43m%1\27[0;37m")
+            end
+        end
+        return result
+    end
+
     -- Filetype color icons
     local function get_file_badge(path)
         local ext = path:match("%.([%w_%-]+)$")
@@ -1658,7 +1759,8 @@ function TUI.run(db, initial_query)
     local function render_query_prompt_instant()
         local left_col_border = (focus_pane == "search") and "\27[1;36m" or "\27[90m"
         local query_prompt = " > " .. query .. "_"
-        local matches_badge = string.format("[%d Matches]", #results)
+        local ext_tag = active_ext_filter and ("\27[1;35m[." .. active_ext_filter .. "]\27[0m ") or ""
+        local matches_badge = ext_tag .. string.format("[%d Matches]", #results)
         local badge_w = visual_len(matches_badge)
         local left_head = ""
         if left_col_w > badge_w + 4 then
@@ -1712,7 +1814,8 @@ function TUI.run(db, initial_query)
 
         -- Row 2: Header Information Bar
         local query_prompt = " > " .. query .. "_"
-        local matches_badge = string.format("[%d Matches]", #results)
+        local ext_tag = active_ext_filter and ("\27[1;35m[." .. active_ext_filter .. "]\27[0m ") or ""
+        local matches_badge = ext_tag .. string.format("[%d Matches]", #results)
         local badge_w = visual_len(matches_badge)
         local left_head = ""
         if left_col_w > badge_w + 4 then
@@ -1727,7 +1830,12 @@ function TUI.run(db, initial_query)
             for ln = 1, #current_preview_lines do
                 if current_match_lines[ln] then first_ln = ln; break end
             end
-            right_head_title = string.format(" 📄 %s:%d (%d/%d)", get_filename(current_preview_file), first_ln, preview_scroll_offset + 1, #current_preview_lines)
+            local match_badge = ""
+            if #current_match_list > 0 then
+                match_badge = string.format(" \27[1;33m[Match %d/%d]\27[0m", current_match_pos, #current_match_list)
+            end
+            local line_badge = string.format(" \27[90m[Line %d/%d]\27[0m", preview_scroll_offset + 1, #current_preview_lines)
+            right_head_title = string.format(" 📄 %s:%d%s%s", get_filename(current_preview_file), first_ln, match_badge, line_badge)
         else
             right_head_title = " 📄 Preview: (No file selected)"
         end
@@ -1766,6 +1874,9 @@ function TUI.run(db, initial_query)
             prev_thumb_pos = 1 + math.floor((preview_scroll_offset / max_prev_offset) * (list_height - 1))
         end
 
+        local cur_file_ext = current_preview_file and current_preview_file:match("%.([%w_%-]+)$")
+        cur_file_ext = cur_file_ext and cur_file_ext:lower() or ""
+
         -- Rows 4 .. (4 + list_height - 1): Content rows
         for i = 1, list_height do
             local item_idx = list_scroll_offset + i
@@ -1777,7 +1888,7 @@ function TUI.run(db, initial_query)
                 right_sb = (i == prev_thumb_pos) and "\27[1;32m█\27[0m" or "\27[90m│\27[0m"
             end
 
-            -- Right Content (Source preview)
+            -- Right Content (Source preview with syntax highlighting)
             local right_cell = ""
             local r_text_w = right_col_w - 1
             if current_preview_file and #current_preview_lines > 0 then
@@ -1790,13 +1901,12 @@ function TUI.run(db, initial_query)
                     local code_str = truncate(line_content, max_code_w)
                     local line_pad = string.rep(" ", math.max(0, max_code_w - visual_len(code_str)))
 
+                    local highlighted = highlight_code_line(code_str, cur_file_ext, current_preview_patterns, is_hit)
+
                     if is_hit then
-                        for _, pat in ipairs(current_preview_patterns) do
-                            code_str = code_str:gsub("(" .. pat .. ")", "\27[1;33;4m%1\27[0;1;37m")
-                        end
-                        right_cell = string.format("\27[1;33m> \27[90m%4d │\27[1;37m %s%s\27[0m%s", file_line_num, code_str, line_pad, right_sb)
+                        right_cell = string.format("\27[1;33m> \27[90m%4d │ \27[0m%s%s%s", file_line_num, highlighted, line_pad, right_sb)
                     else
-                        right_cell = string.format("  \27[90m%4d │\27[0;37m %s%s\27[0m%s", file_line_num, code_str, line_pad, right_sb)
+                        right_cell = string.format("  \27[90m%4d │ \27[0m%s%s%s", file_line_num, highlighted, line_pad, right_sb)
                     end
                 else
                     right_cell = string.rep(" ", r_text_w) .. right_sb
@@ -1816,9 +1926,9 @@ function TUI.run(db, initial_query)
         local status_text = status_bar_msg
         if not status_text or (os.clock() - status_bar_time > 3.0) then
             if vim_mode == "INSERT" then
-                status_text = " [INSERT] Type query  [Enter] Search / Open  [^N/^P] Nav  [^U] Clear  [Esc] Normal Mode  [Tab] Pane"
+                status_text = " [INSERT] Type query (@ext filter)  [Enter] Search/Open  [^W] Del Word  [^U] Clear  [^N/^P] Nav  [Tab] Pane"
             else
-                status_text = " [NORMAL] Enter/o: Open in nvim  j/k: Nav  ^U/c: Clear & Type  i or /: Search  y: Yank  q: Quit"
+                status_text = " [NORMAL] Enter/o: Open in editor  n/N: Next/Prev Hit  j/k: Nav  ^U/c: Clear & Type  i or /: Search  y: Yank  q: Quit"
             end
         else
             status_text = " " .. status_text
@@ -1932,6 +2042,25 @@ function TUI.run(db, initial_query)
                 local stat_res = Indexer.run(db, ".", false)
                 set_status(string.format("✔ Re-indexed %d files (Total: %d)", stat_res.indexed, db:get_stats().total_files))
                 refresh_search()
+            elseif key == "CTRL_W" then
+                if vim_mode == "INSERT" and #query > 0 then
+                    -- Delete backward word
+                    local trimmed = query:gsub("%s+$", "")
+                    local new_q = trimmed:match("^(.-)[%w_%-]+$")
+                    query = new_q or ""
+                    selected_idx = 1
+                    render_query_prompt_instant()
+                end
+            elseif key == "CTRL_A" or (vim_mode == "INSERT" and key == "HOME") then
+                if vim_mode == "INSERT" then
+                    set_status("Cursor at start of query")
+                    render_query_prompt_instant()
+                end
+            elseif key == "CTRL_E" or (vim_mode == "INSERT" and key == "END") then
+                if vim_mode == "INSERT" then
+                    set_status("Cursor at end of query")
+                    render_query_prompt_instant()
+                end
             elseif key == "BACKSPACE" then
                 if vim_mode == "INSERT" and #query > 0 then
                     query = query:sub(1, -2)
