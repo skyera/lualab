@@ -750,15 +750,15 @@ function Indexer.run(db, root_dir, verbose, allow_all)
     root_dir = root_dir:gsub("[/\\]+$", "")
     if #root_dir == 0 then root_dir = "." end
 
-    local files_found = 0
-    local files_indexed = 0
-    local files_skipped = 0
-    local total_bytes = 0
-
     local t_start = os.clock()
-    db:begin()
 
-    local batch_count = 0
+    -- Phase 1: Fast discovery and candidate filtering
+    if verbose then
+        io.write("\27[90m⚡ Discovering files...\27[0m")
+        io.flush()
+    end
+
+    local candidate_files = {}
     local visited_paths = {}
 
     scan_directory(root_dir, function(full_path, fname)
@@ -773,55 +773,111 @@ function Indexer.run(db, root_dir, verbose, allow_all)
         end
 
         if BINARY_EXTENSIONS[ext] then
-            files_skipped = files_skipped + 1
             return
         end
 
         visited_paths[full_path] = true
-        files_found = files_found + 1
+        table.insert(candidate_files, { path = full_path, name = fname, ext = ext })
+    end)
+
+    local total_files = #candidate_files
+    if verbose then
+        io.write(string.format("\r\27[2K🔍 Found %d candidate source files to index\n", total_files))
+        io.flush()
+    end
+
+    -- Phase 2: Indexing pipeline with progress and ETA
+    local files_indexed = 0
+    local files_skipped = 0
+    local total_bytes = 0
+    local batch_count = 0
+    local last_progress_time = 0
+
+    local function render_progress(current_idx, force)
+        if not verbose or total_files == 0 then return end
+        local now = os.clock()
+        if not force and (now - last_progress_time < 0.08) and (current_idx < total_files) then
+            return
+        end
+        last_progress_time = now
+
+        local elapsed = math.max(0.001, now - t_start)
+        local progress_ratio = current_idx / total_files
+        local pct = math.floor(progress_ratio * 100)
+        local rate = current_idx / elapsed
+
+        -- Estimate time remaining (ETA)
+        local remaining_files = total_files - current_idx
+        local eta_seconds = (rate > 0) and math.max(0, math.floor(remaining_files / rate)) or 0
+        local eta_str
+        if current_idx >= total_files then
+            eta_str = string.format("Elapsed: %02d:%02d", math.floor(elapsed / 60), math.floor(elapsed % 60))
+        elseif eta_seconds >= 60 then
+            eta_str = string.format("ETA: %02dm%02ds", math.floor(eta_seconds / 60), eta_seconds % 60)
+        else
+            eta_str = string.format("ETA: %02ds", eta_seconds)
+        end
+
+        -- Progress bar with 24 blocks
+        local bar_w = 24
+        local filled = math.min(bar_w, math.floor(progress_ratio * bar_w))
+        local bar = "\27[32m" .. string.rep("█", filled) .. "\27[90m" .. string.rep("░", bar_w - filled) .. "\27[0m"
+
+        local status_line = string.format("\r\27[2K[%s] %3d%% │ %d/%d files │ %.1f MB │ %d f/s │ %s",
+            bar, pct, current_idx, total_files, total_bytes / (1024 * 1024), math.floor(rate), eta_str)
+        io.write(status_line)
+        io.flush()
+    end
+
+    db:begin()
+
+    for idx, item in ipairs(candidate_files) do
+        local full_path = item.path
+        local fname = item.name
+        local ext = item.ext
 
         local meta = get_file_metadata(full_path)
         if not meta or meta.size > (5 * 1024 * 1024) then -- skip > 5MB single files
             files_skipped = files_skipped + 1
-            return
-        end
+        else
+            -- Check if file already indexed and unchanged
+            local existing = db:get_file_info(full_path)
+            if existing and existing.size == meta.size and existing.mtime == meta.mtime then
+                files_skipped = files_skipped + 1
+            else
+                local f = io.open(full_path, "rb")
+                if not f then
+                    files_skipped = files_skipped + 1
+                else
+                    local content = f:read("*a")
+                    f:close()
 
-        -- Check if file already indexed and unchanged
-        local existing = db:get_file_info(full_path)
-        if existing and existing.size == meta.size and existing.mtime == meta.mtime then
-            files_skipped = files_skipped + 1
-            return
-        end
+                    if not content or is_binary_buffer(content) then
+                        files_skipped = files_skipped + 1
+                    else
+                        db:index_file(full_path, fname, ext, meta.size, meta.mtime, content)
+                        files_indexed = files_indexed + 1
+                        total_bytes = total_bytes + meta.size
+                        batch_count = batch_count + 1
 
-        -- Read content
-        local f = io.open(full_path, "rb")
-        if not f then
-            files_skipped = files_skipped + 1
-            return
-        end
-        local content = f:read("*a")
-        f:close()
-
-        if not content or is_binary_buffer(content) then
-            files_skipped = files_skipped + 1
-            return
-        end
-
-        db:index_file(full_path, fname, ext, meta.size, meta.mtime, content)
-        files_indexed = files_indexed + 1
-        total_bytes = total_bytes + meta.size
-        batch_count = batch_count + 1
-
-        if batch_count >= 500 then
-            db:commit()
-            db:begin()
-            batch_count = 0
-            if verbose then
-                io.write(string.format("\rIndexed %d files (%.1f MB)...", files_indexed, total_bytes / (1024*1024)))
-                io.flush()
+                        if batch_count >= 500 then
+                            db:commit()
+                            db:begin()
+                            batch_count = 0
+                        end
+                    end
+                end
             end
         end
-    end)
+
+        render_progress(idx, false)
+    end
+
+    render_progress(total_files, true)
+    if verbose and total_files > 0 then
+        io.write("\n")
+        io.flush()
+    end
 
     -- Prune deleted / stale files from database
     local files_pruned = 0
@@ -839,9 +895,8 @@ function Indexer.run(db, root_dir, verbose, allow_all)
     local elapsed = os.clock() - t_start
 
     if verbose then
-        if files_indexed > 0 then io.write("\r" .. string.rep(" ", 40) .. "\r") end
-        print(string.format("\27[32m✔ Indexing completed in %.3fs\27[0m", elapsed))
-        print(string.format("  - Scanned: %d files", files_found))
+        print(string.format("\27[32m✔ Indexing completed in %.3fs\27[0m (%d files/sec)", elapsed, math.floor(total_files / math.max(0.001, elapsed))))
+        print(string.format("  - Scanned: %d files", total_files))
         print(string.format("  - Indexed/Updated: %d files (%.2f MB)", files_indexed, total_bytes / (1024*1024)))
         print(string.format("  - Unchanged/Skipped: %d files", files_skipped))
         if files_pruned > 0 then
@@ -850,7 +905,7 @@ function Indexer.run(db, root_dir, verbose, allow_all)
     end
 
     return {
-        scanned = files_found,
+        scanned = total_files,
         indexed = files_indexed,
         skipped = files_skipped,
         pruned  = files_pruned,
