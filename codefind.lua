@@ -627,6 +627,52 @@ local BINARY_EXTENSIONS = {
     ["pdf"] = true, ["db"] = true, ["sqlite"] = true, ["sqlite3"] = true, ["iso"] = true
 }
 
+-- Comprehensive allowlist of source code and configuration extensions
+local SOURCE_EXTENSIONS = {
+    -- C / C++ / Assembly
+    ["c"] = true, ["h"] = true, ["cpp"] = true, ["hpp"] = true, ["cc"] = true, ["hh"] = true,
+    ["cxx"] = true, ["hxx"] = true, ["inl"] = true, ["inc"] = true, ["asm"] = true, ["s"] = true,
+    -- Scripting & Dynamic languages
+    ["lua"] = true, ["luau"] = true, ["py"] = true, ["pyw"] = true, ["rb"] = true, ["php"] = true,
+    ["pl"] = true, ["pm"] = true, ["tcl"] = true, ["awk"] = true, ["sed"] = true,
+    -- Systems & Compiled languages
+    ["rs"] = true, ["go"] = true, ["zig"] = true, ["d"] = true, ["nim"] = true, ["v"] = true,
+    ["odin"] = true, ["f"] = true, ["f90"] = true, ["f95"] = true, ["ada"] = true,
+    -- JVM & Mobile languages
+    ["java"] = true, ["kt"] = true, ["kts"] = true, ["scala"] = true, ["groovy"] = true,
+    ["swift"] = true, ["m"] = true, ["mm"] = true, ["dart"] = true, ["cs"] = true,
+    -- Web & Frontend
+    ["js"] = true, ["jsx"] = true, ["ts"] = true, ["tsx"] = true, ["mjs"] = true, ["cjs"] = true,
+    ["vue"] = true, ["svelte"] = true, ["html"] = true, ["htm"] = true, ["css"] = true,
+    ["scss"] = true, ["sass"] = true, ["less"] = true,
+    -- Functional & Scientific languages
+    ["hs"] = true, ["lhs"] = true, ["ml"] = true, ["mli"] = true, ["fs"] = true, ["fsi"] = true,
+    ["clj"] = true, ["cljs"] = true, ["lisp"] = true, ["el"] = true, ["r"] = true, ["jl"] = true,
+    ["erl"] = true, ["hrl"] = true, ["ex"] = true, ["exs"] = true,
+    -- Shell, Build, Config & Specs
+    ["sh"] = true, ["bash"] = true, ["zsh"] = true, ["fish"] = true,
+    ["cmake"] = true, ["make"] = true, ["mk"] = true, ["dockerfile"] = true,
+    ["yaml"] = true, ["yml"] = true, ["toml"] = true, ["json"] = true,
+    ["md"] = true, ["markdown"] = true, ["rst"] = true, ["sql"] = true,
+    ["proto"] = true, ["graphql"] = true, ["gql"] = true, ["ini"] = true, ["conf"] = true
+}
+
+local SPECIAL_SOURCE_FILES = {
+    ["makefile"] = true,
+    ["cmakelists.txt"] = true,
+    ["dockerfile"] = true,
+    ["rakefile"] = true,
+    ["gemfile"] = true,
+    ["vagrantfile"] = true,
+    ["build.gradle"] = true
+}
+
+local function is_source_file(filename, ext)
+    if SOURCE_EXTENSIONS[ext] then return true end
+    if SPECIAL_SOURCE_FILES[filename:lower()] then return true end
+    return false
+end
+
 local function get_file_extension(path)
     local ext = path:match("%.([%w_%-]+)$")
     return ext and ext:lower() or ""
@@ -698,7 +744,7 @@ end
 --------------------------------------------------------------------------------
 local Indexer = {}
 
-function Indexer.run(db, root_dir, verbose)
+function Indexer.run(db, root_dir, verbose, allow_all)
     root_dir = root_dir or "."
     -- strip trailing slash
     root_dir = root_dir:gsub("[/\\]+$", "")
@@ -719,14 +765,20 @@ function Indexer.run(db, root_dir, verbose)
         -- Ignore internal DB file itself
         if fname:find("%.db$") or fname:find("%.db%-wal$") or fname:find("%.db%-shm$") then return end
 
-        visited_paths[full_path] = true
-        files_found = files_found + 1
         local ext = get_file_extension(fname)
+
+        -- Filter: Limit indexing to source code & config unless allow_all is set
+        if not allow_all and not is_source_file(fname, ext) then
+            return
+        end
 
         if BINARY_EXTENSIONS[ext] then
             files_skipped = files_skipped + 1
             return
         end
+
+        visited_paths[full_path] = true
+        files_found = files_found + 1
 
         local meta = get_file_metadata(full_path)
         if not meta or meta.size > (5 * 1024 * 1024) then -- skip > 5MB single files
@@ -1657,11 +1709,13 @@ Commands:
 Options:
   --tui                  Launch interactive full-screen TUI (supports live search, scroll, open)
   --ext <extension>      Filter by file extension (e.g. --ext lua, --ext c)
+  --all                  Index all text files (disables source code extension filter)
   --limit <n>            Maximum results to return (default: 20)
   --db <path>            Custom database file path (default: .codefind.db)
 
 Examples:
   luajit codefind.lua index .
+  luajit codefind.lua index . --all
   luajit codefind.lua search "sqlite3_prepare"
   luajit codefind.lua search "strtok" --tui
   luajit codefind.lua --tui
@@ -1759,12 +1813,15 @@ local function main(args)
     local use_tui = false
     local ext_filter = nil
     local limit = 20
+    local allow_all = false
 
     local i = 1
     while i <= #args do
         local a = args[i]
         if a == "--tui" then
             use_tui = true
+        elseif a == "--all" then
+            allow_all = true
         elseif a == "--db" and i + 1 <= #args then
             db_path = args[i + 1]
             i = i + 1
@@ -1805,8 +1862,8 @@ local function main(args)
 
     if command == "index" then
         local target_dir = cmd_args[1] or "."
-        print(string.format("⚡ Indexing directory '%s' into %s...", target_dir, db_path))
-        Indexer.run(db, target_dir, true)
+        print(string.format("⚡ Indexing directory '%s' into %s (Source mode: %s)...", target_dir, db_path, allow_all and "ALL" or "SOURCE ONLY"))
+        Indexer.run(db, target_dir, true, allow_all)
     elseif command == "search" then
         local query = table.concat(cmd_args, " ")
         if use_tui then

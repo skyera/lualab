@@ -137,11 +137,11 @@ TestRunner.describe("4. Incremental Updates and Deletion", function()
     TestRunner.it("should prune deleted files during incremental index", function()
         local tmpdir = "/tmp/_test_cf_prune_" .. os.time()
         os.execute("mkdir -p " .. tmpdir)
-        local f1 = io.open(tmpdir .. "/keep.txt", "w")
+        local f1 = io.open(tmpdir .. "/keep.c", "w")
         f1:write("This file is kept permanently.\n")
         f1:close()
 
-        local f2 = io.open(tmpdir .. "/remove.txt", "w")
+        local f2 = io.open(tmpdir .. "/remove.c", "w")
         f2:write("This file will be deleted.\n")
         f2:close()
 
@@ -151,19 +151,55 @@ TestRunner.describe("4. Incremental Updates and Deletion", function()
         assert_eq(res1.indexed, 2, "Expected 2 indexed files")
 
         -- Delete one file on disk
-        os.remove(tmpdir .. "/remove.txt")
+        os.remove(tmpdir .. "/remove.c")
 
         -- Run incremental index again
         local res2 = codefind.Indexer.run(p_db, tmpdir, false)
         assert_eq(res2.pruned, 1, "Expected 1 pruned file")
 
         local search_res = p_db:search("permanently")
-        assert_eq(#search_res, 1, "keep.txt should still match")
+        assert_eq(#search_res, 1, "keep.c should still match")
 
         local search_del = p_db:search("deleted")
-        assert_eq(#search_del, 0, "remove.txt should no longer match")
+        assert_eq(#search_del, 0, "remove.c should no longer match")
 
         p_db:close()
+        os.execute("rm -rf " .. tmpdir)
+    end)
+
+    TestRunner.it("should skip non-source files by default and index them with allow_all", function()
+        local tmpdir = "/tmp/_test_cf_source_filter_" .. os.time()
+        os.execute("mkdir -p " .. tmpdir)
+        local f_src = io.open(tmpdir .. "/logic.py", "w")
+        f_src:write("def calculate_tax(): return 42\n")
+        f_src:close()
+
+        local f_log = io.open(tmpdir .. "/app.log", "w")
+        f_log:write("2026-09-25 ERROR Database connection failed\n")
+        f_log:close()
+
+        local f_csv = io.open(tmpdir .. "/data.csv", "w")
+        f_csv:write("id,name,value\n1,alpha,99\n")
+        f_csv:close()
+
+        local test_db = tmpdir .. "/src_filter.db"
+        local s_db = codefind.Database.open(test_db)
+
+        -- 1. Default mode: only source code (logic.py) is indexed
+        local res_default = codefind.Indexer.run(s_db, tmpdir, false, false)
+        assert_eq(res_default.indexed, 1, "Only 1 source file should be indexed by default")
+        local res_py = s_db:search("calculate_tax")
+        assert_eq(#res_py, 1, "logic.py should be found")
+        local res_log = s_db:search("Database")
+        assert_eq(#res_log, 0, "app.log should be skipped by default")
+
+        -- 2. allow_all mode: app.log and data.csv are also indexed
+        local res_all = codefind.Indexer.run(s_db, tmpdir, false, true)
+        assert_eq(res_all.indexed, 2, "2 previously skipped files should now be indexed")
+        local res_log2 = s_db:search("Database")
+        assert_eq(#res_log2, 1, "app.log should be found with allow_all")
+
+        s_db:close()
         os.execute("rm -rf " .. tmpdir)
     end)
 end)
@@ -182,7 +218,7 @@ TestRunner.describe("5. CLI Invocation & Options", function()
     TestRunner.it("should index and search a fixture directory via CLI", function()
         local tmpdir = "/tmp/_test_cf_dir_" .. os.time()
         os.execute("mkdir -p " .. tmpdir)
-        local f = io.open(tmpdir .. "/sample.txt", "w")
+        local f = io.open(tmpdir .. "/sample.lua", "w")
         f:write("The quick brown fox jumps over the lazy dog\n")
         f:close()
 
@@ -201,7 +237,7 @@ TestRunner.describe("5. CLI Invocation & Options", function()
         if f_res then f_res:close() end
         os.remove(search_out)
 
-        assert_true(content:find("sample.txt") ~= nil, "CLI search did not output matching filename")
+        assert_true(content:find("sample.lua") ~= nil, "CLI search did not output matching filename")
 
         os.execute("rm -rf " .. tmpdir)
     end)
