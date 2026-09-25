@@ -1261,6 +1261,8 @@ function TUI.run(db, initial_query)
                             elseif c2 == 72 then table.insert(key_queue, "HOME"); idx = idx + 3
                             elseif c2 == 70 then table.insert(key_queue, "END"); idx = idx + 3
                             else table.insert(key_queue, "ESC"); idx = idx + 1 end
+                        elseif idx + 2 < n and key_buf[idx + 1] == 79 and key_buf[idx + 2] == 80 then -- ESC O P (F1)
+                            table.insert(key_queue, "F1"); idx = idx + 3
                         elseif idx + 1 == n then
                             -- Only 1 byte ESC at end of buffer
                             local more = ffi.C.poll(pfd, 1, 15)
@@ -1358,6 +1360,19 @@ function TUI.run(db, initial_query)
     local preview_file_cache = {}
     local preview_file_order = {}
     local preview_match_cache = {}
+
+    local line_count_cache = {}
+    local function get_file_line_count(filepath)
+        if line_count_cache[filepath] then return line_count_cache[filepath] end
+        local cnt = 0
+        local f = io.open(filepath, "r")
+        if f then
+            for _ in f:lines() do cnt = cnt + 1 end
+            f:close()
+        end
+        line_count_cache[filepath] = cnt
+        return cnt
+    end
 
     local function get_cached_file_lines(filepath)
         if preview_file_cache[filepath] then
@@ -1734,6 +1749,31 @@ function TUI.run(db, initial_query)
         end
     end
 
+    local function get_file_badge_plain(path)
+        local ext = path:match("%.([%w_%-]+)$")
+        if not ext then return "· " end
+        ext = ext:lower()
+        if ext == "c" or ext == "cpp" or ext == "cc" or ext == "cxx" then
+            return "[c] "
+        elseif ext == "h" or ext == "hpp" or ext == "hh" then
+            return "[h] "
+        elseif ext == "lua" then
+            return "[lua] "
+        elseif ext == "py" then
+            return "[py] "
+        elseif ext == "js" or ext == "ts" or ext == "jsx" or ext == "tsx" then
+            return "[js] "
+        elseif ext == "md" or ext == "txt" or ext == "rst" then
+            return "[txt] "
+        elseif ext == "json" or ext == "yaml" or ext == "yml" or ext == "toml" then
+            return "[cfg] "
+        elseif ext == "sh" or ext == "bash" or ext == "zsh" then
+            return "[sh] "
+        else
+            return "[" .. ext:sub(1, 3) .. "] "
+        end
+    end
+
     -- Format a single file item in the left list
     local function format_left_item(item_idx, is_sel, list_thumb_pos, i)
         local res_item = results[item_idx]
@@ -1746,9 +1786,21 @@ function TUI.run(db, initial_query)
         if res_item then
             local marker = is_sel and "▶ " or "  "
             local full_path = res_item.filepath
-            local badge = get_file_badge(full_path)
-            local badge_w = visual_len(badge)
-            local max_p_len = text_w - 2 - badge_w
+            local badge_str = is_sel and get_file_badge_plain(full_path) or get_file_badge(full_path)
+            local badge_w = is_sel and #badge_str or visual_len(badge_str)
+            -- File line count tag when column is wide enough
+            local line_cnt = get_file_line_count(full_path)
+            local cnt_tag = ""
+            if text_w >= 45 and line_cnt > 0 then
+                if line_cnt >= 1000 then
+                    cnt_tag = string.format(" %.1fkL", line_cnt / 1000)
+                else
+                    cnt_tag = string.format(" %dL", line_cnt)
+                end
+            end
+            local cnt_w = #cnt_tag
+
+            local max_p_len = text_w - 2 - badge_w - cnt_w
             local clean_path = full_path
             if visual_len(clean_path) > max_p_len and max_p_len > 8 then
                 -- Intelligent path shortening: keep filename and parent folder
@@ -1760,12 +1812,19 @@ function TUI.run(db, initial_query)
                     clean_path = truncate(full_path, max_p_len)
                 end
             end
-            local line_body = marker .. (is_sel and clean_path or (badge .. clean_path))
-            local padded = pad_to(line_body, text_w)
+
+            local left_text = marker .. badge_str .. clean_path
+            local right_text = ""
+            if cnt_w > 0 then
+                right_text = is_sel and cnt_tag or ("\27[90m" .. cnt_tag .. "\27[0m")
+            end
+            local avail_space = math.max(0, text_w - visual_len(left_text) - cnt_w)
+            local line_body = left_text .. string.rep(" ", avail_space) .. right_text
+
             if is_sel then
-                return "\27[1;30;43m" .. padded .. "\27[0m" .. left_sb
+                return "\27[1;30;43m" .. line_body .. "\27[0m" .. left_sb
             else
-                return "\27[37m" .. padded .. "\27[0m" .. left_sb
+                return "\27[37m" .. line_body .. "\27[0m" .. left_sb
             end
         elseif #results == 0 and i == 2 then
             local prompt_msg = (#query == 0) and "  Type to search code..." or "  No matches found"
@@ -1943,19 +2002,51 @@ function TUI.run(db, initial_query)
         emit_row(div_y, neutral_border .. "├" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┴" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┤\27[0m")
 
         -- Row Footer / Keybindings
-        local status_text = status_bar_msg
-        if not status_text or (os.clock() - status_bar_time > 3.0) then
-            if vim_mode == "INSERT" then
-                status_text = " [INSERT] Type query (@ext filter)  [Enter] Search/Open  [^W] Del Word  [^U] Clear  [^N/^P] Nav  [Tab] Pane"
-            else
-                status_text = " [NORMAL] Enter/o: Open in editor  n/N: Next/Prev Hit  j/k: Nav  ^U/c: Clear & Type  i or /: Search  y: Yank  q: Quit"
-            end
-        else
-            status_text = " " .. status_text
-        end
-        local padded_status = pad_to(status_text, cur_cols - 2)
         local status_y = div_y + 1
-        emit_row(status_y, string.format("%s│\27[1;30;47m%s\27[0m%s│\27[0m", neutral_border, padded_status, neutral_border))
+        if status_bar_msg and (os.clock() - status_bar_time <= 3.0) then
+            local padded_status = pad_to("  " .. status_bar_msg, cur_cols - 2)
+            emit_row(status_y, string.format("%s│\27[1;30;47m%s\27[0m%s│\27[0m", neutral_border, padded_status, neutral_border))
+        else
+            local pills = {}
+            if vim_mode == "INSERT" then
+                pills = {
+                    {"Enter", "Open"},
+                    {"Tab", "Pane"},
+                    {"n/N", "Match"},
+                    {"@ext", "Filter"},
+                    {"^W", "Del Word"},
+                    {"^U", "Clear"},
+                    {"F1/?", "Help"}
+                }
+            else
+                pills = {
+                    {"Enter/o", "Open"},
+                    {"n/N", "Match"},
+                    {"j/k", "Nav"},
+                    {"Tab", "Pane"},
+                    {"i or /", "Search"},
+                    {"y", "Yank"},
+                    {"q", "Quit"},
+                    {"?", "Help"}
+                }
+            end
+
+            local parts = {}
+            local curr_w = 0
+            for _, item in ipairs(pills) do
+                local key, desc = item[1], item[2]
+                local item_w = visual_len(key) + visual_len(desc) + 4
+                if curr_w + item_w + 1 <= cur_cols - 2 then
+                    table.insert(parts, string.format("\27[1;30;46m %s \27[0;37;40m %s \27[0m", key, desc))
+                    curr_w = curr_w + item_w + 1
+                else
+                    break
+                end
+            end
+            local combined = table.concat(parts, " ")
+            local pad_w = math.max(0, (cur_cols - 2) - curr_w)
+            emit_row(status_y, string.format("%s│%s%s%s│\27[0m", neutral_border, combined, string.rep(" ", pad_w), neutral_border))
+        end
 
         -- Final Bottom Border
         local bot_y = status_y + 1
@@ -2222,7 +2313,13 @@ function TUI.run(db, initial_query)
                     render_query_prompt_instant()
                     set_status("Query cleared — type new search")
                     needs_redraw = true
+                elseif key == "?" or key == "F1" then
+                    set_status("Shortcuts: [Tab] Pane, [n/N] Match, [PgUp/Dn] Scroll, [@ext] Filter, [y] Yank, [^W] Del Word")
+                    needs_redraw = true
                 end
+            elseif key == "F1" then
+                set_status("Shortcuts: [Tab] Pane, [n/N] Match, [PgUp/Dn] Scroll, [@ext] Filter, [^W] Del Word, [^U] Clear")
+                needs_redraw = true
             elseif #key == 1 and (vim_mode == "INSERT" or (vim_mode == "NORMAL" and focus_pane == "search")) then
                 if vim_mode == "NORMAL" then
                     vim_mode = "INSERT"

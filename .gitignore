@@ -12,3 +12,5 @@ portraits/portrait_*_lady.*
 *.bmp
 .russian_block_score
 downloads/
+.codefind.db
+*.codefind.db
