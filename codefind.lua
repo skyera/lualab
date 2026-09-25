@@ -1657,16 +1657,19 @@ function TUI.run(db, initial_query)
             comment_part = "\27[90;3m" .. line:sub(comment_pos) .. "\27[0m"
         end
 
-        -- 2. Strings ("..." or '...')
+        -- 2. Numbers (highlighted before ANSI codes are added so ANSI digits aren't matched)
+        code_part = code_part:gsub("(%f[%w_]%d+%f[^%w_])", "\27[36m%1\27[0m")
+
+        -- 3. Strings ("..." or '...')
         code_part = code_part:gsub('(".-")', "\27[32m%1\27[0m")
         code_part = code_part:gsub("('.-')", "\27[32m%1\27[0m")
 
-        -- 3. Preprocessor directives
+        -- 4. Preprocessor directives
         if ext == "c" or ext == "h" or ext == "cpp" then
             code_part = code_part:gsub("^(%s*#%w+)", "\27[1;35m%1\27[0m")
         end
 
-        -- 4. Keywords
+        -- 5. Keywords
         code_part = code_part:gsub("([%a_][%w_]*)", function(word)
             if SYNTAX_KEYWORDS[word] then
                 return "\27[1;34m" .. word .. "\27[0m"
@@ -1674,16 +1677,33 @@ function TUI.run(db, initial_query)
             return word
         end)
 
-        -- 5. Numbers
-        code_part = code_part:gsub("(%f[%w_]%d+%f[^%w_])", "\27[36m%1\27[0m")
-
         local result = code_part .. comment_part
 
-        -- 6. Highlight search hits with bright yellow bold underline
+        -- 6. Highlight search hits only in visible text segments (never inside ANSI escapes)
         if is_hit and patterns and #patterns > 0 then
-            for _, pat in ipairs(patterns) do
-                result = result:gsub("(" .. pat .. ")", "\27[1;30;43m%1\27[0;37m")
+            local parts = {}
+            local last_pos = 1
+            local cur_color = "\27[0m"
+            for esc_start, esc_match, esc_end in result:gmatch("()(\27%[[%d;]*%a)()") do
+                if esc_start > last_pos then
+                    local chunk = result:sub(last_pos, esc_start - 1)
+                    for _, pat in ipairs(patterns) do
+                        chunk = chunk:gsub("(" .. pat .. ")", "\27[1;30;43m%1\27[0m" .. cur_color)
+                    end
+                    table.insert(parts, chunk)
+                end
+                cur_color = esc_match
+                table.insert(parts, esc_match)
+                last_pos = esc_end
             end
+            if last_pos <= #result then
+                local chunk = result:sub(last_pos)
+                for _, pat in ipairs(patterns) do
+                    chunk = chunk:gsub("(" .. pat .. ")", "\27[1;30;43m%1\27[0m" .. cur_color)
+                end
+                table.insert(parts, chunk)
+            end
+            result = table.concat(parts)
         end
         return result
     end
