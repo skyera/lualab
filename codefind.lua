@@ -1021,8 +1021,17 @@ function TUI.run(db, initial_query)
 
     local function visual_len(str)
         local clean = tostring(str):gsub("\27%[[%d;]*[mK]", "")
-        local _, count = clean:gsub("[%z\1-\127\194-\244][\128-\191]*", "")
-        return count
+        local w = 0
+        for c in clean:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+            if #c == 1 then
+                w = w + 1
+            elseif (c >= "─" and c <= "╿") or (c >= "┌" and c <= "▟") or c == "▶" then
+                w = w + 1
+            else
+                w = w + 2
+            end
+        end
+        return w
     end
 
     local function truncate(str, max_w)
@@ -1042,8 +1051,13 @@ function TUI.run(db, initial_query)
             else
                 local c = raw:match("^[%z\1-\127\194-\244][\128-\191]*", pos)
                 if c then
+                    local cw = 1
+                    if #c > 1 and not ((c >= "─" and c <= "╿") or (c >= "┌" and c <= "▟") or c == "▶") then
+                        cw = 2
+                    end
+                    if curr + cw > max_w - 3 then break end
                     table.insert(out, c)
-                    curr = curr + 1
+                    curr = curr + cw
                     pos = pos + #c
                 else
                     break
@@ -1089,17 +1103,16 @@ function TUI.run(db, initial_query)
             end
 
             local frame_buf = {}
-            local function emit(str) table.insert(frame_buf, str) end
+            local function emit_row(y, row_str)
+                table.insert(frame_buf, string.format("\27[%d;1H\27[2K%s", y, row_str))
+            end
 
             local left_col_border = (focus_pane == "search") and "\27[1;36m" or "\27[90m"
             local right_col_border = (focus_pane == "preview") and "\27[1;32m" or "\27[90m"
             local neutral_border = "\27[90m"
 
-            -- Cursor Home (never use \27[2J clear in the loop to avoid flashing!)
-            emit("\27[H")
-
             -- Row 1: Top Border (Exact visual width: 1 + left_col_w + 1 + right_col_w + 1 = cols)
-            emit(neutral_border .. "┌" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┬" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┐\27[0m\n")
+            emit_row(1, neutral_border .. "┌" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┬" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┐\27[0m")
 
             -- Row 2: Header Information Bar
             local query_prompt = " > " .. query .. "_"
@@ -1131,7 +1144,7 @@ function TUI.run(db, initial_query)
                 right_head = pad_to(right_head_title, right_col_w)
             end
 
-            emit(string.format("%s│\27[0m%s%s│\27[0m%s%s│\27[0m\n",
+            emit_row(2, string.format("%s│\27[0m%s%s│\27[0m%s%s│\27[0m",
                 left_col_border,
                 pad_to(left_head, left_col_w),
                 neutral_border,
@@ -1139,7 +1152,7 @@ function TUI.run(db, initial_query)
                 right_col_border))
 
             -- Row 3: Split Divider
-            emit(neutral_border .. "├" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┼" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┤\27[0m\n")
+            emit_row(3, neutral_border .. "├" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┼" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┤\27[0m")
 
             -- Rows 4 .. (4 + list_height - 1): Content rows
             for i = 1, list_height do
@@ -1199,11 +1212,12 @@ function TUI.run(db, initial_query)
                     right_cell = string.rep(" ", right_col_w)
                 end
 
-                emit(string.format("%s│\27[0m%s%s│\27[0m%s%s│\27[0m\n", left_col_border, left_cell, neutral_border, right_cell, right_col_border))
+                emit_row(3 + i, string.format("%s│\27[0m%s%s│\27[0m%s%s│\27[0m", left_col_border, left_cell, neutral_border, right_cell, right_col_border))
             end
 
             -- Row Bottom Divider
-            emit(neutral_border .. "├" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┴" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┤\27[0m\n")
+            local div_y = 3 + list_height + 1
+            emit_row(div_y, neutral_border .. "├" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┴" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┤\27[0m")
 
             -- Row Footer / Keybindings
             local status_text = status_bar_msg
@@ -1213,13 +1227,15 @@ function TUI.run(db, initial_query)
                 status_text = " " .. status_text
             end
             local padded_status = pad_to(status_text, cols - 2)
-            emit(string.format("%s│\27[1;30;47m%s\27[0m%s│\27[0m\n", neutral_border, padded_status, neutral_border))
+            local status_y = div_y + 1
+            emit_row(status_y, string.format("%s│\27[1;30;47m%s\27[0m%s│\27[0m", neutral_border, padded_status, neutral_border))
 
             -- Final Bottom Border
-            emit(neutral_border .. "└" .. string.rep("─", cols - 2) .. "┘\27[0m")
+            local bot_y = status_y + 1
+            emit_row(bot_y, neutral_border .. "└" .. string.rep("─", cols - 2) .. "┘\27[0m")
 
-            -- Atomically write frame buffer (Zero flicker)
-            io.write(table.concat(frame_buf))
+            -- Atomically write frame buffer with synchronized updates (Zero flicker)
+            io.write("\27[?2026h" .. table.concat(frame_buf) .. "\27[?2026l")
             io.flush()
         end
 
@@ -1237,7 +1253,6 @@ function TUI.run(db, initial_query)
                 else
                     if selected_idx > 1 then
                         selected_idx = selected_idx - 1
-                        current_preview_file = nil
                         needs_redraw = true
                     end
                 end
@@ -1250,7 +1265,6 @@ function TUI.run(db, initial_query)
                 else
                     if selected_idx < #results then
                         selected_idx = selected_idx + 1
-                        current_preview_file = nil
                         needs_redraw = true
                     end
                 end
@@ -1259,7 +1273,6 @@ function TUI.run(db, initial_query)
                     preview_scroll_offset = math.max(0, preview_scroll_offset - 10)
                 else
                     selected_idx = math.max(1, selected_idx - 10)
-                    current_preview_file = nil
                 end
                 needs_redraw = true
             elseif key == "PAGE_DOWN" then
@@ -1267,7 +1280,6 @@ function TUI.run(db, initial_query)
                     preview_scroll_offset = math.min(#current_preview_lines, preview_scroll_offset + 10)
                 else
                     selected_idx = math.min(#results, selected_idx + 10)
-                    current_preview_file = nil
                 end
                 needs_redraw = true
             elseif key == "TAB" then
