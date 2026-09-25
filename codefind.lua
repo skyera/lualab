@@ -1233,6 +1233,7 @@ function TUI.run(db, initial_query)
     local current_match_list = {}
     local current_match_pos = 1
     local needs_redraw = true
+    local last_searched_query = nil
 
     -- LRU File lines cache to avoid re-reading files on disk
     local preview_file_cache = {}
@@ -1349,6 +1350,7 @@ function TUI.run(db, initial_query)
                 load_preview_for(results[selected_idx].filepath, query)
             end
         end
+        last_searched_query = query
         needs_redraw = true
     end
 
@@ -1446,6 +1448,34 @@ function TUI.run(db, initial_query)
             list_scroll_offset = selected_idx - list_height
         end
         list_scroll_offset = math.max(0, math.min(list_scroll_offset, max_scroll))
+    end
+
+    local function open_selected_in_editor()
+        if #results > 0 and results[selected_idx] then
+            disable_raw()
+            local chosen = results[selected_idx].filepath
+            local first_ln = 1
+            for ln = 1, #current_preview_lines do
+                if current_match_lines[ln] then first_ln = ln; break end
+            end
+            local editor = os.getenv("EDITOR")
+            if not editor or editor == "" then
+                if not is_windows and os.execute("which nvim >/dev/null 2>&1") == 0 then
+                    editor = "nvim"
+                else
+                    editor = "vim"
+                end
+            end
+            local edit_cmd = string.format('%s +%d "%s"', editor, first_ln, chosen)
+            os.execute(edit_cmd)
+
+            -- Re-initialize raw terminal mode and alternate screen buffer
+            enable_raw()
+            io.write("\27[H\27[2J")
+            io.flush()
+            set_status(string.format("✔ Returned from %s (%s:%d)", editor, get_filename(chosen), first_ln))
+            needs_redraw = true
+        end
     end
 
     -- Format a single file item in the left list
@@ -1650,9 +1680,9 @@ function TUI.run(db, initial_query)
         local status_text = status_bar_msg
         if not status_text or (os.clock() - status_bar_time > 3.0) then
             if vim_mode == "INSERT" then
-                status_text = " [INSERT] Type + [Enter] to Search  [Esc] Normal Mode  [Tab] Switch Pane  [^U] Clear"
+                status_text = " [INSERT] Type query  [Enter] Search / Open  [Esc] Normal Mode  [Tab] Switch Pane  [^U] Clear"
             else
-                status_text = " [NORMAL] j/k: Nav  n/N: Match  h/l: Pane  i or /: Search  ^D/^U: Page  y: Yank  Enter/o: Open  q: Quit"
+                status_text = " [NORMAL] Enter/o: Open in nvim  j/k: Nav  i or /: Search  n/N: Match  y: Yank  q: Quit"
             end
         else
             status_text = " " .. status_text
@@ -1769,41 +1799,22 @@ function TUI.run(db, initial_query)
                     selected_idx = 1
                     render_query_prompt_instant()
                 end
-            elseif key == "ENTER" and vim_mode == "INSERT" then
-                -- Explicit search execution on Enter
-                selected_idx = 1
-                refresh_search()
-                if #results > 0 then
-                    set_status(string.format("Found %d matches for '%s'", #results, query))
+            elseif key == "ENTER" then
+                if vim_mode == "INSERT" and query ~= last_searched_query then
+                    -- Execute search if query has been changed / typed
+                    selected_idx = 1
+                    refresh_search()
+                    if #results > 0 then
+                        set_status(string.format("Found %d matches for '%s' (Press Enter to open)", #results, query))
+                    else
+                        set_status(string.format("No matches found for '%s'", query))
+                    end
                 else
-                    set_status(string.format("No matches found for '%s'", query))
+                    -- Results are displayed and unchanged, or in NORMAL mode: open in editor
+                    open_selected_in_editor()
                 end
-            elseif (key == "ENTER" or key == "o") and vim_mode == "NORMAL" then
-                if #results > 0 and results[selected_idx] then
-                    disable_raw()
-                    local chosen = results[selected_idx].filepath
-                    local first_ln = 1
-                    for ln = 1, #current_preview_lines do
-                        if current_match_lines[ln] then first_ln = ln; break end
-                    end
-                    local editor = os.getenv("EDITOR")
-                    if not editor or editor == "" then
-                        if not is_windows and os.execute("which nvim >/dev/null 2>&1") == 0 then
-                            editor = "nvim"
-                        else
-                            editor = "vim"
-                        end
-                    end
-                    local edit_cmd = string.format('%s +%d "%s"', editor, first_ln, chosen)
-                    os.execute(edit_cmd)
-
-                    -- Re-initialize raw terminal mode and alternate screen buffer
-                    enable_raw()
-                    io.write("\27[H\27[2J")
-                    io.flush()
-                    set_status(string.format("✔ Returned from %s (%s:%d)", editor, get_filename(chosen), first_ln))
-                    needs_redraw = true
-                end
+            elseif key == "o" and vim_mode == "NORMAL" then
+                open_selected_in_editor()
             elseif vim_mode == "NORMAL" then
                 if key == "i" or key == "/" then
                     vim_mode = "INSERT"
