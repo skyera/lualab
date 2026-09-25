@@ -42,3 +42,10 @@ When the user asks about an issue, problem, feature, or modification, the agent 
 *   **One commit per issue**: Each fix should be its own atomic commit with a descriptive message.
 *   **"commit"**: When the user says "commit", create the commit(s) locally. Do NOT push.
 *   **"push"**: When the user says "push", push all local commits to the remote repository.
+
+## Shorthand Triggers
+
+*   **"ship"** or **"avcp"**: Shorthand for **"apply verify commit push"**. The agent MUST immediately implement the proposed changes, run all verification/test suites, create the atomic commit locally, and push to the remote repository without stopping for intermediate prompts.
+*   **"lgtm"** or **"do it"**: Shorthand for approving implementation and verification immediately.
+*   **"ci"**: Shorthand for local "commit".
+*   **"gp"**: Shorthand for "push" to remote.
