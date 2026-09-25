@@ -1233,12 +1233,11 @@ function TUI.run(db, initial_query)
     local current_match_list = {}
     local current_match_pos = 1
     local needs_redraw = true
-    local search_pending = false
-    local search_pending_time = 0
 
     -- LRU File lines cache to avoid re-reading files on disk
     local preview_file_cache = {}
     local preview_file_order = {}
+    local preview_match_cache = {}
 
     local function get_cached_file_lines(filepath)
         if preview_file_cache[filepath] then
@@ -1257,6 +1256,7 @@ function TUI.run(db, initial_query)
         if #preview_file_order >= 16 then
             local oldest = table.remove(preview_file_order, 1)
             preview_file_cache[oldest] = nil
+            preview_match_cache[oldest] = nil
         end
         table.insert(preview_file_order, filepath)
         preview_file_cache[filepath] = lines
@@ -1270,26 +1270,40 @@ function TUI.run(db, initial_query)
     end
 
     local function load_preview_for(filepath, query_str)
-        if current_preview_file == filepath then return end
+        if current_preview_file == filepath and current_preview_query == query_str then return end
         current_preview_file = filepath
+        current_preview_query = query_str
         current_preview_lines = get_cached_file_lines(filepath)
+
+        local cache_key = query_str or ""
+        local cached_match = preview_match_cache[filepath] and preview_match_cache[filepath][cache_key]
+        if cached_match then
+            current_match_lines = cached_match.match_lines
+            current_match_list = cached_match.match_list
+            current_match_pos = 1
+            preview_scroll_offset = cached_match.scroll_offset
+            return
+        end
+
         current_match_lines = {}
         current_match_list = {}
         current_match_pos = 1
         preview_scroll_offset = 0
 
         local terms = {}
-        for t in query_str:gmatch("[%w_%-]+") do
+        for t in (query_str or ""):gmatch("[%w_%-]+") do
             table.insert(terms, t:lower())
         end
 
-        for idx, line in ipairs(current_preview_lines) do
-            local l_lower = line:lower()
-            for _, term in ipairs(terms) do
-                if l_lower:find(term, 1, true) then
-                    current_match_lines[idx] = true
-                    table.insert(current_match_list, idx)
-                    break
+        if #terms > 0 then
+            for idx, line in ipairs(current_preview_lines) do
+                local l_lower = line:lower()
+                for _, term in ipairs(terms) do
+                    if l_lower:find(term, 1, true) then
+                        current_match_lines[idx] = true
+                        table.insert(current_match_list, idx)
+                        break
+                    end
                 end
             end
         end
@@ -1298,6 +1312,15 @@ function TUI.run(db, initial_query)
             preview_scroll_offset = math.max(0, current_match_list[1] - 4)
             current_match_pos = 1
         end
+
+        if not preview_match_cache[filepath] then
+            preview_match_cache[filepath] = {}
+        end
+        preview_match_cache[filepath][cache_key] = {
+            match_lines = current_match_lines,
+            match_list = current_match_list,
+            scroll_offset = preview_scroll_offset
+        }
     end
 
     local function refresh_search()
@@ -1305,11 +1328,12 @@ function TUI.run(db, initial_query)
             results = {}
             error_msg = nil
             current_preview_file = nil
+            current_preview_query = nil
             current_preview_lines = {}
             current_match_lines = {}
+            current_match_list = {}
             selected_idx = 1
             list_scroll_offset = 0
-            search_pending = false
             needs_redraw = true
             return
         end
@@ -1325,7 +1349,6 @@ function TUI.run(db, initial_query)
                 load_preview_for(results[selected_idx].filepath, query)
             end
         end
-        search_pending = false
         needs_redraw = true
     end
 
@@ -1410,7 +1433,8 @@ function TUI.run(db, initial_query)
             left_col_w = math.max(34, math.floor((cols - 3) * 0.44))
             right_col_w = cols - 3 - left_col_w
             list_height = rows - 6
-            needs_full_redraw = true
+            io.write("\27[H\27[2J")
+            needs_redraw = true
         end
     end
 
@@ -1626,7 +1650,7 @@ function TUI.run(db, initial_query)
         local status_text = status_bar_msg
         if not status_text or (os.clock() - status_bar_time > 3.0) then
             if vim_mode == "INSERT" then
-                status_text = " [INSERT] Type: Search  [Esc] Normal Mode  [Enter/o] Open  [↑/↓] Results  [^U] Clear  [^R] Reindex"
+                status_text = " [INSERT] Type + [Enter] to Search  [Esc] Normal Mode  [Tab] Switch Pane  [^U] Clear"
             else
                 status_text = " [NORMAL] j/k: Nav  n/N: Match  h/l: Pane  i or /: Search  ^D/^U: Page  y: Yank  Enter/o: Open  q: Quit"
             end
@@ -1649,18 +1673,12 @@ function TUI.run(db, initial_query)
     while running do
         update_layout()
 
-        -- Trigger debounced background search when idle or queue drained
-        if search_pending and (os.clock() - search_pending_time >= 0.03 or #key_queue == 0) then
-            refresh_search()
-        end
-
         if needs_redraw then
             needs_redraw = false
             render_full_screen()
         end
 
-        -- Read input via non-blocking poll (shorter timeout when a search debounce is pending)
-        local poll_timeout = search_pending and 10 or 35
+        local poll_timeout = 40
         local key = read_key(poll_timeout)
         if key then
             if key == "CTRL_C" then
@@ -1739,8 +1757,6 @@ function TUI.run(db, initial_query)
                 query = ""
                 selected_idx = 1
                 render_query_prompt_instant()
-                search_pending = true
-                search_pending_time = os.clock()
                 set_status("Query cleared")
             elseif key == "CTRL_R" then
                 set_status("⚡ Incremental re-indexing in progress...")
@@ -1752,10 +1768,17 @@ function TUI.run(db, initial_query)
                     query = query:sub(1, -2)
                     selected_idx = 1
                     render_query_prompt_instant()
-                    search_pending = true
-                    search_pending_time = os.clock()
                 end
-            elseif key == "ENTER" or (vim_mode == "NORMAL" and key == "o") then
+            elseif key == "ENTER" and vim_mode == "INSERT" then
+                -- Explicit search execution on Enter
+                selected_idx = 1
+                refresh_search()
+                if #results > 0 then
+                    set_status(string.format("Found %d matches for '%s'", #results, query))
+                else
+                    set_status(string.format("No matches found for '%s'", query))
+                end
+            elseif (key == "ENTER" or key == "o") and vim_mode == "NORMAL" then
                 if #results > 0 and results[selected_idx] then
                     disable_raw()
                     local chosen = results[selected_idx].filepath
@@ -1886,8 +1909,6 @@ function TUI.run(db, initial_query)
                     vim_mode = "INSERT"
                     focus_pane = "search"
                     render_query_prompt_instant()
-                    search_pending = true
-                    search_pending_time = os.clock()
                 end
             elseif #key == 1 and vim_mode == "INSERT" then
                 query = query .. key
@@ -1898,8 +1919,6 @@ function TUI.run(db, initial_query)
                 selected_idx = 1
                 -- Instant 0ms visual echo to the prompt bar
                 render_query_prompt_instant()
-                search_pending = true
-                search_pending_time = os.clock()
             end
         else
             -- Check if status bar message timed out
