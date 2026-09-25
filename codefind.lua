@@ -1786,11 +1786,23 @@ function TUI.run(db, initial_query)
                     for ln = 1, #current_preview_lines do
                         if current_match_lines[ln] then first_ln = ln; break end
                     end
-                    local editor = os.getenv("EDITOR") or "vim"
+                    local editor = os.getenv("EDITOR")
+                    if not editor or editor == "" then
+                        if not is_windows and os.execute("which nvim >/dev/null 2>&1") == 0 then
+                            editor = "nvim"
+                        else
+                            editor = "vim"
+                        end
+                    end
                     local edit_cmd = string.format('%s +%d "%s"', editor, first_ln, chosen)
-                    print(string.format("\nOpening %s:%d with %s...\n", chosen, first_ln, editor))
                     os.execute(edit_cmd)
-                    return true
+
+                    -- Re-initialize raw terminal mode and alternate screen buffer
+                    enable_raw()
+                    io.write("\27[H\27[2J")
+                    io.flush()
+                    set_status(string.format("✔ Returned from %s (%s:%d)", editor, get_filename(chosen), first_ln))
+                    needs_redraw = true
                 end
             elseif vim_mode == "NORMAL" then
                 if key == "i" or key == "/" then
