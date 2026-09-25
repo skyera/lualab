@@ -963,84 +963,142 @@ function TUI.run(db, initial_query)
             load_preview_for(results[selected_idx].filepath, query)
         end
 
-        -- Draw Header
+        -- Helper to strip ANSI codes for true terminal visual width calculation
+        local function strip_ansi(str)
+            return str:gsub("\27%[[%d;]*m", "")
+        end
+
+        local function pad_to(str, target_width, pad_char)
+            pad_char = pad_char or " "
+            local vis_len = #strip_ansi(str)
+            if vis_len < target_width then
+                return str .. string.rep(pad_char, target_width - vis_len)
+            else
+                return str
+            end
+        end
+
+        -- Calculate strict column dimensions
+        local inner_cols = cols - 2
+        local left_col_w = math.max(28, math.floor(inner_cols * 0.40))
+        local right_col_w = inner_cols - left_col_w - 3 -- 3 for " │ "
+
+        -- Draw Header (Row 1 & 2)
         io.write("\27[H\27[2J") -- Clear screen
         local db_stats = db:get_stats()
-        local header_title = string.format(" 🔍 CodeFind v1.1  [DB: %d files | %s]", db_stats.total_files, format_bytes(db_stats.total_size))
-        local pad_head = math.max(0, cols - #header_title)
-        io.write("\27[1;37;44m" .. header_title .. string.rep(" ", pad_head) .. "\27[0m\n")
+        
+        -- Top Border
+        local top_border = "┌" .. string.rep("─", left_col_w + 2) .. "┬" .. string.rep("─", right_col_w + 2) .. "┐"
+        io.write("\27[90m" .. top_border:sub(1, cols) .. "\27[0m\n")
 
-        local focus_tag = (focus_pane == "preview") and "\27[1;33m[PREVIEW ACTIVE]\27[0m" or "\27[1;32m[SEARCH ACTIVE]\27[0m"
-        io.write(string.format(" \27[1;36mSearch:\27[0m \27[4m%s\27[0m\27[33m_\27[0m  \27[90m(Matches: %d)\27[0m  %s\n", query, #results, focus_tag))
-        io.write(string.rep("─", cols) .. "\n")
+        -- Search / Stats Bar (Inside Box)
+        local query_display = " Search: " .. query .. "_"
+        local matches_tag = string.format("[%d Matches]", #results)
+        local left_top_str = pad_to(query_display, left_col_w - #matches_tag) .. matches_tag
+
+        local right_top_title = ""
+        if current_preview_file then
+            local first_ln = 1
+            for ln = 1, #current_preview_lines do
+                if current_match_lines[ln] then first_ln = ln; break end
+            end
+            right_top_title = string.format(" Preview: %s:%d (%d/%d)", get_filename(current_preview_file), first_ln, preview_scroll_offset + 1, #current_preview_lines)
+        else
+            right_top_title = " Preview: (No file selected)"
+        end
+        local focus_str = (focus_pane == "preview") and "[PREVIEW ACTIVE]" or "[SEARCH ACTIVE]"
+        local right_top_str = pad_to(right_top_title, right_col_w - #focus_str) .. focus_str
+
+        io.write(string.format("\27[90m│\27[0m \27[1;36m%s\27[0m \27[90m│\27[0m \27[1;34m%s\27[0m \27[90m│\27[0m\n", 
+            pad_to(left_top_str, left_col_w),
+            pad_to(right_top_str, right_col_w)))
+
+        -- Mid Header Divider
+        local mid_divider = "├" .. string.rep("─", left_col_w + 2) .. "┼" .. string.rep("─", right_col_w + 2) .. "┤"
+        io.write("\27[90m" .. mid_divider:sub(1, cols) .. "\27[0m\n")
 
         -- Render Split Pane rows
         for i = 1, list_height do
             local item_idx = list_scroll_offset + i
             local res_item = results[item_idx]
 
-            -- Left: Search Result File
-            local left_str = ""
+            -- Left Column: Search Result File
+            local left_cell = ""
             if res_item then
                 local is_sel = (item_idx == selected_idx)
                 local marker = is_sel and "▶ " or "  "
                 local clean_path = res_item.filepath
-                local max_p_len = left_width - 6
+                local max_p_len = left_col_w - 4
                 if #clean_path > max_p_len then
                     clean_path = "..." .. clean_path:sub(#clean_path - (max_p_len - 4))
                 end
 
                 if is_sel then
-                    left_str = string.format("\27[1;33m%s\27[1;37m%-30s\27[0m", marker, clean_path)
+                    local sel_text = marker .. clean_path
+                    local padded = sel_text .. string.rep(" ", math.max(0, left_col_w - #sel_text))
+                    left_cell = "\27[1;30;43m" .. padded .. "\27[0m"
                 else
-                    left_str = string.format("%s\27[36m%-30s\27[0m", marker, clean_path)
+                    local norm_text = marker .. clean_path
+                    local padded = norm_text .. string.rep(" ", math.max(0, left_col_w - #norm_text))
+                    left_cell = "\27[37m" .. padded .. "\27[0m"
                 end
+            else
+                left_cell = string.rep(" ", left_col_w)
             end
 
-            -- Right: Context & Preview Line
-            local right_str = ""
-            if i == 1 and current_preview_file then
-                local first_ln = 1
-                for ln = 1, #current_preview_lines do
-                    if current_match_lines[ln] then first_ln = ln; break end
-                end
-                right_str = string.format("\27[1;34m📄 %s:%d\27[0m \27[90m(Scroll: %d/%d)\27[0m", get_filename(current_preview_file), first_ln, preview_scroll_offset + 1, #current_preview_lines)
-            elseif current_preview_file and #current_preview_lines > 0 then
-                local file_line_num = preview_scroll_offset + (i - 1)
+            -- Right Column: Preview Lines
+            local right_cell = ""
+            if current_preview_file and #current_preview_lines > 0 then
+                local file_line_num = preview_scroll_offset + i
                 if file_line_num <= #current_preview_lines then
                     local line_content = current_preview_lines[file_line_num] or ""
                     local is_hit = current_match_lines[file_line_num]
 
-                    if #line_content > right_width - 10 then
-                        line_content = line_content:sub(1, right_width - 13) .. "..."
+                    -- Max code line width inside column
+                    local max_code_w = right_col_w - 9 -- 9 for "  1234 │ "
+                    if #line_content > max_code_w then
+                        line_content = line_content:sub(1, max_code_w - 3) .. "..."
                     end
 
-                    -- Highlight token if match line
+                    -- Pad code content to avoid background overflow
+                    local line_pad = string.rep(" ", math.max(0, max_code_w - #line_content))
+
                     if is_hit then
+                        -- Highlight matched token
                         for tok in query:gmatch("[%w_%-]+") do
                             local pat = tok:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1")
-                            line_content = line_content:gsub("(" .. pat .. ")", "\27[1;33m%1\27[0m")
+                            line_content = line_content:gsub("(" .. pat .. ")", "\27[1;33;4m%1\27[0;1;37m")
                         end
-                        right_str = string.format("\27[1;33m> \27[90m%4d │\27[0m %s", file_line_num, line_content)
+                        right_cell = string.format("\27[1;33m> \27[90m%4d │\27[1;37m %s%s\27[0m", file_line_num, line_content, line_pad)
                     else
-                        right_str = string.format("  \27[90m%4d │\27[0m %s", file_line_num, line_content)
+                        right_cell = string.format("  \27[90m%4d │\27[0;37m %s%s\27[0m", file_line_num, line_content, line_pad)
                     end
+                else
+                    right_cell = string.rep(" ", right_col_w)
                 end
+            else
+                right_cell = string.rep(" ", right_col_w)
             end
 
-            -- Print Row
-            local left_vis_len = res_item and math.min(left_width, #res_item.filepath + 4) or 0
-            local pad_spaces = math.max(0, left_width - left_vis_len)
-            io.write(string.format("%s%s \27[90m│\27[0m %s\n", left_str, string.rep(" ", pad_spaces), right_str))
+            -- Print Row with guaranteed single-character borders
+            io.write(string.format("\27[90m│\27[0m %s \27[90m│\27[0m %s \27[90m│\27[0m\n", left_cell, right_cell))
         end
 
-        -- Footer bar
-        io.write(string.rep("─", cols) .. "\n")
+        -- Bottom Border
+        local bot_divider = "├" .. string.rep("─", left_col_w + 2) .. "┴" .. string.rep("─", right_col_w + 2) .. "┤"
+        io.write("\27[90m" .. bot_divider:sub(1, cols) .. "\27[0m\n")
+
+        -- Status bar / keybindings
         local status_text = status_bar_msg
         if not status_text or (os.clock() - status_bar_time > 3.0) then
             status_text = "[Type] Search  [↑/↓] Results  [Tab] Toggle Pane  [PgUp/Dn] Scroll  [^R] Re-Index  [Enter] Open  [Esc] Quit"
         end
-        io.write("\27[1;30;47m " .. status_text .. string.rep(" ", math.max(0, cols - #status_text - 2)) .. " \27[0m")
+        local status_vis = " " .. status_text
+        local status_pad = string.rep(" ", math.max(0, cols - 4 - #strip_ansi(status_vis)))
+        io.write(string.format("\27[90m│\27[0m\27[1;30;47m%s%s\27[0m\27[90m│\27[0m\n", status_vis, status_pad))
+
+        local bot_border = "└" .. string.rep("─", cols - 2) .. "┘"
+        io.write("\27[90m" .. bot_border:sub(1, cols) .. "\27[0m")
         io.flush()
 
         -- Read Key Input (POSIX)
