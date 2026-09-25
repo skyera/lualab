@@ -9,6 +9,13 @@ local ffi = require("ffi")
 local bit = require("bit")
 
 local is_windows = (ffi.os == "Windows")
+local kernel32, msvcrt
+local STD_INPUT_HANDLE  = 0xFFFFFFF6 -- ((uint32_t)-10)
+local STD_OUTPUT_HANDLE = 0xFFFFFFF5 -- ((uint32_t)-11)
+if is_windows then
+    pcall(function() kernel32 = ffi.load("kernel32") end)
+    pcall(function() msvcrt = ffi.load("msvcrt") end)
+end
 
 --------------------------------------------------------------------------------
 -- 1. C Declarations: SQLite3 & POSIX / Win32 OS APIs
@@ -1085,10 +1092,31 @@ function TUI.run(db, initial_query)
     end
 
     local orig_termios = nil
+    local orig_in_mode = is_windows and ffi.new("uint32_t[1]") or nil
+    local orig_out_mode = is_windows and ffi.new("uint32_t[1]") or nil
     local in_raw_mode = false
 
     local function enable_raw()
-        if is_windows then return true end
+        if is_windows then
+            if not kernel32 then return false end
+            local hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+            local hOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+            if kernel32.GetConsoleMode(hIn, orig_in_mode) == 0 then return false end
+            kernel32.GetConsoleMode(hOut, orig_out_mode)
+
+            kernel32.SetConsoleOutputCP(65001)
+            local ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+            kernel32.SetConsoleMode(hOut, bit.bor(orig_out_mode[0], ENABLE_VIRTUAL_TERMINAL_PROCESSING))
+
+            local raw_mode = bit.band(orig_in_mode[0], bit.bnot(0x0001 + 0x0002 + 0x0004))
+            kernel32.SetConsoleMode(hIn, raw_mode)
+
+            in_raw_mode = true
+            io.write("\27[?1049h\27[?25l\27[2J\27[H")
+            io.flush()
+            return true
+        end
+
         orig_termios = ffi.new("struct termios")
         if ffi.C.tcgetattr(0, orig_termios) ~= 0 then return false end
 
@@ -1111,7 +1139,14 @@ function TUI.run(db, initial_query)
             -- Leave alternate screen buffer, show cursor, reset formatting
             io.write("\27[?1049l\27[?25h\27[0m")
             io.flush()
-            if orig_termios then
+            if is_windows then
+                if kernel32 then
+                    local hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+                    local hOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+                    kernel32.SetConsoleMode(hIn, orig_in_mode[0])
+                    kernel32.SetConsoleMode(hOut, orig_out_mode[0])
+                end
+            elseif orig_termios then
                 ffi.C.tcsetattr(0, 0, orig_termios)
             end
             in_raw_mode = false
@@ -1124,7 +1159,17 @@ function TUI.run(db, initial_query)
     end
 
     local function get_term_size()
-        if not is_windows then
+        if is_windows then
+            if kernel32 then
+                local hOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+                local csbi = ffi.new("CONSOLE_SCREEN_BUFFER_INFO")
+                if kernel32.GetConsoleScreenBufferInfo(hOut, csbi) ~= 0 then
+                    local w = csbi.srWindow.Right - csbi.srWindow.Left + 1
+                    local h = csbi.srWindow.Bottom - csbi.srWindow.Top + 1
+                    if w > 0 and h > 0 then return tonumber(w), tonumber(h) end
+                end
+            end
+        else
             local ws = ffi.new("struct winsize")
             if ffi.C.ioctl(1, 0x5413, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
                 return tonumber(ws.ws_col), tonumber(ws.ws_row)
@@ -1133,8 +1178,8 @@ function TUI.run(db, initial_query)
         return 100, 30
     end
 
-    local pfd = ffi.new("struct pollfd", { fd = 0, events = 1, revents = 0 })
-    local key_buf = ffi.new("char[128]")
+    local pfd = not is_windows and ffi.new("struct pollfd", { fd = 0, events = 1, revents = 0 }) or nil
+    local key_buf = not is_windows and ffi.new("char[128]") or nil
     local key_queue = {}
 
     local function read_key(timeout_ms)
@@ -1142,6 +1187,55 @@ function TUI.run(db, initial_query)
             return table.remove(key_queue, 1)
         end
         timeout_ms = timeout_ms or 30
+
+        if is_windows then
+            local elapsed = 0
+            while elapsed < timeout_ms do
+                if msvcrt and msvcrt._kbhit() ~= 0 then
+                    local c0 = msvcrt._getch()
+                    if c0 == 0 or c0 == 224 then
+                        local c1 = msvcrt._getch()
+                        if c1 == 72 then return "UP"
+                        elseif c1 == 80 then return "DOWN"
+                        elseif c1 == 75 then return "LEFT"
+                        elseif c1 == 77 then return "RIGHT"
+                        elseif c1 == 73 then return "PAGE_UP"
+                        elseif c1 == 81 then return "PAGE_DOWN"
+                        elseif c1 == 71 then return "HOME"
+                        elseif c1 == 79 then return "END"
+                        end
+                    elseif c0 == 27 then
+                        return "ESC"
+                    elseif c0 == 9 then
+                        return "TAB"
+                    elseif c0 == 13 or c0 == 10 then
+                        return "ENTER"
+                    elseif c0 == 127 or c0 == 8 then
+                        return "BACKSPACE"
+                    elseif c0 == 21 then -- Ctrl-U
+                        return "CTRL_U"
+                    elseif c0 == 14 then -- Ctrl-N
+                        return "CTRL_N"
+                    elseif c0 == 16 then -- Ctrl-P
+                        return "CTRL_P"
+                    elseif c0 == 11 then -- Ctrl-K
+                        return "CTRL_K"
+                    elseif c0 == 4 then -- Ctrl-D
+                        return "CTRL_D"
+                    elseif c0 == 18 then -- Ctrl-R
+                        return "CTRL_R"
+                    elseif c0 == 3 then -- Ctrl-C
+                        return "CTRL_C"
+                    elseif c0 >= 32 and c0 <= 126 then
+                        return string.char(c0)
+                    end
+                end
+                if kernel32 then kernel32.Sleep(10) end
+                elapsed = elapsed + 10
+            end
+            return nil
+        end
+
         local ret = ffi.C.poll(pfd, 1, timeout_ms)
         if ret > 0 and bit.band(pfd.revents, 1) ~= 0 then
             local n = ffi.C.read(0, key_buf, 128)
