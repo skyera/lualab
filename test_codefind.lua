@@ -133,6 +133,39 @@ TestRunner.describe("4. Incremental Updates and Deletion", function()
         local stats = db:get_stats()
         assert_eq(stats.total_files, 2, "File count should be 2 after deletion")
     end)
+
+    TestRunner.it("should prune deleted files during incremental index", function()
+        local tmpdir = "/tmp/_test_cf_prune_" .. os.time()
+        os.execute("mkdir -p " .. tmpdir)
+        local f1 = io.open(tmpdir .. "/keep.txt", "w")
+        f1:write("This file is kept permanently.\n")
+        f1:close()
+
+        local f2 = io.open(tmpdir .. "/remove.txt", "w")
+        f2:write("This file will be deleted.\n")
+        f2:close()
+
+        local prune_db_path = tmpdir .. "/prune.db"
+        local p_db = codefind.Database.open(prune_db_path)
+        local res1 = codefind.Indexer.run(p_db, tmpdir, false)
+        assert_eq(res1.indexed, 2, "Expected 2 indexed files")
+
+        -- Delete one file on disk
+        os.remove(tmpdir .. "/remove.txt")
+
+        -- Run incremental index again
+        local res2 = codefind.Indexer.run(p_db, tmpdir, false)
+        assert_eq(res2.pruned, 1, "Expected 1 pruned file")
+
+        local search_res = p_db:search("permanently")
+        assert_eq(#search_res, 1, "keep.txt should still match")
+
+        local search_del = p_db:search("deleted")
+        assert_eq(#search_del, 0, "remove.txt should no longer match")
+
+        p_db:close()
+        os.execute("rm -rf " .. tmpdir)
+    end)
 end)
 
 TestRunner.describe("5. CLI Invocation & Options", function()

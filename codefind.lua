@@ -258,6 +258,26 @@ end
 
 function Database:close()
     if self.db then
+        if self._stmt_get_file_info then
+            sqlite.sqlite3_finalize(self._stmt_get_file_info)
+            self._stmt_get_file_info = nil
+        end
+        if self._stmt_del_fts then
+            sqlite.sqlite3_finalize(self._stmt_del_fts)
+            self._stmt_del_fts = nil
+        end
+        if self._stmt_del_files then
+            sqlite.sqlite3_finalize(self._stmt_del_files)
+            self._stmt_del_files = nil
+        end
+        if self._stmt_ins_f then
+            sqlite.sqlite3_finalize(self._stmt_ins_f)
+            self._stmt_ins_f = nil
+        end
+        if self._stmt_ins_fts then
+            sqlite.sqlite3_finalize(self._stmt_ins_fts)
+            self._stmt_ins_fts = nil
+        end
         sqlite.sqlite3_close(self.db)
         self.db = nil
     end
@@ -325,12 +345,19 @@ function Database:rollback()
 end
 
 function Database:get_file_info(filepath)
-    local stmt_p = ffi.new("sqlite3_stmt*[1]")
-    local sql = "SELECT id, size, mtime FROM files WHERE filepath = ? LIMIT 1;"
-    if sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_p, nil) ~= SQLITE_OK then
-        return nil
+    local stmt = self._stmt_get_file_info
+    if not stmt then
+        local stmt_p = ffi.new("sqlite3_stmt*[1]")
+        local sql = "SELECT id, size, mtime FROM files WHERE filepath = ? LIMIT 1;"
+        if sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_p, nil) ~= SQLITE_OK then
+            return nil
+        end
+        stmt = stmt_p[0]
+        self._stmt_get_file_info = stmt
+    else
+        sqlite.sqlite3_reset(stmt)
     end
-    local stmt = stmt_p[0]
+
     sqlite.sqlite3_bind_text(stmt, 1, filepath, #filepath, SQLITE_TRANSIENT)
     local res = nil
     if sqlite.sqlite3_step(stmt) == SQLITE_ROW then
@@ -340,66 +367,132 @@ function Database:get_file_info(filepath)
             mtime = tonumber(sqlite.sqlite3_column_int64(stmt, 2)),
         }
     end
-    sqlite.sqlite3_finalize(stmt)
     return res
 end
 
 function Database:index_file(filepath, filename, ext, size, mtime, content)
-    local stmt_p = ffi.new("sqlite3_stmt*[1]")
-    
     -- 1. Remove previous FTS and file entry if updating
-    local sql_del_fts = "DELETE FROM code_idx WHERE filepath = ?;"
-    if sqlite.sqlite3_prepare_v2(self.db, sql_del_fts, #sql_del_fts, stmt_p, nil) == SQLITE_OK then
-        sqlite.sqlite3_bind_text(stmt_p[0], 1, filepath, #filepath, SQLITE_TRANSIENT)
-        sqlite.sqlite3_step(stmt_p[0])
-        sqlite.sqlite3_finalize(stmt_p[0])
+    local stmt_del_fts = self._stmt_del_fts
+    if not stmt_del_fts then
+        local stmt_p = ffi.new("sqlite3_stmt*[1]")
+        local sql = "DELETE FROM code_idx WHERE filepath = ?;"
+        if sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_p, nil) == SQLITE_OK then
+            stmt_del_fts = stmt_p[0]
+            self._stmt_del_fts = stmt_del_fts
+        end
+    else
+        sqlite.sqlite3_reset(stmt_del_fts)
+    end
+    if stmt_del_fts then
+        sqlite.sqlite3_bind_text(stmt_del_fts, 1, filepath, #filepath, SQLITE_TRANSIENT)
+        sqlite.sqlite3_step(stmt_del_fts)
     end
 
-    local sql_del_files = "DELETE FROM files WHERE filepath = ?;"
-    if sqlite.sqlite3_prepare_v2(self.db, sql_del_files, #sql_del_files, stmt_p, nil) == SQLITE_OK then
-        sqlite.sqlite3_bind_text(stmt_p[0], 1, filepath, #filepath, SQLITE_TRANSIENT)
-        sqlite.sqlite3_step(stmt_p[0])
-        sqlite.sqlite3_finalize(stmt_p[0])
+    local stmt_del_files = self._stmt_del_files
+    if not stmt_del_files then
+        local stmt_p = ffi.new("sqlite3_stmt*[1]")
+        local sql = "DELETE FROM files WHERE filepath = ?;"
+        if sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_p, nil) == SQLITE_OK then
+            stmt_del_files = stmt_p[0]
+            self._stmt_del_files = stmt_del_files
+        end
+    else
+        sqlite.sqlite3_reset(stmt_del_files)
+    end
+    if stmt_del_files then
+        sqlite.sqlite3_bind_text(stmt_del_files, 1, filepath, #filepath, SQLITE_TRANSIENT)
+        sqlite.sqlite3_step(stmt_del_files)
     end
 
     -- 2. Insert into files table
-    local sql_ins_f = "INSERT INTO files (filepath, filename, extension, size, mtime) VALUES (?, ?, ?, ?, ?);"
-    if sqlite.sqlite3_prepare_v2(self.db, sql_ins_f, #sql_ins_f, stmt_p, nil) == SQLITE_OK then
-        sqlite.sqlite3_bind_text(stmt_p[0], 1, filepath, #filepath, SQLITE_TRANSIENT)
-        sqlite.sqlite3_bind_text(stmt_p[0], 2, filename, #filename, SQLITE_TRANSIENT)
-        sqlite.sqlite3_bind_text(stmt_p[0], 3, ext or "", #(ext or ""), SQLITE_TRANSIENT)
-        sqlite.sqlite3_bind_int64(stmt_p[0], 4, size)
-        sqlite.sqlite3_bind_int64(stmt_p[0], 5, mtime)
-        sqlite.sqlite3_step(stmt_p[0])
-        sqlite.sqlite3_finalize(stmt_p[0])
+    local stmt_ins_f = self._stmt_ins_f
+    if not stmt_ins_f then
+        local stmt_p = ffi.new("sqlite3_stmt*[1]")
+        local sql = "INSERT INTO files (filepath, filename, extension, size, mtime) VALUES (?, ?, ?, ?, ?);"
+        if sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_p, nil) == SQLITE_OK then
+            stmt_ins_f = stmt_p[0]
+            self._stmt_ins_f = stmt_ins_f
+        end
+    else
+        sqlite.sqlite3_reset(stmt_ins_f)
+    end
+    if stmt_ins_f then
+        sqlite.sqlite3_bind_text(stmt_ins_f, 1, filepath, #filepath, SQLITE_TRANSIENT)
+        sqlite.sqlite3_bind_text(stmt_ins_f, 2, filename, #filename, SQLITE_TRANSIENT)
+        sqlite.sqlite3_bind_text(stmt_ins_f, 3, ext or "", #(ext or ""), SQLITE_TRANSIENT)
+        sqlite.sqlite3_bind_int64(stmt_ins_f, 4, size)
+        sqlite.sqlite3_bind_int64(stmt_ins_f, 5, mtime)
+        sqlite.sqlite3_step(stmt_ins_f)
     end
 
     -- 3. Insert into FTS5 index
-    local sql_ins_fts = "INSERT INTO code_idx (filepath, filename, content) VALUES (?, ?, ?);"
-    if sqlite.sqlite3_prepare_v2(self.db, sql_ins_fts, #sql_ins_fts, stmt_p, nil) == SQLITE_OK then
-        sqlite.sqlite3_bind_text(stmt_p[0], 1, filepath, #filepath, SQLITE_TRANSIENT)
-        sqlite.sqlite3_bind_text(stmt_p[0], 2, filename, #filename, SQLITE_TRANSIENT)
-        sqlite.sqlite3_bind_text(stmt_p[0], 3, content, #content, SQLITE_TRANSIENT)
-        sqlite.sqlite3_step(stmt_p[0])
-        sqlite.sqlite3_finalize(stmt_p[0])
+    local stmt_ins_fts = self._stmt_ins_fts
+    if not stmt_ins_fts then
+        local stmt_p = ffi.new("sqlite3_stmt*[1]")
+        local sql = "INSERT INTO code_idx (filepath, filename, content) VALUES (?, ?, ?);"
+        if sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_p, nil) == SQLITE_OK then
+            stmt_ins_fts = stmt_p[0]
+            self._stmt_ins_fts = stmt_ins_fts
+        end
+    else
+        sqlite.sqlite3_reset(stmt_ins_fts)
+    end
+    if stmt_ins_fts then
+        sqlite.sqlite3_bind_text(stmt_ins_fts, 1, filepath, #filepath, SQLITE_TRANSIENT)
+        sqlite.sqlite3_bind_text(stmt_ins_fts, 2, filename, #filename, SQLITE_TRANSIENT)
+        sqlite.sqlite3_bind_text(stmt_ins_fts, 3, content, #content, SQLITE_TRANSIENT)
+        sqlite.sqlite3_step(stmt_ins_fts)
     end
 end
 
 function Database:remove_file(filepath)
-    local stmt_p = ffi.new("sqlite3_stmt*[1]")
-    local sql1 = "DELETE FROM code_idx WHERE filepath = ?;"
-    if sqlite.sqlite3_prepare_v2(self.db, sql1, #sql1, stmt_p, nil) == SQLITE_OK then
-        sqlite.sqlite3_bind_text(stmt_p[0], 1, filepath, #filepath, SQLITE_TRANSIENT)
-        sqlite.sqlite3_step(stmt_p[0])
-        sqlite.sqlite3_finalize(stmt_p[0])
+    local stmt_del_fts = self._stmt_del_fts
+    if not stmt_del_fts then
+        local stmt_p = ffi.new("sqlite3_stmt*[1]")
+        local sql = "DELETE FROM code_idx WHERE filepath = ?;"
+        if sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_p, nil) == SQLITE_OK then
+            stmt_del_fts = stmt_p[0]
+            self._stmt_del_fts = stmt_del_fts
+        end
+    else
+        sqlite.sqlite3_reset(stmt_del_fts)
+    end
+    if stmt_del_fts then
+        sqlite.sqlite3_bind_text(stmt_del_fts, 1, filepath, #filepath, SQLITE_TRANSIENT)
+        sqlite.sqlite3_step(stmt_del_fts)
     end
 
-    local sql2 = "DELETE FROM files WHERE filepath = ?;"
-    if sqlite.sqlite3_prepare_v2(self.db, sql2, #sql2, stmt_p, nil) == SQLITE_OK then
-        sqlite.sqlite3_bind_text(stmt_p[0], 1, filepath, #filepath, SQLITE_TRANSIENT)
-        sqlite.sqlite3_step(stmt_p[0])
-        sqlite.sqlite3_finalize(stmt_p[0])
+    local stmt_del_files = self._stmt_del_files
+    if not stmt_del_files then
+        local stmt_p = ffi.new("sqlite3_stmt*[1]")
+        local sql = "DELETE FROM files WHERE filepath = ?;"
+        if sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_p, nil) == SQLITE_OK then
+            stmt_del_files = stmt_p[0]
+            self._stmt_del_files = stmt_del_files
+        end
+    else
+        sqlite.sqlite3_reset(stmt_del_files)
     end
+    if stmt_del_files then
+        sqlite.sqlite3_bind_text(stmt_del_files, 1, filepath, #filepath, SQLITE_TRANSIENT)
+        sqlite.sqlite3_step(stmt_del_files)
+    end
+end
+
+function Database:get_all_filepaths()
+    local stmt_p = ffi.new("sqlite3_stmt*[1]")
+    local sql = "SELECT filepath FROM files;"
+    if sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_p, nil) ~= SQLITE_OK then
+        return {}
+    end
+    local stmt = stmt_p[0]
+    local list = {}
+    while sqlite.sqlite3_step(stmt) == SQLITE_ROW do
+        local fpath = ffi.string(sqlite.sqlite3_column_text(stmt, 0))
+        table.insert(list, fpath)
+    end
+    sqlite.sqlite3_finalize(stmt)
+    return list
 end
 
 function Database:search(query_str, options)
@@ -620,11 +713,13 @@ function Indexer.run(db, root_dir, verbose)
     db:begin()
 
     local batch_count = 0
+    local visited_paths = {}
 
     scan_directory(root_dir, function(full_path, fname)
         -- Ignore internal DB file itself
         if fname:find("%.db$") or fname:find("%.db%-wal$") or fname:find("%.db%-shm$") then return end
 
+        visited_paths[full_path] = true
         files_found = files_found + 1
         local ext = get_file_extension(fname)
 
@@ -676,6 +771,18 @@ function Indexer.run(db, root_dir, verbose)
         end
     end)
 
+    -- Prune deleted / stale files from database
+    local files_pruned = 0
+    local all_db_paths = db:get_all_filepaths()
+    for _, db_path in ipairs(all_db_paths) do
+        -- Only prune files that belong under root_dir
+        local belongs = (root_dir == ".") or (db_path == root_dir) or (db_path:sub(1, #root_dir + 1) == (root_dir .. "/"))
+        if belongs and not visited_paths[db_path] then
+            db:remove_file(db_path)
+            files_pruned = files_pruned + 1
+        end
+    end
+
     db:commit()
     local elapsed = os.clock() - t_start
 
@@ -685,12 +792,16 @@ function Indexer.run(db, root_dir, verbose)
         print(string.format("  - Scanned: %d files", files_found))
         print(string.format("  - Indexed/Updated: %d files (%.2f MB)", files_indexed, total_bytes / (1024*1024)))
         print(string.format("  - Unchanged/Skipped: %d files", files_skipped))
+        if files_pruned > 0 then
+            print(string.format("  - Pruned (deleted): %d files", files_pruned))
+        end
     end
 
     return {
         scanned = files_found,
         indexed = files_indexed,
         skipped = files_skipped,
+        pruned  = files_pruned,
         bytes   = total_bytes,
         time    = elapsed
     }
@@ -972,7 +1083,36 @@ function TUI.run(db, initial_query)
     local current_preview_file = nil
     local current_preview_lines = {}
     local current_match_lines = {}
+    local current_match_list = {}
+    local current_match_pos = 1
     local needs_redraw = true
+
+    -- LRU File lines cache to avoid re-reading files on disk
+    local preview_file_cache = {}
+    local preview_file_order = {}
+
+    local function get_cached_file_lines(filepath)
+        if preview_file_cache[filepath] then
+            return preview_file_cache[filepath]
+        end
+        local lines = {}
+        local f = io.open(filepath, "r")
+        if f then
+            for line in f:lines() do
+                table.insert(lines, line)
+                if #lines > 2000 then break end
+            end
+            f:close()
+        end
+        -- Maintain at most 16 cached files
+        if #preview_file_order >= 16 then
+            local oldest = table.remove(preview_file_order, 1)
+            preview_file_cache[oldest] = nil
+        end
+        table.insert(preview_file_order, filepath)
+        preview_file_cache[filepath] = lines
+        return lines
+    end
 
     local function set_status(msg)
         status_bar_msg = msg
@@ -983,18 +1123,11 @@ function TUI.run(db, initial_query)
     local function load_preview_for(filepath, query_str)
         if current_preview_file == filepath then return end
         current_preview_file = filepath
-        current_preview_lines = {}
+        current_preview_lines = get_cached_file_lines(filepath)
         current_match_lines = {}
+        current_match_list = {}
+        current_match_pos = 1
         preview_scroll_offset = 0
-
-        local f = io.open(filepath, "r")
-        if f then
-            for line in f:lines() do
-                table.insert(current_preview_lines, line)
-                if #current_preview_lines > 2000 then break end
-            end
-            f:close()
-        end
 
         local terms = {}
         for t in query_str:gmatch("[%w_%-]+") do
@@ -1006,16 +1139,15 @@ function TUI.run(db, initial_query)
             for _, term in ipairs(terms) do
                 if l_lower:find(term, 1, true) then
                     current_match_lines[idx] = true
+                    table.insert(current_match_list, idx)
                     break
                 end
             end
         end
 
-        for idx = 1, #current_preview_lines do
-            if current_match_lines[idx] then
-                preview_scroll_offset = math.max(0, idx - 4)
-                break
-            end
+        if #current_match_list > 0 then
+            preview_scroll_offset = math.max(0, current_match_list[1] - 4)
+            current_match_pos = 1
         end
     end
 
@@ -1185,45 +1317,73 @@ function TUI.run(db, initial_query)
             -- Row 3: Split Divider
             emit_row(3, neutral_border .. "├" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┼" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┤\27[0m")
 
+            -- Calculate scrollbar thumb positions
+            local list_thumb_pos = 1
+            if #results > list_height then
+                local max_offset = math.max(1, #results - list_height)
+                list_thumb_pos = 1 + math.floor((list_scroll_offset / max_offset) * (list_height - 1))
+            end
+
+            local prev_total = #current_preview_lines
+            local prev_thumb_pos = 1
+            if prev_total > list_height then
+                local max_prev_offset = math.max(1, prev_total - list_height)
+                prev_thumb_pos = 1 + math.floor((preview_scroll_offset / max_prev_offset) * (list_height - 1))
+            end
+
             -- Rows 4 .. (4 + list_height - 1): Content rows
             for i = 1, list_height do
                 local item_idx = list_scroll_offset + i
                 local res_item = results[item_idx]
 
+                -- Left scrollbar indicator
+                local left_sb = " "
+                if #results > list_height then
+                    left_sb = (i == list_thumb_pos) and "\27[1;36m█\27[0m" or "\27[90m│\27[0m"
+                end
+
                 -- Left Content (File list)
                 local left_cell = ""
+                local text_w = left_col_w - 1
                 if res_item then
                     local is_sel = (item_idx == selected_idx)
                     local marker = is_sel and "▶ " or "  "
                     local clean_path = res_item.filepath
-                    local max_p_len = left_col_w - 4
+                    local max_p_len = text_w - 4
                     if #clean_path > max_p_len and max_p_len > 6 then
                         clean_path = "..." .. clean_path:sub(#clean_path - (max_p_len - 4))
                     end
 
                     local full_text = marker .. clean_path
-                    local padded = pad_to(full_text, left_col_w)
+                    local padded = pad_to(full_text, text_w)
                     if is_sel then
-                        left_cell = "\27[1;30;43m" .. padded .. "\27[0m"
+                        left_cell = "\27[1;30;43m" .. padded .. "\27[0m" .. left_sb
                     else
-                        left_cell = "\27[37m" .. padded .. "\27[0m"
+                        left_cell = "\27[37m" .. padded .. "\27[0m" .. left_sb
                     end
                 elseif #results == 0 and i == 2 then
                     local prompt_msg = (#query == 0) and "  Type to search code..." or "  No matches found"
-                    left_cell = "\27[90m" .. pad_to(prompt_msg, left_col_w) .. "\27[0m"
+                    left_cell = "\27[90m" .. pad_to(prompt_msg, text_w) .. "\27[0m" .. left_sb
                 else
-                    left_cell = string.rep(" ", left_col_w)
+                    left_cell = string.rep(" ", text_w) .. left_sb
+                end
+
+                -- Right scrollbar indicator
+                local right_sb = " "
+                if prev_total > list_height then
+                    right_sb = (i == prev_thumb_pos) and "\27[1;32m█\27[0m" or "\27[90m│\27[0m"
                 end
 
                 -- Right Content (Source preview)
                 local right_cell = ""
+                local r_text_w = right_col_w - 1
                 if current_preview_file and #current_preview_lines > 0 then
                     local file_line_num = preview_scroll_offset + i
                     if file_line_num <= #current_preview_lines then
                         local line_content = current_preview_lines[file_line_num] or ""
                         local is_hit = current_match_lines[file_line_num]
 
-                        local max_code_w = math.max(0, right_col_w - 9)
+                        local max_code_w = math.max(0, r_text_w - 9)
                         local code_str = truncate(line_content, max_code_w)
                         local line_pad = string.rep(" ", math.max(0, max_code_w - visual_len(code_str)))
 
@@ -1232,15 +1392,15 @@ function TUI.run(db, initial_query)
                                 local pat = tok:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1")
                                 code_str = code_str:gsub("(" .. pat .. ")", "\27[1;33;4m%1\27[0;1;37m")
                             end
-                            right_cell = string.format("\27[1;33m> \27[90m%4d │\27[1;37m %s%s\27[0m", file_line_num, code_str, line_pad)
+                            right_cell = string.format("\27[1;33m> \27[90m%4d │\27[1;37m %s%s\27[0m%s", file_line_num, code_str, line_pad, right_sb)
                         else
-                            right_cell = string.format("  \27[90m%4d │\27[0;37m %s%s\27[0m", file_line_num, code_str, line_pad)
+                            right_cell = string.format("  \27[90m%4d │\27[0;37m %s%s\27[0m%s", file_line_num, code_str, line_pad, right_sb)
                         end
                     else
-                        right_cell = string.rep(" ", right_col_w)
+                        right_cell = string.rep(" ", r_text_w) .. right_sb
                     end
                 else
-                    right_cell = string.rep(" ", right_col_w)
+                    right_cell = string.rep(" ", r_text_w) .. right_sb
                 end
 
                 emit_row(3 + i, string.format("%s│\27[0m%s%s│\27[0m%s%s│\27[0m", left_col_border, left_cell, neutral_border, right_cell, right_col_border))
@@ -1256,7 +1416,7 @@ function TUI.run(db, initial_query)
                 if vim_mode == "INSERT" then
                     status_text = " [INSERT] Type: Search  [Esc] Normal Mode  [Enter/o] Open  [↑/↓] Results  [^U] Clear  [^R] Reindex"
                 else
-                    status_text = " [NORMAL] j/k: Nav  h/l: Pane  i or /: Search  ^D/^U: Page  g/G: Top/End  Enter/o: Open  q: Quit"
+                    status_text = " [NORMAL] j/k: Nav  n/N: Match  h/l: Pane  i or /: Search  ^D/^U: Page  y: Yank  Enter/o: Open  q: Quit"
                 end
             else
                 status_text = " " .. status_text
@@ -1406,6 +1566,44 @@ function TUI.run(db, initial_query)
                         selected_idx = math.max(1, #results)
                     end
                     needs_redraw = true
+                elseif key == "n" then
+                    -- Jump to next match in current file
+                    if #current_match_list > 0 then
+                        current_match_pos = (current_match_pos % #current_match_list) + 1
+                        local target_ln = current_match_list[current_match_pos]
+                        preview_scroll_offset = math.max(0, target_ln - 4)
+                        set_status(string.format("Match %d/%d (line %d)", current_match_pos, #current_match_list, target_ln))
+                        needs_redraw = true
+                    end
+                elseif key == "N" then
+                    -- Jump to previous match in current file
+                    if #current_match_list > 0 then
+                        current_match_pos = current_match_pos - 1
+                        if current_match_pos < 1 then current_match_pos = #current_match_list end
+                        local target_ln = current_match_list[current_match_pos]
+                        preview_scroll_offset = math.max(0, target_ln - 4)
+                        set_status(string.format("Match %d/%d (line %d)", current_match_pos, #current_match_list, target_ln))
+                        needs_redraw = true
+                    end
+                elseif key == "y" then
+                    -- Yank (copy) filepath:line to clipboard
+                    if #results > 0 and results[selected_idx] then
+                        local chosen = results[selected_idx].filepath
+                        local first_ln = 1
+                        for ln = 1, #current_preview_lines do
+                            if current_match_lines[ln] then first_ln = ln; break end
+                        end
+                        local yank_text = string.format("%s:%d", chosen, first_ln)
+                        if is_windows then
+                            local p = io.popen("clip", "w")
+                            if p then p:write(yank_text); p:close() end
+                        else
+                            local p = io.popen("xclip -selection clipboard 2>/dev/null || wl-copy 2>/dev/null || pbcopy 2>/dev/null", "w")
+                            if p then p:write(yank_text); p:close() end
+                        end
+                        set_status(string.format("✔ Copied '%s' to clipboard", yank_text))
+                        needs_redraw = true
+                    end
                 elseif key == "q" then
                     running = false
                 elseif key == "c" then
