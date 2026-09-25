@@ -821,8 +821,12 @@ function TUI.run(db, initial_query)
     local raw_ok = false
     local termios_orig = nil
 
-    -- Terminal setup (POSIX)
+    -- Check if running in an interactive terminal
     if not is_windows then
+        if ffi.C.isatty(0) == 0 then
+            print("Note: TUI mode requires an interactive terminal (stdin is not a TTY).")
+            return false
+        end
         termios_orig = ffi.new("struct termios")
         if ffi.C.tcgetattr(0, termios_orig) == 0 then
             local raw = ffi.new("struct termios")
@@ -853,13 +857,73 @@ function TUI.run(db, initial_query)
 
     local query = initial_query or ""
     local selected_idx = 1
+    local list_scroll_offset = 0
+    local preview_scroll_offset = 0
+    local focus_pane = "search" -- "search" | "preview"
     local results = {}
     local error_msg = nil
+    local status_bar_msg = nil
+    local status_bar_time = 0
+
+    local current_preview_file = nil
+    local current_preview_lines = {}
+    local current_match_lines = {}
+
+    local function set_status(msg)
+        status_bar_msg = msg
+        status_bar_time = os.clock()
+    end
+
+    local function load_preview_for(filepath, query_str)
+        if current_preview_file == filepath then return end
+        current_preview_file = filepath
+        current_preview_lines = {}
+        current_match_lines = {}
+        preview_scroll_offset = 0
+
+        local f = io.open(filepath, "r")
+        if f then
+            for line in f:lines() do
+                table.insert(current_preview_lines, line)
+                if #current_preview_lines > 2000 then break end
+            end
+            f:close()
+        end
+
+        -- Find match lines for auto-scroll and highlight
+        local terms = {}
+        for t in query_str:gmatch("[%w_%-]+") do
+            table.insert(terms, t:lower())
+        end
+
+        for idx, line in ipairs(current_preview_lines) do
+            local l_lower = line:lower()
+            for _, term in ipairs(terms) do
+                if l_lower:find(term, 1, true) then
+                    current_match_lines[idx] = true
+                    break
+                end
+            end
+        end
+
+        -- Automatically scroll preview to first match
+        for idx = 1, #current_preview_lines do
+            if current_match_lines[idx] then
+                preview_scroll_offset = math.max(0, idx - 4)
+                break
+            end
+        end
+    end
 
     local function refresh_search()
         if #query == 0 then
             results = {}
             error_msg = nil
+            current_preview_file = nil
+            current_preview_lines = {}
+            current_match_lines = {}
+            selected_idx = 1
+            list_scroll_offset = 0
             return
         end
         local res, err = db:search(query, { limit = 100 })
@@ -870,6 +934,9 @@ function TUI.run(db, initial_query)
             error_msg = nil
             results = res
             if selected_idx > #results then selected_idx = math.max(1, #results) end
+            if #results > 0 and results[selected_idx] then
+                load_preview_for(results[selected_idx].filepath, query)
+            end
         end
     end
 
@@ -880,68 +947,100 @@ function TUI.run(db, initial_query)
 
     while running do
         local cols, rows = get_term_size()
-        local left_width = math.floor(cols * 0.45)
+        local left_width = math.max(30, math.floor(cols * 0.42))
         local right_width = cols - left_width - 3
+        local list_height = rows - 6
+
+        -- Ensure scroll offsets stay valid
+        if selected_idx < list_scroll_offset + 1 then
+            list_scroll_offset = selected_idx - 1
+        elseif selected_idx > list_scroll_offset + list_height then
+            list_scroll_offset = selected_idx - list_height
+        end
+        list_scroll_offset = math.max(0, list_scroll_offset)
+
+        if #results > 0 and results[selected_idx] then
+            load_preview_for(results[selected_idx].filepath, query)
+        end
 
         -- Draw Header
         io.write("\27[H\27[2J") -- Clear screen
-        io.write("\27[1;37;44m" .. string.format(" 🔍 CodeFind — Local Code & Document Search Engine %" .. (cols - 46) .. "s", "") .. "\27[0m\n")
-        io.write(string.format(" \27[1;36mQuery:\27[0m \27[4m%s\27[0m\27[33m_\27[0m (Matches: %d)\n", query, #results))
+        local db_stats = db:get_stats()
+        local header_title = string.format(" 🔍 CodeFind v1.1  [DB: %d files | %s]", db_stats.total_files, format_bytes(db_stats.total_size))
+        local pad_head = math.max(0, cols - #header_title)
+        io.write("\27[1;37;44m" .. header_title .. string.rep(" ", pad_head) .. "\27[0m\n")
+
+        local focus_tag = (focus_pane == "preview") and "\27[1;33m[PREVIEW ACTIVE]\27[0m" or "\27[1;32m[SEARCH ACTIVE]\27[0m"
+        io.write(string.format(" \27[1;36mSearch:\27[0m \27[4m%s\27[0m\27[33m_\27[0m  \27[90m(Matches: %d)\27[0m  %s\n", query, #results, focus_tag))
         io.write(string.rep("─", cols) .. "\n")
 
-        local list_height = rows - 6
-        local preview_file_lines = {}
-        local active_file = nil
-
-        if #results > 0 and results[selected_idx] then
-            active_file = results[selected_idx].filepath
-            local f = io.open(active_file, "r")
-            if f then
-                for line in f:lines() do
-                    table.insert(preview_file_lines, line)
-                    if #preview_file_lines > 500 then break end
-                end
-                f:close()
-            end
-        end
-
+        -- Render Split Pane rows
         for i = 1, list_height do
-            -- Left Pane: File Match list
+            local item_idx = list_scroll_offset + i
+            local res_item = results[item_idx]
+
+            -- Left: Search Result File
             local left_str = ""
-            local res_item = results[i]
             if res_item then
-                local marker = (i == selected_idx) and "▶ \27[1;32m" or "  "
+                local is_sel = (item_idx == selected_idx)
+                local marker = is_sel and "▶ " or "  "
                 local clean_path = res_item.filepath
-                if #clean_path > left_width - 6 then
-                    clean_path = "..." .. clean_path:sub(#clean_path - (left_width - 9))
+                local max_p_len = left_width - 6
+                if #clean_path > max_p_len then
+                    clean_path = "..." .. clean_path:sub(#clean_path - (max_p_len - 4))
                 end
-                left_str = string.format("%s%-30s\27[0m", marker, clean_path)
+
+                if is_sel then
+                    left_str = string.format("\27[1;33m%s\27[1;37m%-30s\27[0m", marker, clean_path)
+                else
+                    left_str = string.format("%s\27[36m%-30s\27[0m", marker, clean_path)
+                end
             end
 
-            -- Right Pane: Context Preview
+            -- Right: Context & Preview Line
             local right_str = ""
-            if i == 1 and active_file then
-                right_str = string.format("\27[1;34m[File: %s]\27[0m", get_filename(active_file))
-            elseif active_file and #preview_file_lines > 0 then
-                local line_num = i - 1
-                if line_num <= #preview_file_lines then
-                    local line_content = preview_file_lines[line_num] or ""
-                    if #line_content > right_width - 8 then
-                        line_content = line_content:sub(1, right_width - 11) .. "..."
+            if i == 1 and current_preview_file then
+                local first_ln = 1
+                for ln = 1, #current_preview_lines do
+                    if current_match_lines[ln] then first_ln = ln; break end
+                end
+                right_str = string.format("\27[1;34m📄 %s:%d\27[0m \27[90m(Scroll: %d/%d)\27[0m", get_filename(current_preview_file), first_ln, preview_scroll_offset + 1, #current_preview_lines)
+            elseif current_preview_file and #current_preview_lines > 0 then
+                local file_line_num = preview_scroll_offset + (i - 1)
+                if file_line_num <= #current_preview_lines then
+                    local line_content = current_preview_lines[file_line_num] or ""
+                    local is_hit = current_match_lines[file_line_num]
+
+                    if #line_content > right_width - 10 then
+                        line_content = line_content:sub(1, right_width - 13) .. "..."
                     end
-                    right_str = string.format("\27[90m%4d │\27[0m %s", line_num, line_content)
+
+                    -- Highlight token if match line
+                    if is_hit then
+                        for tok in query:gmatch("[%w_%-]+") do
+                            local pat = tok:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1")
+                            line_content = line_content:gsub("(" .. pat .. ")", "\27[1;33m%1\27[0m")
+                        end
+                        right_str = string.format("\27[1;33m> \27[90m%4d │\27[0m %s", file_line_num, line_content)
+                    else
+                        right_str = string.format("  \27[90m%4d │\27[0m %s", file_line_num, line_content)
+                    end
                 end
             end
 
-            -- Print row
-            local left_visible_len = res_item and math.min(left_width, #res_item.filepath + 4) or 0
-            local pad_spaces = math.max(0, left_width - left_visible_len)
+            -- Print Row
+            local left_vis_len = res_item and math.min(left_width, #res_item.filepath + 4) or 0
+            local pad_spaces = math.max(0, left_width - left_vis_len)
             io.write(string.format("%s%s \27[90m│\27[0m %s\n", left_str, string.rep(" ", pad_spaces), right_str))
         end
 
         -- Footer bar
         io.write(string.rep("─", cols) .. "\n")
-        io.write("\27[1;30;47m [Type] Search  [↑/↓] Navigate  [Enter] Select & Open  [Esc/Ctrl-C] Exit \27[0m")
+        local status_text = status_bar_msg
+        if not status_text or (os.clock() - status_bar_time > 3.0) then
+            status_text = "[Type] Search  [↑/↓] Results  [Tab] Toggle Pane  [PgUp/Dn] Scroll  [^R] Re-Index  [Enter] Open  [Esc] Quit"
+        end
+        io.write("\27[1;30;47m " .. status_text .. string.rep(" ", math.max(0, cols - #status_text - 2)) .. " \27[0m")
         io.flush()
 
         -- Read Key Input (POSIX)
@@ -955,37 +1054,91 @@ function TUI.run(db, initial_query)
                 elseif n >= 3 and buf[1] == 91 then -- Arrow keys '['
                     local c2 = buf[2]
                     if c2 == 65 then -- UP
-                        if selected_idx > 1 then selected_idx = selected_idx - 1 end
+                        if focus_pane == "preview" then
+                            preview_scroll_offset = math.max(0, preview_scroll_offset - 1)
+                        else
+                            if selected_idx > 1 then
+                                selected_idx = selected_idx - 1
+                                current_preview_file = nil
+                            end
+                        end
                     elseif c2 == 66 then -- DOWN
-                        if selected_idx < #results then selected_idx = selected_idx + 1 end
+                        if focus_pane == "preview" then
+                            if preview_scroll_offset + 1 < #current_preview_lines then
+                                preview_scroll_offset = preview_scroll_offset + 1
+                            end
+                        else
+                            if selected_idx < #results then
+                                selected_idx = selected_idx + 1
+                                current_preview_file = nil
+                            end
+                        end
+                    elseif c2 == 53 and n >= 4 and buf[3] == 126 then -- Page Up
+                        if focus_pane == "preview" then
+                            preview_scroll_offset = math.max(0, preview_scroll_offset - 10)
+                        else
+                            selected_idx = math.max(1, selected_idx - 10)
+                            current_preview_file = nil
+                        end
+                    elseif c2 == 54 and n >= 4 and buf[3] == 126 then -- Page Down
+                        if focus_pane == "preview" then
+                            preview_scroll_offset = math.min(#current_preview_lines, preview_scroll_offset + 10)
+                        else
+                            selected_idx = math.min(#results, selected_idx + 10)
+                            current_preview_file = nil
+                        end
                     end
                 end
             elseif c0 == 3 then -- Ctrl-C
                 running = false
+            elseif c0 == 9 then -- Tab: toggle pane focus
+                focus_pane = (focus_pane == "search") and "preview" or "search"
+                set_status("Active Pane: " .. focus_pane:upper())
+            elseif c0 == 18 then -- Ctrl-R: Re-Index repository from inside TUI!
+                set_status("⚡ Incremental re-indexing in progress...")
+                local stat_res = Indexer.run(db, ".", false)
+                set_status(string.format("✔ Re-indexed %d files (Total: %d)", stat_res.indexed, db:get_stats().total_files))
+                refresh_search()
             elseif c0 == 127 or c0 == 8 then -- Backspace
-                if #query > 0 then
+                if focus_pane == "search" and #query > 0 then
                     query = query:sub(1, -2)
                     selected_idx = 1
                     refresh_search()
                 end
-            elseif c0 == 10 or c0 == 13 then -- Enter
+            elseif c0 == 10 or c0 == 13 then -- Enter: Open in $EDITOR
                 if #results > 0 and results[selected_idx] then
                     restore_term()
                     local chosen = results[selected_idx].filepath
+                    local first_ln = 1
+                    for ln = 1, #current_preview_lines do
+                        if current_match_lines[ln] then first_ln = ln; break end
+                    end
                     local editor = os.getenv("EDITOR") or "vim"
-                    print("\nOpening " .. chosen .. " in " .. editor .. "...\n")
-                    os.execute(editor .. ' "' .. chosen .. '"')
-                    return
+                    local edit_cmd = string.format('%s +%d "%s"', editor, first_ln, chosen)
+                    print(string.format("\nOpening %s:%d with %s...\n", chosen, first_ln, editor))
+                    os.execute(edit_cmd)
+                    return true
                 end
             elseif c0 >= 32 and c0 <= 126 then
-                query = query .. string.char(c0)
-                selected_idx = 1
-                refresh_search()
+                if focus_pane == "preview" then
+                    if c0 == 106 then -- 'j' down
+                        if preview_scroll_offset + 1 < #current_preview_lines then
+                            preview_scroll_offset = preview_scroll_offset + 1
+                        end
+                    elseif c0 == 107 then -- 'k' up
+                        preview_scroll_offset = math.max(0, preview_scroll_offset - 1)
+                    end
+                else
+                    query = query .. string.char(c0)
+                    selected_idx = 1
+                    refresh_search()
+                end
             end
         end
     end
 
     restore_term()
+    return true
 end
 
 --------------------------------------------------------------------------------
@@ -1007,7 +1160,8 @@ Commands:
   clean                  Drop index database and vacuum
   --test                 Run built-in unit & integration test suite
 
-Options for 'search':
+Options:
+  --tui                  Launch interactive full-screen TUI (supports live search, scroll, open)
   --ext <extension>      Filter by file extension (e.g. --ext lua, --ext c)
   --limit <n>            Maximum results to return (default: 20)
   --db <path>            Custom database file path (default: .codefind.db)
@@ -1015,7 +1169,8 @@ Options for 'search':
 Examples:
   luajit codefind.lua index .
   luajit codefind.lua search "sqlite3_prepare"
-  luajit codefind.lua search "malloc" --ext c --limit 10
+  luajit codefind.lua search "strtok" --tui
+  luajit codefind.lua --tui
   luajit codefind.lua tui "metatype"
 ]])
 end
@@ -1105,16 +1260,18 @@ local function main(args)
 
     -- Parse global flags
     local db_path = ".codefind.db"
-    local command = args[1]
+    local command = nil
     local cmd_args = {}
-
-    local i = 2
+    local use_tui = false
     local ext_filter = nil
     local limit = 20
 
+    local i = 1
     while i <= #args do
         local a = args[i]
-        if a == "--db" and i + 1 <= #args then
+        if a == "--tui" then
+            use_tui = true
+        elseif a == "--db" and i + 1 <= #args then
             db_path = args[i + 1]
             i = i + 1
         elseif a == "--ext" and i + 1 <= #args then
@@ -1123,10 +1280,23 @@ local function main(args)
         elseif a == "--limit" and i + 1 <= #args then
             limit = tonumber(args[i + 1]) or 20
             i = i + 1
+        elseif not command then
+            command = a
         else
             table.insert(cmd_args, a)
         end
         i = i + 1
+    end
+
+    if not command and use_tui then
+        command = "tui"
+    elseif command == "--tui" then
+        command = "tui"
+    end
+
+    if not command then
+        print_help()
+        return
     end
 
     if command == "clean" then
@@ -1145,14 +1315,17 @@ local function main(args)
         Indexer.run(db, target_dir, true)
     elseif command == "search" then
         local query = table.concat(cmd_args, " ")
-        if #query == 0 then
-            print("Error: search query cannot be empty. Example: codefind search 'function'")
-            db:close()
-            os.exit(1)
-        end
+        if use_tui then
+            TUI.run(db, query)
+        else
+            if #query == 0 then
+                print("Error: search query cannot be empty. Example: codefind search 'function'")
+                db:close()
+                os.exit(1)
+            end
 
-        local t0 = os.clock()
-        local results, err = db:search(query, { extension = ext_filter, limit = limit })
+            local t0 = os.clock()
+            local results, err = db:search(query, { extension = ext_filter, limit = limit })
         local elapsed = (os.clock() - t0) * 1000
 
         if err then
@@ -1185,6 +1358,7 @@ local function main(args)
                     print(colored .. "\n")
                 end
             end
+        end
         end
     elseif command == "tui" then
         local query = table.concat(cmd_args, " ")

@@ -172,6 +172,14 @@ TestRunner.describe("5. CLI Invocation & Options", function()
 
         os.execute("rm -rf " .. tmpdir)
     end)
+
+    TestRunner.it("should accept --tui flag gracefully in non-interactive environment", function()
+        local ret_tui1 = os.execute("luajit codefind.lua --tui < /dev/null > /dev/null 2>&1")
+        assert_true(ret_tui1 == 0 or ret_tui1 == true, "--tui standalone failed")
+
+        local ret_tui2 = os.execute("luajit codefind.lua search 'fox' --tui < /dev/null > /dev/null 2>&1")
+        assert_true(ret_tui2 == 0 or ret_tui2 == true, "search --tui failed")
+    end)
 end)
 
 db:close()
