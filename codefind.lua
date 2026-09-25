@@ -1192,6 +1192,15 @@ function TUI.run(db, initial_query)
                     elseif c0 == 21 then -- Ctrl-U
                         table.insert(key_queue, "CTRL_U")
                         idx = idx + 1
+                    elseif c0 == 14 then -- Ctrl-N
+                        table.insert(key_queue, "CTRL_N")
+                        idx = idx + 1
+                    elseif c0 == 16 then -- Ctrl-P
+                        table.insert(key_queue, "CTRL_P")
+                        idx = idx + 1
+                    elseif c0 == 11 then -- Ctrl-K
+                        table.insert(key_queue, "CTRL_K")
+                        idx = idx + 1
                     elseif c0 == 4 then -- Ctrl-D
                         table.insert(key_queue, "CTRL_D")
                         idx = idx + 1
@@ -1232,6 +1241,7 @@ function TUI.run(db, initial_query)
     local current_match_lines = {}
     local current_match_list = {}
     local current_match_pos = 1
+    local current_preview_patterns = {}
     local needs_redraw = true
     local last_searched_query = nil
 
@@ -1283,6 +1293,10 @@ function TUI.run(db, initial_query)
             current_match_list = cached_match.match_list
             current_match_pos = 1
             preview_scroll_offset = cached_match.scroll_offset
+            current_preview_patterns = {}
+            for t in (query_str or ""):gmatch("[%w_%-]+") do
+                table.insert(current_preview_patterns, t:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1"))
+            end
             return
         end
 
@@ -1292,8 +1306,11 @@ function TUI.run(db, initial_query)
         preview_scroll_offset = 0
 
         local terms = {}
+        current_preview_patterns = {}
         for t in (query_str or ""):gmatch("[%w_%-]+") do
             table.insert(terms, t:lower())
+            local pat = t:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1")
+            table.insert(current_preview_patterns, pat)
         end
 
         if #terms > 0 then
@@ -1478,6 +1495,32 @@ function TUI.run(db, initial_query)
         end
     end
 
+    -- Filetype color icons
+    local function get_file_badge(path)
+        local ext = path:match("%.([%w_%-]+)$")
+        if not ext then return "\27[90m·\27[0m " end
+        ext = ext:lower()
+        if ext == "c" or ext == "cpp" or ext == "cc" or ext == "cxx" then
+            return "\27[1;34m[c]\27[0m "
+        elseif ext == "h" or ext == "hpp" or ext == "hh" then
+            return "\27[1;36m[h]\27[0m "
+        elseif ext == "lua" then
+            return "\27[1;35m[lua]\27[0m "
+        elseif ext == "py" then
+            return "\27[1;33m[py]\27[0m "
+        elseif ext == "js" or ext == "ts" or ext == "jsx" or ext == "tsx" then
+            return "\27[1;32m[js]\27[0m "
+        elseif ext == "md" or ext == "txt" or ext == "rst" then
+            return "\27[37m[txt]\27[0m "
+        elseif ext == "json" or ext == "yaml" or ext == "yml" or ext == "toml" then
+            return "\27[33m[cfg]\27[0m "
+        elseif ext == "sh" or ext == "bash" or ext == "zsh" then
+            return "\27[1;32m[sh]\27[0m "
+        else
+            return "\27[90m[" .. ext:sub(1, 3) .. "]\27[0m "
+        end
+    end
+
     -- Format a single file item in the left list
     local function format_left_item(item_idx, is_sel, list_thumb_pos, i)
         local res_item = results[item_idx]
@@ -1490,7 +1533,9 @@ function TUI.run(db, initial_query)
         if res_item then
             local marker = is_sel and "▶ " or "  "
             local full_path = res_item.filepath
-            local max_p_len = text_w - 4
+            local badge = get_file_badge(full_path)
+            local badge_w = visual_len(badge)
+            local max_p_len = text_w - 2 - badge_w
             local clean_path = full_path
             if visual_len(clean_path) > max_p_len and max_p_len > 8 then
                 -- Intelligent path shortening: keep filename and parent folder
@@ -1502,8 +1547,8 @@ function TUI.run(db, initial_query)
                     clean_path = truncate(full_path, max_p_len)
                 end
             end
-            local full_text = marker .. clean_path
-            local padded = pad_to(full_text, text_w)
+            local line_body = marker .. (is_sel and clean_path or (badge .. clean_path))
+            local padded = pad_to(line_body, text_w)
             if is_sel then
                 return "\27[1;30;43m" .. padded .. "\27[0m" .. left_sb
             else
@@ -1654,8 +1699,7 @@ function TUI.run(db, initial_query)
                     local line_pad = string.rep(" ", math.max(0, max_code_w - visual_len(code_str)))
 
                     if is_hit then
-                        for tok in query:gmatch("[%w_%-]+") do
-                            local pat = tok:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1")
+                        for _, pat in ipairs(current_preview_patterns) do
                             code_str = code_str:gsub("(" .. pat .. ")", "\27[1;33;4m%1\27[0;1;37m")
                         end
                         right_cell = string.format("\27[1;33m> \27[90m%4d │\27[1;37m %s%s\27[0m%s", file_line_num, code_str, line_pad, right_sb)
@@ -1680,7 +1724,7 @@ function TUI.run(db, initial_query)
         local status_text = status_bar_msg
         if not status_text or (os.clock() - status_bar_time > 3.0) then
             if vim_mode == "INSERT" then
-                status_text = " [INSERT] Type query  [Enter] Search / Open  [^U] Clear & Retype  [Esc] Normal Mode  [Tab] Pane"
+                status_text = " [INSERT] Type query  [Enter] Search / Open  [^N/^P] Nav  [^U] Clear  [Esc] Normal Mode  [Tab] Pane"
             else
                 status_text = " [NORMAL] Enter/o: Open in nvim  j/k: Nav  ^U/c: Clear & Type  i or /: Search  y: Yank  q: Quit"
             end
@@ -1720,7 +1764,7 @@ function TUI.run(db, initial_query)
                 else
                     running = false
                 end
-            elseif key == "UP" then
+            elseif key == "UP" or key == "CTRL_P" or (vim_mode == "INSERT" and key == "CTRL_K") then
                 if focus_pane == "preview" then
                     if preview_scroll_offset > 0 then
                         preview_scroll_offset = preview_scroll_offset - 1
@@ -1742,7 +1786,7 @@ function TUI.run(db, initial_query)
                         end
                     end
                 end
-            elseif key == "DOWN" then
+            elseif key == "DOWN" or key == "CTRL_N" then
                 if focus_pane == "preview" then
                     if preview_scroll_offset + 1 < #current_preview_lines then
                         preview_scroll_offset = preview_scroll_offset + 1
@@ -1938,7 +1982,11 @@ function TUI.run(db, initial_query)
                     set_status("Query cleared — type new search")
                     needs_redraw = true
                 end
-            elseif #key == 1 and vim_mode == "INSERT" then
+            elseif #key == 1 and (vim_mode == "INSERT" or (vim_mode == "NORMAL" and focus_pane == "search")) then
+                if vim_mode == "NORMAL" then
+                    vim_mode = "INSERT"
+                    focus_pane = "search"
+                end
                 query = query .. key
                 -- Drain any additional pending single-character keys from the queue
                 while #key_queue > 0 and #key_queue[1] == 1 do
