@@ -1293,10 +1293,7 @@ function TUI.run(db, initial_query)
             current_match_list = cached_match.match_list
             current_match_pos = 1
             preview_scroll_offset = cached_match.scroll_offset
-            current_preview_patterns = {}
-            for t in (query_str or ""):gmatch("[%w_%-]+") do
-                table.insert(current_preview_patterns, t:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1"))
-            end
+            current_preview_patterns = cached_match.patterns or {}
             return
         end
 
@@ -1337,7 +1334,8 @@ function TUI.run(db, initial_query)
         preview_match_cache[filepath][cache_key] = {
             match_lines = current_match_lines,
             match_list = current_match_list,
-            scroll_offset = preview_scroll_offset
+            scroll_offset = preview_scroll_offset,
+            patterns = current_preview_patterns
         }
     end
 
