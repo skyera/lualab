@@ -607,16 +607,54 @@ end
 -- 4. Fast Directory Walker & File Classifier
 --------------------------------------------------------------------------------
 local IGNORED_DIRS = {
+    -- VCS & IDE metadata
     [".git"] = true,
-    ["node_modules"] = true,
     [".svn"] = true,
     [".hg"] = true,
-    ["build"] = true,
-    ["dist"] = true,
-    ["target"] = true,
-    ["__pycache__"] = true,
+    [".vscode"] = true,
     [".idea"] = true,
-    [".vscode"] = true
+    [".settings"] = true,
+
+    -- Cache directories
+    ["__pycache__"] = true,
+    [".pytest_cache"] = true,
+    [".mypy_cache"] = true,
+    [".cache"] = true,
+
+    -- Build & Output directories
+    ["build"] = true,
+    ["_output"] = true,
+    ["dist"] = true,
+    ["out"] = true,
+    ["target"] = true,
+    ["Debug"] = true,
+    ["debug"] = true,
+    ["Release"] = true,
+    ["release"] = true,
+    ["cudafe1"] = true,
+
+    -- Package managers & virtual environments
+    ["node_modules"] = true,
+    ["webapp"] = true,
+    ["virtualenv"] = true,
+    ["venv"] = true,
+    [".venv"] = true,
+    ["env"] = true,
+    ["Anaconda"] = true,
+    ["anaconda"] = true,
+
+    -- Third-party & vendor libraries (as in dotag.py)
+    ["3rdParty"] = true,
+    ["ThirdParty"] = true,
+    ["third_party"] = true,
+    ["3rdparty"] = true,
+    ["boost"] = true,
+    ["Omni"] = true,
+    ["Generated"] = true,
+    ["jazz"] = true,
+    ["PythonStandardLibrary"] = true,
+    ["OpenThreads"] = true,
+    ["OpenCV"] = true
 }
 
 local BINARY_EXTENSIONS = {
@@ -629,12 +667,14 @@ local BINARY_EXTENSIONS = {
 
 -- Comprehensive allowlist of source code and configuration extensions
 local SOURCE_EXTENSIONS = {
-    -- C / C++ / Assembly
+    -- C / C++ / CUDA / Assembly
     ["c"] = true, ["h"] = true, ["cpp"] = true, ["hpp"] = true, ["cc"] = true, ["hh"] = true,
     ["cxx"] = true, ["hxx"] = true, ["inl"] = true, ["inc"] = true, ["asm"] = true, ["s"] = true,
+    ["cu"] = true, ["cuh"] = true, ["idl"] = true, ["rc"] = true, ["mc"] = true, ["sdl"] = true,
     -- Scripting & Dynamic languages
     ["lua"] = true, ["luau"] = true, ["py"] = true, ["pyw"] = true, ["rb"] = true, ["php"] = true,
     ["pl"] = true, ["pm"] = true, ["tcl"] = true, ["awk"] = true, ["sed"] = true,
+    ["bat"] = true, ["cmd"] = true,
     -- Systems & Compiled languages
     ["rs"] = true, ["go"] = true, ["zig"] = true, ["d"] = true, ["nim"] = true, ["v"] = true,
     ["odin"] = true, ["f"] = true, ["f90"] = true, ["f95"] = true, ["ada"] = true,

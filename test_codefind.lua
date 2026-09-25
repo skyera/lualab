@@ -202,6 +202,42 @@ TestRunner.describe("4. Incremental Updates and Deletion", function()
         s_db:close()
         os.execute("rm -rf " .. tmpdir)
     end)
+
+    TestRunner.it("should ignore directories specified in dotag.py (e.g., venv, boost, OpenCV)", function()
+        local tmpdir = "/tmp/_test_cf_dotag_ignore_" .. os.time()
+        os.execute("mkdir -p " .. tmpdir .. "/src " .. tmpdir .. "/venv " .. tmpdir .. "/boost " .. tmpdir .. "/__pycache__")
+        local f_src = io.open(tmpdir .. "/src/kernel.cu", "w")
+        f_src:write("__global__ void saxpy() {}\n")
+        f_src:close()
+
+        local f_venv = io.open(tmpdir .. "/venv/activate.py", "w")
+        f_venv:write("# virtualenv file\n")
+        f_venv:close()
+
+        local f_boost = io.open(tmpdir .. "/boost/asio.hpp", "w")
+        f_boost:write("// boost header\n")
+        f_boost:close()
+
+        local f_pyc = io.open(tmpdir .. "/__pycache__/cache.py", "w")
+        f_pyc:write("# pycache\n")
+        f_pyc:close()
+
+        local test_db = tmpdir .. "/dotag_test.db"
+        local d_db = codefind.Database.open(test_db)
+        local res = codefind.Indexer.run(d_db, tmpdir, false, false)
+
+        -- Only kernel.cu in src/ should be indexed; venv, boost, __pycache__ are ignored
+        assert_eq(res.indexed, 1, "Only src/kernel.cu should be indexed; excluded dirs ignored")
+        local res_cu = d_db:search("saxpy")
+        assert_eq(#res_cu, 1, "kernel.cu (.cu extension) should be indexed and searchable")
+        local res_boost = d_db:search("asio")
+        assert_eq(#res_boost, 0, "boost/asio.hpp should be excluded")
+        local res_venv = d_db:search("virtualenv")
+        assert_eq(#res_venv, 0, "venv/activate.py should be excluded")
+
+        d_db:close()
+        os.execute("rm -rf " .. tmpdir)
+    end)
 end)
 
 TestRunner.describe("5. CLI Invocation & Options", function()
