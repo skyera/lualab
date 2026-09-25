@@ -699,12 +699,110 @@ end
 --------------------------------------------------------------------------------
 -- 6. Highlighting & Terminal Formatting
 --------------------------------------------------------------------------------
+local function colorize_text_matches(line, query_tokens)
+    -- Highlight matched tokens within the line
+    local highlighted = line
+    for _, token in ipairs(query_tokens) do
+        if #token > 0 then
+            -- Case-insensitive match replace
+            local pat = token:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1")
+            highlighted = highlighted:gsub("(?i)" .. pat, function(m)
+                return "\27[1;33m" .. m .. "\27[0m"
+            end)
+        end
+    end
+    return highlighted
+end
+
+local function extract_file_matches(filepath, query_tokens, max_matches_per_file)
+    max_matches_per_file = max_matches_per_file or 3
+    local f = io.open(filepath, "r")
+    if not f then return nil end
+
+    local lines = {}
+    for l in f:lines() do
+        table.insert(lines, l)
+    end
+    f:close()
+
+    local matching_line_indices = {}
+    local lower_tokens = {}
+    for _, tok in ipairs(query_tokens) do
+        if #tok > 0 then table.insert(lower_tokens, tok:lower()) end
+    end
+
+    for idx, line in ipairs(lines) do
+        local l_lower = line:lower()
+        local matched = false
+        for _, tok in ipairs(lower_tokens) do
+            if l_lower:find(tok, 1, true) then
+                matched = true
+                break
+            end
+        end
+        if matched then
+            table.insert(matching_line_indices, idx)
+            if #matching_line_indices >= max_matches_per_file then
+                break
+            end
+        end
+    end
+
+    if #matching_line_indices == 0 then
+        return nil
+    end
+
+    -- Build formatted match blocks with 1 line of context before and after
+    local blocks = {}
+    local covered = {}
+
+    for _, match_ln in ipairs(matching_line_indices) do
+        local start_ln = math.max(1, match_ln - 1)
+        local end_ln = math.min(#lines, match_ln + 1)
+
+        local block_lines = {}
+        for ln = start_ln, end_ln do
+            if not covered[ln] then
+                covered[ln] = true
+                local is_hit = (ln == match_ln)
+                local content = lines[ln]
+                
+                -- Highlight query tokens on the hit line
+                if is_hit then
+                    for _, tok in ipairs(lower_tokens) do
+                        local pat = tok:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1")
+                        -- Case-insensitive replacement in pure Lua
+                        content = content:gsub("(" .. pat .. ")", "\27[1;33m%1\27[0m")
+                    end
+                end
+
+                local marker = is_hit and "\27[1;33m>\27[0m" or " "
+                local line_str = string.format("   %s \27[90m%4d │\27[0m %s", marker, ln, content)
+                table.insert(block_lines, line_str)
+            end
+        end
+        if #block_lines > 0 then
+            table.insert(blocks, table.concat(block_lines, "\n"))
+        end
+    end
+
+    return {
+        first_line = matching_line_indices[1],
+        total_hits = #matching_line_indices,
+        formatted = table.concat(blocks, "\n   \27[90m     ···\27[0m\n")
+    }
+end
+
 local function colorize_snippet(snip)
     -- Format: replace [[HL]] with ANSI yellow bold, [[/HL]] with reset
     local res = snip:gsub("%[%[HL%]%]", "\27[1;33m"):gsub("%[%[/HL%]%]", "\27[0m")
-    -- Replace newlines with formatted line continuations
-    res = res:gsub("[\r\n]+", " ")
-    return res
+    -- Format newlines with clean indentation
+    res = res:gsub("\r\n", "\n"):gsub("\r", "\n")
+    local lines = {}
+    for line in res:gmatch("[^\n]+") do
+        table.insert(lines, "      \27[90m│\27[0m " .. line)
+    end
+    return table.concat(lines, "\n")
 end
 
 local function format_bytes(bytes)
@@ -1066,11 +1164,26 @@ local function main(args)
         if #results == 0 then
             print(string.format("\27[90mNo matches found for '%s' (%.1fms)\27[0m", query, elapsed))
         else
-            print(string.format("\27[1;36m🔍 Results for '%s' (%d matches in %.2fms):\27[0m\n", query, #results, elapsed))
+            print(string.format("\27[1;36m🔍 Results for '%s' (%d matching files in %.2fms):\27[0m\n", query, #results, elapsed))
+            
+            -- Extract query search terms for token highlighting
+            local terms = {}
+            for t in query:gmatch("[%w_%-]+") do
+                table.insert(terms, t)
+            end
+
             for idx, res in ipairs(results) do
-                local colored = colorize_snippet(res.snippet)
-                print(string.format("  \27[1;32m%2d.\27[0m \27[1;37m%s\27[0m \27[90m(score: %.2f)\27[0m", idx, res.filepath, res.rank))
-                print(string.format("      %s\n", colored))
+                local ctx = extract_file_matches(res.filepath, terms, 3)
+                if ctx then
+                    local loc_str = string.format("%s:%d", res.filepath, ctx.first_line)
+                    print(string.format("  \27[1;34m📄 %s\27[0m  \27[90m(score: %.2f)\27[0m", loc_str, res.rank))
+                    print(ctx.formatted .. "\n")
+                else
+                    -- Fallback to FTS5 snippet if file couldn't be read directly
+                    local colored = colorize_snippet(res.snippet)
+                    print(string.format("  \27[1;34m📄 %s\27[0m  \27[90m(score: %.2f)\27[0m", res.filepath, res.rank))
+                    print(colored .. "\n")
+                end
             end
         end
     elseif command == "tui" then
