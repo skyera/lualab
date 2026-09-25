@@ -934,6 +934,9 @@ function TUI.run(db, initial_query)
                     elseif c0 == 21 then -- Ctrl-U
                         table.insert(key_queue, "CTRL_U")
                         idx = idx + 1
+                    elseif c0 == 4 then -- Ctrl-D
+                        table.insert(key_queue, "CTRL_D")
+                        idx = idx + 1
                     elseif c0 == 18 then -- Ctrl-R
                         table.insert(key_queue, "CTRL_R")
                         idx = idx + 1
@@ -960,6 +963,7 @@ function TUI.run(db, initial_query)
     local list_scroll_offset = 0
     local preview_scroll_offset = 0
     local focus_pane = "search" -- "search" | "preview"
+    local vim_mode = "INSERT" -- "INSERT" | "NORMAL"
     local results = {}
     local error_msg = nil
     local status_bar_msg = nil
@@ -1160,11 +1164,13 @@ function TUI.run(db, initial_query)
             else
                 right_head_title = " 📄 Preview: (No file selected)"
             end
-            local focus_badge = (focus_pane == "preview") and "\27[1;32m[PREVIEW ACTIVE]\27[0m" or "\27[1;36m[SEARCH ACTIVE]\27[0m"
-            local fbadge_w = visual_len(focus_badge)
+            local mode_badge = (vim_mode == "INSERT") and "\27[1;36m[INSERT]\27[0m" or "\27[1;33m[NORMAL]\27[0m"
+            local pane_badge = (focus_pane == "preview") and "\27[1;32m[PREVIEW]\27[0m" or "\27[1;34m[RESULTS]\27[0m"
+            local badges = pane_badge .. " " .. mode_badge
+            local fbadge_w = visual_len(badges)
             local right_head = ""
             if right_col_w > fbadge_w + 4 then
-                right_head = pad_to(right_head_title, right_col_w - fbadge_w) .. focus_badge
+                right_head = pad_to(right_head_title, right_col_w - fbadge_w) .. badges
             else
                 right_head = pad_to(right_head_title, right_col_w)
             end
@@ -1247,7 +1253,11 @@ function TUI.run(db, initial_query)
             -- Row Footer / Keybindings
             local status_text = status_bar_msg
             if not status_text or (os.clock() - status_bar_time > 3.0) then
-                status_text = " [Type] Search  [↑/↓] Results  [Tab] Focus  [PgUp/Dn] Scroll  [^U] Clear  [^R] Reindex  [Enter] Open  [Esc] Quit"
+                if vim_mode == "INSERT" then
+                    status_text = " [INSERT] Type: Search  [Esc] Normal Mode  [Enter/o] Open  [↑/↓] Results  [^U] Clear  [^R] Reindex"
+                else
+                    status_text = " [NORMAL] j/k: Nav  h/l: Pane  i or /: Search  ^D/^U: Page  g/G: Top/End  Enter/o: Open  q: Quit"
+                end
             else
                 status_text = " " .. status_text
             end
@@ -1267,8 +1277,15 @@ function TUI.run(db, initial_query)
         -- Read input via non-blocking poll
         local key = read_key(40)
         if key then
-            if key == "ESC" or key == "CTRL_C" then
+            if key == "CTRL_C" then
                 running = false
+            elseif key == "ESC" then
+                if vim_mode == "INSERT" then
+                    vim_mode = "NORMAL"
+                    set_status("NORMAL mode")
+                else
+                    running = false
+                end
             elseif key == "UP" then
                 if focus_pane == "preview" then
                     if preview_scroll_offset > 0 then
@@ -1293,14 +1310,14 @@ function TUI.run(db, initial_query)
                         needs_redraw = true
                     end
                 end
-            elseif key == "PAGE_UP" then
+            elseif key == "PAGE_UP" or (vim_mode == "NORMAL" and key == "CTRL_U") then
                 if focus_pane == "preview" then
                     preview_scroll_offset = math.max(0, preview_scroll_offset - 10)
                 else
                     selected_idx = math.max(1, selected_idx - 10)
                 end
                 needs_redraw = true
-            elseif key == "PAGE_DOWN" then
+            elseif key == "PAGE_DOWN" or (vim_mode == "NORMAL" and key == "CTRL_D") then
                 if focus_pane == "preview" then
                     preview_scroll_offset = math.min(#current_preview_lines, preview_scroll_offset + 10)
                 else
@@ -1310,7 +1327,7 @@ function TUI.run(db, initial_query)
             elseif key == "TAB" then
                 focus_pane = (focus_pane == "search") and "preview" or "search"
                 set_status("Active Pane: " .. focus_pane:upper())
-            elseif key == "CTRL_U" then
+            elseif key == "CTRL_U" and vim_mode == "INSERT" then
                 query = ""
                 selected_idx = 1
                 refresh_search()
@@ -1321,12 +1338,12 @@ function TUI.run(db, initial_query)
                 set_status(string.format("✔ Re-indexed %d files (Total: %d)", stat_res.indexed, db:get_stats().total_files))
                 refresh_search()
             elseif key == "BACKSPACE" then
-                if focus_pane == "search" and #query > 0 then
+                if vim_mode == "INSERT" and #query > 0 then
                     query = query:sub(1, -2)
                     selected_idx = 1
                     refresh_search()
                 end
-            elseif key == "ENTER" then
+            elseif key == "ENTER" or (vim_mode == "NORMAL" and key == "o") then
                 if #results > 0 and results[selected_idx] then
                     disable_raw()
                     local chosen = results[selected_idx].filepath
@@ -1340,28 +1357,72 @@ function TUI.run(db, initial_query)
                     os.execute(edit_cmd)
                     return true
                 end
-            elseif #key == 1 then
-                if focus_pane == "preview" then
-                    if key == "j" then
+            elseif vim_mode == "NORMAL" then
+                if key == "i" or key == "/" then
+                    vim_mode = "INSERT"
+                    focus_pane = "search"
+                    set_status("INSERT mode")
+                elseif key == "j" then
+                    if focus_pane == "preview" then
                         if preview_scroll_offset + 1 < #current_preview_lines then
                             preview_scroll_offset = preview_scroll_offset + 1
                             needs_redraw = true
                         end
-                    elseif key == "k" then
+                    else
+                        if selected_idx < #results then
+                            selected_idx = selected_idx + 1
+                            needs_redraw = true
+                        end
+                    end
+                elseif key == "k" then
+                    if focus_pane == "preview" then
                         if preview_scroll_offset > 0 then
                             preview_scroll_offset = preview_scroll_offset - 1
                             needs_redraw = true
                         end
+                    else
+                        if selected_idx > 1 then
+                            selected_idx = selected_idx - 1
+                            needs_redraw = true
+                        end
                     end
-                else
-                    query = query .. key
-                    -- Drain any additional pending single-character keys from the queue
-                    while #key_queue > 0 and #key_queue[1] == 1 do
-                        query = query .. table.remove(key_queue, 1)
+                elseif key == "h" then
+                    focus_pane = "search"
+                    needs_redraw = true
+                elseif key == "l" then
+                    focus_pane = "preview"
+                    needs_redraw = true
+                elseif key == "g" then
+                    if focus_pane == "preview" then
+                        preview_scroll_offset = 0
+                    else
+                        selected_idx = 1
                     end
+                    needs_redraw = true
+                elseif key == "G" then
+                    if focus_pane == "preview" then
+                        preview_scroll_offset = math.max(0, #current_preview_lines - 5)
+                    else
+                        selected_idx = math.max(1, #results)
+                    end
+                    needs_redraw = true
+                elseif key == "q" then
+                    running = false
+                elseif key == "c" then
+                    query = ""
                     selected_idx = 1
+                    vim_mode = "INSERT"
+                    focus_pane = "search"
                     refresh_search()
                 end
+            elseif #key == 1 and vim_mode == "INSERT" then
+                query = query .. key
+                -- Drain any additional pending single-character keys from the queue
+                while #key_queue > 0 and #key_queue[1] == 1 do
+                    query = query .. table.remove(key_queue, 1)
+                end
+                selected_idx = 1
+                refresh_search()
             end
         else
             -- Check if status bar message timed out
