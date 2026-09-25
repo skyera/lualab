@@ -1680,9 +1680,9 @@ function TUI.run(db, initial_query)
         local status_text = status_bar_msg
         if not status_text or (os.clock() - status_bar_time > 3.0) then
             if vim_mode == "INSERT" then
-                status_text = " [INSERT] Type query  [Enter] Search / Open  [Esc] Normal Mode  [Tab] Switch Pane  [^U] Clear"
+                status_text = " [INSERT] Type query  [Enter] Search / Open  [^U] Clear & Retype  [Esc] Normal Mode  [Tab] Pane"
             else
-                status_text = " [NORMAL] Enter/o: Open in nvim  j/k: Nav  i or /: Search  n/N: Match  y: Yank  q: Quit"
+                status_text = " [NORMAL] Enter/o: Open in nvim  j/k: Nav  ^U/c: Clear & Type  i or /: Search  y: Yank  q: Quit"
             end
         else
             status_text = " " .. status_text
@@ -1764,7 +1764,7 @@ function TUI.run(db, initial_query)
                         end
                     end
                 end
-            elseif key == "PAGE_UP" or (vim_mode == "NORMAL" and key == "CTRL_U") then
+            elseif key == "PAGE_UP" or (vim_mode == "NORMAL" and focus_pane == "preview" and key == "CTRL_U") then
                 if focus_pane == "preview" then
                     preview_scroll_offset = math.max(0, preview_scroll_offset - 10)
                 else
@@ -1783,11 +1783,14 @@ function TUI.run(db, initial_query)
             elseif key == "TAB" then
                 focus_pane = (focus_pane == "search") and "preview" or "search"
                 set_status("Active Pane: " .. focus_pane:upper())
-            elseif key == "CTRL_U" and vim_mode == "INSERT" then
+            elseif key == "CTRL_U" then
                 query = ""
                 selected_idx = 1
+                vim_mode = "INSERT"
+                focus_pane = "search"
                 render_query_prompt_instant()
-                set_status("Query cleared")
+                set_status("Query cleared — type new search")
+                needs_redraw = true
             elseif key == "CTRL_R" then
                 set_status("⚡ Incremental re-indexing in progress...")
                 local stat_res = Indexer.run(db, ".", false)
@@ -1932,6 +1935,8 @@ function TUI.run(db, initial_query)
                     vim_mode = "INSERT"
                     focus_pane = "search"
                     render_query_prompt_instant()
+                    set_status("Query cleared — type new search")
+                    needs_redraw = true
                 end
             elseif #key == 1 and vim_mode == "INSERT" then
                 query = query .. key
