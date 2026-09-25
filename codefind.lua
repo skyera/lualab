@@ -1,0 +1,1106 @@
+#!/usr/bin/env luajit
+--------------------------------------------------------------------------------
+-- codefind.lua
+-- High-Performance Local Code & Document Search Engine
+-- Built with pure LuaJIT FFI and SQLite FTS5 (Zero external dependencies)
+--------------------------------------------------------------------------------
+
+local ffi = require("ffi")
+local bit = require("bit")
+
+local is_windows = (ffi.os == "Windows")
+
+--------------------------------------------------------------------------------
+-- 1. C Declarations: SQLite3 & POSIX / Win32 OS APIs
+--------------------------------------------------------------------------------
+ffi.cdef[[
+    // --- SQLite3 Bindings ---
+    typedef struct sqlite3 sqlite3;
+    typedef struct sqlite3_stmt sqlite3_stmt;
+
+    int sqlite3_open(const char *filename, sqlite3 **ppDb);
+    int sqlite3_close(sqlite3 *db);
+    const char *sqlite3_errmsg(sqlite3 *db);
+
+    int sqlite3_exec(sqlite3 *db, const char *sql,
+                     int (*callback)(void*, int, char**, char**),
+                     void *arg, char **errmsg);
+    void sqlite3_free(void *ptr);
+
+    int sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nByte,
+                           sqlite3_stmt **ppStmt, const char **pzTail);
+    int sqlite3_step(sqlite3_stmt *pStmt);
+    int sqlite3_finalize(sqlite3_stmt *pStmt);
+    int sqlite3_reset(sqlite3_stmt *pStmt);
+
+    int sqlite3_bind_int(sqlite3_stmt *pStmt, int idx, int val);
+    int sqlite3_bind_int64(sqlite3_stmt *pStmt, int idx, int64_t val);
+    int sqlite3_bind_double(sqlite3_stmt *pStmt, int idx, double val);
+    int sqlite3_bind_text(sqlite3_stmt *pStmt, int idx, const char *val, int len, void(*destructor)(void*));
+
+    int sqlite3_column_count(sqlite3_stmt *pStmt);
+    int sqlite3_column_type(sqlite3_stmt *pStmt, int iCol);
+    const char *sqlite3_column_name(sqlite3_stmt *pStmt, int iCol);
+    int sqlite3_column_int(sqlite3_stmt *pStmt, int iCol);
+    int64_t sqlite3_column_int64(sqlite3_stmt *pStmt, int iCol);
+    double sqlite3_column_double(sqlite3_stmt *pStmt, int iCol);
+    const unsigned char *sqlite3_column_text(sqlite3_stmt *pStmt, int iCol);
+    int sqlite3_column_bytes(sqlite3_stmt *pStmt, int iCol);
+]]
+
+if is_windows then
+    ffi.cdef[[
+        typedef void *HANDLE;
+        typedef struct _COORD { short X; short Y; } COORD;
+        typedef struct _SMALL_RECT { short Left; short Top; short Right; short Bottom; } SMALL_RECT;
+        typedef struct _CONSOLE_SCREEN_BUFFER_INFO {
+            COORD      dwSize;
+            COORD      dwCursorPosition;
+            uint16_t   wAttributes;
+            SMALL_RECT srWindow;
+            COORD      dwMaximumWindowSize;
+        } CONSOLE_SCREEN_BUFFER_INFO;
+
+        HANDLE GetStdHandle(uint32_t nStdHandle);
+        int GetConsoleScreenBufferInfo(HANDLE hConsoleOutput, CONSOLE_SCREEN_BUFFER_INFO *lpConsoleScreenBufferInfo);
+        int GetConsoleMode(HANDLE hConsoleHandle, uint32_t *lpMode);
+        int SetConsoleMode(HANDLE hConsoleHandle, uint32_t dwMode);
+        int SetConsoleOutputCP(uint32_t wCodePageID);
+        void Sleep(uint32_t dwMilliseconds);
+        int _kbhit(void);
+        int _getch(void);
+
+        typedef struct _FILETIME { uint32_t dwLowDateTime; uint32_t dwHighDateTime; } FILETIME;
+        typedef struct _WIN32_FIND_DATAA {
+            uint32_t dwFileAttributes;
+            FILETIME ftCreationTime;
+            FILETIME ftLastAccessTime;
+            FILETIME ftLastWriteTime;
+            uint32_t nFileSizeHigh;
+            uint32_t nFileSizeLow;
+            uint32_t dwReserved0;
+            uint32_t dwReserved1;
+            char     cFileName[260];
+            char     cAlternateFileName[14];
+        } WIN32_FIND_DATAA;
+
+        void* FindFirstFileA(const char* lpFileName, WIN32_FIND_DATAA* lpFindFileData);
+        int   FindNextFileA(void* hFindFile, WIN32_FIND_DATAA* lpFindFileData);
+        int   FindClose(void* hFindFile);
+        char* _fullpath(char *absPath, const char *relPath, size_t maxLength);
+    ]]
+else
+    ffi.cdef[[
+        struct winsize {
+            unsigned short ws_row;
+            unsigned short ws_col;
+            unsigned short ws_xpixel;
+            unsigned short ws_ypixel;
+        };
+        int ioctl(int fd, unsigned long request, void *argp);
+        int isatty(int fd);
+
+        typedef unsigned char cc_t;
+        typedef unsigned int  speed_t;
+        typedef unsigned int  tcflag_t;
+
+        struct termios {
+            tcflag_t c_iflag;
+            tcflag_t c_oflag;
+            tcflag_t c_cflag;
+            tcflag_t c_lflag;
+            cc_t     c_line;
+            cc_t     c_cc[32];
+            speed_t  c_ispeed;
+            speed_t  c_ospeed;
+        };
+
+        int tcgetattr(int fd, struct termios *termios_p);
+        int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
+
+        struct pollfd {
+            int   fd;
+            short events;
+            short revents;
+        };
+        int poll(struct pollfd *fds, unsigned long nfds, int timeout);
+        long read(int fd, void *buf, size_t count);
+
+        typedef struct DIR DIR;
+        struct dirent {
+            unsigned long  d_ino;
+            long           d_off;
+            unsigned short d_reclen;
+            unsigned char  d_type;
+            char           d_name[256];
+        };
+        DIR *opendir(const char *name);
+        struct dirent *readdir(DIR *dirp);
+        int closedir(DIR *dirp);
+
+        typedef long time_t;
+        struct stat {
+            unsigned long  st_dev;
+            unsigned long  st_ino;
+            unsigned long  st_nlink;
+            unsigned int   st_mode;
+            unsigned int   st_uid;
+            unsigned int   st_gid;
+            unsigned int   __pad0;
+            unsigned long  st_rdev;
+            long           st_size;
+            long           st_blksize;
+            long           st_blocks;
+            time_t         st_atime;
+            unsigned long  st_atime_nsec;
+            time_t         st_mtime;
+            unsigned long  st_mtime_nsec;
+            time_t         st_ctime;
+            unsigned long  st_ctime_nsec;
+            long           __unused[3];
+        };
+        int stat(const char *pathname, struct stat *statbuf);
+        int __xstat(int ver, const char *pathname, struct stat *statbuf);
+        char *realpath(const char *path, char *resolved_path);
+    ]]
+end
+
+--------------------------------------------------------------------------------
+-- 2. Library Loaders & OS Primitives
+--------------------------------------------------------------------------------
+local function load_sqlite_lib()
+    local candidates = { "sqlite3", "libsqlite3.so.0", "libsqlite3.so", "sqlite3.dll", "libsqlite3.dylib" }
+    for _, name in ipairs(candidates) do
+        local ok, lib = pcall(ffi.load, name)
+        if ok and lib then return lib end
+    end
+    error("Could not load SQLite3 shared library. Ensure libsqlite3 is installed.")
+end
+
+local sqlite = load_sqlite_lib()
+
+local SQLITE_OK   = 0
+local SQLITE_ROW  = 100
+local SQLITE_DONE = 101
+local SQLITE_TRANSIENT = ffi.cast("void(*)(void*)", -1)
+
+-- Terminal & File Stat helpers
+local posix_stat = nil
+if not is_windows then
+    if pcall(function() return ffi.C.stat end) then
+        posix_stat = function(p, st) return ffi.C.stat(p, st) end
+    elseif pcall(function() return ffi.C.__xstat end) then
+        posix_stat = function(p, st)
+            local res = ffi.C.__xstat(3, p, st)
+            if res ~= 0 then res = ffi.C.__xstat(1, p, st) end
+            return res
+        end
+    else
+        posix_stat = function(p, st) return -1 end
+    end
+end
+
+local function get_file_metadata(path)
+    if is_windows then
+        local f = io.open(path, "rb")
+        if not f then return nil end
+        local sz = f:seek("end")
+        f:close()
+        return { size = sz or 0, mtime = 0, is_dir = false }
+    else
+        local st = ffi.new("struct stat")
+        if posix_stat(path, st) == 0 then
+            local is_dir = bit.band(st.st_mode, 0xF000) == 0x4000
+            local is_reg = bit.band(st.st_mode, 0xF000) == 0x8000
+            return {
+                size = tonumber(st.st_size),
+                mtime = tonumber(st.st_mtime),
+                is_dir = is_dir,
+                is_reg = is_reg
+            }
+        end
+    end
+    return nil
+end
+
+local function is_binary_buffer(data)
+    local sample_len = math.min(#data, 4096)
+    local null_count = 0
+    for i = 1, sample_len do
+        local b = data:byte(i)
+        if b == 0 then
+            null_count = null_count + 1
+            if null_count > 1 then return true end
+        end
+    end
+    return false
+end
+
+--------------------------------------------------------------------------------
+-- 3. Database Engine & SQLite Wrapper
+--------------------------------------------------------------------------------
+local Database = {}
+Database.__index = Database
+
+function Database.open(db_path)
+    local self = setmetatable({}, Database)
+    self.path = db_path or ".codefind.db"
+    local db_p = ffi.new("sqlite3*[1]")
+    local rc = sqlite.sqlite3_open(self.path, db_p)
+    if rc ~= SQLITE_OK then
+        local err = db_p[0] ~= nil and ffi.string(sqlite.sqlite3_errmsg(db_p[0])) or "Unknown error"
+        error("Failed to open database: " .. err)
+    end
+    self.db = db_p[0]
+    self:init_schema()
+    return self
+end
+
+function Database:close()
+    if self.db then
+        sqlite.sqlite3_close(self.db)
+        self.db = nil
+    end
+end
+
+function Database:exec(sql)
+    local err_p = ffi.new("char*[1]")
+    local rc = sqlite.sqlite3_exec(self.db, sql, nil, nil, err_p)
+    if rc ~= SQLITE_OK then
+        local err = err_p[0] ~= nil and ffi.string(err_p[0]) or ffi.string(sqlite.sqlite3_errmsg(self.db))
+        if err_p[0] ~= nil then sqlite.sqlite3_free(err_p[0]) end
+        return false, err
+    end
+    return true
+end
+
+function Database:init_schema()
+    -- Fast journaling & caching
+    self:exec("PRAGMA synchronous = NORMAL;")
+    self:exec("PRAGMA journal_mode = WAL;")
+
+    -- Metadata table
+    local sql_files = [[
+        CREATE TABLE IF NOT EXISTS files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            filepath TEXT UNIQUE NOT NULL,
+            filename TEXT NOT NULL,
+            extension TEXT,
+            size INTEGER NOT NULL,
+            mtime INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_files_path ON files(filepath);
+    ]]
+    local ok, err = self:exec(sql_files)
+    if not ok then error("Error creating files table: " .. err) end
+
+    -- Full-Text Search 5 virtual table (unicode61 tokenchars to match symbols like _, .)
+    local sql_fts = [[
+        CREATE VIRTUAL TABLE IF NOT EXISTS code_idx USING fts5(
+            filepath UNINDEXED,
+            filename,
+            content,
+            tokenize = "unicode61 tokenchars '._'"
+        );
+    ]]
+    local ok_fts, err_fts = self:exec(sql_fts)
+    if not ok_fts then
+        -- Fallback to default tokenizer if custom tokenchars syntax not supported by older sqlite
+        local sql_fts_fallback = "CREATE VIRTUAL TABLE IF NOT EXISTS code_idx USING fts5(filepath UNINDEXED, filename, content);"
+        local ok_fb, err_fb = self:exec(sql_fts_fallback)
+        if not ok_fb then error("Failed to create FTS5 index: " .. err_fb) end
+    end
+end
+
+function Database:begin()
+    return self:exec("BEGIN TRANSACTION;")
+end
+
+function Database:commit()
+    return self:exec("COMMIT;")
+end
+
+function Database:rollback()
+    return self:exec("ROLLBACK;")
+end
+
+function Database:get_file_info(filepath)
+    local stmt_p = ffi.new("sqlite3_stmt*[1]")
+    local sql = "SELECT id, size, mtime FROM files WHERE filepath = ? LIMIT 1;"
+    if sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_p, nil) ~= SQLITE_OK then
+        return nil
+    end
+    local stmt = stmt_p[0]
+    sqlite.sqlite3_bind_text(stmt, 1, filepath, #filepath, SQLITE_TRANSIENT)
+    local res = nil
+    if sqlite.sqlite3_step(stmt) == SQLITE_ROW then
+        res = {
+            id = tonumber(sqlite.sqlite3_column_int64(stmt, 0)),
+            size = tonumber(sqlite.sqlite3_column_int64(stmt, 1)),
+            mtime = tonumber(sqlite.sqlite3_column_int64(stmt, 2)),
+        }
+    end
+    sqlite.sqlite3_finalize(stmt)
+    return res
+end
+
+function Database:index_file(filepath, filename, ext, size, mtime, content)
+    local stmt_p = ffi.new("sqlite3_stmt*[1]")
+    
+    -- 1. Remove previous FTS and file entry if updating
+    local sql_del_fts = "DELETE FROM code_idx WHERE filepath = ?;"
+    if sqlite.sqlite3_prepare_v2(self.db, sql_del_fts, #sql_del_fts, stmt_p, nil) == SQLITE_OK then
+        sqlite.sqlite3_bind_text(stmt_p[0], 1, filepath, #filepath, SQLITE_TRANSIENT)
+        sqlite.sqlite3_step(stmt_p[0])
+        sqlite.sqlite3_finalize(stmt_p[0])
+    end
+
+    local sql_del_files = "DELETE FROM files WHERE filepath = ?;"
+    if sqlite.sqlite3_prepare_v2(self.db, sql_del_files, #sql_del_files, stmt_p, nil) == SQLITE_OK then
+        sqlite.sqlite3_bind_text(stmt_p[0], 1, filepath, #filepath, SQLITE_TRANSIENT)
+        sqlite.sqlite3_step(stmt_p[0])
+        sqlite.sqlite3_finalize(stmt_p[0])
+    end
+
+    -- 2. Insert into files table
+    local sql_ins_f = "INSERT INTO files (filepath, filename, extension, size, mtime) VALUES (?, ?, ?, ?, ?);"
+    if sqlite.sqlite3_prepare_v2(self.db, sql_ins_f, #sql_ins_f, stmt_p, nil) == SQLITE_OK then
+        sqlite.sqlite3_bind_text(stmt_p[0], 1, filepath, #filepath, SQLITE_TRANSIENT)
+        sqlite.sqlite3_bind_text(stmt_p[0], 2, filename, #filename, SQLITE_TRANSIENT)
+        sqlite.sqlite3_bind_text(stmt_p[0], 3, ext or "", #(ext or ""), SQLITE_TRANSIENT)
+        sqlite.sqlite3_bind_int64(stmt_p[0], 4, size)
+        sqlite.sqlite3_bind_int64(stmt_p[0], 5, mtime)
+        sqlite.sqlite3_step(stmt_p[0])
+        sqlite.sqlite3_finalize(stmt_p[0])
+    end
+
+    -- 3. Insert into FTS5 index
+    local sql_ins_fts = "INSERT INTO code_idx (filepath, filename, content) VALUES (?, ?, ?);"
+    if sqlite.sqlite3_prepare_v2(self.db, sql_ins_fts, #sql_ins_fts, stmt_p, nil) == SQLITE_OK then
+        sqlite.sqlite3_bind_text(stmt_p[0], 1, filepath, #filepath, SQLITE_TRANSIENT)
+        sqlite.sqlite3_bind_text(stmt_p[0], 2, filename, #filename, SQLITE_TRANSIENT)
+        sqlite.sqlite3_bind_text(stmt_p[0], 3, content, #content, SQLITE_TRANSIENT)
+        sqlite.sqlite3_step(stmt_p[0])
+        sqlite.sqlite3_finalize(stmt_p[0])
+    end
+end
+
+function Database:remove_file(filepath)
+    local stmt_p = ffi.new("sqlite3_stmt*[1]")
+    local sql1 = "DELETE FROM code_idx WHERE filepath = ?;"
+    if sqlite.sqlite3_prepare_v2(self.db, sql1, #sql1, stmt_p, nil) == SQLITE_OK then
+        sqlite.sqlite3_bind_text(stmt_p[0], 1, filepath, #filepath, SQLITE_TRANSIENT)
+        sqlite.sqlite3_step(stmt_p[0])
+        sqlite.sqlite3_finalize(stmt_p[0])
+    end
+
+    local sql2 = "DELETE FROM files WHERE filepath = ?;"
+    if sqlite.sqlite3_prepare_v2(self.db, sql2, #sql2, stmt_p, nil) == SQLITE_OK then
+        sqlite.sqlite3_bind_text(stmt_p[0], 1, filepath, #filepath, SQLITE_TRANSIENT)
+        sqlite.sqlite3_step(stmt_p[0])
+        sqlite.sqlite3_finalize(stmt_p[0])
+    end
+end
+
+function Database:search(query_str, options)
+    options = options or {}
+    local limit = options.limit or 50
+    local ext_filter = options.extension
+
+    -- Sanitize/escape query string for FTS5
+    -- If user did not wrap in quotes and has no special syntax, wrap tokens or support prefix
+    local fts_query = query_str
+    if not query_str:find('"') and not query_str:find("%*") then
+        local words = {}
+        for w in query_str:gmatch("%S+") do
+            -- escape double quotes
+            local escaped = w:gsub('"', '""')
+            table.insert(words, string.format('"%s"*', escaped))
+        end
+        fts_query = table.concat(words, " ")
+    end
+
+    if #fts_query == 0 then return {} end
+
+    local sql
+    if ext_filter and #ext_filter > 0 then
+        sql = string.format([=[
+            SELECT 
+                c.filepath,
+                c.filename,
+                snippet(code_idx, 2, '[[HL]]', '[[/HL]]', '...', 16) AS snip,
+                bm25(code_idx) AS rank
+            FROM code_idx c
+            JOIN files f ON c.filepath = f.filepath
+            WHERE code_idx MATCH ? AND f.extension = '%s'
+            ORDER BY rank ASC
+            LIMIT %d;
+        ]=], ext_filter:gsub("'", "''"), limit)
+    else
+        sql = string.format([=[
+            SELECT 
+                filepath,
+                filename,
+                snippet(code_idx, 2, '[[HL]]', '[[/HL]]', '...', 16) AS snip,
+                bm25(code_idx) AS rank
+            FROM code_idx
+            WHERE code_idx MATCH ?
+            ORDER BY rank ASC
+            LIMIT %d;
+        ]=], limit)
+    end
+
+    local stmt_p = ffi.new("sqlite3_stmt*[1]")
+    local rc = sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_p, nil)
+    if rc ~= SQLITE_OK then
+        -- Try direct match without prefix wildcard if syntax error
+        local fallback_sql = string.format([=[
+            SELECT filepath, filename, snippet(code_idx, 2, '[[HL]]', '[[/HL]]', '...', 16), bm25(code_idx)
+            FROM code_idx WHERE code_idx MATCH ? ORDER BY bm25(code_idx) ASC LIMIT %d;
+        ]=], limit)
+        if sqlite.sqlite3_prepare_v2(self.db, fallback_sql, #fallback_sql, stmt_p, nil) ~= SQLITE_OK then
+            return {}, "Invalid search query syntax: " .. query_str
+        end
+        fts_query = string.format('"%s"', query_str:gsub('"', '""'))
+    end
+
+    local stmt = stmt_p[0]
+    sqlite.sqlite3_bind_text(stmt, 1, fts_query, #fts_query, SQLITE_TRANSIENT)
+
+    local results = {}
+    while sqlite.sqlite3_step(stmt) == SQLITE_ROW do
+        local fpath = ffi.string(sqlite.sqlite3_column_text(stmt, 0))
+        local fname = ffi.string(sqlite.sqlite3_column_text(stmt, 1))
+        local snip  = ffi.string(sqlite.sqlite3_column_text(stmt, 2))
+        local rank  = sqlite.sqlite3_column_double(stmt, 3)
+
+        table.insert(results, {
+            filepath = fpath,
+            filename = fname,
+            snippet  = snip,
+            rank     = rank
+        })
+    end
+    sqlite.sqlite3_finalize(stmt)
+    return results
+end
+
+function Database:get_stats()
+    local stats = { total_files = 0, total_size = 0, extensions = {} }
+    local stmt_p = ffi.new("sqlite3_stmt*[1]")
+    local sql = "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files;"
+    if sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_p, nil) == SQLITE_OK then
+        if sqlite.sqlite3_step(stmt_p[0]) == SQLITE_ROW then
+            stats.total_files = tonumber(sqlite.sqlite3_column_int64(stmt_p[0], 0))
+            stats.total_size  = tonumber(sqlite.sqlite3_column_int64(stmt_p[0], 1))
+        end
+        sqlite.sqlite3_finalize(stmt_p[0])
+    end
+
+    local sql_ext = "SELECT extension, COUNT(*) FROM files GROUP BY extension ORDER BY COUNT(*) DESC LIMIT 10;"
+    if sqlite.sqlite3_prepare_v2(self.db, sql_ext, #sql_ext, stmt_p, nil) == SQLITE_OK then
+        while sqlite.sqlite3_step(stmt_p[0]) == SQLITE_ROW do
+            local ext = ffi.string(sqlite.sqlite3_column_text(stmt_p[0], 0))
+            local cnt = tonumber(sqlite.sqlite3_column_int(stmt_p[0], 1))
+            table.insert(stats.extensions, { ext = (ext == "" and "[none]" or ext), count = cnt })
+        end
+        sqlite.sqlite3_finalize(stmt_p[0])
+    end
+
+    return stats
+end
+
+--------------------------------------------------------------------------------
+-- 4. Fast Directory Walker & File Classifier
+--------------------------------------------------------------------------------
+local IGNORED_DIRS = {
+    [".git"] = true,
+    ["node_modules"] = true,
+    [".svn"] = true,
+    [".hg"] = true,
+    ["build"] = true,
+    ["dist"] = true,
+    ["target"] = true,
+    ["__pycache__"] = true,
+    [".idea"] = true,
+    [".vscode"] = true
+}
+
+local BINARY_EXTENSIONS = {
+    ["so"] = true, ["dll"] = true, ["dylib"] = true, ["a"] = true, ["o"] = true,
+    ["exe"] = true, ["bin"] = true, ["png"] = true, ["jpg"] = true, ["jpeg"] = true,
+    ["gif"] = true, ["bmp"] = true, ["webp"] = true, ["mp3"] = true, ["mp4"] = true,
+    ["zip"] = true, ["tar"] = true, ["gz"] = true, ["bz2"] = true, ["xz"] = true,
+    ["pdf"] = true, ["db"] = true, ["sqlite"] = true, ["sqlite3"] = true, ["iso"] = true
+}
+
+local function get_file_extension(path)
+    local ext = path:match("%.([%w_%-]+)$")
+    return ext and ext:lower() or ""
+end
+
+local function get_filename(path)
+    return path:match("([^/\\]+)$") or path
+end
+
+local function scan_directory(root_dir, callback)
+    local function walk(current_dir)
+        if is_windows then
+            local find_pattern = current_dir .. "/*"
+            local find_data = ffi.new("WIN32_FIND_DATAA")
+            local hFind = kernel32.FindFirstFileA(find_pattern, find_data)
+            if hFind == ffi.cast("void*", -1) or hFind == nil then return end
+
+            repeat
+                local name = ffi.string(find_data.cFileName)
+                if name ~= "." and name ~= ".." then
+                    local is_dir = bit.band(find_data.dwFileAttributes, 0x10) ~= 0
+                    local full_path = current_dir .. "/" .. name
+                    if is_dir then
+                        if not IGNORED_DIRS[name] then walk(full_path) end
+                    else
+                        callback(full_path, name)
+                    end
+                end
+            until kernel32.FindNextFileA(hFind, find_data) == 0
+            kernel32.FindClose(hFind)
+        else
+            local dir_p = ffi.C.opendir(current_dir)
+            if dir_p == nil then return end
+
+            while true do
+                local entry = ffi.C.readdir(dir_p)
+                if entry == nil then break end
+                local name = ffi.string(entry.d_name)
+                if name ~= "." and name ~= ".." then
+                    local full_path = current_dir .. "/" .. name
+                    local is_dir = (entry.d_type == 4)
+                    local is_reg = (entry.d_type == 8)
+
+                    -- Fallback stat if d_type is DT_UNKNOWN (0)
+                    if entry.d_type == 0 then
+                        local meta = get_file_metadata(full_path)
+                        if meta then
+                            is_dir = meta.is_dir
+                            is_reg = meta.is_reg
+                        end
+                    end
+
+                    if is_dir then
+                        if not IGNORED_DIRS[name] then walk(full_path) end
+                    elseif is_reg then
+                        callback(full_path, name)
+                    end
+                end
+            end
+            ffi.C.closedir(dir_p)
+        end
+    end
+
+    walk(root_dir)
+end
+
+--------------------------------------------------------------------------------
+-- 5. Indexing Pipeline
+--------------------------------------------------------------------------------
+local Indexer = {}
+
+function Indexer.run(db, root_dir, verbose)
+    root_dir = root_dir or "."
+    -- strip trailing slash
+    root_dir = root_dir:gsub("[/\\]+$", "")
+    if #root_dir == 0 then root_dir = "." end
+
+    local files_found = 0
+    local files_indexed = 0
+    local files_skipped = 0
+    local total_bytes = 0
+
+    local t_start = os.clock()
+    db:begin()
+
+    local batch_count = 0
+
+    scan_directory(root_dir, function(full_path, fname)
+        -- Ignore internal DB file itself
+        if fname:find("%.db$") or fname:find("%.db%-wal$") or fname:find("%.db%-shm$") then return end
+
+        files_found = files_found + 1
+        local ext = get_file_extension(fname)
+
+        if BINARY_EXTENSIONS[ext] then
+            files_skipped = files_skipped + 1
+            return
+        end
+
+        local meta = get_file_metadata(full_path)
+        if not meta or meta.size > (5 * 1024 * 1024) then -- skip > 5MB single files
+            files_skipped = files_skipped + 1
+            return
+        end
+
+        -- Check if file already indexed and unchanged
+        local existing = db:get_file_info(full_path)
+        if existing and existing.size == meta.size and existing.mtime == meta.mtime then
+            files_skipped = files_skipped + 1
+            return
+        end
+
+        -- Read content
+        local f = io.open(full_path, "rb")
+        if not f then
+            files_skipped = files_skipped + 1
+            return
+        end
+        local content = f:read("*a")
+        f:close()
+
+        if not content or is_binary_buffer(content) then
+            files_skipped = files_skipped + 1
+            return
+        end
+
+        db:index_file(full_path, fname, ext, meta.size, meta.mtime, content)
+        files_indexed = files_indexed + 1
+        total_bytes = total_bytes + meta.size
+        batch_count = batch_count + 1
+
+        if batch_count >= 500 then
+            db:commit()
+            db:begin()
+            batch_count = 0
+            if verbose then
+                io.write(string.format("\rIndexed %d files (%.1f MB)...", files_indexed, total_bytes / (1024*1024)))
+                io.flush()
+            end
+        end
+    end)
+
+    db:commit()
+    local elapsed = os.clock() - t_start
+
+    if verbose then
+        if files_indexed > 0 then io.write("\r" .. string.rep(" ", 40) .. "\r") end
+        print(string.format("\27[32m✔ Indexing completed in %.3fs\27[0m", elapsed))
+        print(string.format("  - Scanned: %d files", files_found))
+        print(string.format("  - Indexed/Updated: %d files (%.2f MB)", files_indexed, total_bytes / (1024*1024)))
+        print(string.format("  - Unchanged/Skipped: %d files", files_skipped))
+    end
+
+    return {
+        scanned = files_found,
+        indexed = files_indexed,
+        skipped = files_skipped,
+        bytes   = total_bytes,
+        time    = elapsed
+    }
+end
+
+--------------------------------------------------------------------------------
+-- 6. Highlighting & Terminal Formatting
+--------------------------------------------------------------------------------
+local function colorize_snippet(snip)
+    -- Format: replace [[HL]] with ANSI yellow bold, [[/HL]] with reset
+    local res = snip:gsub("%[%[HL%]%]", "\27[1;33m"):gsub("%[%[/HL%]%]", "\27[0m")
+    -- Replace newlines with formatted line continuations
+    res = res:gsub("[\r\n]+", " ")
+    return res
+end
+
+local function format_bytes(bytes)
+    if bytes < 1024 then return string.format("%d B", bytes)
+    elseif bytes < 1024 * 1024 then return string.format("%.1f KB", bytes / 1024)
+    else return string.format("%.2f MB", bytes / (1024 * 1024))
+    end
+end
+
+--------------------------------------------------------------------------------
+-- 7. Interactive Terminal UI (TUI) Mode
+--------------------------------------------------------------------------------
+local TUI = {}
+
+function TUI.run(db, initial_query)
+    local raw_ok = false
+    local termios_orig = nil
+
+    -- Terminal setup (POSIX)
+    if not is_windows then
+        termios_orig = ffi.new("struct termios")
+        if ffi.C.tcgetattr(0, termios_orig) == 0 then
+            local raw = ffi.new("struct termios")
+            ffi.copy(raw, termios_orig, ffi.sizeof("struct termios"))
+            raw.c_lflag = bit.band(raw.c_lflag, bit.bnot(bit.bor(0x0002, 0x0008))) -- ECHO | ICANON
+            ffi.C.tcsetattr(0, 0, raw)
+            raw_ok = true
+        end
+    end
+
+    local function restore_term()
+        if raw_ok and termios_orig then
+            ffi.C.tcsetattr(0, 0, termios_orig)
+        end
+        io.write("\27[?25h\27[0m\n") -- show cursor
+        io.flush()
+    end
+
+    local function get_term_size()
+        if not is_windows then
+            local ws = ffi.new("struct winsize")
+            if ffi.C.ioctl(1, 0x5413, ws) == 0 and ws.ws_col > 0 then
+                return ws.ws_col, ws.ws_row
+            end
+        end
+        return 100, 30
+    end
+
+    local query = initial_query or ""
+    local selected_idx = 1
+    local results = {}
+    local error_msg = nil
+
+    local function refresh_search()
+        if #query == 0 then
+            results = {}
+            error_msg = nil
+            return
+        end
+        local res, err = db:search(query, { limit = 100 })
+        if err then
+            error_msg = err
+            results = {}
+        else
+            error_msg = nil
+            results = res
+            if selected_idx > #results then selected_idx = math.max(1, #results) end
+        end
+    end
+
+    refresh_search()
+
+    local running = true
+    io.write("\27[?25l") -- hide cursor
+
+    while running do
+        local cols, rows = get_term_size()
+        local left_width = math.floor(cols * 0.45)
+        local right_width = cols - left_width - 3
+
+        -- Draw Header
+        io.write("\27[H\27[2J") -- Clear screen
+        io.write("\27[1;37;44m" .. string.format(" 🔍 CodeFind — Local Code & Document Search Engine %" .. (cols - 46) .. "s", "") .. "\27[0m\n")
+        io.write(string.format(" \27[1;36mQuery:\27[0m \27[4m%s\27[0m\27[33m_\27[0m (Matches: %d)\n", query, #results))
+        io.write(string.rep("─", cols) .. "\n")
+
+        local list_height = rows - 6
+        local preview_file_lines = {}
+        local active_file = nil
+
+        if #results > 0 and results[selected_idx] then
+            active_file = results[selected_idx].filepath
+            local f = io.open(active_file, "r")
+            if f then
+                for line in f:lines() do
+                    table.insert(preview_file_lines, line)
+                    if #preview_file_lines > 500 then break end
+                end
+                f:close()
+            end
+        end
+
+        for i = 1, list_height do
+            -- Left Pane: File Match list
+            local left_str = ""
+            local res_item = results[i]
+            if res_item then
+                local marker = (i == selected_idx) and "▶ \27[1;32m" or "  "
+                local clean_path = res_item.filepath
+                if #clean_path > left_width - 6 then
+                    clean_path = "..." .. clean_path:sub(#clean_path - (left_width - 9))
+                end
+                left_str = string.format("%s%-30s\27[0m", marker, clean_path)
+            end
+
+            -- Right Pane: Context Preview
+            local right_str = ""
+            if i == 1 and active_file then
+                right_str = string.format("\27[1;34m[File: %s]\27[0m", get_filename(active_file))
+            elseif active_file and #preview_file_lines > 0 then
+                local line_num = i - 1
+                if line_num <= #preview_file_lines then
+                    local line_content = preview_file_lines[line_num] or ""
+                    if #line_content > right_width - 8 then
+                        line_content = line_content:sub(1, right_width - 11) .. "..."
+                    end
+                    right_str = string.format("\27[90m%4d │\27[0m %s", line_num, line_content)
+                end
+            end
+
+            -- Print row
+            local left_visible_len = res_item and math.min(left_width, #res_item.filepath + 4) or 0
+            local pad_spaces = math.max(0, left_width - left_visible_len)
+            io.write(string.format("%s%s \27[90m│\27[0m %s\n", left_str, string.rep(" ", pad_spaces), right_str))
+        end
+
+        -- Footer bar
+        io.write(string.rep("─", cols) .. "\n")
+        io.write("\27[1;30;47m [Type] Search  [↑/↓] Navigate  [Enter] Select & Open  [Esc/Ctrl-C] Exit \27[0m")
+        io.flush()
+
+        -- Read Key Input (POSIX)
+        local buf = ffi.new("char[16]")
+        local n = ffi.C.read(0, buf, 16)
+        if n > 0 then
+            local c0 = buf[0]
+            if c0 == 27 then -- ESC sequence
+                if n == 1 then
+                    running = false
+                elseif n >= 3 and buf[1] == 91 then -- Arrow keys '['
+                    local c2 = buf[2]
+                    if c2 == 65 then -- UP
+                        if selected_idx > 1 then selected_idx = selected_idx - 1 end
+                    elseif c2 == 66 then -- DOWN
+                        if selected_idx < #results then selected_idx = selected_idx + 1 end
+                    end
+                end
+            elseif c0 == 3 then -- Ctrl-C
+                running = false
+            elseif c0 == 127 or c0 == 8 then -- Backspace
+                if #query > 0 then
+                    query = query:sub(1, -2)
+                    selected_idx = 1
+                    refresh_search()
+                end
+            elseif c0 == 10 or c0 == 13 then -- Enter
+                if #results > 0 and results[selected_idx] then
+                    restore_term()
+                    local chosen = results[selected_idx].filepath
+                    local editor = os.getenv("EDITOR") or "vim"
+                    print("\nOpening " .. chosen .. " in " .. editor .. "...\n")
+                    os.execute(editor .. ' "' .. chosen .. '"')
+                    return
+                end
+            elseif c0 >= 32 and c0 <= 126 then
+                query = query .. string.char(c0)
+                selected_idx = 1
+                refresh_search()
+            end
+        end
+    end
+
+    restore_term()
+end
+
+--------------------------------------------------------------------------------
+-- 8. CLI Interface & Self-Tests
+--------------------------------------------------------------------------------
+local function print_help()
+    print([[
+CodeFind — High-Performance Local Code & Document Search Engine
+Powered by LuaJIT FFI & SQLite FTS5 (Zero dependencies)
+
+Usage:
+  codefind <command> [arguments]
+
+Commands:
+  index  [dir]           Index or update repository files (default: current directory)
+  search <query>         Fast ranked full-text search with context snippets
+  tui    [query]         Interactive search browser with live side-by-side preview
+  stats                  Show index database statistics (file counts, size, extensions)
+  clean                  Drop index database and vacuum
+  --test                 Run built-in unit & integration test suite
+
+Options for 'search':
+  --ext <extension>      Filter by file extension (e.g. --ext lua, --ext c)
+  --limit <n>            Maximum results to return (default: 20)
+  --db <path>            Custom database file path (default: .codefind.db)
+
+Examples:
+  luajit codefind.lua index .
+  luajit codefind.lua search "sqlite3_prepare"
+  luajit codefind.lua search "malloc" --ext c --limit 10
+  luajit codefind.lua tui "metatype"
+]])
+end
+
+local function run_self_tests()
+    print("================================================================================")
+    print("  Running Unit & Integration Tests for codefind.lua")
+    print("================================================================================")
+
+    local test_db_path = "/tmp/_test_codefind_" .. os.time() .. ".db"
+    os.remove(test_db_path)
+
+    -- Test 1: Database creation & FTS5 initialization
+    io.write("Test 1: Database & FTS5 Schema Initialization... ")
+    local db = Database.open(test_db_path)
+    assert(db ~= nil and db.db ~= nil, "Database handle should not be nil")
+    print("\27[32m✔ PASSED\27[0m")
+
+    -- Test 2: Indexing mock files
+    io.write("Test 2: Direct file indexing & FTS5 storage... ")
+    db:begin()
+    db:index_file("test/alpha.lua", "alpha.lua", "lua", 120, 1000, "local function calculate_sum(a, b) return a + b end")
+    db:index_file("test/beta.c", "beta.c", "c", 250, 1000, "int main() { printf(\"hello world\\n\"); return 0; }")
+    db:index_file("docs/readme.md", "readme.md", "md", 500, 1000, "# CodeFind Engine\nFast search using SQLite FTS5 and trigrams.")
+    db:commit()
+    print("\27[32m✔ PASSED\27[0m")
+
+    -- Test 3: Search queries & BM25 ranking
+    io.write("Test 3: Search query with snippet and ranking... ")
+    local res1 = db:search("calculate_sum")
+    assert(#res1 == 1, "Expected 1 match for 'calculate_sum', got " .. #res1)
+    assert(res1[1].filepath == "test/alpha.lua", "Matched file mismatch")
+    assert(res1[1].snippet:find("%[%[HL%]%]calculate_sum%[%[/HL%]%]"), "Snippet highlight missing")
+    print("\27[32m✔ PASSED\27[0m")
+
+    -- Test 4: Extension filter
+    io.write("Test 4: Search with extension filter... ")
+    local res2 = db:search("FTS5", { extension = "md" })
+    assert(#res2 == 1, "Expected 1 markdown match for 'FTS5'")
+    assert(res2[1].filename == "readme.md")
+
+    local res3 = db:search("FTS5", { extension = "lua" })
+    assert(#res3 == 0, "Expected 0 lua matches for 'FTS5'")
+    print("\27[32m✔ PASSED\27[0m")
+
+    -- Test 5: Incremental file update
+    io.write("Test 5: Incremental update & deletion... ")
+    db:begin()
+    db:index_file("test/alpha.lua", "alpha.lua", "lua", 150, 2000, "local function calculate_sum_v2(a, b, c) return a + b + c end")
+    db:commit()
+    local res4 = db:search("calculate_sum_v2")
+    assert(#res4 == 1, "Expected updated content to match")
+    local res5 = db:search("calculate_sum")
+    assert(#res5 >= 1, "calculate_sum prefix match supported")
+
+    db:remove_file("test/alpha.lua")
+    local res6 = db:search("calculate_sum_v2")
+    assert(#res6 == 0, "File should have been removed")
+    print("\27[32m✔ PASSED\27[0m")
+
+    -- Test 6: Database Statistics
+    io.write("Test 6: Database stats query... ")
+    local stats = db:get_stats()
+    assert(stats.total_files == 2, "Expected 2 files remaining in stats")
+    print("\27[32m✔ PASSED\27[0m")
+
+    db:close()
+    os.remove(test_db_path)
+    os.remove(test_db_path .. "-wal")
+    os.remove(test_db_path .. "-shm")
+
+    print("================================================================================")
+    print("\27[1;32mALL CODEFIND TESTS PASSED SUCCESSFULLY! (6/6)\27[0m")
+    print("================================================================================")
+end
+
+local function main(args)
+    if #args == 0 or args[1] == "--help" or args[1] == "-h" then
+        print_help()
+        return
+    end
+
+    if args[1] == "--test" then
+        run_self_tests()
+        return
+    end
+
+    -- Parse global flags
+    local db_path = ".codefind.db"
+    local command = args[1]
+    local cmd_args = {}
+
+    local i = 2
+    local ext_filter = nil
+    local limit = 20
+
+    while i <= #args do
+        local a = args[i]
+        if a == "--db" and i + 1 <= #args then
+            db_path = args[i + 1]
+            i = i + 1
+        elseif a == "--ext" and i + 1 <= #args then
+            ext_filter = args[i + 1]:lower():gsub("^%.", "")
+            i = i + 1
+        elseif a == "--limit" and i + 1 <= #args then
+            limit = tonumber(args[i + 1]) or 20
+            i = i + 1
+        else
+            table.insert(cmd_args, a)
+        end
+        i = i + 1
+    end
+
+    if command == "clean" then
+        os.remove(db_path)
+        os.remove(db_path .. "-wal")
+        os.remove(db_path .. "-shm")
+        print("\27[32m✔ Dropped index database: " .. db_path .. "\27[0m")
+        return
+    end
+
+    local db = Database.open(db_path)
+
+    if command == "index" then
+        local target_dir = cmd_args[1] or "."
+        print(string.format("⚡ Indexing directory '%s' into %s...", target_dir, db_path))
+        Indexer.run(db, target_dir, true)
+    elseif command == "search" then
+        local query = table.concat(cmd_args, " ")
+        if #query == 0 then
+            print("Error: search query cannot be empty. Example: codefind search 'function'")
+            db:close()
+            os.exit(1)
+        end
+
+        local t0 = os.clock()
+        local results, err = db:search(query, { extension = ext_filter, limit = limit })
+        local elapsed = (os.clock() - t0) * 1000
+
+        if err then
+            print(string.format("\27[31mError: %s\27[0m", err))
+            db:close()
+            os.exit(1)
+        end
+
+        if #results == 0 then
+            print(string.format("\27[90mNo matches found for '%s' (%.1fms)\27[0m", query, elapsed))
+        else
+            print(string.format("\27[1;36m🔍 Results for '%s' (%d matches in %.2fms):\27[0m\n", query, #results, elapsed))
+            for idx, res in ipairs(results) do
+                local colored = colorize_snippet(res.snippet)
+                print(string.format("  \27[1;32m%2d.\27[0m \27[1;37m%s\27[0m \27[90m(score: %.2f)\27[0m", idx, res.filepath, res.rank))
+                print(string.format("      %s\n", colored))
+            end
+        end
+    elseif command == "tui" then
+        local query = table.concat(cmd_args, " ")
+        TUI.run(db, query)
+    elseif command == "stats" then
+        local stats = db:get_stats()
+        print("\n=== CodeFind Database Statistics ===")
+        print(string.format("Database Path : %s", db_path))
+        print(string.format("Indexed Files : %d", stats.total_files))
+        print(string.format("Total Size    : %s", format_bytes(stats.total_size)))
+        print("\nTop File Extensions:")
+        for _, e in ipairs(stats.extensions) do
+            print(string.format("  .%-10s : %d files", e.ext, e.count))
+        end
+        print("=====================================\n")
+    else
+        print("Unknown command: " .. command)
+        print_help()
+    end
+
+    db:close()
+end
+
+if pcall(debug.getlocal, 4, 1) then
+    return {
+        Database = Database,
+        Indexer  = Indexer,
+        TUI      = TUI
+    }
+else
+    main(arg)
+end

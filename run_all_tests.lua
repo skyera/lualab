@@ -30,6 +30,7 @@ local test_suites = {
     { file = "test_ffi_midi_keyboard.lua", description = "ffi_midi_keyboard — Real-time Synthesizer & Piano Suite" },
     { file = "test_ffi_elf_inspector.lua", description = "ffi_elf_inspector — Linux ELF Binary Analyzer & Symbol Disassembler Suite" },
     { file = "test_ffi_ssh_tunnel.lua", description = "ffi_ssh_tunnel — SSH Tunnel & ProxyJump Manager Suite" },
+    { file = "test_codefind.lua", description = "codefind — Local Code & Document Full-Text Search Engine Suite" },
 }
 
 local luajit_bin = "luajit"
