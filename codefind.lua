@@ -978,18 +978,27 @@ function TUI.run(db, initial_query)
             end
         end
 
+        -- Double-buffering: accumulate output into lines table to eliminate flicker
+        local frame_buf = {}
+        local function emit(str)
+            table.insert(frame_buf, str)
+        end
+
         -- Calculate strict column dimensions
         local inner_cols = cols - 2
         local left_col_w = math.max(28, math.floor(inner_cols * 0.40))
         local right_col_w = inner_cols - left_col_w - 3 -- 3 for " │ "
 
-        -- Draw Header (Row 1 & 2)
-        io.write("\27[H\27[2J") -- Clear screen
-        local db_stats = db:get_stats()
-        
+        local show_help_modal = false
+
+        -- Colors based on active focus pane
+        local left_border_col = (focus_pane == "search") and "\27[1;36m" or "\27[90m"
+        local right_border_col = (focus_pane == "preview") and "\27[1;32m" or "\27[90m"
+        local neutral_col = "\27[90m"
+
         -- Top Border
-        local top_border = "┌" .. string.rep("─", left_col_w + 2) .. "┬" .. string.rep("─", right_col_w + 2) .. "┐"
-        io.write("\27[90m" .. top_border:sub(1, cols) .. "\27[0m\n")
+        emit("\27[H") -- Reset cursor to top-left
+        emit(neutral_col .. "┌" .. left_border_col .. string.rep("─", left_col_w + 2) .. neutral_col .. "┬" .. right_border_col .. string.rep("─", right_col_w + 2) .. neutral_col .. "┐\27[0m\n")
 
         -- Search / Stats Bar (Inside Box)
         local query_display = " Search: " .. query .. "_"
@@ -1002,20 +1011,22 @@ function TUI.run(db, initial_query)
             for ln = 1, #current_preview_lines do
                 if current_match_lines[ln] then first_ln = ln; break end
             end
-            right_top_title = string.format(" Preview: %s:%d (%d/%d)", get_filename(current_preview_file), first_ln, preview_scroll_offset + 1, #current_preview_lines)
+            right_top_title = string.format(" 📄 %s:%d (%d/%d)", get_filename(current_preview_file), first_ln, preview_scroll_offset + 1, #current_preview_lines)
         else
-            right_top_title = " Preview: (No file selected)"
+            right_top_title = " 📄 Preview: (No file selected)"
         end
-        local focus_str = (focus_pane == "preview") and "[PREVIEW ACTIVE]" or "[SEARCH ACTIVE]"
-        local right_top_str = pad_to(right_top_title, right_col_w - #focus_str) .. focus_str
+        local focus_str = (focus_pane == "preview") and "\27[1;32m[PREVIEW ACTIVE]\27[0m" or "\27[1;36m[SEARCH ACTIVE]\27[0m"
+        local right_top_str = pad_to(right_top_title, right_col_w - #strip_ansi(focus_str)) .. focus_str
 
-        io.write(string.format("\27[90m│\27[0m \27[1;36m%s\27[0m \27[90m│\27[0m \27[1;34m%s\27[0m \27[90m│\27[0m\n", 
+        emit(string.format("%s│\27[0m \27[1;37m%s\27[0m %s│\27[0m %s %s│\27[0m\n", 
+            left_border_col,
             pad_to(left_top_str, left_col_w),
-            pad_to(right_top_str, right_col_w)))
+            neutral_col,
+            pad_to(right_top_str, right_col_w),
+            right_border_col))
 
         -- Mid Header Divider
-        local mid_divider = "├" .. string.rep("─", left_col_w + 2) .. "┼" .. string.rep("─", right_col_w + 2) .. "┤"
-        io.write("\27[90m" .. mid_divider:sub(1, cols) .. "\27[0m\n")
+        emit(neutral_col .. "├" .. left_border_col .. string.rep("─", left_col_w + 2) .. neutral_col .. "┼" .. right_border_col .. string.rep("─", right_col_w + 2) .. neutral_col .. "┤\27[0m\n")
 
         -- Render Split Pane rows
         for i = 1, list_height do
@@ -1042,6 +1053,9 @@ function TUI.run(db, initial_query)
                     local padded = norm_text .. string.rep(" ", math.max(0, left_col_w - #norm_text))
                     left_cell = "\27[37m" .. padded .. "\27[0m"
                 end
+            elseif #results == 0 and i == 2 then
+                local prompt_msg = (#query == 0) and "  Type to search files..." or "  No matches found"
+                left_cell = "\27[90m" .. pad_to(prompt_msg, left_col_w) .. "\27[0m"
             else
                 left_cell = string.rep(" ", left_col_w)
             end
@@ -1060,7 +1074,6 @@ function TUI.run(db, initial_query)
                         line_content = line_content:sub(1, max_code_w - 3) .. "..."
                     end
 
-                    -- Pad code content to avoid background overflow
                     local line_pad = string.rep(" ", math.max(0, max_code_w - #line_content))
 
                     if is_hit then
@@ -1081,24 +1094,26 @@ function TUI.run(db, initial_query)
             end
 
             -- Print Row with guaranteed single-character borders
-            io.write(string.format("\27[90m│\27[0m %s \27[90m│\27[0m %s \27[90m│\27[0m\n", left_cell, right_cell))
+            emit(string.format("%s│\27[0m %s %s│\27[0m %s %s│\27[0m\n", left_border_col, left_cell, neutral_col, right_cell, right_border_col))
         end
 
         -- Bottom Border
-        local bot_divider = "├" .. string.rep("─", left_col_w + 2) .. "┴" .. string.rep("─", right_col_w + 2) .. "┤"
-        io.write("\27[90m" .. bot_divider:sub(1, cols) .. "\27[0m\n")
+        emit(neutral_col .. "├" .. left_border_col .. string.rep("─", left_col_w + 2) .. neutral_col .. "┴" .. right_border_col .. string.rep("─", right_col_w + 2) .. neutral_col .. "┤\27[0m\n")
 
         -- Status bar / keybindings
         local status_text = status_bar_msg
         if not status_text or (os.clock() - status_bar_time > 3.0) then
-            status_text = "[Type] Search  [↑/↓] Results  [Tab] Toggle Pane  [PgUp/Dn] Scroll  [^R] Re-Index  [Enter] Open  [Esc] Quit"
+            status_text = "[Type] Search  [↑/↓] Results  [Tab] Focus  [PgUp/Dn] Scroll  [^U] Clear  [^R] Re-Index  [?] Help  [Enter] Open  [Esc] Quit"
         end
         local status_vis = " " .. status_text
         local status_pad = string.rep(" ", math.max(0, cols - 4 - #strip_ansi(status_vis)))
-        io.write(string.format("\27[90m│\27[0m\27[1;30;47m%s%s\27[0m\27[90m│\27[0m\n", status_vis, status_pad))
+        emit(string.format("%s│\27[1;30;47m%s%s\27[0m%s│\27[0m\n", neutral_col, status_vis, status_pad, neutral_col))
 
         local bot_border = "└" .. string.rep("─", cols - 2) .. "┘"
-        io.write("\27[90m" .. bot_border:sub(1, cols) .. "\27[0m")
+        emit(neutral_col .. bot_border:sub(1, cols) .. "\27[0m")
+
+        -- Flush entire frame at once (Flicker-Free)
+        io.write(table.concat(frame_buf))
         io.flush()
 
         -- Read Key Input (POSIX)
@@ -1149,6 +1164,36 @@ function TUI.run(db, initial_query)
                 end
             elseif c0 == 3 then -- Ctrl-C
                 running = false
+            elseif c0 == 21 then -- Ctrl-U: Clear search query
+                query = ""
+                selected_idx = 1
+                refresh_search()
+                set_status("Query cleared")
+            elseif c0 == 63 then -- '?' Help Modal
+                restore_term()
+                print("\n\27[1;36m┌─────────────────────────── ⌨ CodeFind Help & Shortcuts ───────────────────────────┐\27[0m")
+                print("│                                                                                   │")
+                print("│  \27[1mType Characters\27[0m     Live incremental search across all indexed code & documents   │")
+                print("│  \27[1m↑ / ↓ Arrow Keys\27[0m    Move selection through matched files                          │")
+                print("│  \27[1mPgUp / PgDown\27[0m       Jump 10 results or 10 lines in preview                        │")
+                print("│  \27[1mTab\27[0m                 Toggle active focus between [SEARCH] and [PREVIEW]            │")
+                print("│  \27[1mj / k\27[0m               Scroll preview file up / down (when Preview is active)        │")
+                print("│  \27[1mCtrl-U\27[0m              Clear current search query line                               │")
+                print("│  \27[1mCtrl-R\27[0m              Trigger instant background repository re-indexing             │")
+                print("│  \27[1mEnter\27[0m               Open selected file in $EDITOR at exact matched line           │")
+                print("│  \27[1mEsc / Ctrl-C\27[0m        Exit TUI                                                      │")
+                print("│                                                                                   │")
+                print("│                         \27[1;33m[Press any key to resume search]\27[0m                          │")
+                print("\27[1;36m└───────────────────────────────────────────────────────────────────────────────────┘\27[0m")
+                io.read(1)
+                -- Re-enable raw mode
+                if raw_ok and termios_orig then
+                    local raw = ffi.new("struct termios")
+                    ffi.copy(raw, termios_orig, ffi.sizeof("struct termios"))
+                    raw.c_lflag = bit.band(raw.c_lflag, bit.bnot(bit.bor(0x0002, 0x0008)))
+                    ffi.C.tcsetattr(0, 0, raw)
+                end
+                io.write("\27[?25l")
             elseif c0 == 9 then -- Tab: toggle pane focus
                 focus_pane = (focus_pane == "search") and "preview" or "search"
                 set_status("Active Pane: " .. focus_pane:upper())
