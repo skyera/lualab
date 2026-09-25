@@ -1090,6 +1090,10 @@ function TUI.read_key()
                 return "TAB"
             elseif c == 8 then
                 return "BACKSPACE"
+            elseif c == 21 then
+                return "CTRL_U"
+            elseif c == 19 then
+                return "CTRL_S"
             else
                 return string.char(c)
             end
@@ -1100,6 +1104,8 @@ function TUI.read_key()
         elseif ch == "\27" then return "ESC"
         elseif ch == "\t" then return "TAB"
         elseif ch == "\8" then return "BACKSPACE"
+        elseif ch == "\21" then return "CTRL_U"
+        elseif ch == "\19" then return "CTRL_S"
         else return ch end
     end
 
@@ -1116,11 +1122,24 @@ function TUI.read_key()
     elseif s == "\t" then return "TAB"
     elseif s == "\27[Z" then return "SHIFT_TAB"
     elseif s == "\127" or s == "\8" then return "BACKSPACE"
+    elseif s == "\21" then return "CTRL_U"
+    elseif s == "\19" then return "CTRL_S"
     else return s end
 end
 
 function TUI.clear()
-    io.write("\27[2J\27[H")
+    -- Reposition to top-left and clear to end of screen without full blanking
+    io.write("\27[H\27[J")
+    io.flush()
+end
+
+function TUI.hide_cursor()
+    io.write("\27[?25l")
+    io.flush()
+end
+
+function TUI.show_cursor()
+    io.write("\27[?25h")
     io.flush()
 end
 
@@ -1136,34 +1155,41 @@ local function pad_right(s, width)
     return s .. string.rep(" ", width - vlen)
 end
 
--- Render the Main Dashboard
+-- Render the Main Dashboard (Flicker-Free with single-pass buffered output)
 function TUI.render_dashboard(profiles, cursor_idx, status_msg)
-    TUI.clear()
+    local out_buf = {}
+    local function emit(str)
+        table.insert(out_buf, str)
+    end
+
+    -- Move cursor to top-left (1,1) without erasing entire screen (eradicates terminal flash)
+    emit("\27[H")
+
     local W = 100
     local line_sep = string.rep("─", W)
     local line_box = string.rep("═", W)
 
-    io.write("\27[1;36m╔" .. line_box .. "╗\27[0m\n")
+    emit("\27[1;36m╔" .. line_box .. "╗\27[0m\27[K\n")
     local title_content = pad_right("🚀 LuaJIT SSH Tunnel & ProxyJump Studio", W - 2)
-    io.write(string.format("\27[1;36m║\27[1;37m %s \27[1;36m║\27[0m\n", title_content))
+    emit(string.format("\27[1;36m║\27[1;37m %s \27[1;36m║\27[0m\27[K\n", title_content))
     local meta_str = string.format("Profiles: %-2d │ Socket Mux: %-30s │ OS: %s",
         #profiles, MUX_DIR .. "/ssh_mux_*", ffi.os)
-    io.write(string.format("\27[1;36m║\27[0;33m %s \27[1;36m║\27[0m\n", pad_right(meta_str, W - 2)))
-    io.write("\27[1;36m╠" .. line_sep .. "╣\27[0m\n")
+    emit(string.format("\27[1;36m║\27[0;33m %s \27[1;36m║\27[0m\27[K\n", pad_right(meta_str, W - 2)))
+    emit("\27[1;36m╠" .. line_sep .. "╣\27[0m\27[K\n")
 
-    -- Header row (exact column widths: 4, 18, 10, 18, 22, 10; separators: 15; borders: 2; total W = 100)
+    -- Header row
     local hdr_row = "║ " .. pad_right("#", 4) .. " │ "
                          .. pad_right("Profile Name", 18) .. " │ "
                          .. pad_right("Type", 10) .. " │ "
                          .. pad_right("Local Endpoint", 18) .. " │ "
                          .. pad_right("Target / Route", 22) .. " │ "
                          .. pad_right("Status", 10) .. " ║"
-    io.write("\27[1;37m" .. hdr_row .. "\27[0m\n")
-    io.write("\27[1;36m╟" .. line_sep .. "╢\27[0m\n")
+    emit("\27[1;37m" .. hdr_row .. "\27[0m\27[K\n")
+    emit("\27[1;36m╟" .. line_sep .. "╢\27[0m\27[K\n")
 
     if #profiles == 0 then
         local empty_msg = pad_right("  (No profiles configured. Press [n] to create a new profile!)", W - 2)
-        io.write(string.format("║ %s ║\n", empty_msg))
+        emit(string.format("║ %s ║\27[K\n", empty_msg))
     else
         for i, p in ipairs(profiles) do
             local marker = (i == cursor_idx) and "▶" or " "
@@ -1195,14 +1221,14 @@ function TUI.render_dashboard(profiles, cursor_idx, status_msg)
 
             local row_line = "║ " .. c1 .. " │ " .. c2 .. " │ " .. c3 .. " │ " .. c4 .. " │ " .. c5 .. " │ " .. c6 .. " ║"
             if i == cursor_idx then
-                io.write("\27[1;33m" .. row_line .. "\27[0m\n")
+                emit("\27[1;33m" .. row_line .. "\27[0m\27[K\n")
             else
-                io.write(row_line .. "\n")
+                emit(row_line .. "\27[K\n")
             end
         end
     end
 
-    io.write("\27[1;36m╠" .. line_sep .. "╣\27[0m\n")
+    emit("\27[1;36m╠" .. line_sep .. "╣\27[0m\27[K\n")
 
     -- Details & Route Inspection for selected profile
     local sel = profiles[cursor_idx]
@@ -1211,30 +1237,36 @@ function TUI.render_dashboard(profiles, cursor_idx, status_msg)
         local ssh_tgt = string.format("%s@%s:%s", sel.ssh_user or "", sel.ssh_host or "localhost", tostring(sel.ssh_port or 22))
         local cmd = command_parts_to_string(build_ssh_command(sel))
         local route_content = pad_right(string.format("\27[1;34mRoute Detail:\27[0m ProxyJump: %-30s SSH Host: %s", jump_str:sub(1, 30), ssh_tgt), W - 2)
-        io.write(string.format("║ %s ║\n", route_content))
+        emit(string.format("║ %s ║\27[K\n", route_content))
 
         local wrapped = wrap_command_lines(cmd, W - 16)
         for line_idx, line_txt in ipairs(wrapped) do
             local prefix = (line_idx == 1) and "\27[1;34mCommand:     \27[0;37m" or "             \27[0;37m"
             local suffix = (line_idx < #wrapped) and " \\" or ""
             local display_txt = pad_right(prefix .. line_txt .. suffix, W - 2)
-            io.write(string.format("║ %s\27[0m ║\n", display_txt))
+            emit(string.format("║ %s\27[0m ║\27[K\n", display_txt))
         end
-        io.write("\27[1;36m╠" .. line_sep .. "╣\27[0m\n")
+        emit("\27[1;36m╠" .. line_sep .. "╣\27[0m\27[K\n")
     end
 
     -- Keybindings help bar
     local keys_bar = pad_right("\27[1;32m[Enter]\27[0m Toggle  \27[1;32m[s]\27[0m Connect  \27[1;32m[n]\27[0m New  \27[1;32m[e]\27[0m Edit  \27[1;32m[k]\27[0m Release Port  \27[1;32m[v]\27[0m View Cmd  \27[1;32m[d]\27[0m Del  \27[1;31m[q]\27[0m Quit", W - 2)
-    io.write(string.format("║ %s ║\n", keys_bar))
-    io.write("\27[1;36m╚" .. line_box .. "╝\27[0m\n")
+    emit(string.format("║ %s ║\27[K\n", keys_bar))
+    emit("\27[1;36m╚" .. line_box .. "╝\27[0m\27[K\n")
 
     if status_msg and #status_msg > 0 then
-        io.write(string.format("\27[1;33m[STATUS] %s\27[0m\n", status_msg))
+        emit(string.format("\27[1;33m[STATUS] %s\27[0m\27[K\n", status_msg))
+    else
+        emit("\27[K\n")
     end
+    -- Erase any trailing lines below if list shrank
+    emit("\27[J")
+
+    io.write(table.concat(out_buf))
     io.flush()
 end
 
--- Interactive Edit / Create Profile Modal
+-- Interactive Edit / Create Profile Modal (Flicker-Free, High-Definition Editable Fields)
 function TUI.edit_profile_modal(existing_profile)
     local p = {
         name = existing_profile and existing_profile.name or "new-tunnel",
@@ -1251,131 +1283,232 @@ function TUI.edit_profile_modal(existing_profile)
     }
 
     local fields = {
-        { key = "name",        label = "Profile Name",       type = "text" },
-        { key = "type",        label = "Tunnel Type",        type = "choice", options = {"local", "remote", "socks"} },
-        { key = "local_bind",  label = "Local Bind Host",    type = "text" },
-        { key = "local_port",  label = "Local Port",         type = "number" },
-        { key = "remote_host", label = "Remote Target Host", type = "text" },
-        { key = "remote_port", label = "Remote Target Port", type = "number" },
-        { key = "ssh_user",    label = "SSH User",           type = "text" },
-        { key = "ssh_host",    label = "SSH Host",           type = "text" },
-        { key = "ssh_port",    label = "SSH Port",           type = "number" },
-        { key = "proxy_jump",  label = "ProxyJump (-J)",     type = "text" },
-        { key = "identity_key",label = "Identity Key (-i)",  type = "text" },
+        { key = "name",        label = "Profile Name",       badge = "[TEXT]  ", type = "text" },
+        { key = "type",        label = "Tunnel Type",        badge = "[CHOICE]", type = "choice", options = {"local", "remote", "socks"} },
+        { key = "local_bind",  label = "Local Bind Host",    badge = "[HOST]  ", type = "text" },
+        { key = "local_port",  label = "Local Port",         badge = "[PORT]  ", type = "number" },
+        { key = "remote_host", label = "Remote Target Host", badge = "[HOST]  ", type = "text" },
+        { key = "remote_port", label = "Remote Target Port", badge = "[PORT]  ", type = "number" },
+        { key = "ssh_user",    label = "SSH User",           badge = "[USER]  ", type = "text" },
+        { key = "ssh_host",    label = "SSH Host",           badge = "[HOST]  ", type = "text" },
+        { key = "ssh_port",    label = "SSH Port",           badge = "[PORT]  ", type = "number" },
+        { key = "proxy_jump",  label = "ProxyJump (-J)",     badge = "[ROUTE] ", type = "text" },
+        { key = "identity_key",label = "Identity Key (-i)",  badge = "[PATH]  ", type = "text" },
     }
 
     local field_idx = 1
+    local col_pos = nil -- cursor position within text, nil = at end
+
+    -- Initial screen prep
+    io.write("\27[2J")
 
     while true do
-        TUI.clear()
-        local W = 88
+        local out_buf = {}
+        local function emit(str)
+            table.insert(out_buf, str)
+        end
+
+        emit("\27[H")
+        local W = 96
         local inner_w = W - 2
         local box_top = string.rep("═", inner_w)
         local box_mid = string.rep("─", inner_w)
 
-        io.write("\27[1;35m╔" .. box_top .. "╗\27[0m\n")
-        local header_txt = pad_right("✏️  SSH Tunnel Profile Editor (Tab: Move, Space: Cycle Type, Enter: Save)", inner_w - 2)
-        io.write(string.format("\27[1;35m║\27[1;37m %s \27[1;35m║\27[0m\n", header_txt))
-        io.write("\27[1;35m╠" .. box_mid .. "╣\27[0m\n")
+        emit("\27[1;35m╔" .. box_top .. "╗\27[0m\27[K\n")
+        local mode_title = existing_profile and ("✏️  Edit Tunnel Profile — [" .. p.name .. "]") or "✨ Create New Tunnel Profile"
+        local header_txt = pad_right(mode_title, inner_w - 2)
+        emit(string.format("\27[1;35m║\27[1;37m %s \27[1;35m║\27[0m\27[K\n", header_txt))
+        emit("\27[1;35m╠" .. box_mid .. "╣\27[0m\27[K\n")
+
+        -- Subheader explanation
+        local subhdr = pad_right("  Field Name          Type     Editable Value Container                               Validation", inner_w - 2)
+        emit(string.format("║\27[2;37m %s \27[0m║\27[K\n", subhdr))
+        emit("\27[1;35m╟" .. box_mid .. "╢\27[0m\27[K\n")
 
         -- Port status preview
         local port_probe_res = ""
+        local is_port_ok = true
         if p.type ~= "remote" then
-            local ok, state = probe_port_available(tonumber(p.local_port) or 0, p.local_bind)
-            if ok then
-                port_probe_res = "\27[1;32m● Port is FREE & AVAILABLE\27[0m"
+            local pnum = tonumber(p.local_port) or 0
+            if pnum <= 0 or pnum > 65535 then
+                port_probe_res = "\27[1;31m✖ Invalid port (1-65535)\27[0m"
+                is_port_ok = false
             else
-                port_probe_res = "\27[1;31m✖ Port is OCCUPIED / IN USE\27[0m"
+                local ok, _ = probe_port_available(pnum, p.local_bind)
+                if ok then
+                    port_probe_res = "\27[1;32m● FREE & AVAILABLE\27[0m"
+                else
+                    port_probe_res = "\27[1;31m✖ OCCUPIED / IN USE\27[0m"
+                    is_port_ok = false
+                end
             end
         else
-            port_probe_res = "\27[1;34mℹ Remote reverse bind port\27[0m"
+            port_probe_res = "\27[1;34mℹ Reverse Bind Port\27[0m"
         end
 
         local box_width = 38
         for idx, fld in ipairs(fields) do
-            local marker = (idx == field_idx) and "▶" or " "
+            local is_active = (idx == field_idx)
+            local marker = is_active and "\27[1;33m▶\27[0m" or " "
             local val_raw = tostring(p[fld.key] or "")
             local fld_label = pad_right(fld.label, 18)
-            local row_content
+            local badge_color = is_active and "\27[1;33m" or "\27[2;37m"
+            local badge_str = badge_color .. fld.badge .. "\27[0m"
 
+            local row_content
             if fld.type == "choice" then
-                local opt_local  = (p.type == "local")  and "(\27[1;32m●\27[0m) LOCAL"  or "( ) LOCAL"
-                local opt_remote = (p.type == "remote") and "(\27[1;32m●\27[0m) REMOTE" or "( ) REMOTE"
-                local opt_socks  = (p.type == "socks")  and "(\27[1;32m●\27[0m) SOCKS5" or "( ) SOCKS5"
-                local choice_str = string.format("%s  %s  %s", opt_local, opt_remote, opt_socks)
-                if idx == field_idx then
-                    row_content = string.format("%s \27[1;33m%s: \27[1;37m%s \27[2m<Space to cycle>\27[0m", marker, fld_label, choice_str)
+                local opt_local  = (p.type == "local")  and "\27[1;32m(●) LOCAL (-L)\27[0m"  or "\27[2m( ) LOCAL (-L)\27[0m"
+                local opt_remote = (p.type == "remote") and "\27[1;32m(●) REMOTE (-R)\27[0m" or "\27[2m( ) REMOTE (-R)\27[0m"
+                local opt_socks  = (p.type == "socks")  and "\27[1;32m(●) SOCKS5 (-D)\27[0m" or "\27[2m( ) SOCKS5 (-D)\27[0m"
+                local choice_str = string.format("%s   %s   %s", opt_local, opt_remote, opt_socks)
+                if is_active then
+                    row_content = string.format("%s \27[1;37m%s\27[0m %s  \27[48;5;236;1;37m %s \27[0m  \27[1;33m<Space to Cycle>\27[0m",
+                        marker, fld_label, badge_str, choice_str)
                 else
-                    row_content = string.format("%s %s: %s", marker, fld_label, choice_str)
+                    row_content = string.format("%s %s %s  \27[2m%s\27[0m",
+                        marker, fld_label, badge_str, choice_str)
                 end
             elseif p.type == "socks" and (fld.key == "remote_host" or fld.key == "remote_port") then
-                row_content = string.format("%s %s: \27[2;37m[ N/A - Destination resolved dynamically by SOCKS5 client ]\27[0m", marker, fld_label)
+                row_content = string.format("%s \27[2m%s\27[0m %s  \27[2;37m[ N/A - Dynamically resolved by SOCKS5 client ]\27[0m",
+                    marker, fld_label, badge_str)
             else
-                if idx == field_idx then
-                    -- Focused active input box with block cursor and blue highlight
-                    local cursor_str = val_raw .. "█"
-                    local edit_box = "[\27[1;37;44m " .. pad_right(cursor_str, box_width) .. " \27[0m]"
-                    local hint = (fld.type == "number") and "\27[2m(Type digits, Backspace)\27[0m" or "\27[2m(Type to edit, Backspace)\27[0m"
-                    row_content = string.format("%s \27[1;33m%s: \27[0m%s %s", marker, fld_label, edit_box, hint)
+                local val_len = #val_raw
+                local pos = col_pos or val_len
+                if pos > val_len then pos = val_len end
+                if pos < 0 then pos = 0 end
+
+                local display_val = val_raw
+                if #display_val > (box_width - 1) then
+                    display_val = display_val:sub(#display_val - box_width + 2)
+                end
+
+                if is_active then
+                    -- High-definition active editable input field container
+                    -- Clearly shows distinct background, border, active cursor, and editing hint
+                    local before = display_val:sub(1, pos)
+                    local at_cursor = (pos < #display_val) and display_val:sub(pos + 1, pos + 1) or " "
+                    local after = (pos < #display_val) and display_val:sub(pos + 2) or ""
+                    local cursor_repr = "\27[7m" .. at_cursor .. "\27[27m"
+                    local styled_val = before .. cursor_repr .. after
+
+                    local padded_val = styled_val .. string.rep(" ", math.max(0, box_width - visual_len(styled_val)))
+                    local input_container = "\27[1;36m│\27[48;5;236;1;37m ✎ " .. padded_val .. " \27[0;1;36m│\27[0m"
+
+                    local validation = ""
+                    if fld.key == "local_port" then
+                        validation = " " .. port_probe_res
+                    elseif fld.type == "number" then
+                        local n = tonumber(p[fld.key])
+                        if not n or n <= 0 or n > 65535 then
+                            validation = " \27[1;31m✖ Valid port required (1-65535)\27[0m"
+                        else
+                            validation = " \27[1;32m✔ Valid port\27[0m"
+                        end
+                    else
+                        validation = " \27[2;33m[EDITING]\27[0m"
+                    end
+
+                    row_content = string.format("%s \27[1;33m%s\27[0m %s %s%s",
+                        marker, fld_label, badge_str, input_container, validation)
                 else
-                    -- Idle input box
-                    local edit_box = "[ " .. pad_right(val_raw, box_width) .. " ]"
-                    row_content = string.format("%s %s: %s", marker, fld_label, edit_box)
+                    -- Idle editable container: clearly framed with visible boundaries and placeholder
+                    local padded_val = pad_right(val_raw, box_width)
+                    local input_container = "\27[2;37m│   " .. padded_val .. " │\27[0m"
+                    local validation = ""
+                    if fld.key == "local_port" then
+                        validation = " " .. port_probe_res
+                    end
+                    row_content = string.format("%s %s %s %s%s",
+                        marker, fld_label, badge_str, input_container, validation)
                 end
             end
 
-            io.write(string.format("║ %s ║\n", pad_right(row_content, inner_w - 2)))
+            emit(string.format("║ %s ║\27[K\n", pad_right(row_content, inner_w - 2)))
         end
 
-        io.write("\27[1;35m╠" .. box_mid .. "╣\27[0m\n")
-        local probe_line = pad_right("  Local Port Probe : " .. port_probe_res, inner_w - 2)
-        io.write(string.format("║ %s ║\n", probe_line))
-        
-        -- Live Command Preview
+        emit("\27[1;35m╠" .. box_mid .. "╣\27[0m\27[K\n")
+
+        -- Live Generated Command Preview
         local cmd = command_parts_to_string(build_ssh_command(p))
         local wrapped = wrap_command_lines(cmd, inner_w - 24)
         for line_idx, line_txt in ipairs(wrapped) do
-            local prefix = (line_idx == 1) and "  Preview Command  : \27[0;36m" or "                     \27[0;36m"
+            local prefix = (line_idx == 1) and "  ⚡ Generated SSH Command : \27[0;36m" or "                            \27[0;36m"
             local suffix = (line_idx < #wrapped) and " \\" or ""
             local display_txt = pad_right(prefix .. line_txt .. suffix, inner_w - 2)
-            io.write(string.format("║ %s\27[0m ║\n", display_txt))
+            emit(string.format("║ %s\27[0m ║\27[K\n", display_txt))
         end
 
-        io.write("\27[1;35m╠" .. box_mid .. "╣\27[0m\n")
-        local help_line = pad_right("  \27[1;32m[Tab/Shift-Tab]\27[0m Next/Prev Field   \27[1;32m[Space]\27[0m Cycle Option   \27[1;32m[Enter]\27[0m Save   \27[1;31m[Esc]\27[0m Cancel", inner_w - 2)
-        io.write(string.format("║ %s ║\n", help_line))
-        io.write("\27[1;35m╚" .. box_top .. "╝\27[0m\n")
+        emit("\27[1;35m╠" .. box_mid .. "╣\27[0m\27[K\n")
+        local help_line = pad_right("  \27[1;32m[Tab/↓]\27[0m Next  \27[1;32m[Shift-Tab/↑]\27[0m Prev  \27[1;32m[Space]\27[0m Cycle  \27[1;32m[Ctrl+U]\27[0m Clear  \27[1;32m[Enter/Ctrl+S]\27[0m Save  \27[1;31m[Esc]\27[0m Cancel", inner_w - 2)
+        emit(string.format("║ %s ║\27[K\n", help_line))
+        emit("\27[1;35m╚" .. box_top .. "╝\27[0m\27[K\n")
+        emit("\27[J")
+
+        io.write(table.concat(out_buf))
         io.flush()
 
         local key = TUI.read_key()
-        if key == "ESC" then
+        if not key or key == "ESC" then
+            TUI.clear()
             return nil
-        elseif key == "TAB" or key == "DOWN" then
+        end
+        local cur_fld = fields[field_idx]
+
+        if key == "TAB" or key == "DOWN" then
             field_idx = field_idx + 1
             if field_idx > #fields then field_idx = 1 end
+            col_pos = nil
         elseif key == "UP" or key == "SHIFT_TAB" then
             field_idx = field_idx - 1
             if field_idx < 1 then field_idx = #fields end
-        elseif key == "ENTER" then
-            p.local_port = tonumber(p.local_port) or 8080
-            p.remote_port = tonumber(p.remote_port) or 8080
-            p.ssh_port = tonumber(p.ssh_port) or 22
-            return p
-        elseif key == " " and fields[field_idx].type == "choice" then
+            col_pos = nil
+        elseif key == "ENTER" or key == "CTRL_S" then
+            -- If user pressed enter on last field or used Ctrl+S, save; if earlier field, advance to next
+            if key == "CTRL_S" or field_idx == #fields then
+                p.local_port = tonumber(p.local_port) or 8080
+                p.remote_port = tonumber(p.remote_port) or 8080
+                p.ssh_port = tonumber(p.ssh_port) or 22
+                TUI.clear()
+                return p
+            else
+                field_idx = field_idx + 1
+                col_pos = nil
+            end
+        elseif key == " " and cur_fld.type == "choice" then
             local curr = p.type
             if curr == "local" then p.type = "remote"
             elseif curr == "remote" then p.type = "socks"
             else p.type = "local" end
+        elseif key == "LEFT" then
+            local cur_val = tostring(p[cur_fld.key] or "")
+            local pos = col_pos or #cur_val
+            pos = math.max(0, pos - 1)
+            col_pos = pos
+        elseif key == "RIGHT" then
+            local cur_val = tostring(p[cur_fld.key] or "")
+            local pos = col_pos or #cur_val
+            pos = math.min(#cur_val, pos + 1)
+            col_pos = pos
+        elseif key == "CTRL_U" then
+            p[cur_fld.key] = ""
+            col_pos = 0
         elseif key == "BACKSPACE" then
-            local cur_val = tostring(p[fields[field_idx].key] or "")
-            if #cur_val > 0 then
-                p[fields[field_idx].key] = cur_val:sub(1, #cur_val - 1)
+            local cur_val = tostring(p[cur_fld.key] or "")
+            local pos = col_pos or #cur_val
+            if pos > 0 and #cur_val > 0 then
+                local before = cur_val:sub(1, pos - 1)
+                local after = cur_val:sub(pos + 1)
+                p[cur_fld.key] = before .. after
+                col_pos = pos - 1
             end
         elseif key and #key == 1 and string.byte(key) >= 32 and string.byte(key) <= 126 then
-            local fld = fields[field_idx]
-            if fld.type ~= "number" or key:match("%d") then
-                local cur_val = tostring(p[fld.key] or "")
-                p[fld.key] = cur_val .. key
+            if cur_fld.type ~= "number" or key:match("%d") then
+                local cur_val = tostring(p[cur_fld.key] or "")
+                local pos = col_pos or #cur_val
+                local before = cur_val:sub(1, pos)
+                local after = cur_val:sub(pos + 1)
+                p[cur_fld.key] = before .. key .. after
+                col_pos = pos + 1
             end
         end
     end
@@ -1427,6 +1560,7 @@ local function run_tui()
     local status_msg = "Ready. Use arrows to browse profiles."
 
     TUI.set_raw_mode(true)
+    TUI.hide_cursor()
     local ok, err = pcall(function()
         while true do
             if cursor > #data.profiles then cursor = math.max(1, #data.profiles) end
@@ -1434,7 +1568,7 @@ local function run_tui()
             status_msg = ""
 
             local key = TUI.read_key()
-            if key == "q" or key == "ESC" then
+            if not key or key == "q" or key == "ESC" then
                 break
             elseif key == "UP" then
                 cursor = cursor - 1
@@ -1493,12 +1627,14 @@ local function run_tui()
                     local cmd_parts = build_interactive_ssh_command(sel)
                     local cmd = command_parts_to_string(cmd_parts)
                     TUI.set_raw_mode(false)
+                    TUI.show_cursor()
                     TUI.clear()
                     print("\27[1;36m=== Connecting to '" .. sel.name .. "' ===\27[0m")
                     print("\27[2mExecuting: " .. cmd .. "\27[0m\n")
                     os.execute(cmd)
                     print("\n\27[1;33m[Session closed. Press any key to return to dashboard...]\27[0m")
                     TUI.set_raw_mode(true)
+                    TUI.hide_cursor()
                     TUI.read_key()
                     local post_st = get_tunnel_status(sel)
                     status_msg = string.format("Exited SSH session '%s'. Tunnel status: %s", sel.name, post_st.is_up and "● UP" or "○ DOWN")
@@ -1538,6 +1674,7 @@ local function run_tui()
             end
         end
     end)
+    TUI.show_cursor()
     TUI.set_raw_mode(false)
     TUI.clear()
     if not ok then
