@@ -1392,7 +1392,263 @@ function TUI.run(db, initial_query)
 
     local running = true
 
+    -- Cached layout dimensions
+    local cur_cols, cur_rows = get_term_size()
+    cur_cols = math.max(60, cur_cols)
+    cur_rows = math.max(15, cur_rows)
+    local left_col_w = math.max(34, math.floor((cur_cols - 3) * 0.44))
+    local right_col_w = cur_cols - 3 - left_col_w
+    local list_height = cur_rows - 6
+
+    local function update_layout()
+        local cols, rows = get_term_size()
+        cols = math.max(60, cols)
+        rows = math.max(15, rows)
+        if cols ~= cur_cols or rows ~= cur_rows then
+            cur_cols = cols
+            cur_rows = rows
+            left_col_w = math.max(34, math.floor((cols - 3) * 0.44))
+            right_col_w = cols - 3 - left_col_w
+            list_height = rows - 6
+            needs_full_redraw = true
+        end
+    end
+
+    local function clamp_scroll()
+        local max_scroll = math.max(0, #results - list_height)
+        if selected_idx < list_scroll_offset + 1 then
+            list_scroll_offset = selected_idx - 1
+        elseif selected_idx > list_scroll_offset + list_height then
+            list_scroll_offset = selected_idx - list_height
+        end
+        list_scroll_offset = math.max(0, math.min(list_scroll_offset, max_scroll))
+    end
+
+    -- Format a single file item in the left list
+    local function format_left_item(item_idx, is_sel, list_thumb_pos, i)
+        local res_item = results[item_idx]
+        local left_sb = " "
+        if #results > list_height then
+            left_sb = (i == list_thumb_pos) and "\27[1;36m█\27[0m" or "\27[90m│\27[0m"
+        end
+
+        local text_w = left_col_w - 1
+        if res_item then
+            local marker = is_sel and "▶ " or "  "
+            local full_path = res_item.filepath
+            local max_p_len = text_w - 4
+            local clean_path = full_path
+            if visual_len(clean_path) > max_p_len and max_p_len > 8 then
+                -- Intelligent path shortening: keep filename and parent folder
+                local fname = get_filename(full_path)
+                local dir = full_path:sub(1, #full_path - #fname)
+                if #fname + 4 <= max_p_len then
+                    clean_path = "..." .. full_path:sub(#full_path - (max_p_len - 4))
+                else
+                    clean_path = truncate(full_path, max_p_len)
+                end
+            end
+            local full_text = marker .. clean_path
+            local padded = pad_to(full_text, text_w)
+            if is_sel then
+                return "\27[1;30;43m" .. padded .. "\27[0m" .. left_sb
+            else
+                return "\27[37m" .. padded .. "\27[0m" .. left_sb
+            end
+        elseif #results == 0 and i == 2 then
+            local prompt_msg = (#query == 0) and "  Type to search code..." or "  No matches found"
+            return "\27[90m" .. pad_to(prompt_msg, text_w) .. "\27[0m" .. left_sb
+        else
+            return string.rep(" ", text_w) .. left_sb
+        end
+    end
+
+    -- Instant visual echo: update only the query prompt line in row 2
+    local function render_query_prompt_instant()
+        local left_col_border = (focus_pane == "search") and "\27[1;36m" or "\27[90m"
+        local query_prompt = " > " .. query .. "_"
+        local matches_badge = string.format("[%d Matches]", #results)
+        local badge_w = visual_len(matches_badge)
+        local left_head = ""
+        if left_col_w > badge_w + 4 then
+            left_head = pad_to(query_prompt, left_col_w - badge_w) .. matches_badge
+        else
+            left_head = pad_to(query_prompt, left_col_w)
+        end
+        -- Write directly to row 2, column 2 (inside left pane)
+        io.write(string.format("\27[2;1H%s│\27[0m%s", left_col_border, pad_to(left_head, left_col_w)))
+        io.flush()
+    end
+
+    -- Fast selective row update when selection moves within visible window
+    local function render_selection_move(old_idx, new_idx)
+        local list_thumb_pos = 1
+        if #results > list_height then
+            local max_offset = math.max(1, #results - list_height)
+            list_thumb_pos = 1 + math.floor((list_scroll_offset / max_offset) * (list_height - 1))
+        end
+
+        local left_col_border = (focus_pane == "search") and "\27[1;36m" or "\27[90m"
+        local neutral_border = "\27[90m"
+
+        local function redraw_one_row(target_idx, is_sel)
+            local row_num = target_idx - list_scroll_offset
+            if row_num >= 1 and row_num <= list_height then
+                local y = 3 + row_num
+                local left_cell = format_left_item(target_idx, is_sel, list_thumb_pos, row_num)
+                io.write(string.format("\27[%d;1H%s│\27[0m%s%s│\27[0m", y, left_col_border, left_cell, neutral_border))
+            end
+        end
+
+        redraw_one_row(old_idx, false)
+        redraw_one_row(new_idx, true)
+        io.flush()
+    end
+
+    local function render_full_screen()
+        clamp_scroll()
+        local left_col_border = (focus_pane == "search") and "\27[1;36m" or "\27[90m"
+        local right_col_border = (focus_pane == "preview") and "\27[1;32m" or "\27[90m"
+        local neutral_border = "\27[90m"
+
+        local frame_buf = {}
+        local function emit_row(y, row_str)
+            table.insert(frame_buf, string.format("\27[%d;1H\27[2K%s", y, row_str))
+        end
+
+        -- Row 1: Top Border
+        emit_row(1, neutral_border .. "┌" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┬" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┐\27[0m")
+
+        -- Row 2: Header Information Bar
+        local query_prompt = " > " .. query .. "_"
+        local matches_badge = string.format("[%d Matches]", #results)
+        local badge_w = visual_len(matches_badge)
+        local left_head = ""
+        if left_col_w > badge_w + 4 then
+            left_head = pad_to(query_prompt, left_col_w - badge_w) .. matches_badge
+        else
+            left_head = pad_to(query_prompt, left_col_w)
+        end
+
+        local right_head_title = ""
+        if current_preview_file then
+            local first_ln = 1
+            for ln = 1, #current_preview_lines do
+                if current_match_lines[ln] then first_ln = ln; break end
+            end
+            right_head_title = string.format(" 📄 %s:%d (%d/%d)", get_filename(current_preview_file), first_ln, preview_scroll_offset + 1, #current_preview_lines)
+        else
+            right_head_title = " 📄 Preview: (No file selected)"
+        end
+        local mode_badge = (vim_mode == "INSERT") and "\27[1;36m[INSERT]\27[0m" or "\27[1;33m[NORMAL]\27[0m"
+        local pane_badge = (focus_pane == "preview") and "\27[1;32m[PREVIEW]\27[0m" or "\27[1;34m[RESULTS]\27[0m"
+        local badges = pane_badge .. " " .. mode_badge
+        local fbadge_w = visual_len(badges)
+        local right_head = ""
+        if right_col_w > fbadge_w + 4 then
+            right_head = pad_to(right_head_title, right_col_w - fbadge_w) .. badges
+        else
+            right_head = pad_to(right_head_title, right_col_w)
+        end
+
+        emit_row(2, string.format("%s│\27[0m%s%s│\27[0m%s%s│\27[0m",
+            left_col_border,
+            pad_to(left_head, left_col_w),
+            neutral_border,
+            pad_to(right_head, right_col_w),
+            right_col_border))
+
+        -- Row 3: Split Divider
+        emit_row(3, neutral_border .. "├" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┼" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┤\27[0m")
+
+        -- Calculate scrollbar thumb positions
+        local list_thumb_pos = 1
+        if #results > list_height then
+            local max_offset = math.max(1, #results - list_height)
+            list_thumb_pos = 1 + math.floor((list_scroll_offset / max_offset) * (list_height - 1))
+        end
+
+        local prev_total = #current_preview_lines
+        local prev_thumb_pos = 1
+        if prev_total > list_height then
+            local max_prev_offset = math.max(1, prev_total - list_height)
+            prev_thumb_pos = 1 + math.floor((preview_scroll_offset / max_prev_offset) * (list_height - 1))
+        end
+
+        -- Rows 4 .. (4 + list_height - 1): Content rows
+        for i = 1, list_height do
+            local item_idx = list_scroll_offset + i
+            local left_cell = format_left_item(item_idx, (item_idx == selected_idx), list_thumb_pos, i)
+
+            -- Right scrollbar indicator
+            local right_sb = " "
+            if prev_total > list_height then
+                right_sb = (i == prev_thumb_pos) and "\27[1;32m█\27[0m" or "\27[90m│\27[0m"
+            end
+
+            -- Right Content (Source preview)
+            local right_cell = ""
+            local r_text_w = right_col_w - 1
+            if current_preview_file and #current_preview_lines > 0 then
+                local file_line_num = preview_scroll_offset + i
+                if file_line_num <= #current_preview_lines then
+                    local line_content = current_preview_lines[file_line_num] or ""
+                    local is_hit = current_match_lines[file_line_num]
+
+                    local max_code_w = math.max(0, r_text_w - 9)
+                    local code_str = truncate(line_content, max_code_w)
+                    local line_pad = string.rep(" ", math.max(0, max_code_w - visual_len(code_str)))
+
+                    if is_hit then
+                        for tok in query:gmatch("[%w_%-]+") do
+                            local pat = tok:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1")
+                            code_str = code_str:gsub("(" .. pat .. ")", "\27[1;33;4m%1\27[0;1;37m")
+                        end
+                        right_cell = string.format("\27[1;33m> \27[90m%4d │\27[1;37m %s%s\27[0m%s", file_line_num, code_str, line_pad, right_sb)
+                    else
+                        right_cell = string.format("  \27[90m%4d │\27[0;37m %s%s\27[0m%s", file_line_num, code_str, line_pad, right_sb)
+                    end
+                else
+                    right_cell = string.rep(" ", r_text_w) .. right_sb
+                end
+            else
+                right_cell = string.rep(" ", r_text_w) .. right_sb
+            end
+
+            emit_row(3 + i, string.format("%s│\27[0m%s%s│\27[0m%s%s│\27[0m", left_col_border, left_cell, neutral_border, right_cell, right_col_border))
+        end
+
+        -- Row Bottom Divider
+        local div_y = 3 + list_height + 1
+        emit_row(div_y, neutral_border .. "├" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┴" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┤\27[0m")
+
+        -- Row Footer / Keybindings
+        local status_text = status_bar_msg
+        if not status_text or (os.clock() - status_bar_time > 3.0) then
+            if vim_mode == "INSERT" then
+                status_text = " [INSERT] Type: Search  [Esc] Normal Mode  [Enter/o] Open  [↑/↓] Results  [^U] Clear  [^R] Reindex"
+            else
+                status_text = " [NORMAL] j/k: Nav  n/N: Match  h/l: Pane  i or /: Search  ^D/^U: Page  y: Yank  Enter/o: Open  q: Quit"
+            end
+        else
+            status_text = " " .. status_text
+        end
+        local padded_status = pad_to(status_text, cur_cols - 2)
+        local status_y = div_y + 1
+        emit_row(status_y, string.format("%s│\27[1;30;47m%s\27[0m%s│\27[0m", neutral_border, padded_status, neutral_border))
+
+        -- Final Bottom Border
+        local bot_y = status_y + 1
+        emit_row(bot_y, neutral_border .. "└" .. string.rep("─", cur_cols - 2) .. "┘\27[0m")
+
+        -- Atomically write frame buffer with synchronized updates (Zero flicker)
+        io.write("\27[?2026h" .. table.concat(frame_buf) .. "\27[?2026l")
+        io.flush()
+    end
+
     while running do
+        update_layout()
+
         -- Trigger debounced background search when idle or queue drained
         if search_pending and (os.clock() - search_pending_time >= 0.03 or #key_queue == 0) then
             refresh_search()
@@ -1400,198 +1656,11 @@ function TUI.run(db, initial_query)
 
         if needs_redraw then
             needs_redraw = false
-            local cols, rows = get_term_size()
-            cols = math.max(60, cols)
-            rows = math.max(15, rows)
-
-            local left_col_w = math.max(24, math.floor((cols - 3) * 0.38))
-            local right_col_w = cols - 3 - left_col_w
-            local list_height = rows - 6
-
-            if selected_idx < list_scroll_offset + 1 then
-                list_scroll_offset = selected_idx - 1
-            elseif selected_idx > list_scroll_offset + list_height then
-                list_scroll_offset = selected_idx - list_height
-            end
-            list_scroll_offset = math.max(0, list_scroll_offset)
-
-            if #results > 0 and results[selected_idx] then
-                load_preview_for(results[selected_idx].filepath, query)
-            end
-
-            local frame_buf = {}
-            local function emit_row(y, row_str)
-                table.insert(frame_buf, string.format("\27[%d;1H\27[2K%s", y, row_str))
-            end
-
-            local left_col_border = (focus_pane == "search") and "\27[1;36m" or "\27[90m"
-            local right_col_border = (focus_pane == "preview") and "\27[1;32m" or "\27[90m"
-            local neutral_border = "\27[90m"
-
-            -- Row 1: Top Border (Exact visual width: 1 + left_col_w + 1 + right_col_w + 1 = cols)
-            emit_row(1, neutral_border .. "┌" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┬" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┐\27[0m")
-
-            -- Row 2: Header Information Bar
-            local query_prompt = " > " .. query .. "_"
-            local matches_badge = string.format("[%d Matches]", #results)
-            local badge_w = visual_len(matches_badge)
-            local left_head = ""
-            if left_col_w > badge_w + 4 then
-                left_head = pad_to(query_prompt, left_col_w - badge_w) .. matches_badge
-            else
-                left_head = pad_to(query_prompt, left_col_w)
-            end
-
-            local right_head_title = ""
-            if current_preview_file then
-                local first_ln = 1
-                for ln = 1, #current_preview_lines do
-                    if current_match_lines[ln] then first_ln = ln; break end
-                end
-                right_head_title = string.format(" 📄 %s:%d (%d/%d)", get_filename(current_preview_file), first_ln, preview_scroll_offset + 1, #current_preview_lines)
-            else
-                right_head_title = " 📄 Preview: (No file selected)"
-            end
-            local mode_badge = (vim_mode == "INSERT") and "\27[1;36m[INSERT]\27[0m" or "\27[1;33m[NORMAL]\27[0m"
-            local pane_badge = (focus_pane == "preview") and "\27[1;32m[PREVIEW]\27[0m" or "\27[1;34m[RESULTS]\27[0m"
-            local badges = pane_badge .. " " .. mode_badge
-            local fbadge_w = visual_len(badges)
-            local right_head = ""
-            if right_col_w > fbadge_w + 4 then
-                right_head = pad_to(right_head_title, right_col_w - fbadge_w) .. badges
-            else
-                right_head = pad_to(right_head_title, right_col_w)
-            end
-
-            emit_row(2, string.format("%s│\27[0m%s%s│\27[0m%s%s│\27[0m",
-                left_col_border,
-                pad_to(left_head, left_col_w),
-                neutral_border,
-                pad_to(right_head, right_col_w),
-                right_col_border))
-
-            -- Row 3: Split Divider
-            emit_row(3, neutral_border .. "├" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┼" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┤\27[0m")
-
-            -- Calculate scrollbar thumb positions
-            local list_thumb_pos = 1
-            if #results > list_height then
-                local max_offset = math.max(1, #results - list_height)
-                list_thumb_pos = 1 + math.floor((list_scroll_offset / max_offset) * (list_height - 1))
-            end
-
-            local prev_total = #current_preview_lines
-            local prev_thumb_pos = 1
-            if prev_total > list_height then
-                local max_prev_offset = math.max(1, prev_total - list_height)
-                prev_thumb_pos = 1 + math.floor((preview_scroll_offset / max_prev_offset) * (list_height - 1))
-            end
-
-            -- Rows 4 .. (4 + list_height - 1): Content rows
-            for i = 1, list_height do
-                local item_idx = list_scroll_offset + i
-                local res_item = results[item_idx]
-
-                -- Left scrollbar indicator
-                local left_sb = " "
-                if #results > list_height then
-                    left_sb = (i == list_thumb_pos) and "\27[1;36m█\27[0m" or "\27[90m│\27[0m"
-                end
-
-                -- Left Content (File list)
-                local left_cell = ""
-                local text_w = left_col_w - 1
-                if res_item then
-                    local is_sel = (item_idx == selected_idx)
-                    local marker = is_sel and "▶ " or "  "
-                    local clean_path = res_item.filepath
-                    local max_p_len = text_w - 4
-                    if #clean_path > max_p_len and max_p_len > 6 then
-                        clean_path = "..." .. clean_path:sub(#clean_path - (max_p_len - 4))
-                    end
-
-                    local full_text = marker .. clean_path
-                    local padded = pad_to(full_text, text_w)
-                    if is_sel then
-                        left_cell = "\27[1;30;43m" .. padded .. "\27[0m" .. left_sb
-                    else
-                        left_cell = "\27[37m" .. padded .. "\27[0m" .. left_sb
-                    end
-                elseif #results == 0 and i == 2 then
-                    local prompt_msg = (#query == 0) and "  Type to search code..." or "  No matches found"
-                    left_cell = "\27[90m" .. pad_to(prompt_msg, text_w) .. "\27[0m" .. left_sb
-                else
-                    left_cell = string.rep(" ", text_w) .. left_sb
-                end
-
-                -- Right scrollbar indicator
-                local right_sb = " "
-                if prev_total > list_height then
-                    right_sb = (i == prev_thumb_pos) and "\27[1;32m█\27[0m" or "\27[90m│\27[0m"
-                end
-
-                -- Right Content (Source preview)
-                local right_cell = ""
-                local r_text_w = right_col_w - 1
-                if current_preview_file and #current_preview_lines > 0 then
-                    local file_line_num = preview_scroll_offset + i
-                    if file_line_num <= #current_preview_lines then
-                        local line_content = current_preview_lines[file_line_num] or ""
-                        local is_hit = current_match_lines[file_line_num]
-
-                        local max_code_w = math.max(0, r_text_w - 9)
-                        local code_str = truncate(line_content, max_code_w)
-                        local line_pad = string.rep(" ", math.max(0, max_code_w - visual_len(code_str)))
-
-                        if is_hit then
-                            for tok in query:gmatch("[%w_%-]+") do
-                                local pat = tok:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1")
-                                code_str = code_str:gsub("(" .. pat .. ")", "\27[1;33;4m%1\27[0;1;37m")
-                            end
-                            right_cell = string.format("\27[1;33m> \27[90m%4d │\27[1;37m %s%s\27[0m%s", file_line_num, code_str, line_pad, right_sb)
-                        else
-                            right_cell = string.format("  \27[90m%4d │\27[0;37m %s%s\27[0m%s", file_line_num, code_str, line_pad, right_sb)
-                        end
-                    else
-                        right_cell = string.rep(" ", r_text_w) .. right_sb
-                    end
-                else
-                    right_cell = string.rep(" ", r_text_w) .. right_sb
-                end
-
-                emit_row(3 + i, string.format("%s│\27[0m%s%s│\27[0m%s%s│\27[0m", left_col_border, left_cell, neutral_border, right_cell, right_col_border))
-            end
-
-            -- Row Bottom Divider
-            local div_y = 3 + list_height + 1
-            emit_row(div_y, neutral_border .. "├" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┴" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┤\27[0m")
-
-            -- Row Footer / Keybindings
-            local status_text = status_bar_msg
-            if not status_text or (os.clock() - status_bar_time > 3.0) then
-                if vim_mode == "INSERT" then
-                    status_text = " [INSERT] Type: Search  [Esc] Normal Mode  [Enter/o] Open  [↑/↓] Results  [^U] Clear  [^R] Reindex"
-                else
-                    status_text = " [NORMAL] j/k: Nav  n/N: Match  h/l: Pane  i or /: Search  ^D/^U: Page  y: Yank  Enter/o: Open  q: Quit"
-                end
-            else
-                status_text = " " .. status_text
-            end
-            local padded_status = pad_to(status_text, cols - 2)
-            local status_y = div_y + 1
-            emit_row(status_y, string.format("%s│\27[1;30;47m%s\27[0m%s│\27[0m", neutral_border, padded_status, neutral_border))
-
-            -- Final Bottom Border
-            local bot_y = status_y + 1
-            emit_row(bot_y, neutral_border .. "└" .. string.rep("─", cols - 2) .. "┘\27[0m")
-
-            -- Atomically write frame buffer with synchronized updates (Zero flicker)
-            io.write("\27[?2026h" .. table.concat(frame_buf) .. "\27[?2026l")
-            io.flush()
+            render_full_screen()
         end
 
         -- Read input via non-blocking poll (shorter timeout when a search debounce is pending)
-        local poll_timeout = search_pending and 10 or 40
+        local poll_timeout = search_pending and 10 or 35
         local key = read_key(poll_timeout)
         if key then
             if key == "CTRL_C" then
@@ -1611,8 +1680,18 @@ function TUI.run(db, initial_query)
                     end
                 else
                     if selected_idx > 1 then
+                        local old_idx = selected_idx
                         selected_idx = selected_idx - 1
-                        needs_redraw = true
+                        if selected_idx >= list_scroll_offset + 1 then
+                            render_selection_move(old_idx, selected_idx)
+                            if #results > 0 and results[selected_idx] then
+                                load_preview_for(results[selected_idx].filepath, query)
+                                needs_redraw = true
+                            end
+                        else
+                            clamp_scroll()
+                            needs_redraw = true
+                        end
                     end
                 end
             elseif key == "DOWN" then
@@ -1623,8 +1702,18 @@ function TUI.run(db, initial_query)
                     end
                 else
                     if selected_idx < #results then
+                        local old_idx = selected_idx
                         selected_idx = selected_idx + 1
-                        needs_redraw = true
+                        if selected_idx <= list_scroll_offset + list_height then
+                            render_selection_move(old_idx, selected_idx)
+                            if #results > 0 and results[selected_idx] then
+                                load_preview_for(results[selected_idx].filepath, query)
+                                needs_redraw = true
+                            end
+                        else
+                            clamp_scroll()
+                            needs_redraw = true
+                        end
                     end
                 end
             elseif key == "PAGE_UP" or (vim_mode == "NORMAL" and key == "CTRL_U") then
@@ -1633,6 +1722,7 @@ function TUI.run(db, initial_query)
                 else
                     selected_idx = math.max(1, selected_idx - 10)
                 end
+                clamp_scroll()
                 needs_redraw = true
             elseif key == "PAGE_DOWN" or (vim_mode == "NORMAL" and key == "CTRL_D") then
                 if focus_pane == "preview" then
@@ -1640,6 +1730,7 @@ function TUI.run(db, initial_query)
                 else
                     selected_idx = math.min(#results, selected_idx + 10)
                 end
+                clamp_scroll()
                 needs_redraw = true
             elseif key == "TAB" then
                 focus_pane = (focus_pane == "search") and "preview" or "search"
@@ -1647,9 +1738,9 @@ function TUI.run(db, initial_query)
             elseif key == "CTRL_U" and vim_mode == "INSERT" then
                 query = ""
                 selected_idx = 1
+                render_query_prompt_instant()
                 search_pending = true
                 search_pending_time = os.clock()
-                needs_redraw = true
                 set_status("Query cleared")
             elseif key == "CTRL_R" then
                 set_status("⚡ Incremental re-indexing in progress...")
@@ -1660,9 +1751,9 @@ function TUI.run(db, initial_query)
                 if vim_mode == "INSERT" and #query > 0 then
                     query = query:sub(1, -2)
                     selected_idx = 1
+                    render_query_prompt_instant()
                     search_pending = true
                     search_pending_time = os.clock()
-                    needs_redraw = true
                 end
             elseif key == "ENTER" or (vim_mode == "NORMAL" and key == "o") then
                 if #results > 0 and results[selected_idx] then
@@ -1691,8 +1782,18 @@ function TUI.run(db, initial_query)
                         end
                     else
                         if selected_idx < #results then
+                            local old_idx = selected_idx
                             selected_idx = selected_idx + 1
-                            needs_redraw = true
+                            if selected_idx <= list_scroll_offset + list_height then
+                                render_selection_move(old_idx, selected_idx)
+                                if #results > 0 and results[selected_idx] then
+                                    load_preview_for(results[selected_idx].filepath, query)
+                                    needs_redraw = true
+                                end
+                            else
+                                clamp_scroll()
+                                needs_redraw = true
+                            end
                         end
                     end
                 elseif key == "k" then
@@ -1703,8 +1804,18 @@ function TUI.run(db, initial_query)
                         end
                     else
                         if selected_idx > 1 then
+                            local old_idx = selected_idx
                             selected_idx = selected_idx - 1
-                            needs_redraw = true
+                            if selected_idx >= list_scroll_offset + 1 then
+                                render_selection_move(old_idx, selected_idx)
+                                if #results > 0 and results[selected_idx] then
+                                    load_preview_for(results[selected_idx].filepath, query)
+                                    needs_redraw = true
+                                end
+                            else
+                                clamp_scroll()
+                                needs_redraw = true
+                            end
                         end
                     end
                 elseif key == "h" then
@@ -1719,6 +1830,7 @@ function TUI.run(db, initial_query)
                     else
                         selected_idx = 1
                     end
+                    clamp_scroll()
                     needs_redraw = true
                 elseif key == "G" then
                     if focus_pane == "preview" then
@@ -1726,6 +1838,7 @@ function TUI.run(db, initial_query)
                     else
                         selected_idx = math.max(1, #results)
                     end
+                    clamp_scroll()
                     needs_redraw = true
                 elseif key == "n" then
                     -- Jump to next match in current file
@@ -1772,9 +1885,9 @@ function TUI.run(db, initial_query)
                     selected_idx = 1
                     vim_mode = "INSERT"
                     focus_pane = "search"
+                    render_query_prompt_instant()
                     search_pending = true
                     search_pending_time = os.clock()
-                    needs_redraw = true
                 end
             elseif #key == 1 and vim_mode == "INSERT" then
                 query = query .. key
@@ -1783,9 +1896,10 @@ function TUI.run(db, initial_query)
                     query = query .. table.remove(key_queue, 1)
                 end
                 selected_idx = 1
+                -- Instant 0ms visual echo to the prompt bar
+                render_query_prompt_instant()
                 search_pending = true
                 search_pending_time = os.clock()
-                needs_redraw = true
             end
         else
             -- Check if status bar message timed out
