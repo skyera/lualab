@@ -1193,6 +1193,8 @@ function TUI.run(db, initial_query)
     local current_match_list = {}
     local current_match_pos = 1
     local needs_redraw = true
+    local search_pending = false
+    local search_pending_time = 0
 
     -- LRU File lines cache to avoid re-reading files on disk
     local preview_file_cache = {}
@@ -1267,6 +1269,7 @@ function TUI.run(db, initial_query)
             current_match_lines = {}
             selected_idx = 1
             list_scroll_offset = 0
+            search_pending = false
             needs_redraw = true
             return
         end
@@ -1282,6 +1285,7 @@ function TUI.run(db, initial_query)
                 load_preview_for(results[selected_idx].filepath, query)
             end
         end
+        search_pending = false
         needs_redraw = true
     end
 
@@ -1349,6 +1353,11 @@ function TUI.run(db, initial_query)
     local running = true
 
     while running do
+        -- Trigger debounced background search when idle or queue drained
+        if search_pending and (os.clock() - search_pending_time >= 0.03 or #key_queue == 0) then
+            refresh_search()
+        end
+
         if needs_redraw then
             needs_redraw = false
             local cols, rows = get_term_size()
@@ -1541,8 +1550,9 @@ function TUI.run(db, initial_query)
             io.flush()
         end
 
-        -- Read input via non-blocking poll
-        local key = read_key(40)
+        -- Read input via non-blocking poll (shorter timeout when a search debounce is pending)
+        local poll_timeout = search_pending and 10 or 40
+        local key = read_key(poll_timeout)
         if key then
             if key == "CTRL_C" then
                 running = false
@@ -1597,7 +1607,9 @@ function TUI.run(db, initial_query)
             elseif key == "CTRL_U" and vim_mode == "INSERT" then
                 query = ""
                 selected_idx = 1
-                refresh_search()
+                search_pending = true
+                search_pending_time = os.clock()
+                needs_redraw = true
                 set_status("Query cleared")
             elseif key == "CTRL_R" then
                 set_status("⚡ Incremental re-indexing in progress...")
@@ -1608,7 +1620,9 @@ function TUI.run(db, initial_query)
                 if vim_mode == "INSERT" and #query > 0 then
                     query = query:sub(1, -2)
                     selected_idx = 1
-                    refresh_search()
+                    search_pending = true
+                    search_pending_time = os.clock()
+                    needs_redraw = true
                 end
             elseif key == "ENTER" or (vim_mode == "NORMAL" and key == "o") then
                 if #results > 0 and results[selected_idx] then
@@ -1718,7 +1732,9 @@ function TUI.run(db, initial_query)
                     selected_idx = 1
                     vim_mode = "INSERT"
                     focus_pane = "search"
-                    refresh_search()
+                    search_pending = true
+                    search_pending_time = os.clock()
+                    needs_redraw = true
                 end
             elseif #key == 1 and vim_mode == "INSERT" then
                 query = query .. key
@@ -1727,7 +1743,9 @@ function TUI.run(db, initial_query)
                     query = query .. table.remove(key_queue, 1)
                 end
                 selected_idx = 1
-                refresh_search()
+                search_pending = true
+                search_pending_time = os.clock()
+                needs_redraw = true
             end
         else
             -- Check if status bar message timed out
