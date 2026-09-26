@@ -2033,28 +2033,12 @@ function TUI.run(db, initial_query)
         -- 1. Update header row 2
         table.insert(frame_buf, string.format("\27[2;1H\27[2K%s", build_header_row()))
 
-        -- 2. Update ONLY the 2 lines changed in left column (old_idx unhighlighted, new_idx highlighted)
-        local left_col_border = (focus_pane == "search") and "\27[1;36m" or "\27[90m"
-        local neutral_border = "\27[90m"
-
-        local old_rel = old_idx - list_scroll_offset
-        if old_rel >= 1 and old_rel <= list_height then
-            local left_cell_old = format_left_item(old_idx, false, list_thumb_pos, old_rel)
-            table.insert(frame_buf, string.format("\27[%d;1H%s│\27[0m%s%s│\27[0m", 3 + old_rel, left_col_border, left_cell_old, neutral_border))
-        end
-
-        local new_rel = new_idx - list_scroll_offset
-        if new_rel >= 1 and new_rel <= list_height then
-            local left_cell_new = format_left_item(new_idx, true, list_thumb_pos, new_rel)
-            table.insert(frame_buf, string.format("\27[%d;1H%s│\27[0m%s%s│\27[0m", 3 + new_rel, left_col_border, left_cell_new, neutral_border))
-        end
-
-        -- 3. Update right preview pane lines (rows 4 .. 3 + list_height) starting at divider column
-        local right_col_border = (focus_pane == "preview") and "\27[1;32m" or "\27[90m"
-        local right_start_col = left_col_w + 3 -- after left border + left_col_w + divider
+        -- 2. Redraw complete content rows so the list, divider, and preview stay aligned.
+        -- The preview changes for each selected result, so updating its half while only
+        -- partially repainting list rows can leave stale cells or styling on-screen.
         for i = 1, list_height do
-            local right_cell = build_right_cell(i, prev_thumb_pos, prev_total, cur_file_ext)
-            table.insert(frame_buf, string.format("\27[%d;%dH%s%s│\27[0m", 3 + i, right_start_col, right_cell, right_col_border))
+            local row = build_content_row(i, list_thumb_pos, prev_thumb_pos, prev_total, cur_file_ext)
+            table.insert(frame_buf, string.format("\27[%d;1H\27[2K%s", 3 + i, row))
         end
 
         io.write("\27[?2026h" .. table.concat(frame_buf) .. "\27[?2026l")
