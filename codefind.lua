@@ -1285,6 +1285,8 @@ function TUI.run(db, initial_query)
                         return "CTRL_R"
                     elseif c0 == 3 then -- Ctrl-C
                         return "CTRL_C"
+                    elseif c0 == 17 then -- Ctrl-Q
+                        return "CTRL_Q"
                     elseif c0 >= 32 and c0 <= 126 then
                         return string.char(c0)
                     end
@@ -1373,6 +1375,9 @@ function TUI.run(db, initial_query)
                         idx = idx + 1
                     elseif c0 == 3 then -- Ctrl-C
                         table.insert(key_queue, "CTRL_C")
+                        idx = idx + 1
+                    elseif c0 == 17 then -- Ctrl-Q
+                        table.insert(key_queue, "CTRL_Q")
                         idx = idx + 1
                     elseif c0 >= 32 and c0 <= 126 then
                         table.insert(key_queue, string.char(c0))
@@ -2122,6 +2127,7 @@ function TUI.run(db, initial_query)
                     {"Enter", "Open"},
                     {"Tab", "Browse (q quits)"},
                     {"Esc", #query > 0 and "Clear" or "Exit"},
+                    {"^Q", "Quit"},
                     {"@ext", "Filter"},
                     {"^W", "Del Word"},
                     {"F1/?", "Help"}
@@ -2175,7 +2181,7 @@ function TUI.run(db, initial_query)
         local poll_timeout = 40
         local key = read_key(poll_timeout)
         if key then
-            if key == "CTRL_C" then
+            if key == "CTRL_C" or key == "CTRL_Q" then
                 running = false
             elseif key == "ESC" then
                 if focus_pane == "preview" then
@@ -2190,7 +2196,7 @@ function TUI.run(db, initial_query)
                     selected_idx = 1
                     vim_mode = "INSERT"
                     render_query_prompt_instant()
-                    set_status("Query cleared (Press Esc again or q in preview to exit)")
+                    set_status("Query cleared (Press Esc again, Ctrl-Q, or q in Browse to exit)")
                     needs_redraw = true
                 else
                     -- Query is already empty: ESC quits
@@ -2420,20 +2426,17 @@ function TUI.run(db, initial_query)
                 set_status("Shortcuts: [Tab] Pane, [n/N] Match, [PgUp/Dn] Scroll, [@ext] Filter, [^W] Del Word, [^U] Clear")
                 needs_redraw = true
             elseif #key == 1 and focus_pane == "search" then
-                -- When query is empty and user presses 'q', quit cleanly instead of searching 'q'
-                if key == "q" and #query == 0 then
-                    running = false
-                else
-                    vim_mode = "INSERT"
-                    query = query .. key
-                    -- Drain any additional pending single-character keys from the queue
-                    while #key_queue > 0 and #key_queue[1] == 1 do
-                        query = query .. table.remove(key_queue, 1)
-                    end
-                    selected_idx = 1
-                    -- Instant 0ms visual echo to the prompt bar
-                    render_query_prompt_instant()
+                -- Search box is a text input: printable keys are literal, including 'q'.
+                -- Quit via Esc (empty box), Ctrl-C, Ctrl-Q, or Tab then q in Browse.
+                vim_mode = "INSERT"
+                query = query .. key
+                -- Drain any additional pending single-character keys from the queue
+                while #key_queue > 0 and #key_queue[1] == 1 do
+                    query = query .. table.remove(key_queue, 1)
                 end
+                selected_idx = 1
+                -- Instant 0ms visual echo to the prompt bar
+                render_query_prompt_instant()
             end
         else
             -- Check if status bar message timed out
