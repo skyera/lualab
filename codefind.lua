@@ -1112,7 +1112,7 @@ function TUI.run(db, initial_query)
             kernel32.SetConsoleMode(hIn, raw_mode)
 
             in_raw_mode = true
-            io.write("\27[?1049h\27[?25l\27[2J\27[H")
+            io.write("\27[?1049h\27[?25l\27[?7l\27[2J\27[H")
             io.flush()
             return true
         end
@@ -1126,8 +1126,8 @@ function TUI.run(db, initial_query)
         raw.c_lflag = bit.band(raw.c_lflag, bit.bnot(bit.bor(0x0002, 0x0008, 0x0001)))
         if ffi.C.tcsetattr(0, 0, raw) == 0 then
             in_raw_mode = true
-            -- Switch to alternate screen buffer, hide cursor, clear screen
-            io.write("\27[?1049h\27[?25l\27[2J\27[H")
+            -- Switch to alternate screen buffer, hide cursor, disable auto-wrap, clear screen
+            io.write("\27[?1049h\27[?25l\27[?7l\27[2J\27[H")
             io.flush()
             return true
         end
@@ -1136,8 +1136,8 @@ function TUI.run(db, initial_query)
 
     local function disable_raw()
         if in_raw_mode then
-            -- Leave alternate screen buffer, show cursor, reset formatting
-            io.write("\27[?1049l\27[?25h\27[0m")
+            -- Leave alternate screen buffer, re-enable auto-wrap, show cursor, reset formatting
+            io.write("\27[?7h\27[?1049l\27[?25h\27[0m")
             io.flush()
             if is_windows then
                 if kernel32 then
@@ -1586,17 +1586,17 @@ function TUI.run(db, initial_query)
 
     local running = true
 
-    -- Cached layout dimensions
-    local cur_cols, cur_rows = get_term_size()
-    cur_cols = math.max(60, cur_cols)
-    cur_rows = math.max(15, cur_rows)
+    -- Cached layout dimensions (subtract 1 col to avoid hitting terminal auto-wrap edge)
+    local raw_cols, raw_rows = get_term_size()
+    local cur_cols = math.max(60, raw_cols - 1)
+    local cur_rows = math.max(15, raw_rows)
     local left_col_w = math.max(34, math.floor((cur_cols - 3) * 0.44))
     local right_col_w = cur_cols - 3 - left_col_w
     local list_height = cur_rows - 6
 
     local function update_layout()
         local cols, rows = get_term_size()
-        cols = math.max(60, cols)
+        cols = math.max(60, cols - 1)
         rows = math.max(15, rows)
         if cols ~= cur_cols or rows ~= cur_rows then
             cur_cols = cols
@@ -1864,7 +1864,7 @@ function TUI.run(db, initial_query)
         end
     end
 
-    -- Instant visual echo: update only the query prompt line in row 2
+    -- Instant visual echo: update query prompt line in row 2 with zero flicker
     local function render_query_prompt_instant()
         local left_col_border = (focus_pane == "search") and "\27[1;36m" or "\27[90m"
         local query_prompt = " > " .. query .. "_"
@@ -1877,11 +1877,10 @@ function TUI.run(db, initial_query)
         else
             left_head = pad_to(query_prompt, left_col_w)
         end
-        -- Write to row 2 column 1 with synchronized updates and clear up to divider
-        io.write(string.format("\27[?2026h\27[2;1H%s│\27[0m%s\27[0m%s│\27[0m\27[?2026l",
+        -- Write left half of row 2 with synchronized updates up to the divider
+        io.write(string.format("\27[?2026h\27[2;1H%s│\27[0m%s\27[0m\27[90m│\27[0m\27[?2026l",
             left_col_border,
-            pad_to(left_head, left_col_w),
-            "\27[90m"))
+            pad_to(left_head, left_col_w)))
         io.flush()
     end
 
