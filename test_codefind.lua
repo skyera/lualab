@@ -435,6 +435,44 @@ TestRunner.describe("7. SQLite3 Library Discovery, Validation and Selection", fu
             "Empty candidate list must yield no choice")
     end)
 
+    TestRunner.it("should rank a conda build above chocolatey, msys2 and PATH", function()
+        local conda  = select(1, codefind.classify_source([[C:\app\miniforge3\Library\bin\sqlite3.dll]], "PATH"))
+        local anac   = select(1, codefind.classify_source([[D:\anaconda3\Library\bin\sqlite3.dll]], "PATH"))
+        local choco  = select(1, codefind.classify_source([[C:\ProgramData\chocolatey\lib\SQLite\tools\sqlite3.dll]], "PATH"))
+        local msys   = select(1, codefind.classify_source([[C:\msys64\mingw64\bin\sqlite3.dll]], "PATH"))
+        local plain  = select(1, codefind.classify_source([[C:\random\tools\sqlite3.dll]], "PATH"))
+        assert_true(conda > choco, "conda must outrank chocolatey")
+        assert_true(anac > msys, "anaconda must outrank msys2")
+        assert_true(conda > plain, "conda must outrank an anonymous PATH hit")
+        assert_true(choco > plain, "chocolatey must outrank an anonymous PATH hit")
+    end)
+
+    TestRunner.it("should label a library dropped beside the script or cwd as local", function()
+        local tier, label = codefind.classify_source([[C:\proj\sqlite3.dll]], "cwd")
+        assert_eq(label, "local", "A deliberate local placement should be labelled local")
+        assert_true(tier > select(1, codefind.classify_source([[C:\x\bin\sqlite3.dll]], "PATH")),
+            "local placement must outrank an anonymous PATH hit")
+    end)
+
+    TestRunner.it("should pick the highest tier regardless of discovery order", function()
+        local list = {
+            { path = [[C:\choco\sqlite3.dll]], tier = 10, source = "PATH" },
+            { path = [[C:\conda\sqlite3.dll]], tier = 40, source = "PATH" },
+        }
+        assert_eq(codefind.best_candidate(list).path, [[C:\conda\sqlite3.dll]],
+            "Highest tier must win")
+    end)
+
+    TestRunner.it("should match a pinned path against a scanned one despite slash style", function()
+        assert_true(codefind.same_path([[C:/app/miniforge3/sqlite3.dll]],
+                                       [[C:\app\miniforge3\sqlite3.dll]]),
+            "Forward-slash config must match a backslash scan result")
+        assert_true(not codefind.same_path([[C:/a/sqlite3.dll]], [[C:/b/sqlite3.dll]]),
+            "Different paths must not match")
+        assert_true(codefind.same_path([[C:\APP\SQLite3.DLL]], [[C:/app/sqlite3.dll]]),
+            "Matching must be case-insensitive")
+    end)
+
     TestRunner.it("should mark an unvalidated candidate as not loaded", function()
         local d = codefind.describe_candidate(cand("C:\\x\\sqlite3.dll"), 1)
         assert_true(d:find("not loaded"), "Unvalidated candidate must be marked not loaded")

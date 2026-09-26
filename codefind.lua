@@ -96,6 +96,7 @@ if is_windows then
         int   FindNextFileA(void* hFindFile, WIN32_FIND_DATAA* lpFindFileData);
         int   FindClose(void* hFindFile);
         char* _fullpath(char *absPath, const char *relPath, size_t maxLength);
+        unsigned long long GetTickCount64(void);
     ]]
 else
     ffi.cdef[[
@@ -256,6 +257,16 @@ local function split_path_list(p)
     return out
 end
 
+-- Config stores forward slashes for portability; directory scans yield native
+-- backslashes. Compare on a normalised form so a pin still matches its entry.
+local function same_path(a, b)
+    if not a or not b then return false end
+    local function norm(p)
+        return tostring(p):lower():gsub("/", "\\"):gsub("\\+", "\\")
+    end
+    return norm(a) == norm(b)
+end
+
 local function file_exists(path)
     local f = io.open(path, "rb")
     if f then f:close() return true end
@@ -378,6 +389,136 @@ local function scan_sqlite_candidates()
     consider(os.getenv("CD") or os.getenv("PWD"), "cwd")
     return found
 end
+--------------------------------------------------------------------------------
+-- Preference tiers and the persisted pin
+--------------------------------------------------------------------------------
+-- With several sqlite3 DLLs installed, the right one is usually decided by
+-- which toolchain shipped it. A conda build is a deliberate, fully-featured
+-- build (FTS5 included), whereas a stray copy on PATH or in the cwd is often
+-- incidental. Ranking by origin gets the common case right with no config.
+--
+-- A pin covers the rest: `codefind pin` records an exact path that always wins,
+-- for when the heuristic is not what you want.
+
+-- Higher wins. Ties fall back to discovery order.
+local SQLITE_TIERS = {
+    { tier = 40, label = "conda",      match = "miniforge" },
+    { tier = 40, label = "conda",      match = "anaconda" },
+    { tier = 40, label = "conda",      match = "[/\\]conda" },
+    { tier = 30, label = "local",      match = nil },        -- filled in per-source below
+    { tier = 20, label = "msys2",      match = "msys64" },
+    { tier = 20, label = "mingw",      match = "mingw" },
+    { tier = 10, label = "chocolatey", match = "chocolatey" },
+    { tier = 10, label = "scoop",      match = "scoop" },
+}
+
+local function classify_source(path, source)
+    local lower = tostring(path):lower()
+    for _, t in ipairs(SQLITE_TIERS) do
+        if t.match then
+            if lower:find(t.match, 1, true) or lower:find(t.match) then
+                return t.tier, t.label
+            end
+        end
+    end
+    -- A DLL dropped beside the script or into the cwd is a deliberate local
+    -- placement, so it outranks an anonymous PATH hit.
+    if source == "script dir" or source == "cwd" then return 30, "local" end
+    return 5, "PATH"
+end
+
+local function annotate_candidates(cands)
+    for _, c in ipairs(cands) do
+        c.tier, c.origin = classify_source(c.path, c.source)
+    end
+    return cands
+end
+
+local function best_candidate(cands)
+    local best
+    for _, c in ipairs(cands) do
+        if not best or (c.tier or 0) > (best.tier or 0) then best = c end
+    end
+    return best
+end
+
+-- Per-user config, so it survives redeploys and applies from any directory.
+local function config_path()
+    if is_windows then
+        local base = os.getenv("LOCALAPPDATA") or os.getenv("APPDATA")
+        if base then return base .. "\\codefind\\config" end
+        return "codefind.config"
+    end
+    local base = os.getenv("XDG_CONFIG_HOME")
+    if not base or #base == 0 then base = os.getenv("HOME") .. "/.config" end
+    return base .. "/codefind/config"
+end
+
+-- Deliberately a trivial key = "value" format: hand-editable, no parser needed.
+local function read_config()
+    local cfg = {}
+    local f = io.open(config_path(), "r")
+    if not f then return cfg end
+    for line in f:lines() do
+        line = line:gsub("^%s+", ""):gsub("%s+$", "")
+        if #line > 0 and line:sub(1, 1) ~= "#" then
+            local k, v = line:match("^(%w+)%s*=%s*(.*)$")
+            if k then
+                v = v:gsub('^"', ""):gsub('"$', "")
+                cfg[k:lower()] = v
+            end
+        end
+    end
+    f:close()
+    return cfg
+end
+
+local function ensure_config_dir()
+    local dir = config_path():match("^(.*)[/\\][^/\\]*$")
+    if not dir or #dir == 0 then return false end
+    if io.open(config_path(), "r") then return true end
+    local ok
+    if is_windows then
+        ok = os.execute('mkdir "' .. dir .. '" 2>nul')
+    else
+        ok = os.execute('mkdir -p "' .. dir .. '"')
+    end
+    return ok == true or ok == 0
+end
+
+local function write_pin(path)
+    if not ensure_config_dir() then return false, "could not create " .. config_path() end
+    local f = io.open(config_path(), "w")
+    if not f then return false, "could not write " .. config_path() end
+    f:write("# codefind configuration\n")
+    f:write("# Managed by: codefind pin\n")
+    f:write(string.format('sqlite3 = "%s"\n', (path:gsub("\\", "/"))))
+    f:close()
+    return true
+end
+
+local function clear_pin()
+    local cfg = read_config()
+    if not cfg.sqlite3 then return false, "no pin is set" end
+    local f = io.open(config_path(), "r")
+    if not f then return false, "could not read " .. config_path() end
+    local kept = {}
+    for line in f:lines() do
+        local k = line:match("^%s*(%w+)%s*=")
+        if k and k:lower() == "sqlite3" then
+            -- drop it
+        else
+            kept[#kept + 1] = line
+        end
+    end
+    f:close()
+    local out = io.open(config_path(), "w")
+    if not out then return false, "could not write " .. config_path() end
+    out:write(table.concat(kept, "\n"))
+    if #kept > 0 then out:write("\n") end
+    out:close()
+    return true
+end
 
 local function file_size(path)
     local f = io.open(path, "rb")
@@ -392,6 +533,48 @@ local function human_size(n)
     if n < 1024 then return string.format("%d B", n) end
     if n < 1024 * 1024 then return string.format("%.1f KB", n / 1024) end
     return string.format("%.1f MB", n / (1024 * 1024))
+end
+
+-- Monotonic wall clock, in seconds. os.clock() reports CPU time, so it badly
+-- understates an index dominated by file reads and SQLite writes -- timings and
+-- the files/sec rate derived from it were effectively meaningless.
+local wall_now
+do
+    local resolved = false
+    if is_windows and kernel32 then
+        local ok, fn = pcall(function() return kernel32.GetTickCount64 end)
+        if ok and fn then
+            wall_now = function() return tonumber(fn()) / 1000.0 end
+            resolved = true
+        end
+    end
+    if not resolved then
+        local ok = pcall(function()
+            ffi.cdef[[
+                struct codefind_timespec { long tv_sec; long tv_nsec; };
+                int clock_gettime(int clk_id, struct codefind_timespec *tp);
+            ]]
+        end)
+        if ok then
+            local ts = ffi.new("struct codefind_timespec[1]")
+            local CLOCK_MONOTONIC = 1
+            if pcall(function() return ffi.C.clock_gettime(CLOCK_MONOTONIC, ts) end) then
+                wall_now = function()
+                    ffi.C.clock_gettime(CLOCK_MONOTONIC, ts)
+                    return tonumber(ts[0].tv_sec) + tonumber(ts[0].tv_nsec) / 1e9
+                end
+                resolved = true
+            end
+        end
+    end
+    if not resolved then wall_now = os.clock end   -- last resort
+end
+
+local function format_duration(sec)
+    if sec < 60 then return string.format("%.2fs", sec) end
+    if sec < 3600 then return string.format("%dm%02ds", math.floor(sec / 60), math.floor(sec % 60)) end
+    return string.format("%dh%02dm%02ds", math.floor(sec / 3600),
+                         math.floor((sec % 3600) / 60), math.floor(sec % 60))
 end
 
 -- Every library we looked at, whether validated or rejected by the soname probe.
@@ -426,8 +609,9 @@ local function describe_candidate(c, i)
             tag, human_size(r.size or c.size), shorten_reason(r.reason, 4))
     end
     -- Enumerated but deliberately not loaded.
-    return ("%s\n         %s  %s  [not loaded]"):format(
-        tag, human_size(c.size), c.is_pe and "PE image" or "NOT a PE image")
+    return ("%s\n         %s  %s  %s  [not loaded]"):format(
+        tag, human_size(c.size), c.is_pe and "PE image" or "NOT a PE image",
+        c.origin or "?")
 end
 
 local function prompt_sqlite_choice(cands, read_fn, write_fn)
@@ -444,14 +628,22 @@ end
 
 
 -- Returns lib, label  (label is a human description used by `doctor`)
--- Pick from the enumerated candidates WITHOUT loading any of them. Order is
--- discovery order (PATH first), which is the same precedence the Windows loader
--- itself would apply, so the non-interactive default matches what ffi.load
--- would have picked anyway.
+-- Pick from the enumerated candidates WITHOUT loading any of them.
+-- Order of preference: an explicit pin, then an interactive choice, then the
+-- highest toolchain tier, and finally plain discovery order.
 local function choose_candidate(cands, interactive, read_fn, write_fn)
     if #cands == 0 then return nil end
     if #cands == 1 then return cands[1] end
-    if interactive then return cands[prompt_sqlite_choice(cands, read_fn, write_fn)] end
+
+    if interactive then
+        return cands[prompt_sqlite_choice(cands, read_fn, write_fn)]
+    end
+
+    local best = best_candidate(cands)
+    if best and (best.tier or 0) > (cands[1].tier or 0) then
+        SQLITE_SCAN.tier_picked = best.origin
+        return best
+    end
     SQLITE_SCAN.auto_picked = true
     return cands[1]
 end
@@ -476,7 +668,33 @@ local function select_sqlite_lib()
     end
 
     if is_windows then
-        SQLITE_SCAN.candidates = scan_sqlite_candidates()
+        SQLITE_SCAN.candidates = annotate_candidates(scan_sqlite_candidates())
+
+        -- A pin is an explicit decision and outranks both the heuristic and the
+        -- prompt, so normal runs stay non-interactive once one is set.
+        local pinned = read_config().sqlite3
+        if pinned and #pinned > 0 then
+            local pr = validate_sqlite_lib(pinned)
+            if pr.ok then
+                SQLITE_SCAN.chosen = pr
+                SQLITE_SCAN.pinned = pinned
+                local hit
+                for _, c in ipairs(SQLITE_SCAN.candidates) do
+                    if same_path(c.path, pinned) then hit = c end
+                end
+                if hit then hit.result = pr end
+                return pr.lib, pinned
+            end
+            -- Stale pin: say so plainly, then carry on with the normal rules
+            -- rather than failing over a setting the user can trivially re-set.
+            io.write(string.format("\n  \27[33m!\27[0m Pinned sqlite3 is unusable: %s\n", pinned))
+            io.write(string.format("      %s\n", tostring(pr.reason)))
+            io.write(string.format("      Re-pin with: codefind pin     (config: %s)\n\n",
+                                   config_path()))
+            io.flush()
+            SQLITE_SCAN.pin_broken = pinned
+        end
+
         local picked = choose_candidate(SQLITE_SCAN.candidates, is_tty_fd(0), io.read,
                                         function(s) io.write(s); io.flush() end)
         if picked then
@@ -674,16 +892,24 @@ local function print_sqlite_candidates(validate)
         end
     end
     for i, c in ipairs(entries) do
-        local inuse = (SQLITE_SCAN.chosen and c.result and c.result.path == SQLITE_SCAN.chosen.path)
+        local inuse = (SQLITE_SCAN.chosen and c.result and same_path(c.result.path, SQLITE_SCAN.chosen.path))
         io.write(describe_candidate(c, i))
-        if inuse then io.write("   \27[1m<- IN USE\27[0m") end
+        if inuse then
+            io.write("   \27[1m<- IN USE\27[0m")
+            if SQLITE_SCAN.pinned then io.write(" \27[2m(pinned)\27[0m") end
+        end
         io.write("\n")
     end
     if #entries > 1 then
-        if SQLITE_SCAN.auto_picked then
+        if SQLITE_SCAN.tier_picked then
+            io.write(string.format("      (chose the %s build: highest preference tier)\n",
+                                   SQLITE_SCAN.tier_picked))
+        elseif SQLITE_SCAN.auto_picked then
             io.write("      (stdin is not a terminal, so the first on PATH was used)\n")
         end
-        io.write(string.format("\n  Pick a different one:  set %s=C:\\path\\to\\sqlite3.dll\n",
+        io.write(string.format("\n  Choose a different one:\n"))
+        io.write(string.format("      codefind pin                (remember the choice)\n"))
+        io.write(string.format("      set %s=C:\\path\\to\\sqlite3.dll   (this session)\n",
                                SQLITE_ENV_OVERRIDE))
     end
 end
@@ -1319,7 +1545,7 @@ function Indexer.run(db, root_dir, verbose, allow_all)
     root_dir = root_dir:gsub("[/\\]+$", "")
     if #root_dir == 0 then root_dir = "." end
 
-    local t_start = os.clock()
+    local t_start = wall_now()
 
     -- Phase 1: Fast discovery and candidate filtering
     if verbose then
@@ -1355,6 +1581,8 @@ function Indexer.run(db, root_dir, verbose, allow_all)
         io.flush()
     end
 
+    local t_discovered = wall_now()
+
     -- Phase 2: Indexing pipeline with progress and ETA
     local files_indexed = 0
     local files_skipped = 0
@@ -1364,7 +1592,7 @@ function Indexer.run(db, root_dir, verbose, allow_all)
 
     local function render_progress(current_idx, force)
         if not verbose or total_files == 0 then return end
-        local now = os.clock()
+        local now = wall_now()
         if not force and (now - last_progress_time < 0.08) and (current_idx < total_files) then
             return
         end
@@ -1461,16 +1689,22 @@ function Indexer.run(db, root_dir, verbose, allow_all)
     end
 
     db:commit()
-    local elapsed = os.clock() - t_start
+    local elapsed = wall_now() - t_start
+    local t_indexed = wall_now() - t_discovered
 
     if verbose then
-        print(string.format("\27[32m✔ Indexing completed in %.3fs\27[0m (%d files/sec)", elapsed, math.floor(total_files / math.max(0.001, elapsed))))
+        print(string.format("\27[32m✔ Indexing completed in %s\27[0m (%d files/sec)",
+                            format_duration(elapsed),
+                            math.floor(total_files / math.max(0.001, elapsed))))
         print(string.format("  - Scanned: %d files", total_files))
         print(string.format("  - Indexed/Updated: %d files (%.2f MB)", files_indexed, total_bytes / (1024*1024)))
         print(string.format("  - Unchanged/Skipped: %d files", files_skipped))
         if files_pruned > 0 then
             print(string.format("  - Pruned (deleted): %d files", files_pruned))
         end
+        print(string.format("  \27[90m- Elapsed: %s total  |  discover %s  |  index+write %s\27[0m",
+                            format_duration(elapsed), format_duration(t_discovered - t_start),
+                            format_duration(t_indexed)))
     end
 
     return {
@@ -1479,7 +1713,9 @@ function Indexer.run(db, root_dir, verbose, allow_all)
         skipped = files_skipped,
         pruned  = files_pruned,
         bytes   = total_bytes,
-        time    = elapsed
+        time    = elapsed,
+        discover_time = t_discovered - t_start,
+        index_time    = t_indexed
     }
 end
 
@@ -2945,6 +3181,7 @@ Commands:
   stats                  Show index database statistics (file counts, size, extensions)
   clean                  Drop index database and vacuum
   doctor                 Print environment diagnostics (interpreter, sqlite3, script in use)
+  pin [n|path]           Remember which sqlite3 library to use (--list, --clear)
   --test                 Run built-in unit & integration test suite
 
 Options:
@@ -3105,6 +3342,67 @@ local function main(args)
 
     local db = Database.open(db_path)
 
+    if command == "pin" then
+        local cands = annotate_candidates(scan_sqlite_candidates())
+        local arg1 = cmd_args[1]
+
+        if arg1 == "--clear" then
+            local ok, err = clear_pin()
+            io.write(ok and "  \27[32m✔\27[0m Pin cleared.\n"
+                           or string.format("  nothing to clear: %s\n", tostring(err)), "\n")
+            io.flush(); db:close(); return
+        end
+        if arg1 == "--list" then
+            SQLITE_SCAN.candidates = cands
+            print_sqlite_candidates(true)
+            io.write(string.format("\n  config: %s\n", config_path()), "\n")
+            io.flush(); db:close(); return
+        end
+
+        local target
+        if arg1 and tonumber(arg1) then
+            target = cands[tonumber(arg1)]
+            if not target then
+                io.write(string.format("\n  No candidate [%s].\n", tostring(arg1)), "\n")
+                io.flush(); db:close(); return
+            end
+        elseif arg1 then
+            target = { path = arg1 }
+        else
+            if #cands == 0 then
+                io.write("\n  No sqlite3 library found to pin.\n\n", "\n")
+                io.flush(); db:close(); return
+            end
+            SQLITE_SCAN.candidates = cands
+            io.write(string.format("\n  \27[1mPin a sqlite3 library\27[0m  (%d found)\n", #cands))
+            for i, c in ipairs(cands) do io.write(describe_candidate(c, i) .. "\n") end
+            io.write(string.format("\n  Pin which one? [1-%d]: ", #cands))
+            io.flush()
+            local line = io.read("*l")
+            local n = line and tonumber((tostring(line):gsub("%s+", ""))) or nil
+            if not n or n < 1 or n > #cands then
+                io.write("  \27[33m!\27[0m Nothing pinned.\n\n", "\n")
+                io.flush(); db:close(); return
+            end
+            target = cands[n]
+        end
+
+        local r = validate_sqlite_lib(target.path)
+        if not r.ok then
+            io.write(string.format("\n  \27[31mCannot pin\27[0m %s\n", target.path), "\n")
+            io.write(string.format("      %s\n\n", tostring(r.reason)), "\n")
+            io.flush(); db:close(); return
+        end
+        local ok, err = write_pin(target.path)
+        if not ok then
+            io.write(string.format("\n  \27[31mFailed\27[0m %s\n\n", tostring(err)), "\n")
+            io.flush(); db:close(); return
+        end
+        io.write(string.format("\n  \27[32m✔\27[0m Pinned to %s  (v%s)\n", target.path, r.version), "\n")
+        io.write(string.format("  \27[32m✔\27[0m Saved to %s\n\n", config_path()), "\n")
+        io.flush(); db:close(); return
+    end
+
     if command == "doctor" then
         io.write("\n  \27[1mCodeFind diagnostics\27[0m\n")
         io.write(table.concat(diagnostics_lines(db_path, cmd_args[1] or ".", allow_all), "\n"), "\n")
@@ -3200,6 +3498,11 @@ if pcall(debug.getlocal, 4, 1) then
         sanitize_terminal_text = sanitize_terminal_text,
         -- exposed for tests: console-independent selection logic
         choose_candidate = choose_candidate,
+        classify_source = classify_source,
+        best_candidate = best_candidate,
+        read_config = read_config,
+        same_path = same_path,
+        config_path = config_path,
         validate_sqlite_lib = validate_sqlite_lib,
         version_key = version_key,
         describe_candidate = describe_candidate,
