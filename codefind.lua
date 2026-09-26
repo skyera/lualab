@@ -1843,10 +1843,16 @@ function TUI.run(db, initial_query)
             local clean_path = full_path
             if visual_len(clean_path) > max_p_len then
                 local fname = get_filename(full_path)
-                if #fname + 4 <= max_p_len then
-                    clean_path = "..." .. full_path:sub(#full_path - (max_p_len - 4))
+                local parent = full_path:match("([^/\\]+)[/\\][^/\\]+$")
+                local compact = parent and (parent .. "/" .. fname) or fname
+                if visual_len(compact) <= max_p_len then
+                    clean_path = compact
+                elseif visual_len(".../" .. fname) <= max_p_len then
+                    clean_path = ".../" .. fname
+                elseif visual_len(fname) <= max_p_len then
+                    clean_path = fname
                 else
-                    clean_path = truncate(full_path, max_p_len)
+                    clean_path = truncate(fname, max_p_len)
                 end
             end
 

@@ -308,6 +308,14 @@ TestRunner.describe("Suite: 6. TUI Layout Resize and Viewport Clamping", functio
         assert_true(selected_idx >= list_scroll_offset + 1, "selected_idx is above viewport")
         assert_true(selected_idx <= list_scroll_offset + new_height, "selected_idx is below viewport")
     end)
+
+    TestRunner.it("should cleanly format deeply nested paths into parent/filename", function()
+        local full_path = "s/RTCMSread/unit-test/RtcmUnitTest.cu"
+        local fname = full_path:match("[^/\\]+$")
+        local parent = full_path:match("([^/\\]+)[/\\][^/\\]+$")
+        local compact = parent and (parent .. "/" .. fname) or fname
+        assert_true(compact == "unit-test/RtcmUnitTest.cu", "compact path should be parent/filename")
+    end)
 end)
 
 db:close()
