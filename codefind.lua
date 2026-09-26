@@ -1592,7 +1592,22 @@ function TUI.run(db, initial_query)
     local cur_rows = math.max(15, raw_rows)
     local left_col_w = math.max(34, math.floor((cur_cols - 3) * 0.44))
     local right_col_w = cur_cols - 3 - left_col_w
-    local list_height = cur_rows - 6
+    local list_height = math.max(5, cur_rows - 6)
+
+    local function clamp_scroll()
+        local max_scroll = math.max(0, #results - list_height)
+        if #results > 0 then
+            selected_idx = math.max(1, math.min(#results, selected_idx))
+        else
+            selected_idx = 1
+        end
+        if selected_idx < list_scroll_offset + 1 then
+            list_scroll_offset = selected_idx - 1
+        elseif selected_idx > list_scroll_offset + list_height then
+            list_scroll_offset = selected_idx - list_height
+        end
+        list_scroll_offset = math.max(0, math.min(list_scroll_offset, max_scroll))
+    end
 
     local function update_layout()
         local cols, rows = get_term_size()
@@ -1603,20 +1618,11 @@ function TUI.run(db, initial_query)
             cur_rows = rows
             left_col_w = math.max(34, math.floor((cols - 3) * 0.44))
             right_col_w = cols - 3 - left_col_w
-            list_height = rows - 6
+            list_height = math.max(5, rows - 6)
+            clamp_scroll()
             io.write("\27[H\27[2J")
             needs_redraw = true
         end
-    end
-
-    local function clamp_scroll()
-        local max_scroll = math.max(0, #results - list_height)
-        if selected_idx < list_scroll_offset + 1 then
-            list_scroll_offset = selected_idx - 1
-        elseif selected_idx > list_scroll_offset + list_height then
-            list_scroll_offset = selected_idx - list_height
-        end
-        list_scroll_offset = math.max(0, math.min(list_scroll_offset, max_scroll))
     end
 
     local function open_selected_in_editor()

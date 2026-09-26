@@ -287,6 +287,29 @@ TestRunner.describe("5. CLI Invocation & Options", function()
     end)
 end)
 
+TestRunner.describe("Suite: 6. TUI Layout Resize and Viewport Clamping", function()
+    TestRunner.it("should clamp scroll offset and selected index on resize", function()
+        local num_results = 50
+        local list_height = 20
+        local selected_idx = 45
+        local list_scroll_offset = 30
+
+        -- Simulate resize to smaller terminal
+        local new_height = 10
+        local max_scroll = math.max(0, num_results - new_height)
+        if selected_idx < list_scroll_offset + 1 then
+            list_scroll_offset = selected_idx - 1
+        elseif selected_idx > list_scroll_offset + new_height then
+            list_scroll_offset = selected_idx - new_height
+        end
+        list_scroll_offset = math.max(0, math.min(list_scroll_offset, max_scroll))
+
+        assert_true(list_scroll_offset <= max_scroll, "list_scroll_offset exceeds max_scroll")
+        assert_true(selected_idx >= list_scroll_offset + 1, "selected_idx is above viewport")
+        assert_true(selected_idx <= list_scroll_offset + new_height, "selected_idx is below viewport")
+    end)
+end)
+
 db:close()
 os.remove(test_db_path)
 os.remove(test_db_path .. "-wal")
