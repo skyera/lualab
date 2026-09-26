@@ -1783,6 +1783,31 @@ function TUI.run(db, initial_query)
         end
     end
 
+    local function get_file_badge_color(path)
+        local ext = path:match("%.([%w_%-]+)$")
+        if not ext then return "\27[90m" end
+        ext = ext:lower()
+        if ext == "c" or ext == "cpp" or ext == "cc" or ext == "cxx" then
+            return "\27[1;34m"
+        elseif ext == "h" or ext == "hpp" or ext == "hh" then
+            return "\27[1;36m"
+        elseif ext == "lua" then
+            return "\27[1;35m"
+        elseif ext == "py" then
+            return "\27[1;33m"
+        elseif ext == "js" or ext == "ts" or ext == "jsx" or ext == "tsx" then
+            return "\27[1;32m"
+        elseif ext == "md" or ext == "txt" or ext == "rst" then
+            return "\27[37m"
+        elseif ext == "json" or ext == "yaml" or ext == "yml" or ext == "toml" then
+            return "\27[33m"
+        elseif ext == "sh" or ext == "bash" or ext == "zsh" then
+            return "\27[1;32m"
+        else
+            return "\27[90m"
+        end
+    end
+
     -- Format a single file item in the left list
     local function format_left_item(item_idx, is_sel, list_thumb_pos, i)
         local res_item = results[item_idx]
@@ -1795,9 +1820,8 @@ function TUI.run(db, initial_query)
         if res_item then
             local marker = is_sel and "▶ " or "  "
             local full_path = res_item.filepath
-            local badge_str = is_sel and get_file_badge_plain(full_path) or get_file_badge(full_path)
-            local badge_w = is_sel and #badge_str or visual_len(badge_str)
-            -- File line count tag when column is wide enough
+            local badge_plain = get_file_badge_plain(full_path)
+            local badge_w = #badge_plain
             local line_cnt = get_file_line_count(full_path)
             local cnt_tag = ""
             if text_w >= 45 and line_cnt > 0 then
@@ -1809,12 +1833,10 @@ function TUI.run(db, initial_query)
             end
             local cnt_w = #cnt_tag
 
-            local max_p_len = text_w - 2 - badge_w - cnt_w
+            local max_p_len = math.max(4, text_w - 2 - badge_w - cnt_w)
             local clean_path = full_path
-            if visual_len(clean_path) > max_p_len and max_p_len > 8 then
-                -- Intelligent path shortening: keep filename and parent folder
+            if visual_len(clean_path) > max_p_len then
                 local fname = get_filename(full_path)
-                local dir = full_path:sub(1, #full_path - #fname)
                 if #fname + 4 <= max_p_len then
                     clean_path = "..." .. full_path:sub(#full_path - (max_p_len - 4))
                 else
@@ -1822,19 +1844,17 @@ function TUI.run(db, initial_query)
                 end
             end
 
-            local left_text = marker .. badge_str .. clean_path
-            local right_text = ""
-            if cnt_w > 0 then
-                right_text = is_sel and cnt_tag or ("\27[90m" .. cnt_tag .. "\27[0m")
-            end
-            local avail_space = math.max(0, text_w - visual_len(left_text) - cnt_w)
-            local line_body = left_text .. string.rep(" ", avail_space) .. right_text
-            line_body = pad_to(line_body, text_w)
+            local avail_space = math.max(0, text_w - 2 - badge_w - visual_len(clean_path) - cnt_w)
+            local pad_spaces = string.rep(" ", avail_space)
 
             if is_sel then
-                return "\27[1;30;43m" .. line_body .. "\27[0m" .. left_sb
+                local plain_line = marker .. badge_plain .. clean_path .. pad_spaces .. cnt_tag
+                return "\27[1;30;43m" .. pad_to(plain_line, text_w) .. "\27[0m" .. left_sb
             else
-                return "\27[37m" .. line_body .. "\27[0m" .. left_sb
+                local badge_col = get_file_badge_color(full_path)
+                local right_part = (cnt_w > 0) and ("\27[90m" .. cnt_tag .. "\27[0m") or ""
+                local colored_line = marker .. badge_col .. badge_plain .. "\27[0;37m" .. clean_path .. "\27[0m" .. pad_spaces .. right_part
+                return pad_to(colored_line, text_w) .. left_sb
             end
         elseif #results == 0 and i == 2 then
             local prompt_msg = (#query == 0) and "  Type to search code..." or "  No matches found"
