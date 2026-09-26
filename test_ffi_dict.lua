@@ -698,6 +698,18 @@ TestRunner.describe("9. CLI Integration", function()
         assert_true(text:find("word of the day") ~= nil)
     end)
 
+    TestRunner.it("should run the study plan with text prompts when stdin is not a TTY", function()
+        local out = os.tmpname()
+        local ret = os.execute(string.format(
+            'printf "q\\n" | "%s" ffi_dict.lua plan --db %s > %s 2>&1',
+            luajit_bin, cli_db, out))
+        assert_true(ret == 0 or ret == true, "text-mode plan exit code")
+        local f = io.open(out, "r"); local text = f:read("*a"); f:close(); os.remove(out)
+        assert_true(text:find("requires an interactive TTY", 1, true) == nil,
+            "plan must not refuse to run without a TTY")
+        assert_true(text:find("study plan", 1, true) ~= nil, "text plan shows the track chooser")
+    end)
+
     os.remove(cli_db); os.remove(cli_db .. "-wal"); os.remove(cli_db .. "-shm")
     os.remove("/tmp/_test_ffi_dict_wordset.json")
 end)

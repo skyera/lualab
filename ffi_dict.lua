@@ -111,6 +111,37 @@ if not is_windows then
         sighandler_t signal(int signum, sighandler_t handler);
         int atexit(void (*func)(void));
     ]]
+else
+    ffi.cdef[[
+        typedef void *HANDLE;
+        typedef struct _COORD { short X; short Y; } COORD;
+        typedef struct _SMALL_RECT { short Left; short Top; short Right; short Bottom; } SMALL_RECT;
+        typedef struct _CONSOLE_SCREEN_BUFFER_INFO {
+            COORD      dwSize;
+            COORD      dwCursorPosition;
+            uint16_t   wAttributes;
+            SMALL_RECT srWindow;
+            COORD      dwMaximumWindowSize;
+        } CONSOLE_SCREEN_BUFFER_INFO;
+
+        HANDLE __stdcall GetStdHandle(uint32_t nStdHandle);
+        int    __stdcall GetConsoleMode(HANDLE hConsoleHandle, uint32_t *lpMode);
+        int    __stdcall SetConsoleMode(HANDLE hConsoleHandle, uint32_t dwMode);
+        int    __stdcall GetConsoleScreenBufferInfo(HANDLE hConsoleOutput, CONSOLE_SCREEN_BUFFER_INFO *lpConsoleScreenBufferInfo);
+        int    __stdcall SetConsoleOutputCP(uint32_t wCodePageID);
+        void   __stdcall Sleep(uint32_t dwMilliseconds);
+        uint64_t __stdcall GetTickCount64(void);
+
+        int _kbhit(void);
+        int _getch(void);
+    ]]
+end
+
+-- Windows console handles/modes are reached through kernel32 + msvcrt.
+local kernel32, msvcrt
+if is_windows then
+    kernel32 = ffi.load("kernel32")
+    msvcrt = ffi.load("msvcrt")
 end
 
 --------------------------------------------------------------------------------
@@ -136,6 +167,11 @@ local SQLITE_NULL    = 5
 local SQLITE_TRANSIENT = ffi.cast("void(*)(void*)", -1)
 
 local SECONDS_PER_DAY = 86400
+
+-- Win32 console handles / modes (see Term below)
+local STD_INPUT_HANDLE  = 0xFFFFFFF6
+local STD_OUTPUT_HANDLE = 0xFFFFFFF5
+local VT_PROCESSING     = 0x0004 -- ENABLE_VIRTUAL_TERMINAL_PROCESSING
 
 -- Ordered seed lists for guided study plans. Definitions are filled from the
 -- user's imported dictionary, so plans work offline after dictionary setup.
@@ -1531,7 +1567,14 @@ Term.center = center
 Term.make_theme = make_theme
 
 function Term.size()
-    if not is_windows then
+    if is_windows then
+        local csbi = ffi.new("CONSOLE_SCREEN_BUFFER_INFO")
+        if kernel32.GetConsoleScreenBufferInfo(kernel32.GetStdHandle(STD_OUTPUT_HANDLE), csbi) ~= 0 then
+            local w = tonumber(csbi.srWindow.Right) - tonumber(csbi.srWindow.Left) + 1
+            local h = tonumber(csbi.srWindow.Bottom) - tonumber(csbi.srWindow.Top) + 1
+            if w > 0 and h > 0 then return w, h end
+        end
+    else
         local ws = ffi.new("struct winsize")
         if ffi.C.ioctl(1, 0x5413, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
             return tonumber(ws.ws_col), tonumber(ws.ws_row)
@@ -1541,7 +1584,11 @@ function Term.size()
 end
 
 function Term.is_tty()
-    if is_windows then return false end
+    if is_windows then
+        local mode = ffi.new("uint32_t[1]")
+        return kernel32.GetConsoleMode(kernel32.GetStdHandle(STD_INPUT_HANDLE), mode) ~= 0
+           and kernel32.GetConsoleMode(kernel32.GetStdHandle(STD_OUTPUT_HANDLE), mode) ~= 0
+    end
     return ffi.C.isatty(0) == 1 and ffi.C.isatty(1) == 1
 end
 
@@ -1550,8 +1597,26 @@ end
 local raw_state = { active = false, orig = nil }
 
 function Term.enable_raw()
-    if is_windows then return false end
     if raw_state.active then return true end
+    if is_windows then
+        local in_mode = ffi.new("uint32_t[1]")
+        local out_mode = ffi.new("uint32_t[1]")
+        local h_in = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+        local h_out = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        if kernel32.GetConsoleMode(h_in, in_mode) == 0 then return false end
+        if kernel32.GetConsoleMode(h_out, out_mode) == 0 then return false end
+        kernel32.SetConsoleOutputCP(65001) -- UTF-8 so box-drawing glyphs render
+        kernel32.SetConsoleMode(h_out, bit.bor(out_mode[0], VT_PROCESSING))
+        -- Disable ENABLE_PROCESSED_INPUT(1) + LINE_INPUT(2) + ECHO_INPUT(4);
+        -- Ctrl-C then arrives as byte 3 and follows the graceful quit path.
+        kernel32.SetConsoleMode(h_in, bit.band(in_mode[0], bit.bnot(0x0007)))
+        raw_state.win_in = in_mode[0]
+        raw_state.win_out = out_mode[0]
+        raw_state.active = true
+        io.write("\27[?1049h\27[?25l\27[?7l\27[2J\27[H")
+        io.flush()
+        return true
+    end
     local orig = ffi.new("struct termios")
     if ffi.C.tcgetattr(0, orig) ~= 0 then return false end
     local raw = ffi.new("struct termios")
@@ -1571,7 +1636,14 @@ function Term.disable_raw()
     if not raw_state.active then return end
     io.write("\27[?7h\27[?1049l\27[?25h\27[0m")
     io.flush()
-    if raw_state.orig then
+    if is_windows then
+        if raw_state.win_in then
+            kernel32.SetConsoleMode(kernel32.GetStdHandle(STD_INPUT_HANDLE), raw_state.win_in)
+        end
+        if raw_state.win_out then
+            kernel32.SetConsoleMode(kernel32.GetStdHandle(STD_OUTPUT_HANDLE), raw_state.win_out)
+        end
+    elseif raw_state.orig then
         ffi.C.tcsetattr(0, 0, raw_state.orig)
     end
     raw_state.active = false
@@ -1581,8 +1653,34 @@ local key_queue = {}
 
 function Term.read_key(timeout_ms)
     if #key_queue > 0 then return table.remove(key_queue, 1) end
-    if is_windows then return nil end
     timeout_ms = timeout_ms or 100
+    if is_windows then
+        local deadline = tonumber(kernel32.GetTickCount64()) + timeout_ms
+        while true do
+            if msvcrt._kbhit() ~= 0 then
+                local c0 = msvcrt._getch()
+                if c0 == 0 or c0 == 224 then
+                    local c1 = msvcrt._getch()
+                    if c1 == 72 then return "UP"
+                    elseif c1 == 80 then return "DOWN"
+                    elseif c1 == 75 then return "LEFT"
+                    elseif c1 == 77 then return "RIGHT"
+                    elseif c1 == 73 then return "PAGE_UP"
+                    elseif c1 == 81 then return "PAGE_DOWN"
+                    else return "ESC" end
+                elseif c0 == 27 then return "ESC"
+                elseif c0 == 13 or c0 == 10 then return "ENTER"
+                elseif c0 == 3 then return "CTRL_C"
+                elseif c0 == 32 then return " "
+                elseif c0 >= 32 and c0 < 127 then return string.char(c0)
+                end
+            elseif tonumber(kernel32.GetTickCount64()) >= deadline then
+                return nil
+            else
+                kernel32.Sleep(5)
+            end
+        end
+    end
     local pfd = ffi.new("struct pollfd", { fd = 0, events = 1, revents = 0 })
     local buf = ffi.new("char[128]")
     local ret = ffi.C.poll(pfd, 1, timeout_ms)
@@ -1864,11 +1962,129 @@ local function selected_track_id(index)
     return STUDY_TRACKS[index].id
 end
 
+-- Line-based study-plan flow for terminals without full-screen support
+-- (Windows consoles that lack raw mode, MinTTY/Git Bash, piped stdin, ...).
+function TUI.study_plan_text(db, opts)
+    opts = opts or {}
+    local function prompt(label)
+        io.write(label)
+        io.flush()
+        local line = io.read("*l")
+        if line == nil then return nil end
+        return (line:gsub("^%s*(.-)%s*$", "%1"))
+    end
+
+    local current = db:study_plan_get()
+    local selected = #STUDY_TRACKS + 1 -- default to Mixed / adaptive
+    if current and current.track ~= "mixed" then
+        for i, track in ipairs(STUDY_TRACKS) do
+            if track.id == current.track then selected = i break end
+        end
+    end
+    local batch_size = current and current.batch_size or 10
+
+    while true do
+        local due = #db:get_due(os.time(), 100000)
+        io.write("\n  dict ▸ study plan\n")
+        for i, track in ipairs(STUDY_TRACKS) do
+            io.write(string.format("   [%d] %s%s\n", i, track.name, i == selected and "  ←" or ""))
+        end
+        io.write(string.format("   [%d] Mixed / adaptive%s\n", #STUDY_TRACKS + 1,
+            selected == #STUDY_TRACKS + 1 and "  ←" or ""))
+        io.write(string.format("\n  due for review: %d    new words added today: %d\n",
+            due, db:study_plan_today_count(os.date("%Y-%m-%d"))))
+
+        local answer = prompt(string.format(
+            "Select track [1-%d] (Enter = keep %s, q = quit): ", #STUDY_TRACKS + 1,
+            selected_track_id(selected) == "mixed" and "Mixed" or STUDY_TRACK_BY_ID[selected_track_id(selected)].name))
+        if not answer or answer == "q" or answer == "Q" then return true end
+        if answer ~= "" then
+            local choice = tonumber(answer)
+            if choice and choice >= 1 and choice <= #STUDY_TRACKS + 1 then
+                selected = choice
+            else
+                io.write("  Please enter a number between 1 and " .. (#STUDY_TRACKS + 1) .. ".\n")
+            end
+        end
+
+        answer = prompt(string.format("New words per session [1-50] (Enter = %d): ", batch_size))
+        if not answer then return true end
+        if answer ~= "" then
+            local n = tonumber(answer)
+            if n and n >= 1 and n <= 50 and math.floor(n) == n then
+                batch_size = n
+            else
+                io.write("  Invalid batch size; keeping " .. batch_size .. ".\n")
+            end
+        end
+
+        local track_id = selected_track_id(selected)
+        local track_name = track_id == "mixed" and "Mixed / adaptive" or STUDY_TRACK_BY_ID[track_id].name
+        local candidates, candidate_err = db:study_plan_candidates(track_id, batch_size)
+        if not candidates then
+            io.write("\27[31m✘ " .. tostring(candidate_err) .. "\27[0m\n")
+            return false
+        end
+        if #candidates == 0 then
+            io.write("  No unused words found; import a dictionary first.\n")
+            return true
+        end
+
+        local flags = {}
+        for i = 1, #candidates do flags[i] = true end
+        local go_back = false
+        while true do
+            local count = 0
+            for _, on in ipairs(flags) do if on then count = count + 1 end end
+            io.write(string.format("\nPreview: %s (%d/%d selected)\n", track_name, count, #candidates))
+            for i, c in ipairs(candidates) do
+                io.write(string.format("   [%s] %2d. %s — %s\n", flags[i] and "x" or " ", i, c.word,
+                    c.definition or "(definition unavailable)"))
+            end
+            answer = prompt("Enter = add selected   [a]ll   [n]one   numbers to toggle   [b]ack   q = quit: ")
+            if not answer or answer == "q" or answer == "Q" then return true end
+            if answer == "" then break
+            elseif answer == "a" or answer == "A" then
+                for i = 1, #candidates do flags[i] = true end
+            elseif answer == "n" or answer == "N" then
+                for i = 1, #candidates do flags[i] = false end
+            elseif answer == "b" or answer == "B" then
+                go_back = true
+                break
+            else
+                for num in answer:gmatch("%d+") do
+                    local idx = tonumber(num)
+                    if idx and idx >= 1 and idx <= #candidates then flags[idx] = not flags[idx] end
+                end
+            end
+        end
+        if go_back then
+            -- fall through to the track chooser again
+        else
+            local selection = {}
+            for i, c in ipairs(candidates) do if flags[i] then selection[c.word] = true end end
+            local saved, save_err = db:study_plan_set(track_id, batch_size, os.time())
+            if not saved then
+                io.write("\27[31m✘ " .. tostring(save_err) .. "\27[0m\n")
+                return false
+            end
+            local added, add_err = db:study_plan_start_today(os.time(), selection)
+            if not added then
+                io.write("\27[31m✘ " .. tostring(add_err) .. "\27[0m\n")
+                return false
+            end
+            io.write(string.format("\n\27[32m✔ added %d new word(s)\27[0m — %d plan word(s) today. Saved plan: %s, batch %d.\n",
+                #added, db:study_plan_today_count(os.date("%Y-%m-%d")), track_name, batch_size))
+            answer = prompt("Press Enter to finish, [n] for another batch: ")
+            if not answer or (answer ~= "n" and answer ~= "N") then return true end
+        end
+    end
+end
+
 function TUI.study_plan(db, opts)
     opts = opts or {}
     if not Term.is_tty() then
-        io.write("Study plan requires an interactive TTY. Run this command in a terminal.\n")
-        return false
+        return TUI.study_plan_text(db, opts)
     end
 
     local current = db:study_plan_get()
@@ -1891,8 +2107,8 @@ function TUI.study_plan(db, opts)
     local cols, rows = Term.size()
     local renderer = Renderer.new(cols, rows, false)
     if not Term.enable_raw() then
-        io.write("Error: failed to initialize raw terminal mode.\n")
-        return false
+        io.write("Note: full-screen mode unavailable; falling back to text prompts.\n")
+        return TUI.study_plan_text(db, opts)
     end
 
     local running, start_review = true, false
