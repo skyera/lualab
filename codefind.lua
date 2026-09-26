@@ -1820,6 +1820,7 @@ function TUI.run(db, initial_query)
             end
             local avail_space = math.max(0, text_w - visual_len(left_text) - cnt_w)
             local line_body = left_text .. string.rep(" ", avail_space) .. right_text
+            line_body = pad_to(line_body, text_w)
 
             if is_sel then
                 return "\27[1;30;43m" .. line_body .. "\27[0m" .. left_sb
@@ -2097,6 +2098,9 @@ function TUI.run(db, initial_query)
                     preview_scroll_offset = math.max(0, preview_scroll_offset - 10)
                 else
                     selected_idx = math.max(1, selected_idx - 10)
+                    if #results > 0 and results[selected_idx] then
+                        load_preview_for(results[selected_idx].filepath, query)
+                    end
                 end
                 clamp_scroll()
                 needs_redraw = true
@@ -2105,6 +2109,9 @@ function TUI.run(db, initial_query)
                     preview_scroll_offset = math.min(#current_preview_lines, preview_scroll_offset + 10)
                 else
                     selected_idx = math.min(#results, selected_idx + 10)
+                    if #results > 0 and results[selected_idx] then
+                        load_preview_for(results[selected_idx].filepath, query)
+                    end
                 end
                 clamp_scroll()
                 needs_redraw = true
@@ -2221,6 +2228,9 @@ function TUI.run(db, initial_query)
                         preview_scroll_offset = 0
                     else
                         selected_idx = 1
+                        if #results > 0 and results[selected_idx] then
+                            load_preview_for(results[selected_idx].filepath, query)
+                        end
                     end
                     clamp_scroll()
                     needs_redraw = true
@@ -2229,6 +2239,9 @@ function TUI.run(db, initial_query)
                         preview_scroll_offset = math.max(0, #current_preview_lines - 5)
                     else
                         selected_idx = math.max(1, #results)
+                        if #results > 0 and results[selected_idx] then
+                            load_preview_for(results[selected_idx].filepath, query)
+                        end
                     end
                     clamp_scroll()
                     needs_redraw = true
