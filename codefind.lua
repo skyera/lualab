@@ -1852,31 +1852,6 @@ function TUI.run(db, initial_query)
         io.flush()
     end
 
-    -- Fast selective row update when selection moves within visible window
-    local function render_selection_move(old_idx, new_idx)
-        local list_thumb_pos = 1
-        if #results > list_height then
-            local max_offset = math.max(1, #results - list_height)
-            list_thumb_pos = 1 + math.floor((list_scroll_offset / max_offset) * (list_height - 1))
-        end
-
-        local left_col_border = (focus_pane == "search") and "\27[1;36m" or "\27[90m"
-        local neutral_border = "\27[90m"
-
-        local function redraw_one_row(target_idx, is_sel)
-            local row_num = target_idx - list_scroll_offset
-            if row_num >= 1 and row_num <= list_height then
-                local y = 3 + row_num
-                local left_cell = format_left_item(target_idx, is_sel, list_thumb_pos, row_num)
-                io.write(string.format("\27[%d;1H%s│\27[0m%s%s│\27[0m", y, left_col_border, left_cell, neutral_border))
-            end
-        end
-
-        redraw_one_row(old_idx, false)
-        redraw_one_row(new_idx, true)
-        io.flush()
-    end
-
     local function render_full_screen()
         clamp_scroll()
         local left_col_border = (focus_pane == "search") and "\27[1;36m" or "\27[90m"
@@ -2093,18 +2068,12 @@ function TUI.run(db, initial_query)
                     end
                 else
                     if selected_idx > 1 then
-                        local old_idx = selected_idx
                         selected_idx = selected_idx - 1
-                        if selected_idx >= list_scroll_offset + 1 then
-                            render_selection_move(old_idx, selected_idx)
-                            if #results > 0 and results[selected_idx] then
-                                load_preview_for(results[selected_idx].filepath, query)
-                                needs_redraw = true
-                            end
-                        else
-                            clamp_scroll()
-                            needs_redraw = true
+                        clamp_scroll()
+                        if #results > 0 and results[selected_idx] then
+                            load_preview_for(results[selected_idx].filepath, query)
                         end
+                        needs_redraw = true
                     end
                 end
             elseif key == "DOWN" or key == "CTRL_N" then
@@ -2115,18 +2084,12 @@ function TUI.run(db, initial_query)
                     end
                 else
                     if selected_idx < #results then
-                        local old_idx = selected_idx
                         selected_idx = selected_idx + 1
-                        if selected_idx <= list_scroll_offset + list_height then
-                            render_selection_move(old_idx, selected_idx)
-                            if #results > 0 and results[selected_idx] then
-                                load_preview_for(results[selected_idx].filepath, query)
-                                needs_redraw = true
-                            end
-                        else
-                            clamp_scroll()
-                            needs_redraw = true
+                        clamp_scroll()
+                        if #results > 0 and results[selected_idx] then
+                            load_preview_for(results[selected_idx].filepath, query)
                         end
+                        needs_redraw = true
                     end
                 end
             elseif key == "PAGE_UP" or (vim_mode == "NORMAL" and focus_pane == "preview" and key == "CTRL_U") then
@@ -2223,18 +2186,12 @@ function TUI.run(db, initial_query)
                         end
                     else
                         if selected_idx < #results then
-                            local old_idx = selected_idx
                             selected_idx = selected_idx + 1
-                            if selected_idx <= list_scroll_offset + list_height then
-                                render_selection_move(old_idx, selected_idx)
-                                if #results > 0 and results[selected_idx] then
-                                    load_preview_for(results[selected_idx].filepath, query)
-                                    needs_redraw = true
-                                end
-                            else
-                                clamp_scroll()
-                                needs_redraw = true
+                            clamp_scroll()
+                            if #results > 0 and results[selected_idx] then
+                                load_preview_for(results[selected_idx].filepath, query)
                             end
+                            needs_redraw = true
                         end
                     end
                 elseif key == "k" then
@@ -2245,18 +2202,12 @@ function TUI.run(db, initial_query)
                         end
                     else
                         if selected_idx > 1 then
-                            local old_idx = selected_idx
                             selected_idx = selected_idx - 1
-                            if selected_idx >= list_scroll_offset + 1 then
-                                render_selection_move(old_idx, selected_idx)
-                                if #results > 0 and results[selected_idx] then
-                                    load_preview_for(results[selected_idx].filepath, query)
-                                    needs_redraw = true
-                                end
-                            else
-                                clamp_scroll()
-                                needs_redraw = true
+                            clamp_scroll()
+                            if #results > 0 and results[selected_idx] then
+                                load_preview_for(results[selected_idx].filepath, query)
                             end
+                            needs_redraw = true
                         end
                     end
                 elseif key == "h" then
