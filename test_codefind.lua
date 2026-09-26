@@ -501,6 +501,46 @@ TestRunner.describe("7. SQLite3 Library Discovery, Validation and Selection", fu
         assert_true(r.version ~= nil, "Validated library must report a version")
     end)
 
+    TestRunner.it("should not crash on any non-letter character in a preview query", function()
+        -- Regression: gsub's second return value leaked into table.insert's
+        -- optional `pos` argument, so any query containing a non-letter
+        -- ("job_", "log2024", "user.name", "a+b") raised
+        -- "bad argument #2 to 'insert'" and killed the TUI preview.
+        for _, q in ipairs({ "job_", "log2024", "user.name", "a+b", "f(x)", "50%",
+                             "a-b", "[x]", "a$b", "a?b", "a*b", "a^b", "_" }) do
+            local ok, terms, patterns = pcall(codefind.build_preview_patterns, q)
+            assert_true(ok, "Query '" .. q .. "' must not raise, got: " .. tostring(terms))
+            assert_true(#patterns >= 1, "Query '" .. q .. "' should yield a pattern")
+        end
+    end)
+
+    TestRunner.it("should build case-insensitive patterns that actually match", function()
+        local _, pats = codefind.build_preview_patterns("Job_X")
+        local p = pats[1]
+        assert_eq(p, "[jJ][oO][bB]_[xX]", "Each letter should become a case-insensitive class")
+        assert_true(("a Job_X here"):find(p) ~= nil, "Should match 'Job_X'")
+        assert_true(("a JOB_X here"):find(p) ~= nil, "Should match 'JOB_X'")
+        assert_true(("a job_x here"):find(p) ~= nil, "Should match 'job_x'")
+        assert_true(("a jobx here"):find(p) == nil, "Must not match 'jobx' -- '_' is required")
+    end)
+
+    TestRunner.it("should escape a hyphen so it cannot act as a pattern range", function()
+        -- '-' is part of a term (the tokenizer keeps it), but it is also a Lua
+        -- pattern range operator, so it must be escaped in the built pattern.
+        local terms, pats = codefind.build_preview_patterns("a-b")
+        assert_eq(#terms, 1, "'a-b' is a single term")
+        assert_eq(pats[1], "[aA]%-[bB]", "Hyphen must be escaped as %-")
+        assert_true(("xa-by"):find(pats[1]) ~= nil, "Should match 'a-b'")
+        assert_true(("xaby"):find(pats[1]) == nil, "Must not match 'ab' -- hyphen is required")
+    end)
+
+    TestRunner.it("should tokenise a query on non-word characters", function()
+        local terms, pats = codefind.build_preview_patterns("user.name")
+        assert_eq(#terms, 2, "'user.name' is two terms")
+        assert_eq(pats[1], "[uU][sS][eE][rR]", "First term pattern")
+        assert_eq(pats[2], "[nN][aA][mM][eE]", "Second term pattern")
+    end)
+
     TestRunner.it("should describe an unusable candidate without flooding the line", function()
         local c = { path = "C:\\x\\sqlite3.dll", source = "test",
                     result = { path = "C:\\x\\sqlite3.dll", size = 2048, ok = false,

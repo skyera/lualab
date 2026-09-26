@@ -1848,6 +1848,36 @@ end
 local TUI = {}
 
 function TUI.run(db, initial_query)
+--------------------------------------------------------------------------------
+-- Preview highlighting patterns
+--------------------------------------------------------------------------------
+-- One case-insensitive Lua pattern per term in the query, used to highlight
+-- matches in the TUI preview pane.
+--
+-- gsub returns (string, substitutions). As the final argument to table.insert
+-- that second value expands into insert's optional `pos` parameter, so
+-- table.insert(parts, ch:gsub(...)) is really insert(parts, str, count) and
+-- raises "bad argument #2 (number expected, got string)" for every non-letter
+-- character in the query -- which is why searching "job_", "log2024" or
+-- "user.name" crashed the preview. Parentheses truncate it to one value.
+local function build_preview_patterns(query_str)
+    local terms, patterns = {}, {}
+    for term in tostring(query_str or ""):gmatch("[%w_%-]+") do
+        terms[#terms + 1] = term:lower()
+        local ci_parts = {}
+        for ch in term:gmatch(".") do
+            local lo, up = ch:lower(), ch:upper()
+            if lo ~= up then
+                ci_parts[#ci_parts + 1] = "[" .. lo .. up .. "]"
+            else
+                ci_parts[#ci_parts + 1] = (lo:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1"))
+            end
+        end
+        patterns[#patterns + 1] = table.concat(ci_parts)
+    end
+    return terms, patterns
+end
+
     -- Check if running in an interactive terminal
     if not is_windows then
         if ffi.C.isatty(0) == 0 then
@@ -2196,22 +2226,8 @@ function TUI.run(db, initial_query)
         current_match_pos = 1
         preview_scroll_offset = 0
 
-        local terms = {}
-        current_preview_patterns = {}
-        for t in (query_str or ""):gmatch("[%w_%-]+") do
-            table.insert(terms, t:lower())
-            local ci_parts = {}
-            for ch in t:gmatch(".") do
-                local lo = ch:lower()
-                local up = ch:upper()
-                if lo ~= up then
-                    table.insert(ci_parts, "[" .. lo .. up .. "]")
-                else
-                    table.insert(ci_parts, lo:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1"))
-                end
-            end
-            table.insert(current_preview_patterns, table.concat(ci_parts))
-        end
+        local terms
+        terms, current_preview_patterns = build_preview_patterns(query_str)
 
         if #terms > 0 then
             for idx, line in ipairs(current_preview_lines) do
@@ -3505,6 +3521,7 @@ if pcall(debug.getlocal, 4, 1) then
         config_path = config_path,
         validate_sqlite_lib = validate_sqlite_lib,
         version_key = version_key,
+        build_preview_patterns = build_preview_patterns,
         describe_candidate = describe_candidate,
     }
 else
