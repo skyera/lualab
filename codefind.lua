@@ -146,30 +146,61 @@ else
         int closedir(DIR *dirp);
 
         typedef long time_t;
-        struct stat {
-            unsigned long  st_dev;
-            unsigned long  st_ino;
-            unsigned long  st_nlink;
-            unsigned int   st_mode;
-            unsigned int   st_uid;
-            unsigned int   st_gid;
-            unsigned int   __pad0;
-            unsigned long  st_rdev;
-            long           st_size;
-            long           st_blksize;
-            long           st_blocks;
-            time_t         st_atime;
-            unsigned long  st_atime_nsec;
-            time_t         st_mtime;
-            unsigned long  st_mtime_nsec;
-            time_t         st_ctime;
-            unsigned long  st_ctime_nsec;
-            long           __unused[3];
-        };
-        int stat(const char *pathname, struct stat *statbuf);
-        int __xstat(int ver, const char *pathname, struct stat *statbuf);
         char *realpath(const char *path, char *resolved_path);
     ]]
+
+    if ffi.arch == "arm64" or ffi.arch == "aarch64" then
+        ffi.cdef[[
+            struct stat {
+                unsigned long  st_dev;
+                unsigned long  st_ino;
+                unsigned int   st_mode;
+                unsigned int   st_nlink;
+                unsigned int   st_uid;
+                unsigned int   st_gid;
+                unsigned long  st_rdev;
+                unsigned long  __pad1;
+                long           st_size;
+                int            st_blksize;
+                int            __pad2;
+                long           st_blocks;
+                time_t         st_atime;
+                unsigned long  st_atime_nsec;
+                time_t         st_mtime;
+                unsigned long  st_mtime_nsec;
+                time_t         st_ctime;
+                unsigned long  st_ctime_nsec;
+                int            __glibc_reserved[2];
+            };
+            int stat(const char *pathname, struct stat *statbuf);
+            int __xstat(int ver, const char *pathname, struct stat *statbuf);
+        ]]
+    else
+        ffi.cdef[[
+            struct stat {
+                unsigned long  st_dev;
+                unsigned long  st_ino;
+                unsigned long  st_nlink;
+                unsigned int   st_mode;
+                unsigned int   st_uid;
+                unsigned int   st_gid;
+                unsigned int   __pad0;
+                unsigned long  st_rdev;
+                long           st_size;
+                long           st_blksize;
+                long           st_blocks;
+                time_t         st_atime;
+                unsigned long  st_atime_nsec;
+                time_t         st_mtime;
+                unsigned long  st_mtime_nsec;
+                time_t         st_ctime;
+                unsigned long  st_ctime_nsec;
+                long           __unused[3];
+            };
+            int stat(const char *pathname, struct stat *statbuf);
+            int __xstat(int ver, const char *pathname, struct stat *statbuf);
+        ]]
+    end
 end
 
 --------------------------------------------------------------------------------
@@ -197,10 +228,17 @@ if not is_windows then
     if pcall(function() return ffi.C.stat end) then
         posix_stat = function(p, st) return ffi.C.stat(p, st) end
     elseif pcall(function() return ffi.C.__xstat end) then
+        local stat_ver = 1
+        local dummy_st = ffi.new("struct stat")
+        if ffi.C.__xstat(0, ".", dummy_st) == 0 then
+            stat_ver = 0
+        elseif ffi.C.__xstat(1, ".", dummy_st) == 0 then
+            stat_ver = 1
+        elseif ffi.C.__xstat(3, ".", dummy_st) == 0 then
+            stat_ver = 3
+        end
         posix_stat = function(p, st)
-            local res = ffi.C.__xstat(3, p, st)
-            if res ~= 0 then res = ffi.C.__xstat(1, p, st) end
-            return res
+            return ffi.C.__xstat(stat_ver, p, st)
         end
     else
         posix_stat = function(p, st) return -1 end
@@ -213,10 +251,10 @@ local function get_file_metadata(path)
         if not f then return nil end
         local sz = f:seek("end")
         f:close()
-        return { size = sz or 0, mtime = 0, is_dir = false }
+        return { size = sz or 0, mtime = 0, is_dir = false, is_reg = true }
     else
         local st = ffi.new("struct stat")
-        if posix_stat(path, st) == 0 then
+        if posix_stat and posix_stat(path, st) == 0 then
             local is_dir = bit.band(st.st_mode, 0xF000) == 0x4000
             local is_reg = bit.band(st.st_mode, 0xF000) == 0x8000
             return {
@@ -225,6 +263,14 @@ local function get_file_metadata(path)
                 is_dir = is_dir,
                 is_reg = is_reg
             }
+        else
+            -- Robust fallback to Lua standard io if POSIX stat fails
+            local f = io.open(path, "rb")
+            if f then
+                local sz = f:seek("end") or 0
+                f:close()
+                return { size = sz, mtime = 0, is_dir = false, is_reg = true }
+            end
         end
     end
     return nil
