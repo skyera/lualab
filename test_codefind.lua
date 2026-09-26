@@ -377,9 +377,10 @@ TestRunner.describe("7. SQLite3 Library Discovery, Validation and Selection", fu
         end
     end
 
-    local function cand(path, version, source)
-        return { path = path, source = source or "test",
-                 result = { path = path, ok = true, version = version, size = 1024 * 1024 } }
+    -- Candidates are enumerated, not loaded: no `result` until the one the user
+    -- picks has actually been loaded and validated.
+    local function cand(path, source)
+        return { path = path, source = source or "test", size = 1024 * 1024, is_pe = true }
     end
     local function reader(input)
         return function() return input end
@@ -395,42 +396,49 @@ TestRunner.describe("7. SQLite3 Library Discovery, Validation and Selection", fu
         assert_eq(codefind.version_key("garbage"), 0, "Unparseable version should rank 0")
     end)
 
-    TestRunner.it("should auto-select when exactly one library is usable", function()
-        local only = cand("C:\\only\\sqlite3.dll", "3.40.0")
-        local picked = codefind.choose_usable({ only }, false, reader(nil), swallow)
+    TestRunner.it("should auto-select when exactly one library was found", function()
+        local only = cand("C:\\only\\sqlite3.dll")
+        local picked = codefind.choose_candidate({ only }, false, reader(nil), swallow)
         assert_eq(picked.path, "C:\\only\\sqlite3.dll", "Single candidate must be chosen")
     end)
 
-    TestRunner.it("should pick the newest version when not interactive", function()
-        local list = { cand("C:\\old\\sqlite3.dll", "3.47.2"), cand("C:\\new\\sqlite3.dll", "3.53.4") }
-        local picked = codefind.choose_usable(list, false, reader(nil), swallow)
-        assert_eq(picked.path, "C:\\new\\sqlite3.dll", "Newest must win by default")
+    TestRunner.it("should keep discovery order and not load anything to choose", function()
+        local list = { cand("C:\\first\\sqlite3.dll"), cand("C:\\second\\sqlite3.dll") }
+        local picked = codefind.choose_candidate(list, false, reader(nil), swallow)
+        assert_eq(picked.path, "C:\\first\\sqlite3.dll", "First on PATH must win by default")
+        assert_true(picked.result == nil, "Choosing must not populate a validation result")
     end)
 
     TestRunner.it("should honour an interactive numeric choice", function()
-        local list = { cand("C:\\new\\sqlite3.dll", "3.53.4"), cand("C:\\old\\sqlite3.dll", "3.47.2") }
-        local picked = codefind.choose_usable(list, true, reader("2"), swallow)
-        assert_eq(picked.path, "C:\\old\\sqlite3.dll", "Choice 2 must be honoured")
+        local list = { cand("C:\\first\\sqlite3.dll"), cand("C:\\second\\sqlite3.dll") }
+        local picked = codefind.choose_candidate(list, true, reader("2"), swallow)
+        assert_eq(picked.path, "C:\\second\\sqlite3.dll", "Choice 2 must be honoured")
     end)
 
     TestRunner.it("should fall back to the default on invalid interactive input", function()
         for _, bad in ipairs({ "abc", "", "0", "99", "-1" }) do
-            local list = { cand("C:\\new\\sqlite3.dll", "3.53.4"), cand("C:\\old\\sqlite3.dll", "3.47.2") }
-            local picked = codefind.choose_usable(list, true, reader(bad), swallow)
-            assert_eq(picked.path, "C:\\new\\sqlite3.dll",
-                "Input '" .. bad .. "' must fall back to the newest")
+            local list = { cand("C:\\first\\sqlite3.dll"), cand("C:\\second\\sqlite3.dll") }
+            local picked = codefind.choose_candidate(list, true, reader(bad), swallow)
+            assert_eq(picked.path, "C:\\first\\sqlite3.dll",
+                "Input '" .. bad .. "' must fall back to the first")
         end
     end)
 
     TestRunner.it("should fall back to the default when input is closed (EOF)", function()
-        local list = { cand("C:\\new\\sqlite3.dll", "3.53.4"), cand("C:\\old\\sqlite3.dll", "3.47.2") }
-        local picked = codefind.choose_usable(list, true, reader(nil), swallow)
-        assert_eq(picked.path, "C:\\new\\sqlite3.dll", "EOF must fall back to the newest")
+        local list = { cand("C:\\first\\sqlite3.dll"), cand("C:\\second\\sqlite3.dll") }
+        local picked = codefind.choose_candidate(list, true, reader(nil), swallow)
+        assert_eq(picked.path, "C:\\first\\sqlite3.dll", "EOF must fall back to the first")
     end)
 
-    TestRunner.it("should report nothing to choose when no library is usable", function()
-        assert_eq(codefind.choose_usable({}, true, reader("1"), swallow), nil,
+    TestRunner.it("should report nothing to choose when no library was found", function()
+        assert_eq(codefind.choose_candidate({}, true, reader("1"), swallow), nil,
             "Empty candidate list must yield no choice")
+    end)
+
+    TestRunner.it("should mark an unvalidated candidate as not loaded", function()
+        local d = codefind.describe_candidate(cand("C:\\x\\sqlite3.dll"), 1)
+        assert_true(d:find("not loaded"), "Unvalidated candidate must be marked not loaded")
+        assert_true(d:find("PE image"), "Should still report the file header check")
     end)
 
     TestRunner.it("should reject a path that is not a PE image", function()

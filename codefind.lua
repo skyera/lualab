@@ -346,6 +346,9 @@ end
 
 -- Deliberately narrow: PATH, the script's own folder, and the cwd. These are
 -- the only places a DLL would be picked up from anyway, and it stays fast.
+-- Enumeration only: read directory entries and file headers, never ffi.load.
+-- Loading a candidate just to describe it runs that DLL's entry point, which is
+-- a side effect we neither need nor want before the user has picked one.
 local function scan_sqlite_candidates()
     local found, seen = {}, {}
     local function consider(dir, source)
@@ -353,9 +356,20 @@ local function scan_sqlite_candidates()
         for _, name in ipairs(SQLITE_FILE_NAMES) do
             local p = dir .. "\\" .. name
             local key = p:lower():gsub("/", "\\")
-            if not seen[key] and file_exists(p) then
-                seen[key] = true
-                found[#found + 1] = { path = p, source = source }
+            if not seen[key] then
+                local f = io.open(p, "rb")
+                if f then
+                    local sz = f:seek("end")
+                    f:seek("set")
+                    local magic = f:read(2)
+                    f:close()
+                    seen[key] = true
+                    found[#found + 1] = {
+                        path = p, source = source, size = sz,
+                        is_pe = (magic and #magic == 2
+                                 and magic:byte(1) == 77 and magic:byte(2) == 90) or false,
+                    }
+                end
             end
         end
     end
@@ -403,46 +417,45 @@ end
 local function describe_candidate(c, i)
     local r = c.result
     local tag = ("  [%d] %s"):format(i, c.path)
-    if r.ok then
+    if r and r.ok then
         return ("%s\n         v%s  %s  usable (FTS5 yes)  [%s]"):format(
-            tag, r.version, human_size(r.size), c.source)
+            tag, r.version, human_size(r.size or c.size), c.source)
     end
-    return ("%s\n         %s  UNUSABLE: %s"):format(
-        tag, human_size(r.size), shorten_reason(r.reason, 4))
+    if r then   -- loaded and rejected
+        return ("%s\n         %s  UNUSABLE: %s"):format(
+            tag, human_size(r.size or c.size), shorten_reason(r.reason, 4))
+    end
+    -- Enumerated but deliberately not loaded.
+    return ("%s\n         %s  %s  [not loaded]"):format(
+        tag, human_size(c.size), c.is_pe and "PE image" or "NOT a PE image")
 end
 
-local function prompt_sqlite_choice(usable, read_fn, write_fn)
+local function prompt_sqlite_choice(cands, read_fn, write_fn)
     write_fn = write_fn or function(s) io.write(s); io.flush() end
-    write_fn("\n  Multiple usable sqlite3 libraries found:\n\n")
-    for i, c in ipairs(usable) do write_fn(describe_candidate(c, i) .. "\n") end
-    write_fn(string.format("\n  Select [1-%d] (default 1): ", #usable))
+    write_fn(string.format("\n  %d sqlite3 libraries found:\n\n", #cands))
+    for i, c in ipairs(cands) do write_fn(describe_candidate(c, i) .. "\n") end
+    write_fn(string.format("\n  Select [1-%d] (default 1): ", #cands))
     local line = (read_fn or io.read)("*l")
     if not line then write_fn("\n"); return 1 end
     local n = tonumber((tostring(line):gsub("%s+", "")))
-    if not n or n < 1 or n > #usable then return 1 end
+    if not n or n < 1 or n > #cands then return 1 end
     return math.floor(n)
 end
 
--- Newest first, so the default (and the non-interactive choice) is the best
--- build available. Split out from select_sqlite_lib so the decision is testable
--- without needing a real console: `interactive` and `read_fn` are injectable.
-local function choose_usable(usable, interactive, read_fn, write_fn)
-    if #usable == 0 then return nil end
-    if #usable == 1 then return usable[1] end
-    table.sort(usable, function(a, b)
-        return version_key(a.result.version) > version_key(b.result.version)
-    end)
-    if interactive then
-        return usable[prompt_sqlite_choice(usable, read_fn, write_fn)]
-    end
-    -- No prompt possible. Record that the choice was automatic and let
-    -- print_sqlite_candidates explain it, so the candidate list stays the very
-    -- first thing printed rather than being preceded by a notice.
-    SQLITE_SCAN.auto_picked = true
-    return usable[1]
-end
 
 -- Returns lib, label  (label is a human description used by `doctor`)
+-- Pick from the enumerated candidates WITHOUT loading any of them. Order is
+-- discovery order (PATH first), which is the same precedence the Windows loader
+-- itself would apply, so the non-interactive default matches what ffi.load
+-- would have picked anyway.
+local function choose_candidate(cands, interactive, read_fn, write_fn)
+    if #cands == 0 then return nil end
+    if #cands == 1 then return cands[1] end
+    if interactive then return cands[prompt_sqlite_choice(cands, read_fn, write_fn)] end
+    SQLITE_SCAN.auto_picked = true
+    return cands[1]
+end
+
 local function select_sqlite_lib()
     -- 1. An explicit request must be honoured or reported, never silently ignored.
     local forced = os.getenv(SQLITE_ENV_OVERRIDE)
@@ -451,6 +464,8 @@ local function select_sqlite_lib()
         if r.ok then
             SQLITE_SCAN.chosen = r
             SQLITE_SCAN.forced = forced
+            SQLITE_SCAN.candidates = { { path = forced, source = "env", size = r.size,
+                                          is_pe = true, result = r } }
             return r.lib, forced
         end
         io.write("\n  " .. SQLITE_ENV_OVERRIDE .. "=" .. forced .. " is not usable:\n")
@@ -461,22 +476,19 @@ local function select_sqlite_lib()
     end
 
     if is_windows then
-        local usable = {}
-        for _, c in ipairs(scan_sqlite_candidates()) do
-            c.result = validate_sqlite_lib(c.path)
-            SQLITE_SCAN.candidates[#SQLITE_SCAN.candidates + 1] = c
-            if c.result.ok then usable[#usable + 1] = c end
-        end
-
-        if #usable == 1 then
-            SQLITE_SCAN.chosen = usable[1].result
-            return usable[1].result.lib, usable[1].path
-        elseif #usable > 1 then
-            local picked = choose_usable(usable, is_tty_fd(0), io.read, function(s)
-                io.write(s); io.flush()
-            end)
-            SQLITE_SCAN.chosen = picked.result
-            return picked.result.lib, picked.path
+        SQLITE_SCAN.candidates = scan_sqlite_candidates()
+        local picked = choose_candidate(SQLITE_SCAN.candidates, is_tty_fd(0), io.read,
+                                        function(s) io.write(s); io.flush() end)
+        if picked then
+            -- Only the selected library is ever loaded.
+            local r = validate_sqlite_lib(picked.path)
+            picked.result = r
+            if r.ok then
+                SQLITE_SCAN.chosen = r
+                return r.lib, picked.path
+            end
+            SQLITE_SCAN.selected_failed = r
+            return nil, nil      -- banner explains, and points at doctor
         end
     end
 
@@ -522,8 +534,15 @@ local function load_sqlite_lib()
     say("")
     say("  codefind indexes into SQLite FTS5 and cannot run without it.")
     local entries = all_scan_entries()
+    if SQLITE_SCAN.selected_failed then
+        say("  The library you selected could not be used:")
+        say("")
+        say("      " .. SQLITE_SCAN.selected_failed.path)
+        say("      " .. tostring(SQLITE_SCAN.selected_failed.reason))
+        say("")
+    end
     if #entries > 0 then
-        say("  Libraries found, but none passed validation:")
+        say("  Libraries available (only the selected one is ever loaded):")
         say("")
         for i, c in ipairs(entries) do
             say("  " .. describe_candidate(c, i))
@@ -548,7 +567,7 @@ local function load_sqlite_lib()
         say("                  (or: sudo yum install sqlite-libs)")
     end
     say("")
-    say("  Inspect what is installed and why it was rejected:")
+    say("  Inspect every library found and see why one is rejected:")
     say("      luajit codefind.lua doctor")
     say("")
 
@@ -638,7 +657,10 @@ end
 -- Always shown, even when there is only one candidate: seeing the number and
 -- the resolved path is what makes "which sqlite3 am I actually using?" answerable
 -- at a glance instead of by guesswork.
-local function print_sqlite_candidates()
+-- `validate` is used by `doctor` only. Normal runs never load a library the
+-- user did not pick; doctor is an explicit request to inspect them all, so it
+-- is the one place where loading every candidate is the point.
+local function print_sqlite_candidates(validate)
     local entries = all_scan_entries()
     io.write("\n  \27[1m-- sqlite3 libraries \27[0m" .. string.rep("-", 40) .. "\n")
     if #entries == 0 then
@@ -646,15 +668,20 @@ local function print_sqlite_candidates()
                                tostring(sqlite_lib_name)))
         return
     end
+    if validate then
+        for _, c in ipairs(entries) do
+            if not c.result then c.result = validate_sqlite_lib(c.path) end
+        end
+    end
     for i, c in ipairs(entries) do
-        local inuse = (SQLITE_SCAN.chosen and c.result.path == SQLITE_SCAN.chosen.path)
+        local inuse = (SQLITE_SCAN.chosen and c.result and c.result.path == SQLITE_SCAN.chosen.path)
         io.write(describe_candidate(c, i))
         if inuse then io.write("   \27[1m<- IN USE\27[0m") end
         io.write("\n")
     end
     if #entries > 1 then
         if SQLITE_SCAN.auto_picked then
-            io.write("      (stdin is not a terminal, so the newest was chosen automatically)\n")
+            io.write("      (stdin is not a terminal, so the first on PATH was used)\n")
         end
         io.write(string.format("\n  Pick a different one:  set %s=C:\\path\\to\\sqlite3.dll\n",
                                SQLITE_ENV_OVERRIDE))
@@ -3082,8 +3109,7 @@ local function main(args)
         io.write("\n  \27[1mCodeFind diagnostics\27[0m\n")
         io.write(table.concat(diagnostics_lines(db_path, cmd_args[1] or ".", allow_all), "\n"), "\n")
 
-        local entries = all_scan_entries()
-        print_sqlite_candidates()
+        print_sqlite_candidates(true)
 
         io.write("\n  If 'script' points somewhere other than your checkout, you are\n")
         io.write("  running a stale deployed copy -- re-run: luajit deploy.lua --app codefind\n\n")
@@ -3173,7 +3199,7 @@ if pcall(debug.getlocal, 4, 1) then
         TUI      = TUI,
         sanitize_terminal_text = sanitize_terminal_text,
         -- exposed for tests: console-independent selection logic
-        choose_usable = choose_usable,
+        choose_candidate = choose_candidate,
         validate_sqlite_lib = validate_sqlite_lib,
         version_key = version_key,
         describe_candidate = describe_candidate,
