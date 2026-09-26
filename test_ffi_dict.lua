@@ -273,6 +273,30 @@ TestRunner.describe("4. Study Plan", function()
             "mixed mode draws from all eligible tracks")
     end)
 
+    TestRunner.it("should fall back to unused general dictionary entries", function()
+        local fallback_path = "/tmp/_test_ffi_dict_plan_fallback_" .. os.time() .. ".db"
+        os.remove(fallback_path); os.remove(fallback_path .. "-wal"); os.remove(fallback_path .. "-shm")
+        local fallback_db = assert(Database.open(fallback_path))
+        Importer.ingest_wordset(fallback_db, {
+            quasar = { meanings = { { def = "a compact astronomical object", speech_part = "noun" } } },
+            zephyr = { meanings = { { def = "a gentle breeze", speech_part = "noun" } } },
+        })
+        assert(fallback_db:deck_add({ word = "quasar" }, 1000))
+        local candidates = assert(fallback_db:study_plan_candidates("common", 5))
+        assert_eq(#candidates, 1, "deck duplicate is excluded and other general word is offered")
+        assert_eq(candidates[1].word, "zephyr")
+        assert_eq(candidates[1].source_track, "general")
+        assert_true(#candidates[1].definition > 0, "fallback includes imported definition")
+
+        assert(fallback_db:study_plan_set("common", 2, 1000))
+        local added = assert(fallback_db:study_plan_start_today(1000))
+        assert_eq(#added, 1, "general fallback word can be added to plan")
+        assert_eq(fallback_db:scalar("SELECT source_track FROM study_plan_words WHERE word_id = ?;", { added[1].id }),
+            "general", "fallback source is persisted for adaptive mode")
+        fallback_db:close()
+        os.remove(fallback_path); os.remove(fallback_path .. "-wal"); os.remove(fallback_path .. "-shm")
+    end)
+
     TestRunner.it("should honor daily quota and persist today's plan words", function()
         local ok = plan_db:study_plan_set("common", 2, 1000)
         assert_true(ok)
@@ -304,11 +328,13 @@ TestRunner.describe("4. Study Plan", function()
     TestRunner.it("should render a readable study-plan preview frame", function()
         local lines = dict.TUI.study_plan_frame({
             screen = "preview", heading = "Choose a track and daily goal", track_name = "Common English",
-            preview = { { word = "ability", definition = "the power to do something", selected = true } },
+            preview = { { word = "ability", definition = "the power to do something", selected = true,
+                source_track = "general" } },
         }, dict.Term.make_theme(true, true), 80, 24)
         local output = dict.TUI.render_lines(lines)
         assert_true(output:find("study plan", 1, true) ~= nil)
         assert_true(output:find("[x] ability", 1, true) ~= nil)
+        assert_true(output:find("[General dictionary]", 1, true) ~= nil)
         assert_true(output:find("Enter add selected", 1, true) ~= nil)
     end)
 
@@ -533,6 +559,10 @@ TestRunner.describe("9. CLI Integration", function()
         assert_true(ret == 0 or ret == true, "--help exit code")
         local f = io.open(out, "r"); local text = f:read("*a"); f:close(); os.remove(out)
         assert_true(text:find("plan", 1, true) ~= nil, "help lists study-plan command")
+        assert_true(text:find("git clone https://github.com/wordset/wordset-dictionary.git", 1, true) ~= nil,
+            "help includes a copyable Wordset download command")
+        assert_true(text:find("import --wordset ./wordset-dictionary/data", 1, true) ~= nil,
+            "help includes a copyable Wordset import command")
     end)
 
     TestRunner.it("should pass the built-in --test suite", function()

@@ -782,8 +782,17 @@ function Database:study_plan_candidates(track_id, limit)
     end
 
     local deck_rows = self:query("SELECT lower(word) AS word FROM words;") or {}
-    local in_deck = {}
+    local in_deck, track_word_set, track_words = {}, {}, {}
     for _, row in ipairs(deck_rows) do in_deck[row.word] = true end
+    for _, track in ipairs(STUDY_TRACKS) do
+        for _, word in ipairs(track.words) do
+            local key = word:lower()
+            if not track_word_set[key] then
+                track_word_set[key] = true
+                track_words[#track_words + 1] = key
+            end
+        end
+    end
 
     for _, state in ipairs(tracks) do
         for _, word in ipairs(state.track.words) do
@@ -817,6 +826,38 @@ function Database:study_plan_candidates(track_id, limit)
         chosen.current_weight = chosen.current_weight - total_weight
         candidates[#candidates + 1] = chosen.words[chosen.cursor]
         chosen.cursor = chosen.cursor + 1
+    end
+
+    -- Fill any gap with unused dictionary entries so a plan can still work
+    -- when its curated vocabulary does not overlap the imported data.
+    local remaining = limit - #candidates
+    if remaining > 0 then
+        local placeholders, params = {}, {}
+        for _, word in ipairs(track_words) do
+            placeholders[#placeholders + 1] = "?"
+            params[#params + 1] = word
+        end
+        local exclude_tracks = ""
+        if #placeholders > 0 then
+            exclude_tracks = " AND lower(d.word) NOT IN (" .. table.concat(placeholders, ", ") .. ")"
+        end
+        params[#params + 1] = remaining
+        local general = self:query([[
+            SELECT d.word, d.pos, d.definition, d.example
+            FROM dict d
+            WHERE d.id = (
+                SELECT MIN(d2.id) FROM dict d2
+                WHERE lower(d2.word) = lower(d.word)
+                  AND length(trim(coalesce(d2.definition, ''))) > 0
+            )
+            AND NOT EXISTS (SELECT 1 FROM words w WHERE lower(w.word) = lower(d.word))]] ..
+            exclude_tracks .. " ORDER BY lower(d.word), d.id LIMIT ?;", params) or {}
+        for _, row in ipairs(general) do
+            candidates[#candidates + 1] = {
+                word = row.word, pos = row.pos, definition = row.definition,
+                example = row.example, source_track = "general",
+            }
+        end
     end
     return candidates
 end
@@ -1764,8 +1805,10 @@ function UI.study_plan_frame(state, theme, cols, rows)
             if not entry then break end
             local marker = entry.selected and "[x] " or "[ ] "
             local def = entry.definition or "(definition unavailable)"
+            local source = entry.source_track == "general" and "General dictionary"
+                or (STUDY_TRACK_BY_ID[entry.source_track] and STUDY_TRACK_BY_ID[entry.source_track].name or entry.source_track or "")
             local color = idx == state.preview_idx and "1;33" or nil
-            out[4 + i] = pad_row(theme, "  " .. marker .. entry.word .. " — " .. def, width, color)
+            out[4 + i] = pad_row(theme, "  " .. marker .. entry.word .. " — " .. def .. " [" .. source .. "]", width, color)
         end
         local footer_row = #out - 1
         if #preview > visible then
@@ -1891,7 +1934,7 @@ function TUI.study_plan(db, opts)
                             state.preview_offset = 1
                             state.track_name = track_id == "mixed" and "Mixed / adaptive" or STUDY_TRACK_BY_ID[track_id].name
                             state.screen = "preview"
-                            state.message = #candidates == 0 and "No eligible words found; import a dictionary or choose another track." or nil
+                            state.message = #candidates == 0 and "No unused words found; import a dictionary." or nil
                         else
                             state.message = candidate_err
                         end
@@ -2201,8 +2244,11 @@ Options:
   --wordset|--webster|--csv   Import format (with `import`)
   --test                 Run built-in unit & integration test suite
 
+Download and import the Wordset dictionary (run from the project directory):
+  git clone https://github.com/wordset/wordset-dictionary.git
+  luajit ffi_dict.lua import --wordset ./wordset-dictionary/data
+
 Examples:
-  luajit ffi_dict.lua import --wordset ~/data/wordset-dictionary/data
   luajit ffi_dict.lua add ephemeral
   luajit ffi_dict.lua review
   luajit ffi_dict.lua quiz --limit 10
