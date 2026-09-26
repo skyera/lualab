@@ -435,12 +435,10 @@ local function choose_usable(usable, interactive, read_fn, write_fn)
     if interactive then
         return usable[prompt_sqlite_choice(usable, read_fn, write_fn)]
     end
-    if write_fn then
-        write_fn(string.format(
-            "\n  %d usable sqlite3 libraries found; stdin is not a terminal,\n", #usable))
-        write_fn("  using the newest by default. To pin one explicitly:\n")
-        write_fn(string.format("      set %s=%s\n\n", SQLITE_ENV_OVERRIDE, usable[1].path))
-    end
+    -- No prompt possible. Record that the choice was automatic and let
+    -- print_sqlite_candidates explain it, so the candidate list stays the very
+    -- first thing printed rather than being preceded by a notice.
+    SQLITE_SCAN.auto_picked = true
     return usable[1]
 end
 
@@ -655,15 +653,21 @@ local function print_sqlite_candidates()
         io.write("\n")
     end
     if #entries > 1 then
+        if SQLITE_SCAN.auto_picked then
+            io.write("      (stdin is not a terminal, so the newest was chosen automatically)\n")
+        end
         io.write(string.format("\n  Pick a different one:  set %s=C:\\path\\to\\sqlite3.dll\n",
                                SQLITE_ENV_OVERRIDE))
     end
 end
 
 local function print_diagnostics(db_path, target_dir, allow_all)
+    -- The library list comes first: which sqlite3 is in play is the fact that
+    -- most often explains a missing, wrong or shadowed library, so it should not
+    -- sit buried underneath the environment block.
+    print_sqlite_candidates()
     io.write("\n  \27[1m-- environment \27[0m" .. string.rep("-", 46) .. "\n")
     io.write(table.concat(diagnostics_lines(db_path, target_dir, allow_all), "\n"), "\n")
-    print_sqlite_candidates()
     io.flush()
 end
 
