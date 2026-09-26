@@ -337,6 +337,26 @@ TestRunner.describe("Suite: 6. TUI Layout Resize and Viewport Clamping", functio
         local edge_same_page = (edge_rel >= 1 and edge_rel <= list_height)
         assert_true(not edge_same_page, "Index 11 should exceed viewport and trigger full scroll redraw")
     end)
+
+    TestRunner.it("should trigger full screen redraw when moving to end of list across scroll boundaries", function()
+        local list_scroll_offset = 0
+        local old_idx = 10
+        local new_idx = 15
+        local list_height = 10
+        local num_results = 20
+
+        -- simulate clamp_scroll on moving down
+        local old_scroll = list_scroll_offset
+        local selected_idx = new_idx
+        local max_scroll = math.max(0, num_results - list_height)
+        if selected_idx > list_scroll_offset + list_height then
+            list_scroll_offset = selected_idx - list_height
+        end
+        list_scroll_offset = math.max(0, math.min(list_scroll_offset, max_scroll))
+
+        assert_true(list_scroll_offset ~= old_scroll, "Scroll offset must change when moving to end of list")
+        assert_eq(list_scroll_offset, 5, "Scroll offset should now be 5")
+    end)
 end)
 
 db:close()

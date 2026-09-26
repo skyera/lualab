@@ -1593,6 +1593,8 @@ function TUI.run(db, initial_query)
     local left_col_w = math.max(34, math.floor((cur_cols - 3) * 0.44))
     local right_col_w = cur_cols - 3 - left_col_w
     local list_height = math.max(5, cur_rows - 6)
+    local render_full_screen = nil
+    local render_selection_differential = nil
 
     local function clamp_scroll()
         local max_scroll = math.max(0, #results - list_height)
@@ -2010,7 +2012,7 @@ function TUI.run(db, initial_query)
         return string.format("%s│\27[0m%s%s│\27[0m%s%s│\27[0m", left_col_border, left_cell, neutral_border, right_cell, right_col_border)
     end
 
-    local function render_selection_differential(old_idx, new_idx)
+    render_selection_differential = function(old_idx, new_idx)
         local old_scroll = list_scroll_offset
         selected_idx = new_idx
         clamp_scroll()
@@ -2059,7 +2061,7 @@ function TUI.run(db, initial_query)
         io.flush()
     end
 
-    local function render_full_screen()
+    render_full_screen = function()
         clamp_scroll()
         local left_col_border = (focus_pane == "search") and "\27[1;36m" or "\27[90m"
         local right_col_border = (focus_pane == "preview") and "\27[1;32m" or "\27[90m"
