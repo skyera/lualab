@@ -31,6 +31,7 @@ test: $(LUAJIT_LIB)
 	$(LUAJIT_DIR)/src/luajit test_ffi_image_filter_studio.lua
 	$(LUAJIT_DIR)/src/luajit test_ffi_system_info.lua
 	$(LUAJIT_DIR)/src/luajit test_ffi_verlet_cloth.lua
+	$(LUAJIT_DIR)/src/luajit test_ffi_dict.lua
 	-$(LUAJIT_DIR)/src/luajit test_ffi_suite.lua
 
 $(LUAJIT_LIB):
