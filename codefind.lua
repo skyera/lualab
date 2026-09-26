@@ -1848,9 +1848,6 @@ end
 --------------------------------------------------------------------------------
 -- 7. Interactive Terminal UI (TUI) Mode
 --------------------------------------------------------------------------------
-local TUI = {}
-
-function TUI.run(db, initial_query)
 --------------------------------------------------------------------------------
 -- Preview highlighting patterns
 --------------------------------------------------------------------------------
@@ -1881,6 +1878,9 @@ local function build_preview_patterns(query_str)
     return terms, patterns
 end
 
+local TUI = {}
+
+function TUI.run(db, initial_query)
     -- Check if running in an interactive terminal
     if not is_windows then
         if ffi.C.isatty(0) == 0 then
@@ -3521,10 +3521,10 @@ if pcall(debug.getlocal, 4, 1) then
         best_candidate = best_candidate,
         read_config = read_config,
         same_path = same_path,
+        build_preview_patterns = build_preview_patterns,
         config_path = config_path,
         validate_sqlite_lib = validate_sqlite_lib,
         version_key = version_key,
-        build_preview_patterns = build_preview_patterns,
         describe_candidate = describe_candidate,
     }
 else
