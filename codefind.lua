@@ -1430,8 +1430,17 @@ function TUI.run(db, initial_query)
         current_preview_patterns = {}
         for t in (query_str or ""):gmatch("[%w_%-]+") do
             table.insert(terms, t:lower())
-            local pat = t:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1")
-            table.insert(current_preview_patterns, pat)
+            local ci_parts = {}
+            for ch in t:gmatch(".") do
+                local lo = ch:lower()
+                local up = ch:upper()
+                if lo ~= up then
+                    table.insert(ci_parts, "[" .. lo .. up .. "]")
+                else
+                    table.insert(ci_parts, lo:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1"))
+                end
+            end
+            table.insert(current_preview_patterns, table.concat(ci_parts))
         end
 
         if #terms > 0 then
@@ -1848,8 +1857,11 @@ function TUI.run(db, initial_query)
         else
             left_head = pad_to(query_prompt, left_col_w)
         end
-        -- Write directly to row 2, column 2 (inside left pane)
-        io.write(string.format("\27[2;1H%s│\27[0m%s", left_col_border, pad_to(left_head, left_col_w)))
+        -- Write to row 2 column 1 with synchronized updates and clear up to divider
+        io.write(string.format("\27[?2026h\27[2;1H%s│\27[0m%s\27[0m%s│\27[0m\27[?2026l",
+            left_col_border,
+            pad_to(left_head, left_col_w),
+            "\27[90m"))
         io.flush()
     end
 
