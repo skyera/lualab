@@ -191,6 +191,19 @@ local PROGRAMS = {
     controls = "[←/→] Move  •  [↑] Rotate  •  [↓] Soft Drop  •  [Space] Hard Drop",
   },
   {
+    id = "breakout",
+    file = "ffi_breakout.lua",
+    name = "Breakout",
+    icon = "🏓",
+    full_title = "Breakout Terminal Arcade",
+    category = "Game",
+    type = "Arcade / Brick Breaker",
+    backend = "LuaJIT FFI + Fixed-Step Terminal Renderer",
+    desc = "Classic paddle-and-ball action: clear rows of bricks, keep the ball alive,\n" ..
+           "and build your score across increasingly faster levels.",
+    controls = "[A/D] or [←/→] Move  •  [P] Pause  •  [Q] Quit",
+  },
+  {
     id = "game_2048",
     file = "ffi_game_2048.lua",
     name = "2048 Edition",
@@ -564,6 +577,15 @@ local function run_menu(is_test)
   end
 
   if is_test then
+    local breakout_found = false
+    for _, prog in ipairs(PROGRAMS) do
+      if prog.id == "breakout" and prog.file == "ffi_breakout.lua" then
+        breakout_found = file_exists(prog.file)
+        break
+      end
+    end
+    assert(breakout_found, "Breakout must be registered and its script must exist")
+
     -- Verify every selection in dual-pane
     for sel = 1, #PROGRAMS do
       local dual_out = render_dual_pane(sel, 0, 100, 30)
