@@ -10,6 +10,7 @@ local SM2 = dict.SM2
 local JSON = dict.JSON
 local Quiz = dict.Quiz
 local Importer = dict.Importer
+local STUDY_TRACKS = dict.STUDY_TRACKS
 
 local luajit_bin = "luajit"
 if arg and arg[-1] and #arg[-1] > 0 then
@@ -205,7 +206,117 @@ TestRunner.describe("3. Dictionary Import & Lookup", function()
     end)
 end)
 
-TestRunner.describe("4. Deck Add & Auto-fill", function()
+TestRunner.describe("4. Study Plan", function()
+    local plan_db_path = "/tmp/_test_ffi_dict_plan_" .. os.time() .. ".db"
+    os.remove(plan_db_path); os.remove(plan_db_path .. "-wal"); os.remove(plan_db_path .. "-shm")
+    local plan_db = assert(Database.open(plan_db_path))
+
+    TestRunner.it("should expose the four requested tracks", function()
+        assert_eq(#STUDY_TRACKS, 3, "three curated tracks plus mixed mode")
+        assert_eq(STUDY_TRACKS[1].name, "Common English")
+        assert_eq(STUDY_TRACKS[2].name, "Academic")
+        assert_eq(STUDY_TRACKS[3].name, "Exam Prep")
+        assert_eq(STUDY_TRACKS[1].id, "common")
+        assert_eq(STUDY_TRACKS[2].id, "academic")
+        assert_eq(STUDY_TRACKS[3].id, "exam")
+        local ok, err = plan_db:study_plan_set("mixed", 7, 1000)
+        assert_true(ok, err)
+        local plan = plan_db:study_plan_get()
+        assert_eq(plan.track, "mixed")
+        assert_eq(plan.daily_new, 7)
+
+        local path = "/tmp/_test_ffi_dict_plan_persistence_" .. os.time() .. ".db"
+        os.remove(path); os.remove(path .. "-wal"); os.remove(path .. "-shm")
+        local persistent = assert(Database.open(path))
+        assert(persistent:study_plan_set("academic", 5, 1000))
+        persistent:close()
+        persistent = assert(Database.open(path))
+        local saved = persistent:study_plan_get()
+        assert_eq(saved.track, "academic", "track survives database reopen")
+        assert_eq(saved.daily_new, 5, "daily target survives database reopen")
+        persistent:close()
+        os.remove(path); os.remove(path .. "-wal"); os.remove(path .. "-shm")
+    end)
+
+    TestRunner.it("should enforce valid track and daily target bounds", function()
+        local ok, err = plan_db:study_plan_set("unknown", 10, 1000)
+        assert_true(not ok and err:find("unknown"), "unknown track is rejected")
+        ok, err = plan_db:study_plan_set("common", 0, 1000)
+        assert_true(not ok and err:find("1 to 50"), "invalid daily target is rejected")
+    end)
+
+    TestRunner.it("should choose only dictionary-backed words and avoid deck duplicates", function()
+        Importer.ingest_wordset(plan_db, {
+            ability = { meanings = { { def = "the power or skill to do something", speech_part = "noun" } } },
+            accept = { meanings = { { def = "to receive or agree to something", speech_part = "verb" } } },
+            achieve = { meanings = { { def = "to succeed in doing something", speech_part = "verb" } } },
+            active = { meanings = { { def = "doing things or moving around", speech_part = "adjective" } } },
+            abstract = { meanings = { { def = "existing as an idea rather than a physical thing", speech_part = "adjective" } } },
+            abate = { meanings = { { def = "to become less intense", speech_part = "verb" } } },
+        })
+        local candidates = assert(plan_db:study_plan_candidates("common", 10))
+        assert_true(#candidates > 0, "seed track intersects imported sample dictionary")
+        for _, entry in ipairs(candidates) do
+            assert_true(#entry.definition > 0, "candidate has a dictionary definition")
+            assert_true(plan_db:deck_get(entry.word) == nil, "candidate is not already in deck")
+        end
+        assert(plan_db:deck_add({ word = candidates[1].word }, 1000))
+        local next_candidates = assert(plan_db:study_plan_candidates("common", 10))
+        for _, entry in ipairs(next_candidates) do
+            assert_true(entry.word:lower() ~= candidates[1].word:lower(), "deck word excluded")
+        end
+        local mixed = assert(plan_db:study_plan_candidates("mixed", 3))
+        assert_eq(#mixed, 3, "mixed track takes one available word per curriculum")
+        local mixed_tracks = {}
+        for _, entry in ipairs(mixed) do mixed_tracks[entry.source_track] = true end
+        assert_true(mixed_tracks.common and mixed_tracks.academic and mixed_tracks.exam,
+            "mixed mode draws from all eligible tracks")
+    end)
+
+    TestRunner.it("should honor daily quota and persist today's plan words", function()
+        local ok = plan_db:study_plan_set("common", 2, 1000)
+        assert_true(ok)
+        local today = os.date("%Y-%m-%d", 1000)
+        assert_eq(plan_db:study_plan_today_count(today), 0)
+        local no_selection, no_selection_message = plan_db:study_plan_start_today(1000, {})
+        assert_true(no_selection and #no_selection == 0, "empty selection adds no words")
+        assert_true(no_selection_message:find("no words selected"), "empty selection is explained")
+        assert_eq(plan_db:study_plan_today_count(today), 0, "empty selection does not consume quota")
+
+        local preview = assert(plan_db:study_plan_candidates("common", 2))
+        local selection = { [preview[1].word] = true }
+        local first_batch = assert(plan_db:study_plan_start_today(1000, selection))
+        assert_eq(#first_batch, 1, "adds only the selected preview word")
+        assert_eq(plan_db:study_plan_today_count(today), 1)
+        local final_batch = assert(plan_db:study_plan_start_today(1000))
+        assert_eq(#final_batch, 1, "can resume to fill remaining daily quota")
+        assert_eq(plan_db:study_plan_today_count(today), 2)
+        assert_eq(#plan_db:get_due(1000, 10), 3,
+            "planned words join ordinary due queue alongside the candidate added earlier")
+        local none, message = plan_db:study_plan_start_today(1000)
+        assert_true(none and #none == 0, "daily quota prevents extra additions")
+        assert_true(message:find("already reached"), "quota reason is reported")
+        local plan = plan_db:study_plan_get()
+        assert_eq(plan.track, "common", "selected plan persisted")
+        assert_eq(plan.daily_new, 2, "daily target persisted")
+    end)
+
+    TestRunner.it("should render a readable study-plan preview frame", function()
+        local lines = dict.TUI.study_plan_frame({
+            screen = "preview", heading = "Choose a track and daily goal", track_name = "Common English",
+            preview = { { word = "ability", definition = "the power to do something", selected = true } },
+        }, dict.Term.make_theme(true, true), 80, 24)
+        local output = dict.TUI.render_lines(lines)
+        assert_true(output:find("study plan", 1, true) ~= nil)
+        assert_true(output:find("[x] ability", 1, true) ~= nil)
+        assert_true(output:find("Enter add selected", 1, true) ~= nil)
+    end)
+
+    plan_db:close()
+    os.remove(plan_db_path); os.remove(plan_db_path .. "-wal"); os.remove(plan_db_path .. "-shm")
+end)
+
+TestRunner.describe("5. Deck Add & Auto-fill", function()
     TestRunner.it("should auto-fill missing fields from the imported dictionary", function()
         local id = assert(db:deck_add({ word = "ephemeral" }, 1000))
         assert_true(id ~= nil)
@@ -416,9 +527,12 @@ TestRunner.describe("9. CLI Integration", function()
     local cli_db = "/tmp/_test_ffi_dict_cli_" .. os.time() .. ".db"
     os.remove(cli_db); os.remove(cli_db .. "-wal"); os.remove(cli_db .. "-shm")
 
-    TestRunner.it("should execute ffi_dict.lua --help without error", function()
-        local ret = os.execute(string.format('"%s" ffi_dict.lua --help > /dev/null 2>&1', luajit_bin))
+    TestRunner.it("should execute ffi_dict.lua --help and mention study plans", function()
+        local out = os.tmpname()
+        local ret = os.execute(string.format('"%s" ffi_dict.lua --help > %s 2>&1', luajit_bin, out))
         assert_true(ret == 0 or ret == true, "--help exit code")
+        local f = io.open(out, "r"); local text = f:read("*a"); f:close(); os.remove(out)
+        assert_true(text:find("plan", 1, true) ~= nil, "help lists study-plan command")
     end)
 
     TestRunner.it("should pass the built-in --test suite", function()

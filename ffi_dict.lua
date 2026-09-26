@@ -137,6 +137,43 @@ local SQLITE_TRANSIENT = ffi.cast("void(*)(void*)", -1)
 
 local SECONDS_PER_DAY = 86400
 
+-- Ordered seed lists for guided study plans. Definitions are filled from the
+-- user's imported dictionary, so plans work offline after dictionary setup.
+local STUDY_TRACKS = {
+    { id = "common", name = "Common English", words = {
+        "ability", "accept", "achieve", "active", "actual", "advice", "affect", "allow",
+        "almost", "amount", "appear", "approach", "area", "avoid", "balance", "behavior",
+        "benefit", "certain", "change", "choice", "common", "community", "compare", "complete",
+        "consider", "continue", "create", "decide", "develop", "difference", "discover", "effect",
+        "effort", "encourage", "enough", "environment", "especially", "experience", "familiar", "famous",
+        "feature", "follow", "government", "happen", "improve", "include", "interest", "knowledge",
+        "language", "likely", "meaning", "necessary", "opportunity", "perhaps", "possible", "problem",
+        "provide", "reason", "result", "support", "though", "understand",
+    } },
+    { id = "academic", name = "Academic", words = {
+        "abstract", "accurate", "adapt", "adequate", "analyze", "approach", "assess", "assume",
+        "authority", "available", "benefit", "concept", "consistent", "constitutional", "context", "data",
+        "define", "derive", "distribute", "economy", "establish", "estimate", "evidence", "export",
+        "factor", "finance", "formula", "function", "identify", "indicate", "individual", "interpret",
+        "involve", "issue", "method", "occur", "percent", "period", "policy", "principle", "proceed",
+        "process", "require", "research", "respond", "role", "section", "significant", "similar",
+        "source", "specific", "structure", "theory", "vary",
+    } },
+    { id = "exam", name = "Exam Prep", words = {
+        "abate", "aberrant", "abjure", "abscond", "abstain", "acumen", "admonish", "adulterate",
+        "aesthetic", "aggregate", "alacrity", "alleviate", "ambiguous", "ameliorate", "amenable", "anachronism",
+        "analogous", "anomaly", "antipathy", "appease", "arbitrary", "arduous", "articulate", "ascetic",
+        "assiduous", "astute", "auspicious", "belligerent", "bolster", "brevity", "candid", "censure",
+        "circumspect", "coherent", "complacent", "concise", "conundrum", "corroborate", "decorum", "delineate",
+        "deride", "didactic", "diffident", "discern", "eclectic", "eloquent", "enigma", "ephemeral",
+        "equivocal", "erudite", "exacerbate", "fastidious", "gregarious", "immutable", "lucid", "mitigate",
+        "obsolete", "pragmatic", "scrutinize", "tenuous", "ubiquitous", "venerate",
+    } },
+}
+
+local STUDY_TRACK_BY_ID = {}
+for _, track in ipairs(STUDY_TRACKS) do STUDY_TRACK_BY_ID[track.id] = track end
+
 --------------------------------------------------------------------------------
 -- 3. Minimal JSON Decoder (for dictionary imports)
 --------------------------------------------------------------------------------
@@ -518,6 +555,19 @@ function Database:init_schema()
             rated_at INTEGER NOT NULL,
             grade INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS study_plan (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            track TEXT NOT NULL,
+            daily_new INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS study_plan_words (
+            word_id INTEGER PRIMARY KEY,
+            source_track TEXT NOT NULL,
+            plan_date TEXT NOT NULL,
+            FOREIGN KEY (word_id) REFERENCES words(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_study_plan_words_date ON study_plan_words(plan_date);
         CREATE INDEX IF NOT EXISTS idx_reviews_time ON reviews(rated_at);
     ]])
     if not ok then return false, "schema error: " .. tostring(err) end
@@ -678,6 +728,148 @@ function Database:deck_sample(limit)
                s.ease, s.interval_days, s.due_at, s.reps, s.lapses
         FROM words w JOIN srs s ON s.word_id = w.id
         ORDER BY w.id ASC LIMIT ?;]], { limit }) or {}
+end
+
+function Database:study_plan_get()
+    local rows = self:query("SELECT track, daily_new, updated_at FROM study_plan WHERE id = 1;")
+    return rows and rows[1] or nil
+end
+
+function Database:study_plan_set(track, daily_new, now)
+    if track ~= "mixed" and not STUDY_TRACK_BY_ID[track] then
+        return false, "unknown study track: " .. tostring(track)
+    end
+    if type(daily_new) ~= "number" or daily_new < 1 or daily_new > 50 or math.floor(daily_new) ~= daily_new then
+        return false, "daily new-word target must be an integer from 1 to 50"
+    end
+    return self:run([[
+        INSERT OR REPLACE INTO study_plan (id, track, daily_new, updated_at)
+        VALUES (1, ?, ?, ?);]], { track, daily_new, now or os.time() })
+end
+
+function Database:study_plan_today_count(date)
+    return self:scalar("SELECT COUNT(*) FROM study_plan_words WHERE plan_date = ?;",
+        { date or os.date("%Y-%m-%d") }) or 0
+end
+
+local function study_track_performance(db, track_id)
+    local rows = db:query([[
+        SELECT COUNT(*) AS n, AVG(CASE WHEN r.grade > 0 THEN 1.0 ELSE 0.0 END) AS success
+        FROM study_plan_words p JOIN reviews r ON r.word_id = p.word_id
+        WHERE p.source_track = ?;]], { track_id }) or {}
+    local row = rows[1] or {}
+    return row.n and row.n > 0 and row.success or 0.75
+end
+
+function Database:study_plan_candidates(track_id, limit)
+    limit = limit or 10
+    if limit <= 0 then return {} end
+    local tracks = {}
+    if track_id == "mixed" then
+        for _, track in ipairs(STUDY_TRACKS) do
+            local performance = study_track_performance(self, track.id)
+            tracks[#tracks + 1] = {
+                track = track, words = {}, cursor = 1,
+                performance = performance,
+                weight = 0.5 + (1 - performance) * 2,
+                current_weight = 0,
+            }
+        end
+    else
+        local track = STUDY_TRACK_BY_ID[track_id]
+        if not track then return nil, "unknown study track: " .. tostring(track_id) end
+        tracks[1] = { track = track, words = {}, cursor = 1, weight = 1, current_weight = 0 }
+    end
+
+    local deck_rows = self:query("SELECT lower(word) AS word FROM words;") or {}
+    local in_deck = {}
+    for _, row in ipairs(deck_rows) do in_deck[row.word] = true end
+
+    for _, state in ipairs(tracks) do
+        for _, word in ipairs(state.track.words) do
+            local key = word:lower()
+            if not in_deck[key] then
+                local senses = self:dict_lookup(word)
+                if #senses > 0 then
+                    state.words[#state.words + 1] = {
+                        word = word, pos = senses[1].pos, definition = senses[1].definition,
+                        example = senses[1].example, source_track = state.track.id,
+                    }
+                    in_deck[key] = true -- avoid duplicates across mixed tracks
+                end
+            end
+        end
+    end
+
+    local candidates = {}
+    while #candidates < limit do
+        local total_weight, chosen = 0, nil
+        for _, state in ipairs(tracks) do
+            if state.words[state.cursor] then
+                total_weight = total_weight + state.weight
+                state.current_weight = state.current_weight + state.weight
+                if not chosen or state.current_weight > chosen.current_weight then
+                    chosen = state
+                end
+            end
+        end
+        if not chosen then break end
+        chosen.current_weight = chosen.current_weight - total_weight
+        candidates[#candidates + 1] = chosen.words[chosen.cursor]
+        chosen.cursor = chosen.cursor + 1
+    end
+    return candidates
+end
+
+function Database:study_plan_start_today(now, selected_words)
+    now = now or os.time()
+    local plan = self:study_plan_get()
+    if not plan then return nil, "no study plan selected" end
+    local today = os.date("%Y-%m-%d", now)
+    local remaining = math.max(0, plan.daily_new - self:study_plan_today_count(today))
+    if remaining == 0 then return {}, "daily new-word target already reached" end
+
+    local candidates, candidate_err = self:study_plan_candidates(plan.track, remaining)
+    if not candidates then return nil, candidate_err end
+    if #candidates == 0 then return {}, "no unused track words found in the imported dictionary" end
+    if selected_words then
+        local selected = {}
+        for word, value in pairs(selected_words) do
+            if value then selected[tostring(word):lower()] = true end
+        end
+        local chosen = {}
+        for _, candidate in ipairs(candidates) do
+            if selected[candidate.word:lower()] then chosen[#chosen + 1] = candidate end
+        end
+        candidates = chosen
+        if #candidates == 0 then return {}, "no words selected" end
+    end
+
+    local begun, begin_err = self:begin()
+    if not begun then return nil, begin_err end
+    local added = {}
+    for _, candidate in ipairs(candidates) do
+        local id, add_err = self:deck_add({ word = candidate.word }, now)
+        if not id then
+            self:rollback()
+            return nil, add_err
+        end
+        local ok, map_err = self:run([[
+            INSERT INTO study_plan_words (word_id, source_track, plan_date) VALUES (?, ?, ?);]],
+            { id, candidate.source_track, today })
+        if not ok then
+            self:rollback()
+            return nil, map_err
+        end
+        candidate.id = id
+        added[#added + 1] = candidate
+    end
+    local committed, commit_err = self:commit()
+    if not committed then
+        self:rollback()
+        return nil, commit_err
+    end
+    return added
 end
 
 function Database:srs_state(word_id)
@@ -1530,6 +1722,68 @@ function UI.quiz_frame(state, theme, cols, rows)
     return out
 end
 
+function UI.study_plan_frame(state, theme, cols, rows)
+    local width = math.max(40, cols - 1)
+    local dash = theme.box[2]
+    local out = {
+        theme.c("1;36", theme.box[1] .. dash .. " dict " .. theme.box[4] .. " study plan " .. dash .. theme.box[3]),
+        pad_row(theme, fit(state.heading or "Choose a track and daily goal", width - 2), width, "1;30;47"),
+        theme.c("90", hline(theme, theme.box[7], theme.box[2], theme.box[8], width)),
+    }
+    local body_rows = math.max(12, rows - 5)
+    for _ = 1, body_rows do out[#out + 1] = pad_row(theme, "", width) end
+
+    if state.screen == "choose" then
+        out[4] = pad_row(theme, "  Select a vocabulary track:", width)
+        for i, track in ipairs(STUDY_TRACKS) do
+            local marker = state.track_idx == i and ">" or " "
+            out[4 + i] = pad_row(theme, string.format("  %s %s", marker, track.name), width,
+                state.track_idx == i and "1;33" or nil)
+        end
+        local mixed_idx = #STUDY_TRACKS + 1
+        out[4 + mixed_idx] = pad_row(theme,
+            string.format("  %s Mixed / adaptive", state.track_idx == mixed_idx and ">" or " "), width,
+            state.track_idx == mixed_idx and "1;33" or nil)
+        out[10] = pad_row(theme, string.format("  New words per day: %d   (%d due now)", state.daily_new, state.due), width)
+        if state.plan_today > 0 then
+            out[11] = pad_row(theme, string.format("  Added to today's plan: %d", state.plan_today), width, "32")
+        end
+        if state.message then out[12] = pad_row(theme, "  " .. state.message, width, "33") end
+        out[#out] = pad_row(theme, "↑/↓ track  +/- daily goal  Enter preview  [q] quit", width, "36")
+    elseif state.screen == "preview" then
+        local preview = state.preview or {}
+        local first = state.preview_offset or 1
+        local visible = math.max(1, #out - 8)
+        local selected_count = 0
+        for _, entry in ipairs(preview) do if entry.selected then selected_count = selected_count + 1 end end
+        out[4] = pad_row(theme, string.format("  Preview: %s (%d/%d selected)",
+            state.track_name, selected_count, #preview), width, "1;33")
+        for i = 1, visible do
+            local idx = first + i - 1
+            local entry = preview[idx]
+            if not entry then break end
+            local marker = entry.selected and "[x] " or "[ ] "
+            local def = entry.definition or "(definition unavailable)"
+            local color = idx == state.preview_idx and "1;33" or nil
+            out[4 + i] = pad_row(theme, "  " .. marker .. entry.word .. " — " .. def, width, color)
+        end
+        local footer_row = #out - 1
+        if #preview > visible then
+            out[footer_row] = pad_row(theme,
+                string.format("  Showing %d-%d of %d words", first, math.min(first + visible - 1, #preview), #preview),
+                width, "90")
+            footer_row = footer_row - 1
+        end
+        if state.message then out[footer_row] = pad_row(theme, "  " .. state.message, width, "33") end
+        out[#out] = pad_row(theme, "↑/↓ move  Space toggle  Enter add selected  [b] back  [q] quit", width, "36")
+    else
+        out[4] = pad_row(theme, center(state.message or "Today's words are ready.", width - 2), width, "1;32")
+        out[6] = pad_row(theme, center("[r] review due cards now", width - 2), width, "36")
+        out[#out] = pad_row(theme, "[r] review   Enter plan settings   [q] quit", width, "36")
+    end
+    return out
+end
+
 --------------------------------------------------------------------------------
 -- 10. Interactive Sessions (review & quiz)
 --------------------------------------------------------------------------------
@@ -1560,6 +1814,148 @@ TUI.quiz_pool_for = quiz_pool_for
 
 local function render_lines(lines)
     return table.concat(lines, "\n") .. "\n"
+end
+
+local function selected_track_id(index)
+    if index == #STUDY_TRACKS + 1 then return "mixed" end
+    return STUDY_TRACKS[index].id
+end
+
+function TUI.study_plan(db, opts)
+    opts = opts or {}
+    if not Term.is_tty() then
+        io.write("Study plan requires an interactive TTY. Run this command in a terminal.\n")
+        return false
+    end
+
+    local current = db:study_plan_get()
+    local selected = 1
+    if current then
+        if current.track == "mixed" then
+            selected = #STUDY_TRACKS + 1
+        else
+            for i, track in ipairs(STUDY_TRACKS) do
+                if track.id == current.track then selected = i break end
+            end
+        end
+    end
+    local state = {
+        screen = "choose", track_idx = selected,
+        daily_new = current and current.daily_new or 10,
+        due = #db:get_due(os.time(), 100000),
+        plan_today = db:study_plan_today_count(os.date("%Y-%m-%d")),
+    }
+    local cols, rows = Term.size()
+    local renderer = Renderer.new(cols, rows, false)
+    if not Term.enable_raw() then
+        io.write("Error: failed to initialize raw terminal mode.\n")
+        return false
+    end
+
+    local running, start_review = true, false
+    local ok, err = xpcall(function()
+        while running do
+            local c2, r2 = Term.size()
+            if c2 ~= cols or r2 ~= rows then
+                cols, rows = c2, r2
+                renderer = Renderer.new(cols, rows, false)
+                io.write("\27[2J")
+                renderer:force_full()
+            end
+            renderer:begin()
+            local lines = UI.study_plan_frame(state, make_theme(false, opts.ascii), cols, rows)
+            for i, line in ipairs(lines) do renderer:set(i, line) end
+            renderer:flush()
+
+            local key = Term.read_key(100)
+            if key then
+                if key == "q" or key == "ESC" or key == "CTRL_C" then
+                    running = false
+                elseif state.screen == "choose" then
+                    if key == "UP" then
+                        state.track_idx = ((state.track_idx - 2) % (#STUDY_TRACKS + 1)) + 1
+                    elseif key == "DOWN" then
+                        state.track_idx = (state.track_idx % (#STUDY_TRACKS + 1)) + 1
+                    elseif key == "+" or key == "=" then
+                        state.daily_new = math.min(50, state.daily_new + 1)
+                    elseif key == "-" then
+                        state.daily_new = math.max(1, state.daily_new - 1)
+                    elseif key == "ENTER" then
+                        local track_id = selected_track_id(state.track_idx)
+                        local candidates, candidate_err = db:study_plan_candidates(track_id,
+                            math.max(0, state.daily_new - state.plan_today))
+                        if candidates then
+                            state.preview = candidates
+                            for _, candidate in ipairs(candidates) do candidate.selected = true end
+                            state.preview_idx = 1
+                            state.preview_offset = 1
+                            state.track_name = track_id == "mixed" and "Mixed / adaptive" or STUDY_TRACK_BY_ID[track_id].name
+                            state.screen = "preview"
+                            state.message = #candidates == 0 and "No eligible words found; import a dictionary or choose another track." or nil
+                        else
+                            state.message = candidate_err
+                        end
+                    end
+                elseif state.screen == "preview" then
+                    if key == "UP" and #(state.preview or {}) > 0 then
+                        state.preview_idx = math.max(1, state.preview_idx - 1)
+                        if state.preview_idx < state.preview_offset then
+                            state.preview_offset = state.preview_idx
+                        end
+                    elseif key == "DOWN" and #(state.preview or {}) > 0 then
+                        state.preview_idx = math.min(#state.preview, state.preview_idx + 1)
+                        local visible = math.max(1, rows - 13)
+                        if state.preview_idx >= state.preview_offset + visible then
+                            state.preview_offset = state.preview_idx - visible + 1
+                        end
+                    elseif key == " " and state.preview[state.preview_idx] then
+                        state.preview[state.preview_idx].selected = not state.preview[state.preview_idx].selected
+                        state.message = nil
+                    elseif key == "b" then
+                        state.screen = "choose"
+                        state.message = nil
+                    elseif key == "ENTER" then
+                        local track_id = selected_track_id(state.track_idx)
+                        local saved, save_err = db:study_plan_set(track_id, state.daily_new, os.time())
+                        if not saved then
+                            state.message = save_err
+                        else
+                            local selection = {}
+                            for _, candidate in ipairs(state.preview) do
+                                if candidate.selected then selection[candidate.word] = true end
+                            end
+                            local added, add_err = db:study_plan_start_today(os.time(), selection)
+                            if not added then
+                                state.message = add_err
+                            else
+                                state.plan_today = db:study_plan_today_count(os.date("%Y-%m-%d"))
+                                state.message = #added > 0 and string.format("Added %d new word(s) to your plan.", #added)
+                                    or (add_err or "No new words added.")
+                                state.screen = "done"
+                            end
+                        end
+                    end
+                elseif state.screen == "done" then
+                    if key == "r" then
+                        running = false
+                        start_review = true
+                    elseif key == "ENTER" then
+                        state.screen = "choose"
+                        state.message = nil
+                        state.due = #db:get_due(os.time(), 100000)
+                    end
+                end
+            end
+        end
+    end, debug.traceback)
+
+    Term.disable_raw()
+    if not ok then
+        io.write("Error in study plan: " .. tostring(err) .. "\n")
+        return false
+    end
+    if start_review then return TUI.review(db, { limit = 20 }) end
+    return true
 end
 
 function TUI.review(db, opts)
@@ -1770,6 +2166,7 @@ end
 
 TUI.review_frame = UI.review_frame
 TUI.quiz_frame = UI.quiz_frame
+TUI.study_plan_frame = UI.study_plan_frame
 TUI.render_lines = render_lines
 
 --------------------------------------------------------------------------------
@@ -1790,6 +2187,7 @@ Commands:
   lookup <query>         Search the dictionary and your deck
   stats                  Learning statistics, streak and review sparkline
   wotd                   Word of the day (deterministic per day)
+  plan                   Choose a track and start today's guided study session
   import <paths...>      Import dictionary data into the local database
 
 Options:
@@ -1810,8 +2208,14 @@ Examples:
   luajit ffi_dict.lua quiz --limit 10
   luajit ffi_dict.lua lookup "short lived"
   luajit ffi_dict.lua stats
+  luajit ffi_dict.lua plan
+
+Study plan tracks:
+  Common English, Academic, Exam Prep, Mixed / adaptive
+  (bundled starter lists; Exam Prep is not an official exam syllabus)
 
 Interactive keys:
+  plan:    [↑/↓] select/scroll  [+/-] daily target  [Space] toggle  [Enter] preview/add
   review:  [Space] reveal  [1] Again  [2] Hard  [3] Good  [4] Easy  [s] skip  [q] quit
   quiz:    [1-4] answer    [s] skip   [q] quit
 ]])
@@ -2213,6 +2617,8 @@ local function main(args)
         ok = cmd_stats(db, opts)
     elseif opts.command == "wotd" then
         ok = cmd_wotd(db, opts)
+    elseif opts.command == "plan" then
+        ok = TUI.study_plan(db, { ascii = opts.ascii })
     elseif opts.command == "import" then
         ok = cmd_import(db, opts)
     else
@@ -2231,6 +2637,7 @@ end
 if pcall(debug.getlocal, 4, 1) then
     return {
         Database = Database,
+        STUDY_TRACKS = STUDY_TRACKS,
         SM2 = SM2,
         JSON = JSON,
         Quiz = Quiz,
