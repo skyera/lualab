@@ -731,20 +731,21 @@ function Database:deck_sample(limit)
 end
 
 function Database:study_plan_get()
-    local rows = self:query("SELECT track, daily_new, updated_at FROM study_plan WHERE id = 1;")
+    local rows = self:query("SELECT track, daily_new AS batch_size, updated_at FROM study_plan WHERE id = 1;")
     return rows and rows[1] or nil
 end
 
-function Database:study_plan_set(track, daily_new, now)
+function Database:study_plan_set(track, batch_size, now)
     if track ~= "mixed" and not STUDY_TRACK_BY_ID[track] then
         return false, "unknown study track: " .. tostring(track)
     end
-    if type(daily_new) ~= "number" or daily_new < 1 or daily_new > 50 or math.floor(daily_new) ~= daily_new then
-        return false, "daily new-word target must be an integer from 1 to 50"
+    if type(batch_size) ~= "number" or batch_size < 1 or batch_size > 50 or math.floor(batch_size) ~= batch_size then
+        return false, "new-word batch size must be an integer from 1 to 50"
     end
+    -- Keep the existing column name so existing user databases need no migration.
     return self:run([[
         INSERT OR REPLACE INTO study_plan (id, track, daily_new, updated_at)
-        VALUES (1, ?, ?, ?);]], { track, daily_new, now or os.time() })
+        VALUES (1, ?, ?, ?);]], { track, batch_size, now or os.time() })
 end
 
 function Database:study_plan_today_count(date)
@@ -867,12 +868,11 @@ function Database:study_plan_start_today(now, selected_words)
     local plan = self:study_plan_get()
     if not plan then return nil, "no study plan selected" end
     local today = os.date("%Y-%m-%d", now)
-    local remaining = math.max(0, plan.daily_new - self:study_plan_today_count(today))
-    if remaining == 0 then return {}, "daily new-word target already reached" end
 
-    local candidates, candidate_err = self:study_plan_candidates(plan.track, remaining)
+    -- The saved target is a per-session batch size, not a daily quota.
+    local candidates, candidate_err = self:study_plan_candidates(plan.track, plan.batch_size)
     if not candidates then return nil, candidate_err end
-    if #candidates == 0 then return {}, "no unused track words found in the imported dictionary" end
+    if #candidates == 0 then return {}, "no unused words remain in the imported dictionary" end
     if selected_words then
         local selected = {}
         for word, value in pairs(selected_words) do
@@ -1785,12 +1785,10 @@ function UI.study_plan_frame(state, theme, cols, rows)
         out[4 + mixed_idx] = pad_row(theme,
             string.format("  %s Mixed / adaptive", state.track_idx == mixed_idx and ">" or " "), width,
             state.track_idx == mixed_idx and "1;33" or nil)
-        out[10] = pad_row(theme, string.format("  New words per day: %d   (%d due now)", state.daily_new, state.due), width)
-        if state.plan_today > 0 then
-            out[11] = pad_row(theme, string.format("  Added to today's plan: %d", state.plan_today), width, "32")
-        end
+        out[10] = pad_row(theme, string.format("  New words per session: %d   (%d due for review)", state.batch_size, state.due), width)
+        out[11] = pad_row(theme, string.format("  New words added today: %d", state.plan_today or 0), width, "32")
         if state.message then out[12] = pad_row(theme, "  " .. state.message, width, "33") end
-        out[#out] = pad_row(theme, "↑/↓ track  +/- daily goal  Enter preview  [q] quit", width, "36")
+        out[#out] = pad_row(theme, "↑/↓ track  +/- session batch  Enter preview  [q] quit", width, "36")
     elseif state.screen == "preview" then
         local preview = state.preview or {}
         local first = state.preview_offset or 1
@@ -1821,8 +1819,10 @@ function UI.study_plan_frame(state, theme, cols, rows)
         out[#out] = pad_row(theme, "↑/↓ move  Space toggle  Enter add selected  [b] back  [q] quit", width, "36")
     else
         out[4] = pad_row(theme, center(state.message or "Today's words are ready.", width - 2), width, "1;32")
-        out[6] = pad_row(theme, center("[r] review due cards now", width - 2), width, "36")
-        out[#out] = pad_row(theme, "[r] review   Enter plan settings   [q] quit", width, "36")
+        out[5] = pad_row(theme, center(string.format("New words added today: %d", state.plan_today or 0), width - 2), width)
+        out[7] = pad_row(theme, center("[n] add another new-word batch", width - 2), width, "36")
+        out[8] = pad_row(theme, center("[r] review due cards now", width - 2), width, "36")
+        out[#out] = pad_row(theme, "[n] next batch  [r] review  Enter plan settings  [q] quit", width, "36")
     end
     return out
 end
@@ -1884,7 +1884,7 @@ function TUI.study_plan(db, opts)
     end
     local state = {
         screen = "choose", track_idx = selected,
-        daily_new = current and current.daily_new or 10,
+        batch_size = current and current.batch_size or 10,
         due = #db:get_due(os.time(), 100000),
         plan_today = db:study_plan_today_count(os.date("%Y-%m-%d")),
     }
@@ -1920,13 +1920,12 @@ function TUI.study_plan(db, opts)
                     elseif key == "DOWN" then
                         state.track_idx = (state.track_idx % (#STUDY_TRACKS + 1)) + 1
                     elseif key == "+" or key == "=" then
-                        state.daily_new = math.min(50, state.daily_new + 1)
+                        state.batch_size = math.min(50, state.batch_size + 1)
                     elseif key == "-" then
-                        state.daily_new = math.max(1, state.daily_new - 1)
+                        state.batch_size = math.max(1, state.batch_size - 1)
                     elseif key == "ENTER" then
                         local track_id = selected_track_id(state.track_idx)
-                        local candidates, candidate_err = db:study_plan_candidates(track_id,
-                            math.max(0, state.daily_new - state.plan_today))
+                        local candidates, candidate_err = db:study_plan_candidates(track_id, state.batch_size)
                         if candidates then
                             state.preview = candidates
                             for _, candidate in ipairs(candidates) do candidate.selected = true end
@@ -1959,7 +1958,7 @@ function TUI.study_plan(db, opts)
                         state.message = nil
                     elseif key == "ENTER" then
                         local track_id = selected_track_id(state.track_idx)
-                        local saved, save_err = db:study_plan_set(track_id, state.daily_new, os.time())
+                        local saved, save_err = db:study_plan_set(track_id, state.batch_size, os.time())
                         if not saved then
                             state.message = save_err
                         else
@@ -1972,7 +1971,8 @@ function TUI.study_plan(db, opts)
                                 state.message = add_err
                             else
                                 state.plan_today = db:study_plan_today_count(os.date("%Y-%m-%d"))
-                                state.message = #added > 0 and string.format("Added %d new word(s) to your plan.", #added)
+                                state.last_batch_size = #added
+                                state.message = #added > 0 and string.format("Added %d new word(s) to your deck.", #added)
                                     or (add_err or "No new words added.")
                                 state.screen = "done"
                             end
@@ -1982,6 +1982,20 @@ function TUI.study_plan(db, opts)
                     if key == "r" then
                         running = false
                         start_review = true
+                    elseif key == "n" then
+                        local track_id = selected_track_id(state.track_idx)
+                        local candidates, candidate_err = db:study_plan_candidates(track_id, state.batch_size)
+                        if candidates and #candidates > 0 then
+                            state.preview = candidates
+                            for _, candidate in ipairs(candidates) do candidate.selected = true end
+                            state.preview_idx = 1
+                            state.preview_offset = 1
+                            state.track_name = track_id == "mixed" and "Mixed / adaptive" or STUDY_TRACK_BY_ID[track_id].name
+                            state.screen = "preview"
+                            state.message = nil
+                        else
+                            state.message = candidate_err or "No unused words remain in the imported dictionary."
+                        end
                     elseif key == "ENTER" then
                         state.screen = "choose"
                         state.message = nil
@@ -2261,7 +2275,7 @@ Study plan tracks:
   (bundled starter lists; Exam Prep is not an official exam syllabus)
 
 Interactive keys:
-  plan:    [↑/↓] select/scroll  [+/-] daily target  [Space] toggle  [Enter] preview/add
+  plan:    [↑/↓] select/scroll  [+/-] session batch  [Enter] preview  [Space] toggle  [n] next batch
   review:  [Space] reveal  [1] Again  [2] Hard  [3] Good  [4] Easy  [s] skip  [q] quit
   quiz:    [1-4] answer    [s] skip   [q] quit
 ]])

@@ -223,7 +223,7 @@ TestRunner.describe("4. Study Plan", function()
         assert_true(ok, err)
         local plan = plan_db:study_plan_get()
         assert_eq(plan.track, "mixed")
-        assert_eq(plan.daily_new, 7)
+        assert_eq(plan.batch_size, 7)
 
         local path = "/tmp/_test_ffi_dict_plan_persistence_" .. os.time() .. ".db"
         os.remove(path); os.remove(path .. "-wal"); os.remove(path .. "-shm")
@@ -233,16 +233,16 @@ TestRunner.describe("4. Study Plan", function()
         persistent = assert(Database.open(path))
         local saved = persistent:study_plan_get()
         assert_eq(saved.track, "academic", "track survives database reopen")
-        assert_eq(saved.daily_new, 5, "daily target survives database reopen")
+        assert_eq(saved.batch_size, 5, "batch size survives database reopen")
         persistent:close()
         os.remove(path); os.remove(path .. "-wal"); os.remove(path .. "-shm")
     end)
 
-    TestRunner.it("should enforce valid track and daily target bounds", function()
+    TestRunner.it("should enforce valid track and per-session batch bounds", function()
         local ok, err = plan_db:study_plan_set("unknown", 10, 1000)
         assert_true(not ok and err:find("unknown"), "unknown track is rejected")
         ok, err = plan_db:study_plan_set("common", 0, 1000)
-        assert_true(not ok and err:find("1 to 50"), "invalid daily target is rejected")
+        assert_true(not ok and err:find("1 to 50"), "invalid session batch size is rejected")
     end)
 
     TestRunner.it("should choose only dictionary-backed words and avoid deck duplicates", function()
@@ -293,11 +293,14 @@ TestRunner.describe("4. Study Plan", function()
         assert_eq(#added, 1, "general fallback word can be added to plan")
         assert_eq(fallback_db:scalar("SELECT source_track FROM study_plan_words WHERE word_id = ?;", { added[1].id }),
             "general", "fallback source is persisted for adaptive mode")
+        local none, exhaustion_message = fallback_db:study_plan_start_today(1000)
+        assert_true(none and #none == 0, "general fallback stops when dictionary is exhausted")
+        assert_true(exhaustion_message:find("no unused words remain"), "general dictionary exhaustion is explained")
         fallback_db:close()
         os.remove(fallback_path); os.remove(fallback_path .. "-wal"); os.remove(fallback_path .. "-shm")
     end)
 
-    TestRunner.it("should honor daily quota and persist today's plan words", function()
+    TestRunner.it("should allow multiple same-day batches without repeating words", function()
         local ok = plan_db:study_plan_set("common", 2, 1000)
         assert_true(ok)
         local today = os.date("%Y-%m-%d", 1000)
@@ -313,16 +316,23 @@ TestRunner.describe("4. Study Plan", function()
         assert_eq(#first_batch, 1, "adds only the selected preview word")
         assert_eq(plan_db:study_plan_today_count(today), 1)
         local final_batch = assert(plan_db:study_plan_start_today(1000))
-        assert_eq(#final_batch, 1, "can resume to fill remaining daily quota")
-        assert_eq(plan_db:study_plan_today_count(today), 2)
-        assert_eq(#plan_db:get_due(1000, 10), 3,
+        assert_eq(#final_batch, 2, "second call adds a full batch on the same day")
+        assert_eq(plan_db:study_plan_today_count(today), 3)
+        assert_true(first_batch[1].word ~= final_batch[1].word, "subsequent batches do not repeat words")
+        local seen = { [first_batch[1].word:lower()] = true }
+        for _, word in ipairs(final_batch) do
+            assert_true(not seen[word.word:lower()], "batch never repeats an earlier word")
+            seen[word.word:lower()] = true
+        end
+        assert_eq(#plan_db:get_due(1000, 10), 4,
             "planned words join ordinary due queue alongside the candidate added earlier")
-        local none, message = plan_db:study_plan_start_today(1000)
-        assert_true(none and #none == 0, "daily quota prevents extra additions")
-        assert_true(message:find("already reached"), "quota reason is reported")
+
+        local none, exhaustion_message = plan_db:study_plan_start_today(1000)
+        assert_true(none and #none == 0, "returns empty only when no unused words remain")
+        assert_true(exhaustion_message:find("no unused words remain"), "dictionary exhaustion is explained")
         local plan = plan_db:study_plan_get()
         assert_eq(plan.track, "common", "selected plan persisted")
-        assert_eq(plan.daily_new, 2, "daily target persisted")
+        assert_eq(plan.batch_size, 2, "per-session batch size persisted")
     end)
 
     TestRunner.it("should render a readable study-plan preview frame", function()
@@ -336,6 +346,15 @@ TestRunner.describe("4. Study Plan", function()
         assert_true(output:find("[x] ability", 1, true) ~= nil)
         assert_true(output:find("[General dictionary]", 1, true) ~= nil)
         assert_true(output:find("Enter add selected", 1, true) ~= nil)
+
+        local choose_lines = dict.TUI.study_plan_frame({
+            screen = "choose", track_idx = 1, batch_size = 10, due = 0, plan_today = 20,
+        }, dict.Term.make_theme(true, true), 80, 24)
+        local choose_output = dict.TUI.render_lines(choose_lines)
+        assert_true(choose_output:find("New words per session: 10", 1, true) ~= nil,
+            "plan UI identifies a per-session batch size")
+        assert_true(choose_output:find("New words added today: 20", 1, true) ~= nil,
+            "plan UI shows today's progress")
     end)
 
     plan_db:close()
