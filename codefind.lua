@@ -28,6 +28,7 @@ ffi.cdef[[
     int sqlite3_open(const char *filename, sqlite3 **ppDb);
     int sqlite3_close(sqlite3 *db);
     const char *sqlite3_errmsg(sqlite3 *db);
+    const char *sqlite3_libversion(void);
 
     int sqlite3_exec(sqlite3 *db, const char *sql,
                      int (*callback)(void*, int, char**, char**),
@@ -214,7 +215,7 @@ local function load_sqlite_lib()
     local tried = {}
     for _, name in ipairs(SQLITE_CANDIDATES) do
         local ok, lib = pcall(ffi.load, name)
-        if ok and lib then return lib end
+        if ok and lib then return lib, name end
         tried[#tried + 1] = name
     end
 
@@ -268,12 +269,109 @@ local function load_sqlite_lib()
     error("Could not load SQLite3 shared library. See the instructions above.")
 end
 
-local sqlite = load_sqlite_lib()
+local sqlite, sqlite_lib_name = load_sqlite_lib()
 
 local SQLITE_OK   = 0
 local SQLITE_ROW  = 100
 local SQLITE_DONE = 101
 local SQLITE_TRANSIENT = ffi.cast("void(*)(void*)", -1)
+
+--------------------------------------------------------------------------------
+-- 2b. Runtime Diagnostics
+--------------------------------------------------------------------------------
+-- Windows failures are easy to misread: a missing sqlite3.dll, a stale deployed
+-- copy, and a console that swallows output all look alike ("nothing happened").
+-- These helpers report what the running process actually sees -- especially
+-- WHICH copy of the script is executing -- so the cases are distinguishable.
+
+local function sqlite_version()
+    local ok, v = pcall(function() return ffi.string(sqlite.sqlite3_libversion()) end)
+    if ok and v and #v > 0 then return v end
+    return "unknown"
+end
+
+local function is_stdout_tty()
+    if is_windows then
+        if not kernel32 then return false end
+        local ok, h = pcall(function() return kernel32.GetStdHandle(STD_OUTPUT_HANDLE) end)
+        if not ok or h == nil or h == ffi.NULL then return false end
+        local mode = ffi.new("uint32_t[1]")
+        local ok2, res = pcall(function() return kernel32.GetConsoleMode(h, mode) end)
+        return ok2 and res ~= 0
+    end
+    local ok, res = pcall(function() return ffi.C.isatty(1) ~= 0 end)
+    return ok and res
+end
+
+-- Resolve to an absolute path when the platform bindings allow it; fall back to
+-- the shell's idea of the cwd so we still print something useful.
+local function resolve_path(p)
+    if type(p) ~= "string" or #p == 0 then return "?" end
+    if p:match("^/") or p:match("^%a:[/\\]") or p:match("^\\\\") then return p end
+    local buf = ffi.new("char[4096]")
+    if is_windows then
+        local ok, res = pcall(function() return ffi.string(ffi.C._fullpath(buf, p, 4096)) end)
+        if ok and res then return res end
+    else
+        local ok, res = pcall(function() return ffi.string(ffi.C.realpath(p, buf)) end)
+        if ok and res then return res end
+    end
+    local cwd = os.getenv("CD") or os.getenv("PWD") or "?"
+    return (cwd:gsub("[/\\]+$", "")) .. "/" .. p
+end
+
+local function file_size(path)
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local n = f:seek("end")
+    f:close()
+    return n
+end
+
+local function human_size(n)
+    if not n then return "?" end
+    if n < 1024 then return string.format("%d B", n) end
+    if n < 1024 * 1024 then return string.format("%.1f KB", n / 1024) end
+    return string.format("%.1f MB", n / (1024 * 1024))
+end
+
+-- The single most useful line when a Windows install misbehaves: it proves
+-- whether you are running the repo copy or a stale deployed one.
+local function running_script_path()
+    local a0 = rawget(_G, "arg")
+    local s = a0 and a0[0]
+    if not s or s == "" then return "?" end
+    return resolve_path(s)
+end
+
+local function diagnostics_lines(db_path, target_dir, allow_all)
+    local jit = rawget(_G, "jit")
+    local interp = jit and string.format("%s (%s)", jit.version, jit.arch)
+                        or "plain Lua -- NO JIT/FFI, cannot run this tool"
+
+    local size = file_size(db_path)
+    local db_desc = resolve_path(db_path)
+    db_desc = db_desc .. string.format("  (%s%s)", size and "exists, " .. human_size(size) or "new",
+                                       (db_path:match("%.db$")) and "" or "  [UNEXPECTED EXT]")
+
+    local L = {}
+    local function add(k, v) L[#L + 1] = string.format("  %-11s %s", k, v) end
+    add("interpreter", interp)
+    add("platform", string.format("%s / %s   ffi.os=%s", is_windows and "Windows" or ffi.os, ffi.arch, ffi.os))
+    add("sqlite3", string.format("%s  loaded, v%s", tostring(sqlite_lib_name), sqlite_version()))
+    add("tty", is_stdout_tty() and "yes" or "no  (output redirected or buffered)")
+    add("script", running_script_path())
+    add("db", db_desc)
+    add("target", string.format("%s  ->  %s", target_dir, resolve_path(target_dir)))
+    add("mode", allow_all and "ALL files" or "SOURCE ONLY (use --all to include everything)")
+    return L
+end
+
+local function print_diagnostics(db_path, target_dir, allow_all)
+    io.write("\n  \27[1m-- environment \27[0m" .. string.rep("-", 46) .. "\n")
+    io.write(table.concat(diagnostics_lines(db_path, target_dir, allow_all), "\n"), "\n")
+    io.flush()
+end
 
 -- Terminal & File Stat helpers
 local posix_stat = nil
@@ -2521,6 +2619,7 @@ Commands:
   tui    [query]         Interactive search browser with live side-by-side preview
   stats                  Show index database statistics (file counts, size, extensions)
   clean                  Drop index database and vacuum
+  doctor                 Print environment diagnostics (interpreter, sqlite3, script in use)
   --test                 Run built-in unit & integration test suite
 
 Options:
@@ -2529,6 +2628,7 @@ Options:
   --all                  Index all text files (disables source code extension filter)
   --limit <n>            Maximum results to return (default: 20)
   --db <path>            Custom database file path (default: .codefind.db)
+  --quiet                Suppress the environment block printed before indexing
 
 Examples:
   luajit codefind.lua index .
@@ -2631,6 +2731,7 @@ local function main(args)
     local ext_filter = nil
     local limit = 20
     local allow_all = false
+    local quiet = false
 
     local i = 1
     while i <= #args do
@@ -2639,6 +2740,8 @@ local function main(args)
             use_tui = true
         elseif a == "--all" then
             allow_all = true
+        elseif a == "--quiet" or a == "-q" then
+            quiet = true
         elseif a == "--db" and i + 1 <= #args then
             db_path = args[i + 1]
             i = i + 1
@@ -2677,8 +2780,19 @@ local function main(args)
 
     local db = Database.open(db_path)
 
+    if command == "doctor" then
+        io.write("\n  \27[1mCodeFind diagnostics\27[0m\n")
+        io.write(table.concat(diagnostics_lines(db_path, cmd_args[1] or ".", allow_all), "\n"), "\n")
+        io.write("\n  If 'script' points somewhere other than your checkout, you are\n")
+        io.write("  running a stale deployed copy -- re-run: luajit deploy.lua --app codefind\n\n")
+        io.flush()
+        db:close()
+        return
+    end
+
     if command == "index" then
         local target_dir = cmd_args[1] or "."
+        if not quiet then print_diagnostics(db_path, target_dir, allow_all) end
         print(string.format("⚡ Indexing directory '%s' into %s (Source mode: %s)...", target_dir, db_path, allow_all and "ALL" or "SOURCE ONLY"))
         Indexer.run(db, target_dir, true, allow_all)
     elseif command == "search" then
