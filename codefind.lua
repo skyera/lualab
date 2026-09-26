@@ -637,9 +637,33 @@ local function diagnostics_lines(db_path, target_dir, allow_all)
     return L
 end
 
+-- Always shown, even when there is only one candidate: seeing the number and
+-- the resolved path is what makes "which sqlite3 am I actually using?" answerable
+-- at a glance instead of by guesswork.
+local function print_sqlite_candidates()
+    local entries = all_scan_entries()
+    io.write("\n  \27[1m-- sqlite3 libraries \27[0m" .. string.rep("-", 40) .. "\n")
+    if #entries == 0 then
+        io.write(string.format("      (no sqlite3 file found by path; loaded %s)\n",
+                               tostring(sqlite_lib_name)))
+        return
+    end
+    for i, c in ipairs(entries) do
+        local inuse = (SQLITE_SCAN.chosen and c.result.path == SQLITE_SCAN.chosen.path)
+        io.write(describe_candidate(c, i))
+        if inuse then io.write("   \27[1m<- IN USE\27[0m") end
+        io.write("\n")
+    end
+    if #entries > 1 then
+        io.write(string.format("\n  Pick a different one:  set %s=C:\\path\\to\\sqlite3.dll\n",
+                               SQLITE_ENV_OVERRIDE))
+    end
+end
+
 local function print_diagnostics(db_path, target_dir, allow_all)
     io.write("\n  \27[1m-- environment \27[0m" .. string.rep("-", 46) .. "\n")
     io.write(table.concat(diagnostics_lines(db_path, target_dir, allow_all), "\n"), "\n")
+    print_sqlite_candidates()
     io.flush()
 end
 
@@ -3055,18 +3079,7 @@ local function main(args)
         io.write(table.concat(diagnostics_lines(db_path, cmd_args[1] or ".", allow_all), "\n"), "\n")
 
         local entries = all_scan_entries()
-        if #entries > 0 then
-            io.write("\n  -- sqlite3 libraries found " .. string.rep("-", 30) .. "\n")
-            for i, c in ipairs(entries) do
-                local inuse = (SQLITE_SCAN.chosen and c.result.path == SQLITE_SCAN.chosen.path)
-                io.write(describe_candidate(c, i))
-                if inuse then io.write("   \27[1m<- IN USE\27[0m") end
-                io.write("\n")
-            end
-            if #entries > 1 then
-                io.write(string.format("\n  Pin one with:  set %s=C:\\path\\to\\sqlite3.dll\n", SQLITE_ENV_OVERRIDE))
-            end
-        end
+        print_sqlite_candidates()
 
         io.write("\n  If 'script' points somewhere other than your checkout, you are\n")
         io.write("  running a stale deployed copy -- re-run: luajit deploy.lua --app codefind\n\n")
