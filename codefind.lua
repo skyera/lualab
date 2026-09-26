@@ -207,43 +207,342 @@ end
 --------------------------------------------------------------------------------
 -- 2. Library Loaders & OS Primitives
 --------------------------------------------------------------------------------
--- Candidate library names, ordered by likelihood for the host platform.
--- Windows has no system sqlite3.dll, so it must be installed or dropped on PATH.
-local SQLITE_CANDIDATES = { "sqlite3", "sqlite3.dll", "libsqlite3.so.0", "libsqlite3.so", "libsqlite3.dylib" }
+-- SQLite3 discovery & validation
+--------------------------------------------------------------------------------
+-- Windows commonly has SEVERAL sqlite3 DLLs installed at once (conda, chocolatey,
+-- MSYS2, hand-dropped copies). ffi.load("sqlite3") silently takes whichever the
+-- Windows loader reaches first, so the version you actually get is invisible and
+-- can differ from the one you think you have. So we enumerate real files,
+-- validate each one, and let the user choose.
 
-local function load_sqlite_lib()
-    local tried = {}
-    for _, name in ipairs(SQLITE_CANDIDATES) do
-        local ok, lib = pcall(ffi.load, name)
-        if ok and lib then return lib, name end
-        tried[#tried + 1] = name
+local SQLITE_CANDIDATES  = { "sqlite3", "sqlite3.dll", "libsqlite3.so.0", "libsqlite3.so", "libsqlite3.dylib" }
+local SQLITE_FILE_NAMES  = { "sqlite3.dll", "sqlite3-3.dll", "libsqlite3.dll" }
+local SQLITE_ENV_OVERRIDE = "CODEFIND_SQLITE3"
+
+-- Symbols codefind actually calls. These are ALREADY declared in the cdef
+-- above, which is load-bearing: lib[sym] raises "undefined symbol" for any name
+-- that is not declared, so probing an undeclared symbol yields a false negative.
+local SQLITE_REQUIRED_SYMBOLS = {
+    "sqlite3_open", "sqlite3_close", "sqlite3_errmsg", "sqlite3_exec",
+    "sqlite3_prepare_v2", "sqlite3_step", "sqlite3_finalize", "sqlite3_reset",
+    "sqlite3_bind_text", "sqlite3_bind_int64", "sqlite3_column_text",
+    "sqlite3_column_count", "sqlite3_libversion", "sqlite3_free",
+}
+
+-- Everything the loader learned, so `doctor` can show it without re-scanning.
+local SQLITE_SCAN = { candidates = {}, chosen = nil }
+
+local function is_tty_fd(fd)
+    if is_windows then
+        if not kernel32 then return false end
+        local h = (fd == 0) and STD_INPUT_HANDLE or STD_OUTPUT_HANDLE
+        local ok, handle = pcall(function() return kernel32.GetStdHandle(h) end)
+        if not ok or handle == nil or handle == ffi.NULL then return false end
+        local mode = ffi.new("uint32_t[1]")
+        local ok2, r = pcall(function() return kernel32.GetConsoleMode(handle, mode) end)
+        return ok2 and r ~= 0
+    end
+    local ok, r = pcall(function() return ffi.C.isatty(fd) ~= 0 end)
+    return ok and r
+end
+
+-- Windows PATH is ';'-separated even under Git Bash, where $PATH looks ':'-separated.
+local function split_path_list(p)
+    local out = {}
+    for d in tostring(p or ""):gmatch("[^;]+") do
+        d = d:gsub("^%s+", ""):gsub("%s+$", ""):gsub("[/\\]+$", "")
+        if #d > 0 then out[#out + 1] = d end
+    end
+    return out
+end
+
+local function file_exists(path)
+    local f = io.open(path, "rb")
+    if f then f:close() return true end
+    return false
+end
+
+-- Numeric version key so 3.53.4 sorts above 3.47.2.
+local function version_key(v)
+    local a, b, c = tostring(v or ""):match("^(%d+)%.(%d+)%.(%d+)")
+    if not a then return 0 end
+    return tonumber(a) * 1000000 + tonumber(b) * 1000 + tonumber(c)
+end
+
+-- Validate a single candidate. Returns a record; ok==true means genuinely usable.
+-- Shared by file validation and the bare-soname fallback. Probing lib[sym] is
+-- safe only because every name here is already declared in the cdef above;
+-- an undeclared name raises "undefined symbol" regardless of what is exported.
+local function missing_symbols(lib)
+    local missing = {}
+    for _, sym in ipairs(SQLITE_REQUIRED_SYMBOLS) do
+        if not pcall(function() return lib[sym] end) then missing[#missing + 1] = sym end
+    end
+    return missing
+end
+
+local function validate_sqlite_lib(path)
+    local res = { path = path, ok = false }
+
+    local f = io.open(path, "rb")
+    if not f then res.reason = "not readable"; return res end
+    res.size = f:seek("end")
+    f:seek("set")
+    local magic = f:read(2)
+    f:close()
+    if not magic or #magic < 2 or magic:byte(1) ~= 77 or magic:byte(2) ~= 90 then
+        res.reason = "not a PE image"
+        return res
     end
 
-    -- Fail loudly: this runs at module load, before any command dispatch, so a
-    -- bare error() leaves the user staring at an empty terminal with no clue why.
+    local ok, lib = pcall(ffi.load, path)
+    if not ok or not lib then
+        res.reason = "LoadLibrary failed (" .. tostring(lib) .. ")"
+        return res
+    end
+
+    local missing = missing_symbols(lib)
+    if #missing > 0 then
+        res.reason = "missing symbols: " .. table.concat(missing, ", ")
+        return res
+    end
+
+    local vok, v = pcall(function() return ffi.string(lib.sqlite3_libversion()) end)
+    if not vok or not v or #v == 0 then
+        res.reason = "sqlite3_libversion() not callable"
+        return res
+    end
+    res.version = v
+
+    -- Final gate: a library can load, export everything, and still be built
+    -- without FTS5 -- which codefind needs for indexing. Probe the real feature.
+    local db = ffi.new("sqlite3*[1]")
+    if lib.sqlite3_open(":memory:", db) ~= 0 then
+        res.reason = "sqlite3_open(':memory:') failed"
+        return res
+    end
+    local err = ffi.new("char*[1]")
+    local rc = lib.sqlite3_exec(db[0], "CREATE VIRTUAL TABLE t USING fts5(body)", nil, nil, err)
+    if rc ~= 0 then
+        local msg = (err[0] ~= nil) and ffi.string(err[0]) or ("code " .. rc)
+        pcall(function() lib.sqlite3_free(err[0]) end)
+        lib.sqlite3_close(db[0])
+        res.reason = "FTS5 unavailable (" .. msg .. ")"
+        return res
+    end
+    lib.sqlite3_close(db[0])
+
+    res.ok = true
+    res.lib = lib
+    return res
+end
+
+local function current_script_dir()
+    local a0 = rawget(_G, "arg")
+    local s = a0 and a0[0]
+    if not s or s == "" then return nil end
+    return s:match("^(.*)[/\\][^/\\]*$")
+end
+
+-- Deliberately narrow: PATH, the script's own folder, and the cwd. These are
+-- the only places a DLL would be picked up from anyway, and it stays fast.
+local function scan_sqlite_candidates()
+    local found, seen = {}, {}
+    local function consider(dir, source)
+        if not dir or #dir == 0 then return end
+        for _, name in ipairs(SQLITE_FILE_NAMES) do
+            local p = dir .. "\\" .. name
+            local key = p:lower():gsub("/", "\\")
+            if not seen[key] and file_exists(p) then
+                seen[key] = true
+                found[#found + 1] = { path = p, source = source }
+            end
+        end
+    end
+    for _, dir in ipairs(split_path_list(os.getenv("PATH"))) do consider(dir, "PATH") end
+    consider(current_script_dir(), "script dir")
+    consider(os.getenv("CD") or os.getenv("PWD"), "cwd")
+    return found
+end
+
+local function file_size(path)
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local n = f:seek("end")
+    f:close()
+    return n
+end
+
+local function human_size(n)
+    if not n then return "?" end
+    if n < 1024 then return string.format("%d B", n) end
+    if n < 1024 * 1024 then return string.format("%.1f KB", n / 1024) end
+    return string.format("%.1f MB", n / (1024 * 1024))
+end
+
+-- Every library we looked at, whether validated or rejected by the soname probe.
+local function all_scan_entries()
+    local out = {}
+    for _, c in ipairs(SQLITE_SCAN.candidates) do out[#out + 1] = c end
+    for _, c in ipairs(SQLITE_SCAN.rejected or {}) do out[#out + 1] = c end
+    return out
+end
+
+-- Keep rejection reasons readable: a DLL missing all 14 symbols would otherwise
+-- wrap a very long line across the terminal.
+local function shorten_reason(reason, max_syms)
+    local syms = tostring(reason):match("missing symbols: (.*)$")
+    if not syms then return reason end
+    local list = {}
+    for s in syms:gmatch("[^,%s]+") do list[#list + 1] = s end
+    if #list <= max_syms then return reason end
+    return ("missing %d symbols: %s, ... (+%d more)"):format(
+        #list, table.concat(list, ", ", 1, max_syms), #list - max_syms)
+end
+
+local function describe_candidate(c, i)
+    local r = c.result
+    local tag = ("  [%d] %s"):format(i, c.path)
+    if r.ok then
+        return ("%s\n         v%s  %s  usable (FTS5 yes)  [%s]"):format(
+            tag, r.version, human_size(r.size), c.source)
+    end
+    return ("%s\n         %s  UNUSABLE: %s"):format(
+        tag, human_size(r.size), shorten_reason(r.reason, 4))
+end
+
+local function prompt_sqlite_choice(usable, read_fn, write_fn)
+    write_fn = write_fn or function(s) io.write(s); io.flush() end
+    write_fn("\n  Multiple usable sqlite3 libraries found:\n\n")
+    for i, c in ipairs(usable) do write_fn(describe_candidate(c, i) .. "\n") end
+    write_fn(string.format("\n  Select [1-%d] (default 1): ", #usable))
+    local line = (read_fn or io.read)("*l")
+    if not line then write_fn("\n"); return 1 end
+    local n = tonumber((tostring(line):gsub("%s+", "")))
+    if not n or n < 1 or n > #usable then return 1 end
+    return math.floor(n)
+end
+
+-- Newest first, so the default (and the non-interactive choice) is the best
+-- build available. Split out from select_sqlite_lib so the decision is testable
+-- without needing a real console: `interactive` and `read_fn` are injectable.
+local function choose_usable(usable, interactive, read_fn, write_fn)
+    if #usable == 0 then return nil end
+    if #usable == 1 then return usable[1] end
+    table.sort(usable, function(a, b)
+        return version_key(a.result.version) > version_key(b.result.version)
+    end)
+    if interactive then
+        return usable[prompt_sqlite_choice(usable, read_fn, write_fn)]
+    end
+    if write_fn then
+        write_fn(string.format(
+            "\n  %d usable sqlite3 libraries found; stdin is not a terminal,\n", #usable))
+        write_fn("  using the newest by default. To pin one explicitly:\n")
+        write_fn(string.format("      set %s=%s\n\n", SQLITE_ENV_OVERRIDE, usable[1].path))
+    end
+    return usable[1]
+end
+
+-- Returns lib, label  (label is a human description used by `doctor`)
+local function select_sqlite_lib()
+    -- 1. An explicit request must be honoured or reported, never silently ignored.
+    local forced = os.getenv(SQLITE_ENV_OVERRIDE)
+    if forced and #forced > 0 then
+        local r = validate_sqlite_lib(forced)
+        if r.ok then
+            SQLITE_SCAN.chosen = r
+            SQLITE_SCAN.forced = forced
+            return r.lib, forced
+        end
+        io.write("\n  " .. SQLITE_ENV_OVERRIDE .. "=" .. forced .. " is not usable:\n")
+        io.write("    " .. tostring(r.reason) .. "\n")
+        io.write("  Fix the variable or unset it to auto-select.\n\n")
+        io.flush()
+        error("CODEFIND_SQLITE3 points at an unusable library")
+    end
+
+    if is_windows then
+        local usable = {}
+        for _, c in ipairs(scan_sqlite_candidates()) do
+            c.result = validate_sqlite_lib(c.path)
+            SQLITE_SCAN.candidates[#SQLITE_SCAN.candidates + 1] = c
+            if c.result.ok then usable[#usable + 1] = c end
+        end
+
+        if #usable == 1 then
+            SQLITE_SCAN.chosen = usable[1].result
+            return usable[1].result.lib, usable[1].path
+        elseif #usable > 1 then
+            local picked = choose_usable(usable, is_tty_fd(0), io.read, function(s)
+                io.write(s); io.flush()
+            end)
+            SQLITE_SCAN.chosen = picked.result
+            return picked.result.lib, picked.path
+        end
+    end
+
+    -- POSIX, or a Windows layout the scan could not see: fall back to plain
+    -- soname probing. This MUST still validate -- on Windows ffi.load("sqlite3")
+    -- happily resolves to a broken ./sqlite3.dll sitting in the cwd, and
+    -- returning that unchecked crashes later at the first real API call.
+    for _, name in ipairs(SQLITE_CANDIDATES) do
+        local ok, lib = pcall(ffi.load, name)
+        if ok and lib then
+            local missing = missing_symbols(lib)
+            if #missing == 0 then
+                local v = "unknown"
+                pcall(function() v = ffi.string(lib.sqlite3_libversion()) end)
+                SQLITE_SCAN.chosen = { ok = true, path = name, version = v, size = nil }
+                return lib, name
+            end
+            SQLITE_SCAN.rejected = SQLITE_SCAN.rejected or {}
+            SQLITE_SCAN.rejected[#SQLITE_SCAN.rejected + 1] = {
+                path = name, source = "soname",
+                result = { path = name, size = nil,
+                           reason = "missing symbols: " .. table.concat(missing, ", ") },
+            }
+        end
+    end
+    return nil, nil
+end
+
+local function load_sqlite_lib()
+    local lib, label = select_sqlite_lib()
+    if lib then return lib, label end
+
+    -- Nothing usable anywhere: fail loudly. This runs at module load, before any
+    -- command dispatch, so a bare error() leaves an empty terminal and no clue.
     local L = {}
     local function say(s) L[#L + 1] = s end
 
-    local title = "codefind FATAL: SQLite3 shared library not found"
-    local pad = 62 - 2 - #title          -- 2 = leading indent inside the box
+    local title = "codefind FATAL: no usable SQLite3 library found"
     say("")
     say("  ╔" .. string.rep("═", 62) .. "╗")
-    say("  ║  " .. title .. string.rep(" ", pad) .. "║")
+    say("  ║  " .. title .. string.rep(" ", 62 - 2 - #title) .. "║")
     say("  ╚" .. string.rep("═", 62) .. "╝")
     say("")
     say("  codefind indexes into SQLite FTS5 and cannot run without it.")
-    say("  Every load name below was tried and failed:")
-    say("")
-    for _, name in ipairs(tried) do
-        say("      ✗ " .. name)
+    local entries = all_scan_entries()
+    if #entries > 0 then
+        say("  Libraries found, but none passed validation:")
+        say("")
+        for i, c in ipairs(entries) do
+            say("  " .. describe_candidate(c, i))
+        end
+        say("")
+    else
+        say("  No sqlite3 DLL was found in PATH, the script folder, or the cwd.")
+        say("")
     end
-    say("")
     if is_windows then
         say("  Fix on Windows (pick one):")
         say("      choco install sqlite")
         say("      winget install SQLite.SQLite")
-        say("      .. or drop a sqlite3.dll beside codefind.lua (or in any")
-        say("         folder listed in your PATH).")
+        say("      conda install sqlite            (if you use miniforge/anaconda)")
+        say("      .. or drop a sqlite3.dll beside codefind.lua")
+        say("  .. or pin a specific one you already have:")
+        say(string.format("      set %s=C:\\path\\to\\sqlite3.dll", SQLITE_ENV_OVERRIDE))
     elseif ffi.os == "OSX" then
         say("  Fix on macOS:   brew install sqlite")
     else
@@ -251,22 +550,16 @@ local function load_sqlite_lib()
         say("                  (or: sudo yum install sqlite-libs)")
     end
     say("")
-    say("  Verify it is reachable:")
-    say("      luajit -e \"print(pcall(require('ffi').load,'sqlite3'))\"")
-    say("")
-    say("  Then re-run:")
-    say("      luajit codefind.lua index .")
+    say("  Inspect what is installed and why it was rejected:")
+    say("      luajit codefind.lua doctor")
     say("")
 
     local message = table.concat(L, "\n")
-    -- Write to stdout AND stderr, and flush both, so the diagnostic survives
-    -- however the process was launched (pipe, redirect, .cmd shim, IDE console).
-    io.stdout:write(message, "\n")
-    io.stdout:flush()
-    io.stderr:write(message, "\n")
-    io.stderr:flush()
-
-    error("Could not load SQLite3 shared library. See the instructions above.")
+    -- stdout AND stderr, both flushed, so this survives pipes, redirects,
+    -- .cmd shims and IDE consoles.
+    io.stdout:write(message, "\n"); io.stdout:flush()
+    io.stderr:write(message, "\n"); io.stderr:flush()
+    error("No usable SQLite3 library. See the instructions above.")
 end
 
 local sqlite, sqlite_lib_name = load_sqlite_lib()
@@ -291,16 +584,7 @@ local function sqlite_version()
 end
 
 local function is_stdout_tty()
-    if is_windows then
-        if not kernel32 then return false end
-        local ok, h = pcall(function() return kernel32.GetStdHandle(STD_OUTPUT_HANDLE) end)
-        if not ok or h == nil or h == ffi.NULL then return false end
-        local mode = ffi.new("uint32_t[1]")
-        local ok2, res = pcall(function() return kernel32.GetConsoleMode(h, mode) end)
-        return ok2 and res ~= 0
-    end
-    local ok, res = pcall(function() return ffi.C.isatty(1) ~= 0 end)
-    return ok and res
+    return is_tty_fd(1)
 end
 
 -- Resolve to an absolute path when the platform bindings allow it; fall back to
@@ -320,20 +604,6 @@ local function resolve_path(p)
     return (cwd:gsub("[/\\]+$", "")) .. "/" .. p
 end
 
-local function file_size(path)
-    local f = io.open(path, "rb")
-    if not f then return nil end
-    local n = f:seek("end")
-    f:close()
-    return n
-end
-
-local function human_size(n)
-    if not n then return "?" end
-    if n < 1024 then return string.format("%d B", n) end
-    if n < 1024 * 1024 then return string.format("%.1f KB", n / 1024) end
-    return string.format("%.1f MB", n / (1024 * 1024))
-end
 
 -- The single most useful line when a Windows install misbehaves: it proves
 -- whether you are running the repo copy or a stale deployed one.
@@ -358,7 +628,7 @@ local function diagnostics_lines(db_path, target_dir, allow_all)
     local function add(k, v) L[#L + 1] = string.format("  %-11s %s", k, v) end
     add("interpreter", interp)
     add("platform", string.format("%s / %s   ffi.os=%s", is_windows and "Windows" or ffi.os, ffi.arch, ffi.os))
-    add("sqlite3", string.format("%s  loaded, v%s", tostring(sqlite_lib_name), sqlite_version()))
+    add("sqlite3", string.format("v%s  %s", sqlite_version(), tostring(sqlite_lib_name)))
     add("tty", is_stdout_tty() and "yes" or "no  (output redirected or buffered)")
     add("script", running_script_path())
     add("db", db_desc)
@@ -2783,6 +3053,21 @@ local function main(args)
     if command == "doctor" then
         io.write("\n  \27[1mCodeFind diagnostics\27[0m\n")
         io.write(table.concat(diagnostics_lines(db_path, cmd_args[1] or ".", allow_all), "\n"), "\n")
+
+        local entries = all_scan_entries()
+        if #entries > 0 then
+            io.write("\n  -- sqlite3 libraries found " .. string.rep("-", 30) .. "\n")
+            for i, c in ipairs(entries) do
+                local inuse = (SQLITE_SCAN.chosen and c.result.path == SQLITE_SCAN.chosen.path)
+                io.write(describe_candidate(c, i))
+                if inuse then io.write("   \27[1m<- IN USE\27[0m") end
+                io.write("\n")
+            end
+            if #entries > 1 then
+                io.write(string.format("\n  Pin one with:  set %s=C:\\path\\to\\sqlite3.dll\n", SQLITE_ENV_OVERRIDE))
+            end
+        end
+
         io.write("\n  If 'script' points somewhere other than your checkout, you are\n")
         io.write("  running a stale deployed copy -- re-run: luajit deploy.lua --app codefind\n\n")
         io.flush()
@@ -2869,7 +3154,12 @@ if pcall(debug.getlocal, 4, 1) then
         Database = Database,
         Indexer  = Indexer,
         TUI      = TUI,
-        sanitize_terminal_text = sanitize_terminal_text
+        sanitize_terminal_text = sanitize_terminal_text,
+        -- exposed for tests: console-independent selection logic
+        choose_usable = choose_usable,
+        validate_sqlite_lib = validate_sqlite_lib,
+        version_key = version_key,
+        describe_candidate = describe_candidate,
     }
 else
     main(arg)

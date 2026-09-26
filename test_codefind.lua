@@ -364,6 +364,107 @@ TestRunner.describe("Suite: 6. TUI Layout Resize and Viewport Clamping", functio
     end)
 end)
 
+TestRunner.describe("7. SQLite3 Library Discovery, Validation and Selection", function()
+    -- Locate a real sqlite3 on PATH so validation can be exercised for real.
+    local SELF_SQLITE_PATH = nil
+    do
+        local dirs = {}
+        for d in (os.getenv("PATH") or ""):gmatch("[^;]+") do dirs[#dirs + 1] = d end
+        for _, d in ipairs(dirs) do
+            local p = d:gsub("[/\\]+$", "") .. "\\sqlite3.dll"
+            local f = io.open(p, "rb")
+            if f then f:close(); SELF_SQLITE_PATH = p; break end
+        end
+    end
+
+    local function cand(path, version, source)
+        return { path = path, source = source or "test",
+                 result = { path = path, ok = true, version = version, size = 1024 * 1024 } }
+    end
+    local function reader(input)
+        return function() return input end
+    end
+    local function swallow() end
+
+    TestRunner.it("should compare dotted versions numerically, not lexically", function()
+        -- The bug this guards: "3.9.0" > "3.47.2" as strings, but not as numbers.
+        assert_true(codefind.version_key("3.53.4") > codefind.version_key("3.47.2"),
+            "3.53.4 must outrank 3.47.2")
+        assert_true(codefind.version_key("3.9.0") < codefind.version_key("3.47.2"),
+            "3.9.0 must NOT outrank 3.47.2")
+        assert_eq(codefind.version_key("garbage"), 0, "Unparseable version should rank 0")
+    end)
+
+    TestRunner.it("should auto-select when exactly one library is usable", function()
+        local only = cand("C:\\only\\sqlite3.dll", "3.40.0")
+        local picked = codefind.choose_usable({ only }, false, reader(nil), swallow)
+        assert_eq(picked.path, "C:\\only\\sqlite3.dll", "Single candidate must be chosen")
+    end)
+
+    TestRunner.it("should pick the newest version when not interactive", function()
+        local list = { cand("C:\\old\\sqlite3.dll", "3.47.2"), cand("C:\\new\\sqlite3.dll", "3.53.4") }
+        local picked = codefind.choose_usable(list, false, reader(nil), swallow)
+        assert_eq(picked.path, "C:\\new\\sqlite3.dll", "Newest must win by default")
+    end)
+
+    TestRunner.it("should honour an interactive numeric choice", function()
+        local list = { cand("C:\\new\\sqlite3.dll", "3.53.4"), cand("C:\\old\\sqlite3.dll", "3.47.2") }
+        local picked = codefind.choose_usable(list, true, reader("2"), swallow)
+        assert_eq(picked.path, "C:\\old\\sqlite3.dll", "Choice 2 must be honoured")
+    end)
+
+    TestRunner.it("should fall back to the default on invalid interactive input", function()
+        for _, bad in ipairs({ "abc", "", "0", "99", "-1" }) do
+            local list = { cand("C:\\new\\sqlite3.dll", "3.53.4"), cand("C:\\old\\sqlite3.dll", "3.47.2") }
+            local picked = codefind.choose_usable(list, true, reader(bad), swallow)
+            assert_eq(picked.path, "C:\\new\\sqlite3.dll",
+                "Input '" .. bad .. "' must fall back to the newest")
+        end
+    end)
+
+    TestRunner.it("should fall back to the default when input is closed (EOF)", function()
+        local list = { cand("C:\\new\\sqlite3.dll", "3.53.4"), cand("C:\\old\\sqlite3.dll", "3.47.2") }
+        local picked = codefind.choose_usable(list, true, reader(nil), swallow)
+        assert_eq(picked.path, "C:\\new\\sqlite3.dll", "EOF must fall back to the newest")
+    end)
+
+    TestRunner.it("should report nothing to choose when no library is usable", function()
+        assert_eq(codefind.choose_usable({}, true, reader("1"), swallow), nil,
+            "Empty candidate list must yield no choice")
+    end)
+
+    TestRunner.it("should reject a path that is not a PE image", function()
+        local tmp = os.tmpname()
+        local f = io.open(tmp, "wb"); f:write("not a dll"); f:close()
+        local r = codefind.validate_sqlite_lib(tmp)
+        os.remove(tmp)
+        assert_true(not r.ok, "A text file must not validate")
+        assert_true(r.reason:find("not a PE image"), "Expected a PE-image rejection, got: " .. tostring(r.reason))
+    end)
+
+    TestRunner.it("should reject a missing file with a readable reason", function()
+        local r = codefind.validate_sqlite_lib("C:\\definitely\\not\\here\\sqlite3.dll")
+        assert_true(not r.ok, "Missing file must not validate")
+        assert_true(r.reason ~= nil and #r.reason > 0, "Rejection must carry a reason")
+    end)
+
+    TestRunner.it("should validate the library actually in use", function()
+        if SELF_SQLITE_PATH == nil then return end   -- platform without a discoverable file
+        local r = codefind.validate_sqlite_lib(SELF_SQLITE_PATH)
+        assert_true(r.ok, "The in-use library must validate, got: " .. tostring(r.reason))
+        assert_true(r.version ~= nil, "Validated library must report a version")
+    end)
+
+    TestRunner.it("should describe an unusable candidate without flooding the line", function()
+        local c = { path = "C:\\x\\sqlite3.dll", source = "test",
+                    result = { path = "C:\\x\\sqlite3.dll", size = 2048, ok = false,
+                               reason = "missing symbols: sqlite3_open, sqlite3_close, sqlite3_exec, sqlite3_step, sqlite3_finalize, sqlite3_free" } }
+        local d = codefind.describe_candidate(c, 1)
+        assert_true(d:find("UNUSABLE"), "Description must mark it unusable")
+        assert_true(d:find("%+%d more"), "Long symbol lists must be truncated")
+    end)
+end)
+
 db:close()
 os.remove(test_db_path)
 os.remove(test_db_path .. "-wal")
