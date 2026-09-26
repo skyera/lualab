@@ -288,6 +288,11 @@ TestRunner.describe("5. CLI Invocation & Options", function()
 end)
 
 TestRunner.describe("Suite: 6. TUI Layout Resize and Viewport Clamping", function()
+    TestRunner.it("should sanitize control characters before rendering terminal text", function()
+        local sanitized = codefind.sanitize_terminal_text("left\tright\r\nnext\27[2J")
+        assert_eq(sanitized, "left    right  next [2J", "Terminal control characters should not move the cursor")
+    end)
+
     TestRunner.it("should clamp scroll offset and selected index on resize", function()
         local num_results = 50
         local list_height = 20

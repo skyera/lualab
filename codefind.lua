@@ -1070,6 +1070,13 @@ local function colorize_snippet(snip)
     return table.concat(lines, "\n")
 end
 
+local function sanitize_terminal_text(text)
+    local sanitized = tostring(text)
+        :gsub("\t", "    ")
+        :gsub("[%z\1-\31\127]", " ")
+    return sanitized
+end
+
 local function format_bytes(bytes)
     if bytes < 1024 then return string.format("%d B", bytes)
     elseif bytes < 1024 * 1024 then return string.format("%.1f KB", bytes / 1024)
@@ -1594,7 +1601,7 @@ function TUI.run(db, initial_query)
     local right_col_w = cur_cols - 3 - left_col_w
     local list_height = math.max(5, cur_rows - 6)
     local render_full_screen = nil
-    local render_selection_differential = nil
+    local render_selection = nil
 
     local function clamp_scroll()
         local max_scroll = math.max(0, #results - list_height)
@@ -1828,6 +1835,7 @@ function TUI.run(db, initial_query)
         if res_item then
             local marker = is_sel and "▶ " or "  "
             local full_path = res_item.filepath
+            local display_path = sanitize_terminal_text(full_path)
             local badge_plain = get_file_badge_plain(full_path)
             local badge_w = #badge_plain
             local line_cnt = get_file_line_count(full_path)
@@ -1842,10 +1850,10 @@ function TUI.run(db, initial_query)
             local cnt_w = #cnt_tag
 
             local max_p_len = math.max(4, text_w - 2 - badge_w - cnt_w)
-            local clean_path = full_path
+            local clean_path = display_path
             if visual_len(clean_path) > max_p_len then
-                local fname = get_filename(full_path)
-                local parent = full_path:match("([^/\\]+)[/\\][^/\\]+$")
+                local fname = get_filename(display_path)
+                local parent = display_path:match("([^/\\]+)[/\\][^/\\]+$")
                 local compact = parent and (parent .. "/" .. fname) or fname
                 if visual_len(compact) <= max_p_len then
                     clean_path = compact
@@ -1945,7 +1953,7 @@ function TUI.run(db, initial_query)
                 match_badge = string.format(" \27[1;33m[Match %d/%d]\27[0m", current_match_pos, #current_match_list)
             end
             local line_badge = string.format(" \27[90m[Line %d/%d]\27[0m", preview_scroll_offset + 1, #current_preview_lines)
-            right_head_title = string.format(" 📄 %s:%d%s%s", get_filename(current_preview_file), first_ln, match_badge, line_badge)
+            right_head_title = string.format(" 📄 %s:%d%s%s", sanitize_terminal_text(get_filename(current_preview_file)), first_ln, match_badge, line_badge)
         else
             right_head_title = " 📄 Preview: (No file selected)"
         end
@@ -1977,7 +1985,7 @@ function TUI.run(db, initial_query)
         if current_preview_file and #current_preview_lines > 0 then
             local file_line_num = preview_scroll_offset + i
             if file_line_num <= #current_preview_lines then
-                local line_content = current_preview_lines[file_line_num] or ""
+                local line_content = sanitize_terminal_text(current_preview_lines[file_line_num] or "")
                 local is_hit = current_match_lines[file_line_num]
 
                 local max_code_w = math.max(0, r_text_w - 9)
@@ -2012,8 +2020,7 @@ function TUI.run(db, initial_query)
         return string.format("%s│\27[0m%s%s│\27[0m%s%s│\27[0m", left_col_border, left_cell, neutral_border, right_cell, right_col_border)
     end
 
-    render_selection_differential = function(old_idx, new_idx)
-        local old_scroll = list_scroll_offset
+    render_selection = function(_, new_idx)
         selected_idx = new_idx
         clamp_scroll()
 
@@ -2021,28 +2028,9 @@ function TUI.run(db, initial_query)
             load_preview_for(results[selected_idx].filepath, query)
         end
 
-        -- If list viewport has scrolled, do a full screen render
-        if list_scroll_offset ~= old_scroll then
-            render_full_screen()
-            return
-        end
-
-        local list_thumb_pos, prev_thumb_pos, prev_total, cur_file_ext = get_thumb_positions()
-        local frame_buf = {}
-
-        -- 1. Update header row 2
-        table.insert(frame_buf, string.format("\27[2;1H\27[2K%s", build_header_row()))
-
-        -- 2. Redraw complete content rows so the list, divider, and preview stay aligned.
-        -- The preview changes for each selected result, so updating its half while only
-        -- partially repainting list rows can leave stale cells or styling on-screen.
-        for i = 1, list_height do
-            local row = build_content_row(i, list_thumb_pos, prev_thumb_pos, prev_total, cur_file_ext)
-            table.insert(frame_buf, string.format("\27[%d;1H\27[2K%s", 3 + i, row))
-        end
-
-        io.write("\27[?2026h" .. table.concat(frame_buf) .. "\27[?2026l")
-        io.flush()
+        -- Selection changes affect the preview, header, scrollbar, and list. Render them
+        -- together as one frame instead of mixing partial updates with the main loop.
+        render_full_screen()
     end
 
     render_full_screen = function()
@@ -2171,7 +2159,7 @@ function TUI.run(db, initial_query)
                 else
                     if selected_idx > 1 then
                         local old_idx = selected_idx
-                        render_selection_differential(old_idx, old_idx - 1)
+                        render_selection(old_idx, old_idx - 1)
                     end
                 end
             elseif key == "DOWN" or key == "CTRL_N" then
@@ -2183,7 +2171,7 @@ function TUI.run(db, initial_query)
                 else
                     if selected_idx < #results then
                         local old_idx = selected_idx
-                        render_selection_differential(old_idx, old_idx + 1)
+                        render_selection(old_idx, old_idx + 1)
                     end
                 end
             elseif key == "PAGE_UP" or (vim_mode == "NORMAL" and focus_pane == "preview" and key == "CTRL_U") then
@@ -2287,7 +2275,7 @@ function TUI.run(db, initial_query)
                     else
                         if selected_idx < #results then
                             local old_idx = selected_idx
-                            render_selection_differential(old_idx, old_idx + 1)
+                            render_selection(old_idx, old_idx + 1)
                         end
                     end
                 elseif key == "k" then
@@ -2299,7 +2287,7 @@ function TUI.run(db, initial_query)
                     else
                         if selected_idx > 1 then
                             local old_idx = selected_idx
-                            render_selection_differential(old_idx, old_idx - 1)
+                            render_selection(old_idx, old_idx - 1)
                         end
                     end
                 elseif key == "h" then
@@ -2664,7 +2652,8 @@ if pcall(debug.getlocal, 4, 1) then
     return {
         Database = Database,
         Indexer  = Indexer,
-        TUI      = TUI
+        TUI      = TUI,
+        sanitize_terminal_text = sanitize_terminal_text
     }
 else
     main(arg)
