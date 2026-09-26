@@ -206,13 +206,66 @@ end
 --------------------------------------------------------------------------------
 -- 2. Library Loaders & OS Primitives
 --------------------------------------------------------------------------------
+-- Candidate library names, ordered by likelihood for the host platform.
+-- Windows has no system sqlite3.dll, so it must be installed or dropped on PATH.
+local SQLITE_CANDIDATES = { "sqlite3", "sqlite3.dll", "libsqlite3.so.0", "libsqlite3.so", "libsqlite3.dylib" }
+
 local function load_sqlite_lib()
-    local candidates = { "sqlite3", "libsqlite3.so.0", "libsqlite3.so", "sqlite3.dll", "libsqlite3.dylib" }
-    for _, name in ipairs(candidates) do
+    local tried = {}
+    for _, name in ipairs(SQLITE_CANDIDATES) do
         local ok, lib = pcall(ffi.load, name)
         if ok and lib then return lib end
+        tried[#tried + 1] = name
     end
-    error("Could not load SQLite3 shared library. Ensure libsqlite3 is installed.")
+
+    -- Fail loudly: this runs at module load, before any command dispatch, so a
+    -- bare error() leaves the user staring at an empty terminal with no clue why.
+    local L = {}
+    local function say(s) L[#L + 1] = s end
+
+    local title = "codefind FATAL: SQLite3 shared library not found"
+    local pad = 62 - 2 - #title          -- 2 = leading indent inside the box
+    say("")
+    say("  ╔" .. string.rep("═", 62) .. "╗")
+    say("  ║  " .. title .. string.rep(" ", pad) .. "║")
+    say("  ╚" .. string.rep("═", 62) .. "╝")
+    say("")
+    say("  codefind indexes into SQLite FTS5 and cannot run without it.")
+    say("  Every load name below was tried and failed:")
+    say("")
+    for _, name in ipairs(tried) do
+        say("      ✗ " .. name)
+    end
+    say("")
+    if is_windows then
+        say("  Fix on Windows (pick one):")
+        say("      choco install sqlite")
+        say("      winget install SQLite.SQLite")
+        say("      .. or drop a sqlite3.dll beside codefind.lua (or in any")
+        say("         folder listed in your PATH).")
+    elseif ffi.os == "OSX" then
+        say("  Fix on macOS:   brew install sqlite")
+    else
+        say("  Fix on Linux:   sudo apt install libsqlite3-0")
+        say("                  (or: sudo yum install sqlite-libs)")
+    end
+    say("")
+    say("  Verify it is reachable:")
+    say("      luajit -e \"print(pcall(require('ffi').load,'sqlite3'))\"")
+    say("")
+    say("  Then re-run:")
+    say("      luajit codefind.lua index .")
+    say("")
+
+    local message = table.concat(L, "\n")
+    -- Write to stdout AND stderr, and flush both, so the diagnostic survives
+    -- however the process was launched (pipe, redirect, .cmd shim, IDE console).
+    io.stdout:write(message, "\n")
+    io.stdout:flush()
+    io.stderr:write(message, "\n")
+    io.stderr:flush()
+
+    error("Could not load SQLite3 shared library. See the instructions above.")
 end
 
 local sqlite = load_sqlite_lib()
