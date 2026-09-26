@@ -33,6 +33,7 @@ local test_suites = {
     { file = "test_ffi_elf_inspector.lua", description = "ffi_elf_inspector — Linux ELF Binary Analyzer & Symbol Disassembler Suite" },
     { file = "test_ffi_ssh_tunnel.lua", description = "ffi_ssh_tunnel — SSH Tunnel & ProxyJump Manager Suite" },
     { file = "test_codefind.lua", description = "codefind — Local Code & Document Full-Text Search Engine Suite" },
+    { file = "test_person.lua", description = "person — Metatable OOP Class, Validation & Inheritance Suite" },
 }
 
 local luajit_bin = "luajit"
