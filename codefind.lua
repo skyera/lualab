@@ -475,21 +475,24 @@ end
 
 local function ensure_config_dir()
     local dir = config_path():match("^(.*)[/\\][^/\\]*$")
-    if not dir or #dir == 0 then return false end
-    if io.open(config_path(), "r") then return true end
-    local ok
+    if not dir or #dir == 0 then return end
+    -- Best effort only, and deliberately not checked: `md` exits non-zero when
+    -- the directory ALREADY exists, so its status code says nothing about
+    -- whether the directory is usable. The real test is whether the config file
+    -- can be opened for writing, which write_pin does next.
     if is_windows then
-        ok = os.execute('mkdir "' .. dir .. '" 2>nul')
+        os.execute('mkdir "' .. dir .. '" 2>nul')
     else
-        ok = os.execute('mkdir -p "' .. dir .. '"')
+        os.execute('mkdir -p "' .. dir .. '"')
     end
-    return ok == true or ok == 0
 end
 
 local function write_pin(path)
-    if not ensure_config_dir() then return false, "could not create " .. config_path() end
+    ensure_config_dir()
     local f = io.open(config_path(), "w")
-    if not f then return false, "could not write " .. config_path() end
+    if not f then
+        return false, "could not write " .. config_path() .. " (is that location writable?)"
+    end
     f:write("# codefind configuration\n")
     f:write("# Managed by: codefind pin\n")
     f:write(string.format('sqlite3 = "%s"\n', (path:gsub("\\", "/"))))
