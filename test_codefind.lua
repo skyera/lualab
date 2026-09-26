@@ -316,6 +316,27 @@ TestRunner.describe("Suite: 6. TUI Layout Resize and Viewport Clamping", functio
         local compact = parent and (parent .. "/" .. fname) or fname
         assert_true(compact == "unit-test/RtcmUnitTest.cu", "compact path should be parent/filename")
     end)
+
+    TestRunner.it("should identify when selection change is within page for 2-line differential update", function()
+        local list_height = 10
+        local list_scroll_offset = 0
+        local old_idx = 3
+        local new_idx = 4
+
+        -- Calculate row coordinate in terminal: 3 header/border rows + relative index
+        local old_rel = old_idx - list_scroll_offset
+        local new_rel = new_idx - list_scroll_offset
+        local is_same_page = (old_rel >= 1 and old_rel <= list_height) and (new_rel >= 1 and new_rel <= list_height)
+        assert_true(is_same_page, "Index 3 to 4 should remain on same viewport page")
+        assert_eq(3 + old_rel, 6, "Row 6 should be updated for old index")
+        assert_eq(3 + new_rel, 7, "Row 7 should be updated for new index")
+
+        -- Moving past viewport boundary triggers full scroll redraw
+        local edge_new_idx = 11
+        local edge_rel = edge_new_idx - list_scroll_offset
+        local edge_same_page = (edge_rel >= 1 and edge_rel <= list_height)
+        assert_true(not edge_same_page, "Index 11 should exceed viewport and trigger full scroll redraw")
+    end)
 end)
 
 db:close()

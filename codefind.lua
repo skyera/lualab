@@ -1896,21 +1896,31 @@ function TUI.run(db, initial_query)
         io.flush()
     end
 
-    local function render_full_screen()
-        clamp_scroll()
+    local function get_thumb_positions()
+        local list_thumb_pos = 1
+        if #results > list_height then
+            local max_offset = math.max(1, #results - list_height)
+            list_thumb_pos = 1 + math.floor((list_scroll_offset / max_offset) * (list_height - 1))
+        end
+
+        local prev_total = #current_preview_lines
+        local prev_thumb_pos = 1
+        if prev_total > list_height then
+            local max_prev_offset = math.max(1, prev_total - list_height)
+            prev_thumb_pos = 1 + math.floor((preview_scroll_offset / max_prev_offset) * (list_height - 1))
+        end
+
+        local cur_file_ext = current_preview_file and current_preview_file:match("%.([%w_%-]+)$")
+        cur_file_ext = cur_file_ext and cur_file_ext:lower() or ""
+
+        return list_thumb_pos, prev_thumb_pos, prev_total, cur_file_ext
+    end
+
+    local function build_header_row()
         local left_col_border = (focus_pane == "search") and "\27[1;36m" or "\27[90m"
         local right_col_border = (focus_pane == "preview") and "\27[1;32m" or "\27[90m"
         local neutral_border = "\27[90m"
 
-        local frame_buf = {}
-        local function emit_row(y, row_str)
-            table.insert(frame_buf, string.format("\27[%d;1H\27[2K%s", y, row_str))
-        end
-
-        -- Row 1: Top Border
-        emit_row(1, neutral_border .. "┌" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┬" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┐\27[0m")
-
-        -- Row 2: Header Information Bar
         local query_prompt = " > " .. query .. "_"
         local ext_tag = active_ext_filter and ("\27[1;35m[." .. active_ext_filter .. "]\27[0m ") or ""
         local matches_badge = ext_tag .. string.format("[%d Matches]", #results)
@@ -1946,72 +1956,134 @@ function TUI.run(db, initial_query)
             right_head = pad_to(right_head_title, right_col_w)
         end
 
-        emit_row(2, string.format("%s│\27[0m%s%s│\27[0m%s%s│\27[0m",
+        return string.format("%s│\27[0m%s%s│\27[0m%s%s│\27[0m",
             left_col_border,
             pad_to(left_head, left_col_w),
             neutral_border,
             pad_to(right_head, right_col_w),
-            right_col_border))
+            right_col_border)
+    end
 
-        -- Row 3: Split Divider
-        emit_row(3, neutral_border .. "├" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┼" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┤\27[0m")
-
-        -- Calculate scrollbar thumb positions
-        local list_thumb_pos = 1
-        if #results > list_height then
-            local max_offset = math.max(1, #results - list_height)
-            list_thumb_pos = 1 + math.floor((list_scroll_offset / max_offset) * (list_height - 1))
-        end
-
-        local prev_total = #current_preview_lines
-        local prev_thumb_pos = 1
+    local function build_right_cell(i, prev_thumb_pos, prev_total, cur_file_ext)
+        local right_sb = " "
         if prev_total > list_height then
-            local max_prev_offset = math.max(1, prev_total - list_height)
-            prev_thumb_pos = 1 + math.floor((preview_scroll_offset / max_prev_offset) * (list_height - 1))
+            right_sb = (i == prev_thumb_pos) and "\27[1;32m█\27[0m" or "\27[90m│\27[0m"
         end
 
-        local cur_file_ext = current_preview_file and current_preview_file:match("%.([%w_%-]+)$")
-        cur_file_ext = cur_file_ext and cur_file_ext:lower() or ""
+        local right_cell = ""
+        local r_text_w = right_col_w - 1
+        if current_preview_file and #current_preview_lines > 0 then
+            local file_line_num = preview_scroll_offset + i
+            if file_line_num <= #current_preview_lines then
+                local line_content = current_preview_lines[file_line_num] or ""
+                local is_hit = current_match_lines[file_line_num]
 
-        -- Rows 4 .. (4 + list_height - 1): Content rows
-        for i = 1, list_height do
-            local item_idx = list_scroll_offset + i
-            local left_cell = format_left_item(item_idx, (item_idx == selected_idx), list_thumb_pos, i)
+                local max_code_w = math.max(0, r_text_w - 9)
+                local code_str = truncate(line_content, max_code_w)
+                local line_pad = string.rep(" ", math.max(0, max_code_w - visual_len(code_str)))
 
-            -- Right scrollbar indicator
-            local right_sb = " "
-            if prev_total > list_height then
-                right_sb = (i == prev_thumb_pos) and "\27[1;32m█\27[0m" or "\27[90m│\27[0m"
-            end
+                local highlighted = highlight_code_line(code_str, cur_file_ext, current_preview_patterns, is_hit)
 
-            -- Right Content (Source preview with syntax highlighting)
-            local right_cell = ""
-            local r_text_w = right_col_w - 1
-            if current_preview_file and #current_preview_lines > 0 then
-                local file_line_num = preview_scroll_offset + i
-                if file_line_num <= #current_preview_lines then
-                    local line_content = current_preview_lines[file_line_num] or ""
-                    local is_hit = current_match_lines[file_line_num]
-
-                    local max_code_w = math.max(0, r_text_w - 9)
-                    local code_str = truncate(line_content, max_code_w)
-                    local line_pad = string.rep(" ", math.max(0, max_code_w - visual_len(code_str)))
-
-                    local highlighted = highlight_code_line(code_str, cur_file_ext, current_preview_patterns, is_hit)
-
-                    if is_hit then
-                        right_cell = string.format("\27[1;33m> \27[90m%4d │ \27[0m%s%s%s", file_line_num, highlighted, line_pad, right_sb)
-                    else
-                        right_cell = string.format("  \27[90m%4d │ \27[0m%s%s%s", file_line_num, highlighted, line_pad, right_sb)
-                    end
+                if is_hit then
+                    right_cell = string.format("\27[1;33m> \27[90m%4d │ \27[0m%s%s%s", file_line_num, highlighted, line_pad, right_sb)
                 else
-                    right_cell = string.rep(" ", r_text_w) .. right_sb
+                    right_cell = string.format("  \27[90m%4d │ \27[0m%s%s%s", file_line_num, highlighted, line_pad, right_sb)
                 end
             else
                 right_cell = string.rep(" ", r_text_w) .. right_sb
             end
+        else
+            right_cell = string.rep(" ", r_text_w) .. right_sb
+        end
+        return right_cell
+    end
 
-            emit_row(3 + i, string.format("%s│\27[0m%s%s│\27[0m%s%s│\27[0m", left_col_border, left_cell, neutral_border, right_cell, right_col_border))
+    local function build_content_row(i, list_thumb_pos, prev_thumb_pos, prev_total, cur_file_ext)
+        local left_col_border = (focus_pane == "search") and "\27[1;36m" or "\27[90m"
+        local right_col_border = (focus_pane == "preview") and "\27[1;32m" or "\27[90m"
+        local neutral_border = "\27[90m"
+
+        local item_idx = list_scroll_offset + i
+        local left_cell = format_left_item(item_idx, (item_idx == selected_idx), list_thumb_pos, i)
+        local right_cell = build_right_cell(i, prev_thumb_pos, prev_total, cur_file_ext)
+
+        return string.format("%s│\27[0m%s%s│\27[0m%s%s│\27[0m", left_col_border, left_cell, neutral_border, right_cell, right_col_border)
+    end
+
+    local function render_selection_differential(old_idx, new_idx)
+        local old_scroll = list_scroll_offset
+        selected_idx = new_idx
+        clamp_scroll()
+
+        if #results > 0 and results[selected_idx] then
+            load_preview_for(results[selected_idx].filepath, query)
+        end
+
+        -- If list viewport has scrolled, do a full screen render
+        if list_scroll_offset ~= old_scroll then
+            render_full_screen()
+            return
+        end
+
+        local list_thumb_pos, prev_thumb_pos, prev_total, cur_file_ext = get_thumb_positions()
+        local frame_buf = {}
+
+        -- 1. Update header row 2
+        table.insert(frame_buf, string.format("\27[2;1H\27[2K%s", build_header_row()))
+
+        -- 2. Update ONLY the 2 lines changed in left column (old_idx unhighlighted, new_idx highlighted)
+        local left_col_border = (focus_pane == "search") and "\27[1;36m" or "\27[90m"
+        local neutral_border = "\27[90m"
+
+        local old_rel = old_idx - list_scroll_offset
+        if old_rel >= 1 and old_rel <= list_height then
+            local left_cell_old = format_left_item(old_idx, false, list_thumb_pos, old_rel)
+            table.insert(frame_buf, string.format("\27[%d;1H%s│\27[0m%s%s│\27[0m", 3 + old_rel, left_col_border, left_cell_old, neutral_border))
+        end
+
+        local new_rel = new_idx - list_scroll_offset
+        if new_rel >= 1 and new_rel <= list_height then
+            local left_cell_new = format_left_item(new_idx, true, list_thumb_pos, new_rel)
+            table.insert(frame_buf, string.format("\27[%d;1H%s│\27[0m%s%s│\27[0m", 3 + new_rel, left_col_border, left_cell_new, neutral_border))
+        end
+
+        -- 3. Update right preview pane lines (rows 4 .. 3 + list_height) starting at divider column
+        local right_col_border = (focus_pane == "preview") and "\27[1;32m" or "\27[90m"
+        local right_start_col = left_col_w + 3 -- after left border + left_col_w + divider
+        for i = 1, list_height do
+            local right_cell = build_right_cell(i, prev_thumb_pos, prev_total, cur_file_ext)
+            table.insert(frame_buf, string.format("\27[%d;%dH%s%s│\27[0m", 3 + i, right_start_col, right_cell, right_col_border))
+        end
+
+        io.write("\27[?2026h" .. table.concat(frame_buf) .. "\27[?2026l")
+        io.flush()
+    end
+
+    local function render_full_screen()
+        clamp_scroll()
+        local left_col_border = (focus_pane == "search") and "\27[1;36m" or "\27[90m"
+        local right_col_border = (focus_pane == "preview") and "\27[1;32m" or "\27[90m"
+        local neutral_border = "\27[90m"
+
+        local frame_buf = {}
+        local function emit_row(y, row_str)
+            table.insert(frame_buf, string.format("\27[%d;1H\27[2K%s", y, row_str))
+        end
+
+        -- Row 1: Top Border
+        emit_row(1, neutral_border .. "┌" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┬" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┐\27[0m")
+
+        -- Row 2: Header Information Bar
+        emit_row(2, build_header_row())
+
+        -- Row 3: Split Divider
+        emit_row(3, neutral_border .. "├" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┼" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┤\27[0m")
+
+        local list_thumb_pos, prev_thumb_pos, prev_total, cur_file_ext = get_thumb_positions()
+
+        -- Rows 4 .. (4 + list_height - 1): Content rows
+        for i = 1, list_height do
+            emit_row(3 + i, build_content_row(i, list_thumb_pos, prev_thumb_pos, prev_total, cur_file_ext))
         end
 
         -- Row Bottom Divider
@@ -2112,12 +2184,8 @@ function TUI.run(db, initial_query)
                     end
                 else
                     if selected_idx > 1 then
-                        selected_idx = selected_idx - 1
-                        clamp_scroll()
-                        if #results > 0 and results[selected_idx] then
-                            load_preview_for(results[selected_idx].filepath, query)
-                        end
-                        needs_redraw = true
+                        local old_idx = selected_idx
+                        render_selection_differential(old_idx, old_idx - 1)
                     end
                 end
             elseif key == "DOWN" or key == "CTRL_N" then
@@ -2128,12 +2196,8 @@ function TUI.run(db, initial_query)
                     end
                 else
                     if selected_idx < #results then
-                        selected_idx = selected_idx + 1
-                        clamp_scroll()
-                        if #results > 0 and results[selected_idx] then
-                            load_preview_for(results[selected_idx].filepath, query)
-                        end
-                        needs_redraw = true
+                        local old_idx = selected_idx
+                        render_selection_differential(old_idx, old_idx + 1)
                     end
                 end
             elseif key == "PAGE_UP" or (vim_mode == "NORMAL" and focus_pane == "preview" and key == "CTRL_U") then
@@ -2236,12 +2300,8 @@ function TUI.run(db, initial_query)
                         end
                     else
                         if selected_idx < #results then
-                            selected_idx = selected_idx + 1
-                            clamp_scroll()
-                            if #results > 0 and results[selected_idx] then
-                                load_preview_for(results[selected_idx].filepath, query)
-                            end
-                            needs_redraw = true
+                            local old_idx = selected_idx
+                            render_selection_differential(old_idx, old_idx + 1)
                         end
                     end
                 elseif key == "k" then
@@ -2252,12 +2312,8 @@ function TUI.run(db, initial_query)
                         end
                     else
                         if selected_idx > 1 then
-                            selected_idx = selected_idx - 1
-                            clamp_scroll()
-                            if #results > 0 and results[selected_idx] then
-                                load_preview_for(results[selected_idx].filepath, query)
-                            end
-                            needs_redraw = true
+                            local old_idx = selected_idx
+                            render_selection_differential(old_idx, old_idx - 1)
                         end
                     end
                 elseif key == "h" then
