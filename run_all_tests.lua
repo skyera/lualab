@@ -18,6 +18,7 @@ local test_suites = {
     { file = "test_ffi_chinese_chess.lua", description = "LuaJIT FFI Chinese Chess (Xiangqi) Engine & Rules Suite" },
     { file = "test_ffi_chip8.lua", description = "LuaJIT FFI Retro Chip-8 CPU Emulator & VM Suite" },
     { file = "test_ffi_falling_sand.lua", description = "LuaJIT FFI Falling Sand & Cellular Physics Suite" },
+    { file = "test_ffi_verlet_cloth.lua", description = "LuaJIT FFI Verlet Cloth & Rope Physics Suite" },
     { file = "test_ffi_demoscene_studio.lua", description = "LuaJIT FFI 1990s Demoscene Effects Studio Suite" },
     { file = "test_ffi_wolf3d_raycaster.lua", description = "LuaJIT FFI 1990s Wolfenstein 3D Raycasting Engine Suite" },
     { file = "test_ffi_game_2048.lua", description = "LuaJIT FFI 2048 Sliding Puzzle & Expectimax AI Suite" },
