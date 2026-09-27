@@ -405,6 +405,84 @@ assert(q == "中", "Multi-byte backspace failed to retain single remaining CJK c
 
 print("OK_UTF8_SEARCH")' ]==],
         expect = "OK_UTF8_SEARCH"
+    },
+    {
+        name = "[d] arms a confirmation before deleting, folders and search mode untouched",
+        cmd = luajit .. [==[ -e '
+local s = io.open("pix.lua"):read("*a")
+assert(s:find("local function delete_file_from_disk", 1, true), "delete helper missing")
+assert(s:find("local pending_delete = nil", 1, true), "confirmation state missing")
+assert(s:find("pending_delete = item", 1, true), "[d] does not arm the confirmation")
+assert(s:find("permanently?", 1, true), "confirmation prompt missing")
+assert(s:find("drop_deleted_item(item)", 1, true), "deleted item is not dropped from the list")
+assert(s:find("Folders cannot be deleted here", 1, true), "folders are not refused")
+assert(s:find("Delete selected file (with confirm)", 1, true), "help modal entry missing")
+assert(s:find("[d]", 1, true), "list footer hint missing")
+-- The gate must open the non-search branch, so [d] can never hijack typed query input
+local DQ = string.char(34)
+local NL = string.char(10)
+local gate = s:find("if pending_delete then", 1, true)
+assert(gate, "confirmation gate missing from the key loop")
+local before_gate = s:sub(math.max(1, gate - 60), gate - 1)
+assert(before_gate:find(NL .. "                else" .. NL, 1, true), "confirmation gate is not the first thing in the list branch")
+local list_block = s:sub(gate, gate + 2000)
+assert(list_block:find("elseif k == " .. DQ .. "d" .. DQ .. " then", 1, true), "[d] handler missing from the list branch")
+assert(list_block:find("delete_file_from_disk(item.filepath)", 1, true), "confirmed delete does not remove the armed file")
+print("OK_DELETE_KEY")' ]==],
+        expect = "OK_DELETE_KEY"
+    },
+    {
+        name = "delete_file_from_disk removes files, clears the animated cache, retries the 8.3 path",
+        cmd = luajit .. [==[ -e '
+local s = io.open("pix.lua"):read("*a")
+local i = s:find("local function delete_file_from_disk", 1, true)
+assert(i, "delete helper not found in pix.lua")
+local NL = string.char(10)
+local j = s:find(NL .. "end" .. NL, i, true) -- "\nend\n", i, true)
+assert(j, "end of delete helper not found")
+local chunk = s:sub(i, j + 4) .. NL .. "return delete_file_from_disk" .. NL
+-- "\nreturn delete_file_from_disk\n"
+local tmp = ((os.getenv("TEMP") or "/tmp"):gsub("\\", "/")) .. "/test_pix_delete"
+os.execute("rm -rf " .. tmp .. " && mkdir -p " .. tmp)
+local function touch(name)
+    local p = tmp .. "/" .. name
+    local f = assert(io.open(p, "wb"))
+    f:write("x")
+    f:close()
+    return p
+end
+local cache = {}
+local env = { type = type, os = os, animated_cache = cache, get_win_short_path = function(p) return p end }
+local loader = assert(loadstring(chunk, "delete_helper"))
+setfenv(loader, env)
+local del = loader()
+
+-- 1. A plain delete removes the file and forgets its animation cache entry
+local victim = touch("victim.png")
+cache[victim] = true
+assert(del(victim) == true, "delete reported failure")
+assert(io.open(victim, "rb") == nil, "file still on disk after delete")
+assert(cache[victim] == nil, "animated cache not invalidated")
+assert(del(victim) == false, "deleting a missing file must fail")
+
+-- 2. Windows fallback: the ANSI path fails, the 8.3 short path succeeds
+local attempts = {}
+env.os = { remove = function(p) attempts[#attempts + 1] = p if p == "C:/fake/long name.png" then return nil, "ENOENT" end return true end }
+env.get_win_short_path = function(p) return p .. "~1" end
+assert(del("C:/fake/long name.png") == true, "short-path fallback not taken")
+assert(attempts[1] == "C:/fake/long name.png" and attempts[2] == "C:/fake/long name.png~1", "wrong retry path")
+
+-- 3. Both attempts failing surfaces the error, and bad input is rejected
+env.get_win_short_path = function(p) return p end
+env.os = { remove = function() return nil, "EACCES" end }
+local ok, err = del("C:/fake/locked.png")
+assert(ok == false and err == "EACCES", "error not reported")
+assert(del(nil) == false, "nil path must be rejected")
+assert(del("") == false, "empty path must be rejected")
+
+os.execute("rm -rf " .. tmp)
+print("OK_DELETE_FILE")' ]==],
+        expect = "OK_DELETE_FILE"
     }
 }
 

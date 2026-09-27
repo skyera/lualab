@@ -18,6 +18,7 @@
        - Supports arrow keys (↑ / ↓ / k / j), direct number entry, Enter/Space to view, 'q' to quit.
        - Interactive Help popup modal with [?].
        - CLI direct selection flag: --select <n> or -s <n>.
+       - [d] deletes the selected file after an inline [y]/[n] confirmation prompt (files only).
        - Non-interactive / pipe friendly fallback.
     3. Dual Graphics Rendering Engine:
        - Kitty Graphics Protocol: Auto-detected (Kitty, Ghostty, WezTerm). Renders native pixel-perfect images.
@@ -304,6 +305,27 @@ local function format_date(timestamp)
     if not timestamp or timestamp <= 0 then return "-" end
     local ok, res = pcall(os.date, "%Y-%m-%d", timestamp)
     return ok and res or "-"
+end
+
+-- Remove one file from disk for the [d] key. os.remove() goes through the CRT, whose path
+-- handling is ANSI on Windows, so a non-ASCII name that displayed fine can still fail there;
+-- retry once via the 8.3 short path (identity on POSIX) before reporting an error.
+local function delete_file_from_disk(filepath)
+    if type(filepath) ~= "string" or filepath == "" then
+        return false, "no file path"
+    end
+    local ok, err = os.remove(filepath)
+    if not ok and get_win_short_path then
+        local short = get_win_short_path(filepath)
+        if short and short ~= filepath then
+            ok, err = os.remove(short)
+        end
+    end
+    if ok then
+        animated_cache[filepath] = nil
+        return true
+    end
+    return false, err
 end
 
 -- -------------------------------------------------------------------------
@@ -5380,6 +5402,7 @@ local function render_help_modal(term_w, term_h, active_protocol)
         "│    Ctrl-F / Ctrl-B     Scroll full page down / up           │",
         "│    H / M / L           Jump to top / middle / bottom visible│",
         "│    1 - 9               Quick select item by index number    │",
+        "│    d                   Delete selected file (with confirm)  │",
         "│                                                             │",
         "│  Viewer Controls:                                           │",
         "│    l / j / → / n       Next image                           │",
@@ -5454,7 +5477,7 @@ local function render_help_modal(term_w, term_h, active_protocol)
     io.flush()
 end
 
-local function render_file_list(dir_path, images, total_unfiltered, selected_idx, page_offset, msg, search_mode, search_query, sort_mode, sort_desc, recursive, icon_mode, show_hidden)
+local function render_file_list(dir_path, images, total_unfiltered, selected_idx, page_offset, msg, search_mode, search_query, sort_mode, sort_desc, recursive, icon_mode, show_hidden, confirm_item)
     local term_w, term_h = get_terminal_size()
     local out = {}
     table.insert(out, "\27[H") -- Home cursor without blanking the frame
@@ -5491,11 +5514,16 @@ local function render_file_list(dir_path, images, total_unfiltered, selected_idx
     elseif #search_query > 0 then
         table.insert(out, string.format("  \27[90mFilter: \27[1;93m'%s'\27[0m \27[90m(%d matches) [Esc/ / to clear]\27[0m   \27[93m[?]\27[0m Help   \27[91m[Q]\27[0m Quit\n", to_display_text(search_query), #images))
     else
-        table.insert(out, string.format("  \27[93m[↑/↓/k/j]\27[0m Move   \27[1;92m[Enter/l]\27[0m Open/View   \27[93m[h/Backsp]\27[0m Up   \27[93m[/]\27[0m Filter   \27[93m[i]\27[0m Icon   \27[93m[?]\27[0m Help   \27[91m[Q]\27[0m Quit\n"))
+        table.insert(out, string.format("  \27[93m[↑/↓/k/j]\27[0m Move   \27[1;92m[Enter/l]\27[0m Open/View   \27[93m[h/Backsp]\27[0m Up   \27[91m[d]\27[0m Delete   \27[93m[/]\27[0m Filter   \27[93m[i]\27[0m Icon   \27[93m[?]\27[0m Help   \27[91m[Q]\27[0m Quit\n"))
     end
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
-    if msg and #msg > 0 then
+    if confirm_item then
+        -- Same two-row slot as the status message, so the layout stays put while confirming.
+        local nm = utf8_truncate(to_display_text(confirm_item.filename), math.max(12, term_w - 58))
+        table.insert(out, string.format(
+            "  \27[1;41;97m DELETE \27[0m \27[1;91mRemove '%s' permanently?  \27[1;92m[y]\27[1;91m Yes   \27[1;93m[n/Esc]\27[0m\27[1;91m Cancel\27[0m\n\n", nm))
+    elseif msg and #msg > 0 then
         table.insert(out, string.format("  \27[1;93mℹ %s\27[0m\n\n", msg))
     else
         table.insert(out, "\n")
@@ -5908,6 +5936,7 @@ local function main()
     local in_viewer = false
     local in_help = false
     local current_msg = nil
+    local pending_delete = nil -- item awaiting the [d] confirmation
     local viewer_zoom = 1.0
     local viewer_pan_x = 0
     local viewer_pan_y = 0
@@ -5928,6 +5957,7 @@ local function main()
         sort_images(raw_images, sort_mode, sort_desc)
         search_query = ""
         search_mode = false
+        pending_delete = nil
         filtered_images = filter_images(raw_images, search_query)
         selected_idx = 1
         page_offset = 1
@@ -5956,6 +5986,25 @@ local function main()
             page_offset = selected_idx
         elseif selected_idx > page_offset + max_items - 1 then
             page_offset = math.max(1, selected_idx - max_items + 1)
+        end
+    end
+
+    -- Drop a successfully removed file from both lists and keep the selection in range.
+    local function drop_deleted_item(item)
+        for i, it in ipairs(raw_images) do
+            if it == item then
+                table.remove(raw_images, i)
+                break
+            end
+        end
+        filtered_images = filter_images(raw_images, search_query)
+        if #filtered_images == 0 then
+            selected_idx = 1
+            page_offset = 1
+        else
+            selected_idx = math.max(1, math.min(selected_idx, #filtered_images))
+            page_offset = math.max(1, math.min(page_offset, selected_idx))
+            update_page_window()
         end
     end
 
@@ -6127,7 +6176,7 @@ local function main()
             end
             else
                 update_page_window()
-                render_file_list(target_dir, filtered_images, #raw_images, selected_idx, page_offset, current_msg, search_mode, search_query, sort_mode, sort_desc, recursive, icon_mode, show_hidden)
+                render_file_list(target_dir, filtered_images, #raw_images, selected_idx, page_offset, current_msg, search_mode, search_query, sort_mode, sort_desc, recursive, icon_mode, show_hidden, pending_delete)
                 current_msg = nil
 
                 local k = read_key()
@@ -6173,7 +6222,26 @@ local function main()
                         page_offset = 1
                     end
                 else
-                    if not k or k == "q" or k == "CTRL_C" then
+                    if pending_delete then
+                        -- [y] confirms the deletion; Ctrl+C / Q keep their global quit meaning,
+                        -- any other key (n, Esc, q, ...) backs out without touching the file.
+                        if k == "y" or k == "Y" then
+                            local item = pending_delete
+                            pending_delete = nil
+                            local ok, err = delete_file_from_disk(item.filepath)
+                            if ok then
+                                drop_deleted_item(item)
+                                current_msg = "Deleted: " .. to_display_text(item.filename)
+                            else
+                                current_msg = "Delete failed: " .. to_display_text(tostring(err))
+                            end
+                        elseif k == "CTRL_C" or k == "Q" then
+                            break
+                        elseif k then
+                            pending_delete = nil
+                            current_msg = "Delete cancelled"
+                        end
+                    elseif not k or k == "q" or k == "CTRL_C" then
                         break
                     elseif k == "ESC" then
                         if #search_query > 0 then
@@ -6189,6 +6257,13 @@ local function main()
                         search_mode = true
                     elseif k == "?" then
                         in_help = true
+                    elseif k == "d" then
+                        local item = filtered_images[selected_idx]
+                        if item and item.is_dir then
+                            current_msg = "Folders cannot be deleted here (files only)"
+                        elseif item then
+                            pending_delete = item
+                        end
                     elseif k == "i" then
                         if icon_mode == "unicode" then
                             icon_mode = "nerd"
