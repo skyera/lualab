@@ -214,3 +214,47 @@ myshape:printArea()
 mysquare:printArea()
 myshape2:printArea()
 mysquare2:printArea()
+
+
+local Character = {}
+Character.__index = Character
+
+function Character:new(name, health)
+    local instance = {
+        name = name,
+        health = health,
+        level = 1
+    }
+    setmetatable(instance, Character)
+    return instance
+end
+
+function Character:takeDemage(amount)
+    self.health = self.health - amount
+    print(self.name .. " took " .. amount .. " demage. Health is now " .. self.health)
+end
+
+function Character:displayStatus()
+    print(string.format("Name: %s | Level: %d | Health: %d", self.name, self.level, self.health))
+end
+
+local Warrior = {}
+Warrior.__index = Warrior
+
+setmetatable(Warrior, { __index = Character})
+
+function Warrior:new(name, health, armor)
+    local instance = Character:new(name, health)
+    instance.armor = armor
+    setmetatable(instance, Warrior)
+    return instance
+end
+
+function Warrior:shieldBash()
+    print(self.name .. " performs a shield bash, using armor rating " .. self.armor)
+end
+
+local my_warrior = Warrior:new("Thorin", 150, 25)
+my_warrior:displayStatus()
+my_warrior:takeDemage(30)
+my_warrior:shieldBash()
