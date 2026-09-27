@@ -487,28 +487,31 @@ local function ensure_config_dir()
     end
 end
 
-local function write_pin(path)
+local function write_config_key(key, val)
     ensure_config_dir()
+    local cfg = read_config()
+    cfg[key:lower()] = val
     local f = io.open(config_path(), "w")
     if not f then
         return false, "could not write " .. config_path() .. " (is that location writable?)"
     end
     f:write("# codefind configuration\n")
-    f:write("# Managed by: codefind pin\n")
-    f:write(string.format('sqlite3 = "%s"\n', (path:gsub("\\", "/"))))
+    for k, v in pairs(cfg) do
+        f:write(string.format('%s = "%s"\n', k, tostring(v):gsub("\\", "/")))
+    end
     f:close()
     return true
 end
 
-local function clear_pin()
+local function clear_config_key(key)
     local cfg = read_config()
-    if not cfg.sqlite3 then return false, "no pin is set" end
+    if not cfg[key:lower()] then return false, "no setting for " .. key end
     local f = io.open(config_path(), "r")
     if not f then return false, "could not read " .. config_path() end
     local kept = {}
     for line in f:lines() do
         local k = line:match("^%s*(%w+)%s*=")
-        if k and k:lower() == "sqlite3" then
+        if k and k:lower() == key:lower() then
             -- drop it
         else
             kept[#kept + 1] = line
@@ -521,6 +524,14 @@ local function clear_pin()
     if #kept > 0 then out:write("\n") end
     out:close()
     return true
+end
+
+local function write_pin(path)
+    return write_config_key("sqlite3", path)
+end
+
+local function clear_pin()
+    return clear_config_key("sqlite3")
 end
 
 local function file_size(path)
@@ -1480,7 +1491,123 @@ local function get_filename(path)
     return path:match("([^/\\]+)$") or path
 end
 
-local function scan_directory(root_dir, callback)
+local function has_ignored_dir(path)
+    if not path then return false end
+    for segment in path:gmatch("[^/\\]+") do
+        if IGNORED_DIRS[segment] then return true end
+    end
+    return false
+end
+
+local function detect_available_finders()
+    local finders = {
+        builtin = {
+            name = "builtin",
+            label = "Native LuaJIT FFI (FindFirstFile / opendir, zero dependencies)",
+            available = true,
+            path = "builtin"
+        }
+    }
+
+    -- Check fd / fdfind
+    local fd_cmd = is_windows and "where fd.exe 2>nul" or "which fd 2>/dev/null || which fdfind 2>/dev/null"
+    local p = io.popen(fd_cmd, "r")
+    if p then
+        local line = p:read("*l")
+        p:close()
+        if line and #line > 0 then
+            local vstr = "available"
+            local vp = io.popen("fd --version 2>nul", "r")
+            if vp then
+                local vl = vp:read("*l")
+                vp:close()
+                if vl and #vl > 0 then vstr = vl end
+            end
+            finders.fd = {
+                name = "fd",
+                label = string.format("fd (%s, fast multi-threaded)", vstr),
+                available = true,
+                path = line
+            }
+        end
+    end
+
+    -- Check POSIX find
+    if not is_windows then
+        local p = io.popen("which find 2>/dev/null", "r")
+        if p then
+            local line = p:read("*l")
+            p:close()
+            if line and #line > 0 then
+                finders.find = {
+                    name = "find",
+                    label = "GNU/POSIX find (Standard Unix utility)",
+                    available = true,
+                    path = line
+                }
+            end
+        end
+    else
+        local p = io.popen("find . -maxdepth 0 -type d 2>nul", "r")
+        if p then
+            local out = p:read("*a")
+            p:close()
+            if out and (out:find("%./") or out:find("%.")) then
+                finders.find = {
+                    name = "find",
+                    label = "GNU/POSIX find (Git/Cygwin find)",
+                    available = true,
+                    path = "find"
+                }
+            end
+        end
+    end
+
+    return finders
+end
+
+local function resolve_finder(requested_mode)
+    local mode = requested_mode
+    if not mode or #mode == 0 then
+        mode = os.getenv("CODEFIND_FINDER")
+    end
+    if not mode or #mode == 0 then
+        local cfg = read_config()
+        mode = cfg.finder
+    end
+    mode = (mode or "auto"):lower()
+
+    local available = detect_available_finders()
+
+    if mode == "auto" then
+        if available.fd and available.fd.available then
+            return "fd"
+        end
+        return "builtin"
+    elseif mode == "fd" then
+        if available.fd and available.fd.available then
+            return "fd"
+        else
+            return "builtin"
+        end
+    elseif mode == "find" then
+        if available.find and available.find.available then
+            return "find"
+        else
+            return "builtin"
+        end
+    elseif mode == "builtin" or mode == "native" then
+        return "builtin"
+    else
+        return "builtin"
+    end
+end
+
+local function scan_directory_builtin(root_dir, callback)
+    root_dir = root_dir or "."
+    root_dir = root_dir:gsub("\\", "/"):gsub("/+$", "")
+    if root_dir == "" or root_dir == "./" then root_dir = "." end
+
     local function walk(current_dir)
         if is_windows then
             local find_pattern = current_dir .. "/*"
@@ -1492,11 +1619,13 @@ local function scan_directory(root_dir, callback)
                 local name = ffi.string(find_data.cFileName)
                 if name ~= "." and name ~= ".." then
                     local is_dir = bit.band(find_data.dwFileAttributes, 0x10) ~= 0
-                    local full_path = current_dir .. "/" .. name
+                    local full_path = (current_dir == ".") and name or (current_dir .. "/" .. name)
                     if is_dir then
                         if not IGNORED_DIRS[name] then walk(full_path) end
                     else
-                        callback(full_path, name)
+                        if not has_ignored_dir(full_path) then
+                            callback(full_path, name)
+                        end
                     end
                 end
             until kernel32.FindNextFileA(hFind, find_data) == 0
@@ -1510,7 +1639,7 @@ local function scan_directory(root_dir, callback)
                 if entry == nil then break end
                 local name = ffi.string(entry.d_name)
                 if name ~= "." and name ~= ".." then
-                    local full_path = current_dir .. "/" .. name
+                    local full_path = (current_dir == ".") and name or (current_dir .. "/" .. name)
                     local is_dir = (entry.d_type == 4)
                     local is_reg = (entry.d_type == 8)
 
@@ -1526,7 +1655,9 @@ local function scan_directory(root_dir, callback)
                     if is_dir then
                         if not IGNORED_DIRS[name] then walk(full_path) end
                     elseif is_reg then
-                        callback(full_path, name)
+                        if not has_ignored_dir(full_path) then
+                            callback(full_path, name)
+                        end
                     end
                 end
             end
@@ -1537,12 +1668,72 @@ local function scan_directory(root_dir, callback)
     walk(root_dir)
 end
 
+local function scan_directory_fd(root_dir, callback)
+    root_dir = root_dir or "."
+    root_dir = root_dir:gsub("\\", "/"):gsub("/+$", "")
+    if root_dir == "" or root_dir == "./" then root_dir = "." end
+
+    local null_dev = is_windows and "2>nul" or "2>/dev/null"
+    local exclude_parts = {}
+    for dir in pairs(IGNORED_DIRS) do
+        table.insert(exclude_parts, string.format('--exclude "%s"', dir))
+    end
+    local exclude_str = table.concat(exclude_parts, " ")
+    local search_path = (root_dir == ".") and "." or root_dir
+    local cmd = string.format('fd --type f --hidden %s . "%s" %s', exclude_str, search_path, null_dev)
+    local p = io.popen(cmd, "r")
+    if not p then return false end
+    for line in p:lines() do
+        local raw = line:gsub("\r$", ""):gsub("^%./", ""):gsub("\\", "/")
+        if not has_ignored_dir(raw) then
+            local fname = get_filename(raw)
+            callback(raw, fname)
+        end
+    end
+    p:close()
+    return true
+end
+
+local function scan_directory_find(root_dir, callback)
+    root_dir = root_dir or "."
+    root_dir = root_dir:gsub("\\", "/"):gsub("/+$", "")
+    if root_dir == "" or root_dir == "./" then root_dir = "." end
+
+    local null_dev = is_windows and "2>nul" or "2>/dev/null"
+    local search_path = (root_dir == ".") and "." or root_dir
+    local cmd = string.format('find "%s" -type f %s', search_path, null_dev)
+    local p = io.popen(cmd, "r")
+    if not p then return false end
+    for line in p:lines() do
+        local raw = line:gsub("\r$", ""):gsub("^%./", ""):gsub("\\", "/")
+        if not has_ignored_dir(raw) then
+            local fname = get_filename(raw)
+            callback(raw, fname)
+        end
+    end
+    p:close()
+    return true
+end
+
+local function scan_directory(root_dir, callback, finder_mode)
+    local active = resolve_finder(finder_mode)
+    if active == "fd" then
+        local ok = scan_directory_fd(root_dir, callback)
+        if ok then return "fd" end
+    elseif active == "find" then
+        local ok = scan_directory_find(root_dir, callback)
+        if ok then return "find" end
+    end
+    scan_directory_builtin(root_dir, callback)
+    return "builtin"
+end
+
 --------------------------------------------------------------------------------
 -- 5. Indexing Pipeline
 --------------------------------------------------------------------------------
 local Indexer = {}
 
-function Indexer.run(db, root_dir, verbose, allow_all)
+function Indexer.run(db, root_dir, verbose, allow_all, finder_mode)
     root_dir = root_dir or "."
     -- strip trailing slash
     root_dir = root_dir:gsub("[/\\]+$", "")
@@ -1550,9 +1741,11 @@ function Indexer.run(db, root_dir, verbose, allow_all)
 
     local t_start = wall_now()
 
+    local active_crawler = resolve_finder(finder_mode)
+
     -- Phase 1: Fast discovery and candidate filtering
     if verbose then
-        io.write("\27[90m⚡ Discovering files...\27[0m")
+        io.write(string.format("\27[90m⚡ Discovering files (crawler: %s)...\27[0m", active_crawler))
         io.flush()
     end
 
@@ -1575,8 +1768,10 @@ function Indexer.run(db, root_dir, verbose, allow_all)
         end
 
         visited_paths[full_path] = true
+        visited_paths[full_path:gsub("^%./", "")] = true
+        visited_paths["./" .. full_path:gsub("^%./", "")] = true
         table.insert(candidate_files, { path = full_path, name = fname, ext = ext })
-    end)
+    end, active_crawler)
 
     local total_files = #candidate_files
     if verbose then
@@ -1606,16 +1801,19 @@ function Indexer.run(db, root_dir, verbose, allow_all)
         local pct = math.floor(progress_ratio * 100)
         local rate = current_idx / elapsed
 
+        local elap_m, elap_s = math.floor(elapsed / 60), math.floor(elapsed % 60)
+        local elapsed_str = string.format("%02d:%02d", elap_m, elap_s)
+
         -- Estimate time remaining (ETA)
         local remaining_files = total_files - current_idx
         local eta_seconds = (rate > 0) and math.max(0, math.floor(remaining_files / rate)) or 0
-        local eta_str
+        local time_str
         if current_idx >= total_files then
-            eta_str = string.format("Elapsed: %02d:%02d", math.floor(elapsed / 60), math.floor(elapsed % 60))
+            time_str = string.format("Elapsed: %s │ Done", elapsed_str)
         elseif eta_seconds >= 60 then
-            eta_str = string.format("ETA: %02dm%02ds", math.floor(eta_seconds / 60), eta_seconds % 60)
+            time_str = string.format("Elapsed: %s │ ETA: %02dm%02ds", elapsed_str, math.floor(eta_seconds / 60), eta_seconds % 60)
         else
-            eta_str = string.format("ETA: %02ds", eta_seconds)
+            time_str = string.format("Elapsed: %s │ ETA: %02ds", elapsed_str, eta_seconds)
         end
 
         -- Progress bar with 24 blocks
@@ -1624,7 +1822,7 @@ function Indexer.run(db, root_dir, verbose, allow_all)
         local bar = "\27[32m" .. string.rep("█", filled) .. "\27[90m" .. string.rep("░", bar_w - filled) .. "\27[0m"
 
         local status_line = string.format("\r\27[2K[%s] %3d%% │ %d/%d files │ %.1f MB │ %d f/s │ %s",
-            bar, pct, current_idx, total_files, total_bytes / (1024 * 1024), math.floor(rate), eta_str)
+            bar, pct, current_idx, total_files, total_bytes / (1024 * 1024), math.floor(rate), time_str)
         io.write(status_line)
         io.flush()
     end
@@ -1640,8 +1838,14 @@ function Indexer.run(db, root_dir, verbose, allow_all)
         if not meta or meta.size > (5 * 1024 * 1024) then -- skip > 5MB single files
             files_skipped = files_skipped + 1
         else
-            -- Check if file already indexed and unchanged
+            -- Check if file already indexed and unchanged (check both relative and ./ forms)
             local existing = db:get_file_info(full_path)
+            if not existing and full_path:find("^%./") then
+                existing = db:get_file_info(full_path:sub(3))
+            elseif not existing then
+                existing = db:get_file_info("./" .. full_path)
+            end
+
             if existing and existing.size == meta.size and existing.mtime == meta.mtime then
                 files_skipped = files_skipped + 1
             else
@@ -1682,10 +1886,12 @@ function Indexer.run(db, root_dir, verbose, allow_all)
     -- Prune deleted / stale files from database
     local files_pruned = 0
     local all_db_paths = db:get_all_filepaths()
+    local norm_root = root_dir:gsub("^%./", "")
     for _, db_path in ipairs(all_db_paths) do
         -- Only prune files that belong under root_dir
-        local belongs = (root_dir == ".") or (db_path == root_dir) or (db_path:sub(1, #root_dir + 1) == (root_dir .. "/"))
-        if belongs and not visited_paths[db_path] then
+        local norm_db = db_path:gsub("^%./", "")
+        local belongs = (norm_root == "" or norm_root == ".") or (norm_db == norm_root) or (norm_db:sub(1, #norm_root + 1) == (norm_root .. "/"))
+        if belongs and not visited_paths[db_path] and not visited_paths[norm_db] and not visited_paths["./" .. norm_db] then
             db:remove_file(db_path)
             files_pruned = files_pruned + 1
         end
@@ -1705,8 +1911,8 @@ function Indexer.run(db, root_dir, verbose, allow_all)
         if files_pruned > 0 then
             print(string.format("  - Pruned (deleted): %d files", files_pruned))
         end
-        print(string.format("  \27[90m- Elapsed: %s total  |  discover %s  |  index+write %s\27[0m",
-                            format_duration(elapsed), format_duration(t_discovered - t_start),
+        print(string.format("  \27[90m- Elapsed: %s total  |  crawler: %s (discover %s)  |  index+write %s\27[0m",
+                            format_duration(elapsed), active_crawler, format_duration(t_discovered - t_start),
                             format_duration(t_indexed)))
     end
 
@@ -1717,6 +1923,7 @@ function Indexer.run(db, root_dir, verbose, allow_all)
         pruned  = files_pruned,
         bytes   = total_bytes,
         time    = elapsed,
+        crawler = active_crawler,
         discover_time = t_discovered - t_start,
         index_time    = t_indexed
     }
@@ -3287,10 +3494,12 @@ Commands:
   clean                  Drop index database and vacuum
   doctor                 Print environment diagnostics (interpreter, sqlite3, script in use)
   pin [n|path]           Remember which sqlite3 library to use (--list, --clear)
+  finder [name]          Configure default file crawler (fd, find, builtin, auto; --list, --clear)
   --test                 Run built-in unit & integration test suite
 
 Options:
   --tui                  Launch interactive full-screen TUI (supports live search, scroll, open)
+  --finder <mode>        File crawler to use: fd, find, builtin, or auto (default: auto)
   --ext <extension>      Filter by file extension (e.g. --ext lua, --ext c)
   --all                  Index all text files (disables source code extension filter)
   --limit <n>            Maximum results to return (default: 20)
@@ -3299,7 +3508,9 @@ Options:
 
 Examples:
   luajit codefind.lua index .
+  luajit codefind.lua index . --finder=fd
   luajit codefind.lua index . --all
+  luajit codefind.lua finder
   luajit codefind.lua search "sqlite3_prepare"
   luajit codefind.lua search "strtok" --tui
   luajit codefind.lua --tui
@@ -3432,6 +3643,7 @@ local function main(args)
     local limit = 20
     local allow_all = false
     local quiet = false
+    local finder_mode = nil
 
     local i = 1
     while i <= #args do
@@ -3442,6 +3654,11 @@ local function main(args)
             allow_all = true
         elseif a == "--quiet" or a == "-q" then
             quiet = true
+        elseif a == "--finder" and i + 1 <= #args then
+            finder_mode = args[i + 1]:lower()
+            i = i + 1
+        elseif a:match("^%-%-finder=(.+)$") then
+            finder_mode = a:match("^%-%-finder=(.+)$"):lower()
         elseif a == "--db" and i + 1 <= #args then
             db_path = args[i + 1]
             i = i + 1
@@ -3541,11 +3758,91 @@ local function main(args)
         io.flush(); db:close(); return
     end
 
+    if command == "finder" then
+        local cands = detect_available_finders()
+        local cur = resolve_finder()
+        local arg1 = cmd_args[1]
+
+        if arg1 == "--clear" then
+            local ok, err = clear_config_key("finder")
+            io.write(ok and "  \27[32m✔\27[0m Finder setting cleared (reverted to auto).\n"
+                           or string.format("  nothing to clear: %s\n", tostring(err)), "\n")
+            io.flush(); db:close(); return
+        end
+        if arg1 == "--list" then
+            io.write("\n  \27[1mAvailable File Crawlers\27[0m:\n")
+            for _, k in ipairs({ "fd", "find", "builtin" }) do
+                local f = cands[k]
+                local mark = (k == cur) and " \27[32m[Active]\27[0m" or ""
+                if f and f.available then
+                    io.write(string.format("    - \27[1m%-8s\27[0m: %s%s\n", k, f.label, mark))
+                else
+                    io.write(string.format("    - \27[90m%-8s: not available%s\27[0m\n", k, mark))
+                end
+            end
+            io.write(string.format("\n  Config path: %s\n\n", config_path()))
+            io.flush(); db:close(); return
+        end
+
+        local target
+        if arg1 then
+            target = arg1:lower()
+            if target ~= "fd" and target ~= "find" and target ~= "builtin" and target ~= "auto" then
+                io.write(string.format("\n  Unknown finder [%s]. Choose: fd, find, builtin, or auto.\n\n", tostring(arg1)))
+                io.flush(); db:close(); return
+            end
+            if target ~= "auto" and (not cands[target] or not cands[target].available) then
+                io.write(string.format("\n  \27[33mWarning\27[0m: Finder '%s' is not currently available on this system.\n", target))
+            end
+        else
+            local list = { "fd", "find", "builtin", "auto" }
+            io.write(string.format("\n  \27[1mConfigure Default File Crawler\27[0m\n"))
+            io.write("  --------------------------------------------------\n")
+            for idx, k in ipairs(list) do
+                local f = cands[k]
+                local desc = (k == "auto") and "Auto-detect (uses fd if present, otherwise builtin) [Recommended]" or (f and f.label or "Not available")
+                local mark = (k == cur) and " \27[32m[Active]\27[0m" or ""
+                io.write(string.format("  [%d] %-8s %s%s\n", idx, k, desc, mark))
+            end
+            io.write("\n  Select default finder [1-4] (or Enter for [1]): ")
+            io.flush()
+            local line = io.read("*l")
+            local n = line and tonumber((tostring(line):gsub("%s+", ""))) or 1
+            if not n or n < 1 or n > #list then
+                io.write("  \27[33m!\27[0m Nothing changed.\n\n")
+                io.flush(); db:close(); return
+            end
+            target = list[n]
+        end
+
+        local ok, err = write_config_key("finder", target)
+        if not ok then
+            io.write(string.format("\n  \27[31mFailed\27[0m: %s\n\n", tostring(err)))
+            io.flush(); db:close(); return
+        end
+        io.write(string.format("\n  \27[32m✔\27[0m Default file crawler set to: %s\n", target))
+        io.write(string.format("  \27[32m✔\27[0m Saved to %s\n\n", config_path()))
+        io.flush(); db:close(); return
+    end
+
     if command == "doctor" then
         io.write("\n  \27[1mCodeFind diagnostics\27[0m\n")
         io.write(table.concat(diagnostics_lines(db_path, cmd_args[1] or ".", allow_all), "\n"), "\n")
 
         print_sqlite_candidates(true)
+
+        local finders = detect_available_finders()
+        local cur_f = resolve_finder()
+        io.write("\n  \27[1m-- file crawlers \27[0m" .. string.rep("-", 40) .. "\n")
+        for _, k in ipairs({ "fd", "find", "builtin" }) do
+            local f = finders[k]
+            local mark = (k == cur_f) and " \27[32m[Active]\27[0m" or ""
+            if f and f.available then
+                io.write(string.format("    - \27[1m%-8s\27[0m: %s%s\n", k, f.label, mark))
+            else
+                io.write(string.format("    - \27[90m%-8s: not available%s\27[0m\n", k, mark))
+            end
+        end
 
         io.write("\n  If 'script' points somewhere other than your checkout, you are\n")
         io.write("  running a stale deployed copy -- re-run: luajit deploy.lua --app codefind\n\n")
@@ -3558,7 +3855,7 @@ local function main(args)
         local target_dir = cmd_args[1] or "."
         if not quiet then print_diagnostics(db_path, target_dir, allow_all) end
         print(string.format("⚡ Indexing directory '%s' into %s (Source mode: %s)...", target_dir, db_path, allow_all and "ALL" or "SOURCE ONLY"))
-        Indexer.run(db, target_dir, true, allow_all)
+        Indexer.run(db, target_dir, true, allow_all, finder_mode)
     elseif command == "search" then
         local query = table.concat(cmd_args, " ")
         if use_tui then
@@ -3646,6 +3943,14 @@ if pcall(debug.getlocal, 4, 1) then
         validate_sqlite_lib = validate_sqlite_lib,
         version_key = version_key,
         describe_candidate = describe_candidate,
+        detect_available_finders = detect_available_finders,
+        resolve_finder = resolve_finder,
+        has_ignored_dir = has_ignored_dir,
+        scan_directory = scan_directory,
+        scan_directory_builtin = scan_directory_builtin,
+        scan_directory_fd = scan_directory_fd,
+        scan_directory_find = scan_directory_find,
+        IGNORED_DIRS = IGNORED_DIRS,
     }
 else
     main(arg)

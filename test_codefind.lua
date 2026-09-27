@@ -34,6 +34,10 @@ local function assert_true(val, msg)
     if not val then error(msg or "Assertion failed: expected true", 2) end
 end
 
+local function assert_false(val, msg)
+    if val then error(msg or "Assertion failed: expected false", 2) end
+end
+
 local function assert_eq(actual, expected, msg)
     if actual ~= expected then
         error(string.format("%s: expected '%s', got '%s'", msg or "Assertion failed", tostring(expected), tostring(actual)), 2)
@@ -641,6 +645,109 @@ TestRunner.describe("8. Streaming Windowed Preview Reader", function()
     end)
 
     os.remove(test_large_file)
+end)
+
+TestRunner.describe("9. Multi-Finder Crawler & Path Normalization", function()
+    TestRunner.it("should detect available file crawlers", function()
+        local finders = codefind.detect_available_finders()
+        assert_true(finders ~= nil, "Finders table should exist")
+        assert_true(finders.builtin ~= nil, "Builtin finder should exist")
+        assert_true(finders.builtin.available == true, "Builtin finder must always be available")
+        if finders.fd then
+            assert_true(type(finders.fd.label) == "string", "fd label should be a string")
+        end
+    end)
+
+    TestRunner.it("should correctly resolve finder mode fallbacks", function()
+        assert_eq(codefind.resolve_finder("builtin"), "builtin", "Explicit builtin should resolve to builtin")
+        assert_eq(codefind.resolve_finder("native"), "builtin", "native alias should resolve to builtin")
+        assert_eq(codefind.resolve_finder("nonexistent_crawler"), "builtin", "Unknown finder should fall back to builtin")
+
+        local auto = codefind.resolve_finder("auto")
+        local finders = codefind.detect_available_finders()
+        if finders.fd and finders.fd.available then
+            assert_eq(auto, "fd", "Auto should prefer fd when available")
+        else
+            assert_eq(auto, "builtin", "Auto should fallback to builtin when fd is not available")
+        end
+    end)
+
+    TestRunner.it("should correctly identify ignored paths across dotag.py directory list", function()
+        assert_true(codefind.has_ignored_dir(".git/objects/abc"), ".git should be ignored")
+        assert_true(codefind.has_ignored_dir("project/build/release/out.o"), "build should be ignored")
+        assert_true(codefind.has_ignored_dir("venv/lib/python3.10/site.py"), "venv should be ignored")
+        assert_true(codefind.has_ignored_dir("vendor/boost/include/any.hpp"), "boost should be ignored")
+        assert_true(codefind.has_ignored_dir("libs/OpenCV/include/opencv.hpp"), "OpenCV should be ignored")
+        assert_true(codefind.has_ignored_dir("deps/3rdParty/lib.c"), "3rdParty should be ignored")
+        assert_true(codefind.has_ignored_dir("node_modules/pkg/index.js"), "node_modules should be ignored")
+
+        assert_false(codefind.has_ignored_dir("src/main.lua"), "Normal source file should not be ignored")
+        assert_false(codefind.has_ignored_dir("lib/math_utils.c"), "Normal source file should not be ignored")
+        assert_false(codefind.has_ignored_dir("core/engine.cpp"), "Normal source file should not be ignored")
+    end)
+
+    TestRunner.it("should produce consistent paths and ignore folders identically across crawlers", function()
+        local tmpdir = make_tmpdir("_test_cf_finders_" .. os.time())
+        make_tmpdir("_test_cf_finders_" .. os.time() .. "/src")
+        make_tmpdir("_test_cf_finders_" .. os.time() .. "/venv")
+        make_tmpdir("_test_cf_finders_" .. os.time() .. "/build")
+
+        local f_ok = io.open(tmpdir .. "/src/app.lua", "w")
+        f_ok:write("print('hello world')\n")
+        f_ok:close()
+
+        local f_venv = io.open(tmpdir .. "/venv/bad.lua", "w")
+        f_venv:write("print('should be ignored')\n")
+        f_venv:close()
+
+        local f_build = io.open(tmpdir .. "/build/temp.lua", "w")
+        f_build:write("print('should be ignored')\n")
+        f_build:close()
+
+        -- 1. Scan with builtin crawler
+        local paths_builtin = {}
+        codefind.scan_directory(tmpdir, function(full_path, fname)
+            paths_builtin[fname] = full_path
+        end, "builtin")
+
+        assert_true(paths_builtin["app.lua"] ~= nil, "app.lua must be discovered by builtin")
+        assert_true(paths_builtin["bad.lua"] == nil, "venv/bad.lua must be ignored by builtin")
+        assert_true(paths_builtin["temp.lua"] == nil, "build/temp.lua must be ignored by builtin")
+
+        -- 2. Scan with fd crawler if available
+        local finders = codefind.detect_available_finders()
+        if finders.fd and finders.fd.available then
+            local paths_fd = {}
+            codefind.scan_directory(tmpdir, function(full_path, fname)
+                paths_fd[fname] = full_path
+            end, "fd")
+
+            assert_true(paths_fd["app.lua"] ~= nil, "app.lua must be discovered by fd")
+            assert_true(paths_fd["bad.lua"] == nil, "venv/bad.lua must be ignored by fd")
+            assert_true(paths_fd["temp.lua"] == nil, "build/temp.lua must be ignored by fd")
+
+            -- 3. Path parity between builtin and fd
+            assert_eq(paths_builtin["app.lua"]:gsub("\\", "/"), paths_fd["app.lua"]:gsub("\\", "/"),
+                      "Paths discovered by builtin and fd should be identical")
+        end
+
+        -- 4. Indexer parity: indexing with builtin then fd should not cause false pruning or re-indexing
+        local parity_db_path = tmpdir .. "/parity.db"
+        local p_db = codefind.Database.open(parity_db_path)
+        local res1 = codefind.Indexer.run(p_db, tmpdir, false, false, "builtin")
+        assert_eq(res1.indexed, 1, "Expected 1 indexed file with builtin crawler")
+        assert_eq(res1.pruned, 0, "No files pruned")
+
+        if finders.fd and finders.fd.available then
+            local res2 = codefind.Indexer.run(p_db, tmpdir, false, false, "fd")
+            assert_eq(res2.indexed, 0, "No re-indexing when switching to fd crawler")
+            assert_eq(res2.pruned, 0, "No false pruning when switching to fd crawler")
+            assert_true(res2.skipped >= 1, "Existing file skipped/unchanged")
+        end
+
+        p_db:close()
+        rm_tmpdir(tmpdir)
+    end)
 end)
 
 db:close()
