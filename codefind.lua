@@ -2985,7 +2985,7 @@ function TUI.run(db, initial_query)
     -- Instant visual echo: update query prompt line in row 2 with zero flicker
     local function render_query_prompt_instant()
         local left_col_border = (focus_pane == "search") and "\27[1;36m" or "\27[90m"
-        local query_prompt = " > " .. query .. "_"
+        local query_prompt = " > " .. query .. "|"
         local ext_tag = active_ext_filter and ("\27[1;35m[." .. active_ext_filter .. "]\27[0m ") or ""
         local matches_badge = ext_tag .. string.format("[%d Matches]", #results)
         local badge_w = visual_len(matches_badge)
@@ -3027,7 +3027,7 @@ function TUI.run(db, initial_query)
         local right_col_border = (focus_pane == "preview") and "\27[1;32m" or "\27[90m"
         local neutral_border = "\27[90m"
 
-        local query_prompt = " > " .. query .. "_"
+        local query_prompt = " > " .. query .. "|"
         local ext_tag = active_ext_filter and ("\27[1;35m[." .. active_ext_filter .. "]\27[0m ") or ""
         local matches_badge = ext_tag .. string.format("[%d Matches]", #results)
         local badge_w = visual_len(matches_badge)
