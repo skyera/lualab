@@ -1878,6 +1878,134 @@ local function build_preview_patterns(query_str)
     return terms, patterns
 end
 
+--------------------------------------------------------------------------------
+-- Stream / Windowed Preview Reader
+--------------------------------------------------------------------------------
+-- Caches a sliding window of lines around the active cursor/match offset on
+-- demand, allowing files of arbitrary size (10k, 50k, 100k+ lines) to be previewed
+-- and searched with minimal memory footprint and zero disk I/O on nearby navigation.
+local function make_preview_reader(window_size, max_cached_files)
+    local win_size = window_size or 1000
+    local max_files = max_cached_files or 16
+    local file_cache = {}
+    local file_order = {}
+    local line_count_cache = {}
+
+    local function get_total_lines(filepath)
+        if not filepath then return 0 end
+        if line_count_cache[filepath] then return line_count_cache[filepath] end
+        local cnt = 0
+        local f = io.open(filepath, "r")
+        if f then
+            for _ in f:lines() do cnt = cnt + 1 end
+            f:close()
+        end
+        line_count_cache[filepath] = cnt
+        return cnt
+    end
+
+    local function touch_lru(filepath)
+        for i, path in ipairs(file_order) do
+            if path == filepath then
+                table.remove(file_order, i)
+                break
+            end
+        end
+        table.insert(file_order, filepath)
+        if #file_order > max_files then
+            local oldest = table.remove(file_order, 1)
+            file_cache[oldest] = nil
+        end
+    end
+
+    local function load_window(filepath, target_start)
+        local f = io.open(filepath, "r")
+        local loaded = {}
+        if f then
+            local curr = 0
+            for l in f:lines() do
+                curr = curr + 1
+                if curr >= target_start then
+                    table.insert(loaded, l)
+                    if #loaded >= win_size then break end
+                end
+            end
+            f:close()
+        end
+        return loaded
+    end
+
+    local function get_line(filepath, line_num)
+        if not filepath or not line_num or line_num < 1 then return "" end
+        local total = get_total_lines(filepath)
+        if line_num > total then return "" end
+
+        local entry = file_cache[filepath]
+        if not entry then
+            local start_ln = math.max(1, line_num - math.floor(win_size / 2))
+            local lines = load_window(filepath, start_ln)
+            entry = {
+                window_start = start_ln,
+                lines = lines
+            }
+            file_cache[filepath] = entry
+            touch_lru(filepath)
+        else
+            touch_lru(filepath)
+            local offset = line_num - entry.window_start + 1
+            if offset < 1 or offset > #entry.lines then
+                local start_ln = math.max(1, line_num - math.floor(win_size / 2))
+                entry.window_start = start_ln
+                entry.lines = load_window(filepath, start_ln)
+            end
+        end
+
+        local offset = line_num - entry.window_start + 1
+        if offset >= 1 and offset <= #entry.lines then
+            return entry.lines[offset] or ""
+        end
+        return ""
+    end
+
+    local function find_matches(filepath, terms)
+        local match_lines = {}
+        local match_list = {}
+        local total_lines = 0
+
+        if not filepath then return match_lines, match_list, 0 end
+        local f = io.open(filepath, "r")
+        if f then
+            local has_terms = terms and #terms > 0
+            for line in f:lines() do
+                total_lines = total_lines + 1
+                if has_terms then
+                    local l_lower = line:lower()
+                    for _, term in ipairs(terms) do
+                        if l_lower:find(term, 1, true) then
+                            match_lines[total_lines] = true
+                            table.insert(match_list, total_lines)
+                            break
+                        end
+                    end
+                end
+            end
+            f:close()
+            line_count_cache[filepath] = total_lines
+        else
+            total_lines = get_total_lines(filepath)
+        end
+
+        return match_lines, match_list, total_lines
+    end
+
+    return {
+        get_line = get_line,
+        get_total_lines = get_total_lines,
+        find_matches = find_matches,
+        file_cache = file_cache,
+    }
+end
+
 local TUI = {}
 
 function TUI.run(db, initial_query)
@@ -2151,7 +2279,7 @@ function TUI.run(db, initial_query)
     local status_bar_time = 0
 
     local current_preview_file = nil
-    local current_preview_lines = {}
+    local current_preview_total_lines = 0
     local current_match_lines = {}
     local current_match_list = {}
     local current_match_pos = 1
@@ -2159,46 +2287,11 @@ function TUI.run(db, initial_query)
     local needs_redraw = true
     local last_searched_query = nil
 
-    -- LRU File lines cache to avoid re-reading files on disk
-    local preview_file_cache = {}
-    local preview_file_order = {}
+    local preview_reader = make_preview_reader(1000, 16)
     local preview_match_cache = {}
 
-    local line_count_cache = {}
     local function get_file_line_count(filepath)
-        if line_count_cache[filepath] then return line_count_cache[filepath] end
-        local cnt = 0
-        local f = io.open(filepath, "r")
-        if f then
-            for _ in f:lines() do cnt = cnt + 1 end
-            f:close()
-        end
-        line_count_cache[filepath] = cnt
-        return cnt
-    end
-
-    local function get_cached_file_lines(filepath)
-        if preview_file_cache[filepath] then
-            return preview_file_cache[filepath]
-        end
-        local lines = {}
-        local f = io.open(filepath, "r")
-        if f then
-            for line in f:lines() do
-                table.insert(lines, line)
-                if #lines > 2000 then break end
-            end
-            f:close()
-        end
-        -- Maintain at most 16 cached files
-        if #preview_file_order >= 16 then
-            local oldest = table.remove(preview_file_order, 1)
-            preview_file_cache[oldest] = nil
-            preview_match_cache[oldest] = nil
-        end
-        table.insert(preview_file_order, filepath)
-        preview_file_cache[filepath] = lines
-        return lines
+        return preview_reader.get_total_lines(filepath)
     end
 
     local function set_status(msg)
@@ -2211,7 +2304,6 @@ function TUI.run(db, initial_query)
         if current_preview_file == filepath and current_preview_query == query_str then return end
         current_preview_file = filepath
         current_preview_query = query_str
-        current_preview_lines = get_cached_file_lines(filepath)
 
         local cache_key = query_str or ""
         local cached_match = preview_match_cache[filepath] and preview_match_cache[filepath][cache_key]
@@ -2221,6 +2313,7 @@ function TUI.run(db, initial_query)
             current_match_pos = 1
             preview_scroll_offset = cached_match.scroll_offset
             current_preview_patterns = cached_match.patterns or {}
+            current_preview_total_lines = cached_match.total_lines or preview_reader.get_total_lines(filepath)
             return
         end
 
@@ -2232,23 +2325,18 @@ function TUI.run(db, initial_query)
         local terms
         terms, current_preview_patterns = build_preview_patterns(query_str)
 
-        if #terms > 0 then
-            for idx, line in ipairs(current_preview_lines) do
-                local l_lower = line:lower()
-                for _, term in ipairs(terms) do
-                    if l_lower:find(term, 1, true) then
-                        current_match_lines[idx] = true
-                        table.insert(current_match_list, idx)
-                        break
-                    end
-                end
-            end
-        end
+        local m_lines, m_list, tot_lines = preview_reader.find_matches(filepath, terms)
+        current_match_lines = m_lines
+        current_match_list = m_list
+        current_preview_total_lines = tot_lines
 
         if #current_match_list > 0 then
             preview_scroll_offset = math.max(0, current_match_list[1] - 4)
             current_match_pos = 1
         end
+
+        -- Warm up preview window around initial preview_scroll_offset
+        preview_reader.get_line(filepath, preview_scroll_offset + 1)
 
         if not preview_match_cache[filepath] then
             preview_match_cache[filepath] = {}
@@ -2257,7 +2345,8 @@ function TUI.run(db, initial_query)
             match_lines = current_match_lines,
             match_list = current_match_list,
             scroll_offset = preview_scroll_offset,
-            patterns = current_preview_patterns
+            patterns = current_preview_patterns,
+            total_lines = current_preview_total_lines,
         }
     end
 
@@ -2284,7 +2373,7 @@ function TUI.run(db, initial_query)
             error_msg = nil
             current_preview_file = nil
             current_preview_query = nil
-            current_preview_lines = {}
+            current_preview_total_lines = 0
             current_match_lines = {}
             current_match_list = {}
             selected_idx = 1
@@ -2398,6 +2487,12 @@ function TUI.run(db, initial_query)
             list_scroll_offset = selected_idx - list_height
         end
         list_scroll_offset = math.max(0, math.min(list_scroll_offset, max_scroll))
+
+        if current_preview_total_lines > 0 then
+            preview_scroll_offset = math.max(0, math.min(current_preview_total_lines - 1, preview_scroll_offset))
+        else
+            preview_scroll_offset = 0
+        end
     end
 
     local function update_layout()
@@ -2420,10 +2515,7 @@ function TUI.run(db, initial_query)
         if #results > 0 and results[selected_idx] then
             disable_raw()
             local chosen = results[selected_idx].filepath
-            local first_ln = 1
-            for ln = 1, #current_preview_lines do
-                if current_match_lines[ln] then first_ln = ln; break end
-            end
+            local first_ln = current_match_list[1] or 1
             local editor = os.getenv("EDITOR")
             if not editor or editor == "" then
                 if not is_windows and os.execute("which nvim >/dev/null 2>&1") == 0 then
@@ -2695,7 +2787,7 @@ function TUI.run(db, initial_query)
             list_thumb_pos = 1 + math.floor((list_scroll_offset / max_offset) * (list_height - 1))
         end
 
-        local prev_total = #current_preview_lines
+        local prev_total = current_preview_total_lines
         local prev_thumb_pos = 1
         if prev_total > list_height then
             local max_prev_offset = math.max(1, prev_total - list_height)
@@ -2726,15 +2818,12 @@ function TUI.run(db, initial_query)
 
         local right_head_title = ""
         if current_preview_file then
-            local first_ln = 1
-            for ln = 1, #current_preview_lines do
-                if current_match_lines[ln] then first_ln = ln; break end
-            end
+            local first_ln = current_match_list[1] or 1
             local match_badge = ""
             if #current_match_list > 0 then
                 match_badge = string.format(" \27[1;33m[Match %d/%d]\27[0m", current_match_pos, #current_match_list)
             end
-            local line_badge = string.format(" \27[90m[Line %d/%d]\27[0m", preview_scroll_offset + 1, #current_preview_lines)
+            local line_badge = string.format(" \27[90m[Line %d/%d]\27[0m", preview_scroll_offset + 1, current_preview_total_lines)
             right_head_title = string.format(" 📄 %s:%d%s%s", sanitize_terminal_text(get_filename(current_preview_file)), first_ln, match_badge, line_badge)
         else
             right_head_title = " 📄 Preview: (No file selected)"
@@ -2764,10 +2853,10 @@ function TUI.run(db, initial_query)
 
         local right_cell = ""
         local r_text_w = right_col_w - 1
-        if current_preview_file and #current_preview_lines > 0 then
+        if current_preview_file and current_preview_total_lines > 0 then
             local file_line_num = preview_scroll_offset + i
-            if file_line_num <= #current_preview_lines then
-                local line_content = sanitize_terminal_text(current_preview_lines[file_line_num] or "")
+            if file_line_num <= current_preview_total_lines then
+                local line_content = sanitize_terminal_text(preview_reader.get_line(current_preview_file, file_line_num) or "")
                 local is_hit = current_match_lines[file_line_num]
 
                 local max_code_w = math.max(0, r_text_w - 9)
@@ -2947,7 +3036,7 @@ function TUI.run(db, initial_query)
                 end
             elseif key == "DOWN" or key == "CTRL_N" then
                 if focus_pane == "preview" then
-                    if preview_scroll_offset + 1 < #current_preview_lines then
+                    if preview_scroll_offset + 1 < current_preview_total_lines then
                         preview_scroll_offset = preview_scroll_offset + 1
                         needs_redraw = true
                     end
@@ -2970,7 +3059,7 @@ function TUI.run(db, initial_query)
                 needs_redraw = true
             elseif key == "PAGE_DOWN" or (vim_mode == "NORMAL" and key == "CTRL_D") then
                 if focus_pane == "preview" then
-                    preview_scroll_offset = math.min(#current_preview_lines, preview_scroll_offset + 10)
+                    preview_scroll_offset = math.min(math.max(0, current_preview_total_lines - 1), preview_scroll_offset + 10)
                 else
                     selected_idx = math.min(#results, selected_idx + 10)
                     if #results > 0 and results[selected_idx] then
@@ -3051,7 +3140,7 @@ function TUI.run(db, initial_query)
                     set_status("INSERT mode")
                 elseif key == "j" then
                     if focus_pane == "preview" then
-                        if preview_scroll_offset + 1 < #current_preview_lines then
+                        if preview_scroll_offset + 1 < current_preview_total_lines then
                             preview_scroll_offset = preview_scroll_offset + 1
                             needs_redraw = true
                         end
@@ -3092,7 +3181,7 @@ function TUI.run(db, initial_query)
                     needs_redraw = true
                 elseif key == "G" then
                     if focus_pane == "preview" then
-                        preview_scroll_offset = math.max(0, #current_preview_lines - 5)
+                        preview_scroll_offset = math.max(0, current_preview_total_lines - list_height)
                     else
                         selected_idx = math.max(1, #results)
                         if #results > 0 and results[selected_idx] then
@@ -3124,10 +3213,7 @@ function TUI.run(db, initial_query)
                     -- Yank (copy) filepath:line to clipboard
                     if #results > 0 and results[selected_idx] then
                         local chosen = results[selected_idx].filepath
-                        local first_ln = 1
-                        for ln = 1, #current_preview_lines do
-                            if current_match_lines[ln] then first_ln = ln; break end
-                        end
+                        local first_ln = current_match_list[1] or 1
                         local yank_text = string.format("%s:%d", chosen, first_ln)
                         if is_windows then
                             local p = io.popen("clip", "w")
@@ -3283,13 +3369,46 @@ local function run_self_tests()
     assert(stats.total_files == 2, "Expected 2 files remaining in stats")
     print("\27[32m✔ PASSED\27[0m")
 
+    -- Test 7: Windowed preview reader with large file (> 2000 lines)
+    io.write("Test 7: Windowed preview reader with files > 2000 lines... ")
+    local reader = make_preview_reader(200, 4)
+    local sample_path = "test_large_preview.tmp"
+    local tf = io.open(sample_path, "w")
+    for i = 1, 3500 do
+        if i == 2500 then
+            tf:write("local special_marker_at_2500 = true\n")
+        else
+            tf:write(string.format("line %d = %d\n", i, i * 2))
+        end
+    end
+    tf:close()
+
+    local tot = reader.get_total_lines(sample_path)
+    assert(tot == 3500, "Expected total lines to be 3500, got " .. tostring(tot))
+    local l1 = reader.get_line(sample_path, 1)
+    assert(l1 == "line 1 = 2", "Expected line 1 content")
+    local l2500 = reader.get_line(sample_path, 2500)
+    assert(l2500 == "local special_marker_at_2500 = true", "Expected line 2500 content")
+    local l3500 = reader.get_line(sample_path, 3500)
+    assert(l3500 == "line 3500 = 7000", "Expected line 3500 content")
+    local out_bound = reader.get_line(sample_path, 3501)
+    assert(out_bound == "", "Expected empty string for out-of-bounds line")
+
+    local m_lines, m_list, m_tot = reader.find_matches(sample_path, { "special_marker_at_2500" })
+    assert(#m_list == 1 and m_list[1] == 2500, "Expected match at line 2500 beyond old 2000 limit")
+    assert(m_lines[2500] == true, "Expected match_lines[2500] to be true")
+    assert(m_tot == 3500, "Expected total lines to match 3500")
+
+    os.remove(sample_path)
+    print("\27[32m✔ PASSED\27[0m")
+
     db:close()
     os.remove(test_db_path)
     os.remove(test_db_path .. "-wal")
     os.remove(test_db_path .. "-shm")
 
     print("================================================================================")
-    print("\27[1;32mALL CODEFIND TESTS PASSED SUCCESSFULLY! (6/6)\27[0m")
+    print("\27[1;32mALL CODEFIND TESTS PASSED SUCCESSFULLY! (7/7)\27[0m")
     print("================================================================================")
 end
 
@@ -3514,6 +3633,7 @@ if pcall(debug.getlocal, 4, 1) then
         Database = Database,
         Indexer  = Indexer,
         TUI      = TUI,
+        make_preview_reader = make_preview_reader,
         sanitize_terminal_text = sanitize_terminal_text,
         -- exposed for tests: console-independent selection logic
         choose_candidate = choose_candidate,

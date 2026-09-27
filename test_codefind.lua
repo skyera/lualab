@@ -40,11 +40,33 @@ local function assert_eq(actual, expected, msg)
     end
 end
 
+local is_win = package.config:sub(1,1) == '\\'
+local null_dev = is_win and "NUL" or "/dev/null"
+local tmp_base = is_win and (os.getenv("TEMP") or "C:\\temp"):gsub("\\", "/") or "/tmp"
+
+local function make_tmpdir(name)
+    local p = tmp_base .. "/" .. name
+    if is_win then
+        os.execute('if not exist "' .. p:gsub("/", "\\") .. '" mkdir "' .. p:gsub("/", "\\") .. '" > NUL 2>&1')
+    else
+        os.execute('mkdir -p "' .. p .. '"')
+    end
+    return p
+end
+
+local function rm_tmpdir(dir)
+    if is_win then
+        os.execute('rmdir /s /q "' .. dir:gsub("/", "\\") .. '" > NUL 2>&1')
+    else
+        os.execute('rm -rf "' .. dir .. '"')
+    end
+end
+
 print("================================================================================")
 print("  Running Integration & Unit Test Suite for codefind.lua")
 print("================================================================================")
 
-local test_db_path = "/tmp/_test_codefind_suite_" .. os.time() .. ".db"
+local test_db_path = tmp_base .. "/_test_codefind_suite_" .. os.time() .. ".db"
 os.remove(test_db_path)
 os.remove(test_db_path .. "-wal")
 os.remove(test_db_path .. "-shm")
@@ -135,8 +157,7 @@ TestRunner.describe("4. Incremental Updates and Deletion", function()
     end)
 
     TestRunner.it("should prune deleted files during incremental index", function()
-        local tmpdir = "/tmp/_test_cf_prune_" .. os.time()
-        os.execute("mkdir -p " .. tmpdir)
+        local tmpdir = make_tmpdir("_test_cf_prune_" .. os.time())
         local f1 = io.open(tmpdir .. "/keep.c", "w")
         f1:write("This file is kept permanently.\n")
         f1:close()
@@ -164,12 +185,11 @@ TestRunner.describe("4. Incremental Updates and Deletion", function()
         assert_eq(#search_del, 0, "remove.c should no longer match")
 
         p_db:close()
-        os.execute("rm -rf " .. tmpdir)
+        rm_tmpdir(tmpdir)
     end)
 
     TestRunner.it("should skip non-source files by default and index them with allow_all", function()
-        local tmpdir = "/tmp/_test_cf_source_filter_" .. os.time()
-        os.execute("mkdir -p " .. tmpdir)
+        local tmpdir = make_tmpdir("_test_cf_source_filter_" .. os.time())
         local f_src = io.open(tmpdir .. "/logic.py", "w")
         f_src:write("def calculate_tax(): return 42\n")
         f_src:close()
@@ -200,12 +220,15 @@ TestRunner.describe("4. Incremental Updates and Deletion", function()
         assert_eq(#res_log2, 1, "app.log should be found with allow_all")
 
         s_db:close()
-        os.execute("rm -rf " .. tmpdir)
+        rm_tmpdir(tmpdir)
     end)
 
     TestRunner.it("should ignore directories specified in dotag.py (e.g., venv, boost, OpenCV)", function()
-        local tmpdir = "/tmp/_test_cf_dotag_ignore_" .. os.time()
-        os.execute("mkdir -p " .. tmpdir .. "/src " .. tmpdir .. "/venv " .. tmpdir .. "/boost " .. tmpdir .. "/__pycache__")
+        local tmpdir = make_tmpdir("_test_cf_dotag_ignore_" .. os.time())
+        make_tmpdir("_test_cf_dotag_ignore_" .. os.time() .. "/src")
+        make_tmpdir("_test_cf_dotag_ignore_" .. os.time() .. "/venv")
+        make_tmpdir("_test_cf_dotag_ignore_" .. os.time() .. "/boost")
+        make_tmpdir("_test_cf_dotag_ignore_" .. os.time() .. "/__pycache__")
         local f_src = io.open(tmpdir .. "/src/kernel.cu", "w")
         f_src:write("__global__ void saxpy() {}\n")
         f_src:close()
@@ -236,35 +259,34 @@ TestRunner.describe("4. Incremental Updates and Deletion", function()
         assert_eq(#res_venv, 0, "venv/activate.py should be excluded")
 
         d_db:close()
-        os.execute("rm -rf " .. tmpdir)
+        rm_tmpdir(tmpdir)
     end)
 end)
 
 TestRunner.describe("5. CLI Invocation & Options", function()
     TestRunner.it("should execute codefind.lua --help without error", function()
-        local ret = os.execute("luajit codefind.lua --help > /dev/null 2>&1")
+        local ret = os.execute(string.format("luajit codefind.lua --help > %s 2>&1", null_dev))
         assert_true(ret == 0 or ret == true, "Help execution failed")
     end)
 
     TestRunner.it("should execute codefind.lua --test without error", function()
-        local ret = os.execute("luajit codefind.lua --test > /dev/null 2>&1")
+        local ret = os.execute(string.format("luajit codefind.lua --test > %s 2>&1", null_dev))
         assert_true(ret == 0 or ret == true, "Self-test execution failed")
     end)
 
     TestRunner.it("should index and search a fixture directory via CLI", function()
-        local tmpdir = "/tmp/_test_cf_dir_" .. os.time()
-        os.execute("mkdir -p " .. tmpdir)
+        local tmpdir = make_tmpdir("_test_cf_dir_" .. os.time())
         local f = io.open(tmpdir .. "/sample.lua", "w")
         f:write("The quick brown fox jumps over the lazy dog\n")
         f:close()
 
         local custom_db = tmpdir .. "/custom.db"
-        local idx_cmd = string.format("luajit codefind.lua index %s --db %s > /dev/null 2>&1", tmpdir, custom_db)
+        local idx_cmd = string.format("luajit codefind.lua index %s --db %s > %s 2>&1", tmpdir, custom_db, null_dev)
         local ret_idx = os.execute(idx_cmd)
         assert_true(ret_idx == 0 or ret_idx == true, "CLI indexing failed")
 
-        local search_out = "/tmp/_test_cf_search.txt"
-        local search_cmd = string.format("luajit codefind.lua search 'lazy dog' --db %s > %s 2>&1", custom_db, search_out)
+        local search_out = tmpdir .. "/_test_cf_search.txt"
+        local search_cmd = string.format("luajit codefind.lua search \"lazy dog\" --db %s > %s 2>&1", custom_db, search_out)
         local ret_search = os.execute(search_cmd)
         assert_true(ret_search == 0 or ret_search == true, "CLI search failed")
 
@@ -275,14 +297,14 @@ TestRunner.describe("5. CLI Invocation & Options", function()
 
         assert_true(content:find("sample.lua") ~= nil, "CLI search did not output matching filename")
 
-        os.execute("rm -rf " .. tmpdir)
+        rm_tmpdir(tmpdir)
     end)
 
     TestRunner.it("should accept --tui flag gracefully in non-interactive environment", function()
-        local ret_tui1 = os.execute("luajit codefind.lua --tui < /dev/null > /dev/null 2>&1")
+        local ret_tui1 = os.execute(string.format("luajit codefind.lua --tui < %s > %s 2>&1", null_dev, null_dev))
         assert_true(ret_tui1 == 0 or ret_tui1 == true, "--tui standalone failed")
 
-        local ret_tui2 = os.execute("luajit codefind.lua search 'fox' --tui < /dev/null > /dev/null 2>&1")
+        local ret_tui2 = os.execute(string.format("luajit codefind.lua search 'fox' --tui < %s > %s 2>&1", null_dev, null_dev))
         assert_true(ret_tui2 == 0 or ret_tui2 == true, "search --tui failed")
     end)
 end)
@@ -549,6 +571,76 @@ TestRunner.describe("7. SQLite3 Library Discovery, Validation and Selection", fu
         assert_true(d:find("UNUSABLE"), "Description must mark it unusable")
         assert_true(d:find("%+%d more"), "Long symbol lists must be truncated")
     end)
+end)
+
+TestRunner.describe("8. Streaming Windowed Preview Reader", function()
+    local test_large_file = "test_large_windowed.tmp"
+    local tf = io.open(test_large_file, "w")
+    for i = 1, 5000 do
+        if i == 45 then
+            tf:write("target_identifier_at_45 = 100\n")
+        elseif i == 2500 then
+            tf:write("target_identifier_at_2500 = 200\n")
+        elseif i == 4800 then
+            tf:write("target_identifier_at_4800 = 300\n")
+        else
+            tf:write(string.format("local line_%d = %d\n", i, i))
+        end
+    end
+    tf:close()
+
+    TestRunner.it("should read lines from arbitrary offsets in files larger than 2,000 lines", function()
+        local reader = codefind.make_preview_reader(500, 4)
+        assert_eq(reader.get_total_lines(test_large_file), 5000, "Total lines should be 5000")
+        assert_eq(reader.get_line(test_large_file, 1), "local line_1 = 1", "Line 1 should match")
+        assert_eq(reader.get_line(test_large_file, 45), "target_identifier_at_45 = 100", "Line 45 should match")
+        assert_eq(reader.get_line(test_large_file, 2000), "local line_2000 = 2000", "Line 2000 should match")
+        assert_eq(reader.get_line(test_large_file, 2001), "local line_2001 = 2001", "Line 2001 (beyond old limit) should match")
+        assert_eq(reader.get_line(test_large_file, 2500), "target_identifier_at_2500 = 200", "Line 2500 should match")
+        assert_eq(reader.get_line(test_large_file, 4800), "target_identifier_at_4800 = 300", "Line 4800 should match")
+        assert_eq(reader.get_line(test_large_file, 5000), "local line_5000 = 5000", "Line 5000 should match")
+    end)
+
+    TestRunner.it("should slide the window on demand without reloading adjacent lines", function()
+        local reader = codefind.make_preview_reader(200, 4)
+        local l1 = reader.get_line(test_large_file, 2500)
+        assert_eq(l1, "target_identifier_at_2500 = 200")
+        local entry = reader.file_cache[test_large_file]
+        assert_true(entry ~= nil, "File should be cached")
+        local initial_start = entry.window_start
+
+        -- Nearby line should not shift the window
+        local l2 = reader.get_line(test_large_file, 2505)
+        assert_eq(l2, "local line_2505 = 2505")
+        assert_eq(entry.window_start, initial_start, "Window should not slide for nearby line")
+
+        -- Line far away should slide the window
+        local l3 = reader.get_line(test_large_file, 4800)
+        assert_eq(l3, "target_identifier_at_4800 = 300")
+        assert_true(entry.window_start > initial_start, "Window should have slid forward")
+    end)
+
+    TestRunner.it("should stream through files to find query matches at line > 2,000", function()
+        local reader = codefind.make_preview_reader(500, 4)
+        local m_lines, m_list, tot = reader.find_matches(test_large_file, { "target_identifier" })
+        assert_eq(tot, 5000, "Total lines returned should be 5000")
+        assert_eq(#m_list, 3, "Expected 3 matches")
+        assert_eq(m_list[1], 45, "First match at line 45")
+        assert_eq(m_list[2], 2500, "Second match at line 2500 (> 2000)")
+        assert_eq(m_list[3], 4800, "Third match at line 4800 (> 2000)")
+        assert_true(m_lines[45] and m_lines[2500] and m_lines[4800], "Match lines map should be populated")
+    end)
+
+    TestRunner.it("should safely handle boundary inputs and nonexistent files", function()
+        local reader = codefind.make_preview_reader(500, 4)
+        assert_eq(reader.get_line(test_large_file, 0), "", "Line 0 should return empty string")
+        assert_eq(reader.get_line(test_large_file, -5), "", "Negative line should return empty string")
+        assert_eq(reader.get_line(test_large_file, 5001), "", "Out-of-bounds line should return empty string")
+        assert_eq(reader.get_line("nonexistent_file_xyz.txt", 1), "", "Nonexistent file should return empty string")
+        assert_eq(reader.get_total_lines("nonexistent_file_xyz.txt"), 0, "Nonexistent file total should be 0")
+    end)
+
+    os.remove(test_large_file)
 end)
 
 db:close()
