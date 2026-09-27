@@ -863,7 +863,9 @@ local function running_script_path()
     return resolve_path(s)
 end
 
-local function diagnostics_lines(db_path, target_dir, allow_all)
+local resolve_finder, detect_available_finders
+
+local function diagnostics_lines(db_path, target_dir, allow_all, finder_mode)
     local jit = rawget(_G, "jit")
     local interp = jit and string.format("%s (%s)", jit.version, jit.arch)
                         or "plain Lua -- NO JIT/FFI, cannot run this tool"
@@ -873,11 +875,24 @@ local function diagnostics_lines(db_path, target_dir, allow_all)
     db_desc = db_desc .. string.format("  (%s%s)", size and "exists, " .. human_size(size) or "new",
                                        (db_path:match("%.db$")) and "" or "  [UNEXPECTED EXT]")
 
+    local active_f = resolve_finder(finder_mode)
+    local f_label
+    if active_f == "fd" then
+        f_label = "fd (fast multi-threaded)"
+    elseif active_f == "builtin" then
+        f_label = "builtin (native LuaJIT FFI)"
+    elseif active_f == "find" then
+        f_label = "find (POSIX find)"
+    else
+        f_label = active_f
+    end
+
     local L = {}
     local function add(k, v) L[#L + 1] = string.format("  %-11s %s", k, v) end
     add("interpreter", interp)
     add("platform", string.format("%s / %s   ffi.os=%s", is_windows and "Windows" or ffi.os, ffi.arch, ffi.os))
     add("sqlite3", string.format("v%s  %s", sqlite_version(), tostring(sqlite_lib_name)))
+    add("crawler", f_label)
     add("tty", is_stdout_tty() and "yes" or "no  (output redirected or buffered)")
     add("script", running_script_path())
     add("db", db_desc)
@@ -928,13 +943,13 @@ local function print_sqlite_candidates(validate)
     end
 end
 
-local function print_diagnostics(db_path, target_dir, allow_all)
+local function print_diagnostics(db_path, target_dir, allow_all, finder_mode)
     -- The library list comes first: which sqlite3 is in play is the fact that
     -- most often explains a missing, wrong or shadowed library, so it should not
     -- sit buried underneath the environment block.
     print_sqlite_candidates()
     io.write("\n  \27[1m-- environment \27[0m" .. string.rep("-", 46) .. "\n")
-    io.write(table.concat(diagnostics_lines(db_path, target_dir, allow_all), "\n"), "\n")
+    io.write(table.concat(diagnostics_lines(db_path, target_dir, allow_all, finder_mode), "\n"), "\n")
     io.flush()
 end
 
@@ -1499,7 +1514,7 @@ local function has_ignored_dir(path)
     return false
 end
 
-local function detect_available_finders()
+detect_available_finders = function()
     local finders = {
         builtin = {
             name = "builtin",
@@ -1566,7 +1581,7 @@ local function detect_available_finders()
     return finders
 end
 
-local function resolve_finder(requested_mode)
+resolve_finder = function(requested_mode)
     local mode = requested_mode
     if not mode or #mode == 0 then
         mode = os.getenv("CODEFIND_FINDER")
@@ -1775,7 +1790,7 @@ function Indexer.run(db, root_dir, verbose, allow_all, finder_mode)
 
     local total_files = #candidate_files
     if verbose then
-        io.write(string.format("\r\27[2K🔍 Found %d candidate source files to index\n", total_files))
+        io.write(string.format("\r\27[2K🔍 Found %d candidate source files to index (crawler: %s)\n", total_files, active_crawler))
         io.flush()
     end
 
@@ -3853,8 +3868,12 @@ local function main(args)
 
     if command == "index" then
         local target_dir = cmd_args[1] or "."
-        if not quiet then print_diagnostics(db_path, target_dir, allow_all) end
-        print(string.format("⚡ Indexing directory '%s' into %s (Source mode: %s)...", target_dir, db_path, allow_all and "ALL" or "SOURCE ONLY"))
+        local active_f = resolve_finder(finder_mode)
+        if not quiet then print_diagnostics(db_path, target_dir, allow_all, finder_mode) end
+        print(string.format("⚡ Indexing directory '%s' into %s (Source mode: %s, Crawler: %s)...",
+                            target_dir, db_path,
+                            allow_all and "ALL" or "SOURCE ONLY",
+                            active_f))
         Indexer.run(db, target_dir, true, allow_all, finder_mode)
     elseif command == "search" then
         local query = table.concat(cmd_args, " ")
