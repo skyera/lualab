@@ -1281,7 +1281,8 @@ end
 
 function Database:search(query_str, options)
     options = options or {}
-    local limit = options.limit or 50
+    local limit = options.limit
+    local limit_clause = (limit and limit > 0) and string.format(" LIMIT %d", limit) or ""
     local ext_filter = options.extension
 
     -- Sanitize/escape query string for FTS5
@@ -1310,9 +1311,8 @@ function Database:search(query_str, options)
             FROM code_idx c
             JOIN files f ON c.filepath = f.filepath
             WHERE code_idx MATCH ? AND f.extension = '%s'
-            ORDER BY rank ASC
-            LIMIT %d;
-        ]=], ext_filter:gsub("'", "''"), limit)
+            ORDER BY rank ASC%s;
+        ]=], ext_filter:gsub("'", "''"), limit_clause)
     else
         sql = string.format([=[
             SELECT 
@@ -1322,9 +1322,8 @@ function Database:search(query_str, options)
                 bm25(code_idx) AS rank
             FROM code_idx
             WHERE code_idx MATCH ?
-            ORDER BY rank ASC
-            LIMIT %d;
-        ]=], limit)
+            ORDER BY rank ASC%s;
+        ]=], limit_clause)
     end
 
     local stmt_p = ffi.new("sqlite3_stmt*[1]")
@@ -1333,8 +1332,8 @@ function Database:search(query_str, options)
         -- Try direct match without prefix wildcard if syntax error
         local fallback_sql = string.format([=[
             SELECT filepath, filename, snippet(code_idx, 2, '[[HL]]', '[[/HL]]', '...', 16), bm25(code_idx)
-            FROM code_idx WHERE code_idx MATCH ? ORDER BY bm25(code_idx) ASC LIMIT %d;
-        ]=], limit)
+            FROM code_idx WHERE code_idx MATCH ? ORDER BY bm25(code_idx) ASC%s;
+        ]=], limit_clause)
         if sqlite.sqlite3_prepare_v2(self.db, fallback_sql, #fallback_sql, stmt_p, nil) ~= SQLITE_OK then
             return {}, "Invalid search query syntax: " .. query_str
         end
@@ -1374,7 +1373,7 @@ function Database:get_stats()
         sqlite.sqlite3_finalize(stmt_p[0])
     end
 
-    local sql_ext = "SELECT extension, COUNT(*) FROM files GROUP BY extension ORDER BY COUNT(*) DESC LIMIT 10;"
+    local sql_ext = "SELECT extension, COUNT(*) FROM files GROUP BY extension ORDER BY COUNT(*) DESC;"
     if sqlite.sqlite3_prepare_v2(self.db, sql_ext, #sql_ext, stmt_p, nil) == SQLITE_OK then
         while sqlite.sqlite3_step(stmt_p[0]) == SQLITE_ROW do
             local ext = ffi.string(sqlite.sqlite3_column_text(stmt_p[0], 0))
@@ -2230,7 +2229,7 @@ end
 
 local TUI = {}
 
-function TUI.run(db, initial_query)
+function TUI.run(db, initial_query, tui_limit)
     -- Check if running in an interactive terminal
     if not is_windows then
         if ffi.C.isatty(0) == 0 then
@@ -2604,7 +2603,7 @@ function TUI.run(db, initial_query)
             return
         end
 
-        local search_opts = { limit = 100 }
+        local search_opts = { limit = (tui_limit and tui_limit > 0) and tui_limit or nil }
         if ext_filt then search_opts.extension = ext_filt end
 
         local res, err = db:search(#fts_q > 0 and fts_q or "*", search_opts)
@@ -2934,6 +2933,12 @@ function TUI.run(db, initial_query)
             local display_path = sanitize_terminal_text(full_path)
             local badge_plain = get_file_badge_plain(full_path)
             local badge_w = #badge_plain
+
+            local num_w = math.max(2, #tostring(#results))
+            local num_plain = string.format("%" .. num_w .. "d. ", item_idx)
+            local num_w_total = #num_plain
+            local num_col = is_sel and num_plain or ("\27[90m" .. num_plain .. "\27[0m")
+
             local line_cnt = get_file_line_count(full_path)
             local cnt_tag = ""
             if text_w >= 45 and line_cnt > 0 then
@@ -2945,7 +2950,7 @@ function TUI.run(db, initial_query)
             end
             local cnt_w = #cnt_tag
 
-            local max_p_len = math.max(4, text_w - 2 - badge_w - cnt_w)
+            local max_p_len = math.max(4, text_w - 2 - num_w_total - badge_w - cnt_w)
             local clean_path = display_path
             if visual_len(clean_path) > max_p_len then
                 local fname = get_filename(display_path)
@@ -2962,16 +2967,16 @@ function TUI.run(db, initial_query)
                 end
             end
 
-            local avail_space = math.max(0, text_w - 2 - badge_w - visual_len(clean_path) - cnt_w)
+            local avail_space = math.max(0, text_w - 2 - num_w_total - badge_w - visual_len(clean_path) - cnt_w)
             local pad_spaces = string.rep(" ", avail_space)
 
             if is_sel then
-                local plain_line = marker .. badge_plain .. clean_path .. pad_spaces .. cnt_tag
+                local plain_line = marker .. num_plain .. badge_plain .. clean_path .. pad_spaces .. cnt_tag
                 return "\27[1;30;43m" .. pad_to(plain_line, text_w) .. "\27[0m" .. left_sb
             else
                 local badge_col = get_file_badge_color(full_path)
                 local right_part = (cnt_w > 0) and ("\27[90m" .. cnt_tag .. "\27[0m") or ""
-                local colored_line = marker .. badge_col .. badge_plain .. "\27[0;37m" .. clean_path .. "\27[0m" .. pad_spaces .. right_part
+                local colored_line = marker .. num_col .. badge_col .. badge_plain .. "\27[0;37m" .. clean_path .. "\27[0m" .. pad_spaces .. right_part
                 return pad_to(colored_line, text_w) .. left_sb
             end
         elseif #results == 0 and i == 2 then
@@ -2987,7 +2992,7 @@ function TUI.run(db, initial_query)
         local left_col_border = (focus_pane == "search") and "\27[1;36m" or "\27[90m"
         local query_prompt = " > " .. query .. "|"
         local ext_tag = active_ext_filter and ("\27[1;35m[." .. active_ext_filter .. "]\27[0m ") or ""
-        local matches_badge = ext_tag .. string.format("[%d Matches]", #results)
+        local matches_badge = ext_tag .. ((#results > 0) and string.format("[%d/%d]", selected_idx, #results) or "[0 Matches]")
         local badge_w = visual_len(matches_badge)
         local left_head = ""
         if left_col_w > badge_w + 4 then
@@ -3029,7 +3034,7 @@ function TUI.run(db, initial_query)
 
         local query_prompt = " > " .. query .. "|"
         local ext_tag = active_ext_filter and ("\27[1;35m[." .. active_ext_filter .. "]\27[0m ") or ""
-        local matches_badge = ext_tag .. string.format("[%d Matches]", #results)
+        local matches_badge = ext_tag .. ((#results > 0) and string.format("[%d/%d]", selected_idx, #results) or "[0 Matches]")
         local badge_w = visual_len(matches_badge)
         local left_head = ""
         if left_col_w > badge_w + 4 then
@@ -3517,7 +3522,7 @@ Options:
   --finder <mode>        File crawler to use: fd, find, builtin, or auto (default: auto)
   --ext <extension>      Filter by file extension (e.g. --ext lua, --ext c)
   --all                  Index all text files (disables source code extension filter)
-  --limit <n>            Maximum results to return (default: 20)
+  --limit <n>            Maximum results to return (default: 20 for CLI, 0 for unlimited; unlimited by default in TUI)
   --db <path>            Custom database file path (default: .codefind.db)
   --quiet                Suppress the environment block printed before indexing
 
@@ -3628,13 +3633,28 @@ local function run_self_tests()
     os.remove(sample_path)
     print("\27[32m✔ PASSED\27[0m")
 
+    -- Test 8: Unlimited search and limit support
+    io.write("Test 8: Unlimited search vs capped limit... ")
+    db:begin()
+    db:index_file("test/lim1.lua", "lim1.lua", "lua", 100, 1000, "local common_word_here = 1")
+    db:index_file("test/lim2.lua", "lim2.lua", "lua", 100, 1000, "local common_word_here = 2")
+    db:index_file("test/lim3.lua", "lim3.lua", "lua", 100, 1000, "local common_word_here = 3")
+    db:commit()
+    local lim_all = db:search("common_word_here")
+    assert(#lim_all == 3, "Expected 3 matches with unlimited search, got " .. #lim_all)
+    local lim_one = db:search("common_word_here", { limit = 1 })
+    assert(#lim_one == 1, "Expected 1 match with limit = 1, got " .. #lim_one)
+    local lim_zero = db:search("common_word_here", { limit = 0 })
+    assert(#lim_zero == 3, "Expected 3 matches with limit = 0 (unlimited), got " .. #lim_zero)
+    print("\27[32m✔ PASSED\27[0m")
+
     db:close()
     os.remove(test_db_path)
     os.remove(test_db_path .. "-wal")
     os.remove(test_db_path .. "-shm")
 
     print("================================================================================")
-    print("\27[1;32mALL CODEFIND TESTS PASSED SUCCESSFULLY! (7/7)\27[0m")
+    print("\27[1;32mALL CODEFIND TESTS PASSED SUCCESSFULLY! (8/8)\27[0m")
     print("================================================================================")
 end
 
@@ -3656,6 +3676,7 @@ local function main(args)
     local use_tui = false
     local ext_filter = nil
     local limit = 20
+    local limit_specified = false
     local allow_all = false
     local quiet = false
     local finder_mode = nil
@@ -3681,7 +3702,8 @@ local function main(args)
             ext_filter = args[i + 1]:lower():gsub("^%.", "")
             i = i + 1
         elseif a == "--limit" and i + 1 <= #args then
-            limit = tonumber(args[i + 1]) or 20
+            limit = tonumber(args[i + 1])
+            limit_specified = true
             i = i + 1
         elseif not command then
             command = a
@@ -3877,8 +3899,9 @@ local function main(args)
         Indexer.run(db, target_dir, true, allow_all, finder_mode)
     elseif command == "search" then
         local query = table.concat(cmd_args, " ")
+        local tui_limit = limit_specified and ((limit and limit > 0) and limit or nil) or nil
         if use_tui then
-            TUI.run(db, query)
+            TUI.run(db, query, tui_limit)
         else
             if #query == 0 then
                 print("Error: search query cannot be empty. Example: codefind search 'function'")
@@ -3887,7 +3910,8 @@ local function main(args)
             end
 
             local t0 = os.clock()
-            local results, err = db:search(query, { extension = ext_filter, limit = limit })
+            local search_limit = (limit and limit > 0) and limit or nil
+            local results, err = db:search(query, { extension = ext_filter, limit = search_limit })
         local elapsed = (os.clock() - t0) * 1000
 
         if err then
@@ -3924,7 +3948,8 @@ local function main(args)
         end
     elseif command == "tui" then
         local query = table.concat(cmd_args, " ")
-        TUI.run(db, query)
+        local tui_limit = limit_specified and ((limit and limit > 0) and limit or nil) or nil
+        TUI.run(db, query, tui_limit)
     elseif command == "stats" then
         local stats = db:get_stats()
         print("\n=== CodeFind Database Statistics ===")
