@@ -241,26 +241,56 @@ else
         int closedir(DIR *dirp);
 
         typedef long time_t;
-        struct stat {
-            unsigned long  st_dev;
-            unsigned long  st_ino;
-            unsigned long  st_nlink;
-            unsigned int   st_mode;
-            unsigned int   st_uid;
-            unsigned int   st_gid;
-            unsigned int   __pad0;
-            unsigned long  st_rdev;
-            long           st_size;
-            long           st_blksize;
-            long           st_blocks;
-            time_t         st_atime;
-            unsigned long  st_atime_nsec;
-            time_t         st_mtime;
-            unsigned long  st_mtime_nsec;
-            time_t         st_ctime;
-            unsigned long  st_ctime_nsec;
-            long           __unused[3];
-        };
+    ]]
+    if ffi.arch == "arm64" then
+        ffi.cdef[[
+            struct stat {
+                unsigned long  st_dev;
+                unsigned long  st_ino;
+                unsigned int   st_mode;
+                unsigned int   st_nlink;
+                unsigned int   st_uid;
+                unsigned int   st_gid;
+                unsigned long  st_rdev;
+                unsigned long  __pad1;
+                long           st_size;
+                int            st_blksize;
+                int            __pad2;
+                long           st_blocks;
+                long           st_atime;
+                unsigned long  st_atime_nsec;
+                long           st_mtime;
+                unsigned long  st_mtime_nsec;
+                long           st_ctime;
+                unsigned long  st_ctime_nsec;
+                unsigned int   __unused[2];
+            };
+        ]]
+    else
+        ffi.cdef[[
+            struct stat {
+                unsigned long  st_dev;
+                unsigned long  st_ino;
+                unsigned long  st_nlink;
+                unsigned int   st_mode;
+                unsigned int   st_uid;
+                unsigned int   st_gid;
+                unsigned int   __pad0;
+                unsigned long  st_rdev;
+                long           st_size;
+                long           st_blksize;
+                long           st_blocks;
+                long           st_atime;
+                unsigned long  st_atime_nsec;
+                long           st_mtime;
+                unsigned long  st_mtime_nsec;
+                long           st_ctime;
+                unsigned long  st_ctime_nsec;
+                long           __unused[3];
+            };
+        ]]
+    end
+    ffi.cdef[[
         int stat(const char *pathname, struct stat *statbuf);
         int __xstat(int ver, const char *pathname, struct stat *statbuf);
 
@@ -907,7 +937,11 @@ else
 
                 if posix_stat(full_path, st) == 0 then
                     local mode = tonumber(st.st_mode)
-                    is_dir = (bit.band(mode, 0xF000) == 0x4000) -- S_ISDIR
+                    if ent.d_type == 4 then
+                        is_dir = true
+                    else
+                        is_dir = (bit.band(mode, 0xF000) == 0x4000) -- S_ISDIR
+                    end
                     is_exec = (bit.band(mode, 0x49) ~= 0)        -- S_IXUSR / S_IXGRP / S_IXOTH
                     size = tonumber(st.st_size)
                     mtime = tonumber(st.st_mtime)
@@ -1878,9 +1912,10 @@ local function main(args)
             kernel32.FindClose(hFind)
         end
     else
-        local st = ffi.new("struct stat")
-        if posix_stat(requested_path, st) == 0 then
-            is_directory = (bit.band(tonumber(st.st_mode), 0xF000) == 0x4000)
+        local d = ffi.C.opendir(requested_path)
+        if d ~= nil then
+            is_directory = true
+            ffi.C.closedir(d)
         end
     end
 
