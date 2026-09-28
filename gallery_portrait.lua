@@ -38,6 +38,37 @@ local disable_raw_mode
 local read_key
 local is_stdin_tty
 
+local bit = bit or require("bit")
+-- macOS/BSD poll() is unreliable on character devices, so use select() there.
+-- Mirrors poll()'s contract (return value plus pfd.revents) so callers that
+-- inspect revents need no change. fd_set is FD_SETSIZE/8 == 128 bytes on both.
+local function posix_wait(pfd, timeout_ms)
+    if ffi.os ~= "OSX" and ffi.os ~= "BSD" then
+        return ffi.C.poll(pfd, 1, timeout_ms)
+    end
+    -- Callers pass either a scalar `struct pollfd` or a `struct pollfd[1]`.
+    -- Only the array form is indexable, so probe that rather than inspecting
+    -- the ctype (a scalar ctype has no `elemtype`/`kind` field).
+    local entry = pfd
+    local ok = pcall(function() return pfd[0] end)
+    if ok then entry = pfd[0] end
+    entry.revents = 0
+    -- Use bit.rshift/bit.band rather than the >> and & operators: the bundled
+    -- LuaJIT build used by the test suite is compiled with 5.2 compatibility,
+    -- where those operators are a syntax error.
+    local fds = ffi.new("unsigned char[128]")
+    local byte = bit.rshift(entry.fd, 3)
+    fds[byte] = fds[byte] + 2 ^ bit.band(entry.fd, 7)
+    local tv = ffi.new("PosixTimeval")
+    tv.tv_sec = math.floor(timeout_ms / 1000)
+    tv.tv_usec = (timeout_ms % 1000) * 1000
+    if ffi.C.select(entry.fd + 1, fds, nil, nil, tv) > 0 then
+        entry.revents = 1 -- POLLIN
+        return 1
+    end
+    return 0
+end
+
 local function make_dir(dir_path)
     if is_windows then
         os.execute(string.format('if not exist %q mkdir %q >nul 2>&1', dir_path, dir_path))
@@ -233,6 +264,8 @@ ffi.cdef(posix_termios_cdef[[
             short events;
             short revents;
         };
+        typedef struct { long tv_sec; long tv_usec; } PosixTimeval;
+        int select(int nfds, void *readfds, void *writefds, void *exceptfds, PosixTimeval *timeout);
         int poll(struct pollfd *fds, unsigned long nfds, int timeout);
         long read(int fd, void *buf, size_t count);
 
@@ -299,7 +332,7 @@ ffi.cdef(posix_termios_cdef[[
 
     read_key = function(timeout_ms)
         timeout_ms = timeout_ms or -1
-        local ret = ffi.C.poll(pfd, 1, timeout_ms)
+        local ret = posix_wait(pfd, timeout_ms)
         if ret > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
             local n = ffi.C.read(STDIN_FILENO, key_buf, 16)
             if n > 0 then
