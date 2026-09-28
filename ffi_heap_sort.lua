@@ -254,102 +254,215 @@ local function generate_steps()
     snapshots = {}
     reset_array()
 
-    local function add_step(phase, desc, hi_a, hi_b, is_swap, heap_sz)
+    local function add_step(phase, desc, hi_a, hi_b, is_swap, heap_sz, instruction)
         steps[#steps + 1] = {
-            phase      = phase,
-            desc       = desc,
+            phase       = phase,
+            desc        = desc,
             highlight_a = hi_a,       -- 0-indexed or -1
             highlight_b = hi_b,       -- 0-indexed or -1
-            is_swap    = is_swap or false,
-            heap_size  = heap_sz,
+            is_swap     = is_swap or false,
+            heap_size   = heap_sz,
+            instruction = instruction or {},  -- array of instruction lines
         }
         snapshots[#snapshots + 1] = record_snapshot()
     end
 
     -- Initial state
-    add_step("init", "Initial array – press Space to start", -1, -1, false, n)
+    add_step("init", "Initial array – press Space to start", -1, -1, false, n, {
+        "The array is unsorted. Heap Sort works in two phases:",
+        "  Phase 1 (BUILD): Convert this array into a max-heap in-place.",
+        "  Phase 2 (SORT):  Extract the max element repeatedly to build",
+        "                   the sorted result from right to left.",
+        "",
+        "We will start by building a max-heap from the bottom up,",
+        "processing each non-leaf node from index " .. (math.floor(n/2)-1) .. " down to 0.",
+    })
 
     -- ── Phase 1: Build max-heap (bottom-up) ──
-    local function sift_down(start_idx, heap_len, phase_name)
+    local function sift_down(start_idx, heap_len, phase_name, context)
         local root = start_idx
+        local depth = 0
         while true do
             local left  = 2 * root + 1
             local right = 2 * root + 2
             local largest = root
 
             if left < heap_len then
+                local cmp_result
+                if arr[left] > arr[largest] then
+                    cmp_result = string.format(
+                        "%d > %d → left child is larger, it becomes the swap candidate.",
+                        arr[left], arr[largest])
+                else
+                    cmp_result = string.format(
+                        "%d ≤ %d → parent is larger or equal, left child is not a candidate.",
+                        arr[left], arr[largest])
+                end
                 add_step(phase_name,
                     string.format("Compare arr[%d]=%d with left child arr[%d]=%d",
                         largest, arr[largest], left, arr[left]),
-                    largest, left, false, heap_len)
+                    largest, left, false, heap_len, {
+                    context,
+                    string.format("Checking left child: arr[%d]=%d  vs  arr[%d]=%d",
+                        left, arr[left], largest, arr[largest]),
+                    string.format("  Formula: left_child = 2×%d + 1 = %d", root, left),
+                    "  Result: " .. cmp_result,
+                })
                 if arr[left] > arr[largest] then
                     largest = left
                 end
             end
 
             if right < heap_len then
+                local cmp_result
+                if arr[right] > arr[largest] then
+                    cmp_result = string.format(
+                        "%d > %d → right child is the largest so far.",
+                        arr[right], arr[largest])
+                else
+                    cmp_result = string.format(
+                        "%d ≤ %d → right child is not larger.",
+                        arr[right], arr[largest])
+                end
                 add_step(phase_name,
                     string.format("Compare arr[%d]=%d with right child arr[%d]=%d",
                         largest, arr[largest], right, arr[right]),
-                    largest, right, false, heap_len)
+                    largest, right, false, heap_len, {
+                    context,
+                    string.format("Checking right child: arr[%d]=%d  vs  current largest arr[%d]=%d",
+                        right, arr[right], largest, arr[largest]),
+                    string.format("  Formula: right_child = 2×%d + 2 = %d", root, right),
+                    "  Result: " .. cmp_result,
+                })
                 if arr[right] > arr[largest] then
                     largest = right
                 end
             end
 
             if largest ~= root then
+                local child_side = (largest == left) and "left" or "right"
                 add_step(phase_name,
                     string.format("Swap arr[%d]=%d ↔ arr[%d]=%d",
                         root, arr[root], largest, arr[largest]),
-                    root, largest, true, heap_len)
+                    root, largest, true, heap_len, {
+                    context,
+                    string.format("The %s child (arr[%d]=%d) is larger than parent (arr[%d]=%d).",
+                        child_side, largest, arr[largest], root, arr[root]),
+                    "  ⚠ This violates the max-heap property: parent must be ≥ children.",
+                    string.format("  → Swap them: arr[%d] and arr[%d] exchange values.", root, largest),
+                    "  After swap, continue sifting down from the swapped position.",
+                })
                 arr[root], arr[largest] = arr[largest], arr[root]
                 root = largest
+                depth = depth + 1
             else
+                local reason
+                if left >= heap_len then
+                    reason = string.format("arr[%d]=%d is a leaf node (no children).", root, arr[root])
+                else
+                    reason = string.format("arr[%d]=%d is already ≥ all its children.", root, arr[root])
+                end
                 add_step(phase_name,
                     string.format("arr[%d]=%d is in correct position (heap property satisfied)",
                         root, arr[root]),
-                    root, -1, false, heap_len)
+                    root, -1, false, heap_len, {
+                    context,
+                    "✓ Heap property satisfied at this node.",
+                    "  " .. reason,
+                    "  Sift-down complete" .. (depth > 0
+                        and string.format(" (moved down %d level%s).", depth, depth > 1 and "s" or "")
+                        or " (no swaps needed)."),
+                })
                 break
             end
         end
     end
 
     -- Build heap
-    for i = math.floor(n / 2) - 1, 0, -1 do
+    local total_non_leaf = math.floor(n / 2)
+    for i = total_non_leaf - 1, 0, -1 do
+        local left_idx = 2 * i + 1
+        local right_idx = 2 * i + 2
+        local children_desc = string.format("children: arr[%d]=%d", left_idx, arr[left_idx])
+        if right_idx < n then
+            children_desc = children_desc .. string.format(", arr[%d]=%d", right_idx, arr[right_idx])
+        end
         add_step("build",
             string.format("─── Build heap: sift down idx=%d (value=%d) ───", i, arr[i]),
-            i, -1, false, n)
-        sift_down(i, n, "build")
+            i, -1, false, n, {
+            string.format("Starting sift-down at index %d (value %d).", i, arr[i]),
+            "  " .. children_desc,
+            string.format("  Processing non-leaf node %d of %d (bottom-up order).",
+                total_non_leaf - i, total_non_leaf),
+            "  Goal: ensure this subtree satisfies the max-heap property.",
+        })
+        local ctx = string.format("Sifting down from original position idx=%d", i)
+        sift_down(i, n, "build", ctx)
     end
 
-    add_step("build", "Max-heap built! Now extracting elements...", -1, -1, false, n)
+    add_step("build", "Max-heap built! Now extracting elements...", -1, -1, false, n, {
+        "✓ BUILD PHASE COMPLETE",
+        string.format("  The max-heap is ready. Root arr[0]=%d is the maximum.", arr[0]),
+        "  Every parent node is ≥ its children throughout the tree.",
+        "",
+        "Next: SORT PHASE – repeatedly extract the maximum element.",
+    })
 
     -- ── Phase 2: Extract sorted elements ──
+    local extract_round = 0
     for heap_len = n, 2, -1 do
+        extract_round = extract_round + 1
         -- Swap root (max) with last element in heap
         add_step("sort",
             string.format("Swap root arr[0]=%d ↔ arr[%d]=%d (move max to sorted position)",
                 arr[0], heap_len - 1, arr[heap_len - 1]),
-            0, heap_len - 1, true, heap_len)
+            0, heap_len - 1, true, heap_len, {
+            string.format("Extraction round %d of %d:", extract_round, n - 1),
+            string.format("  The root arr[0]=%d is the current maximum in the heap.", arr[0]),
+            string.format("  Swap it with the last heap element arr[%d]=%d.", heap_len - 1, arr[heap_len - 1]),
+            string.format("  → arr[%d]=%d moves to its final sorted position.", heap_len - 1, arr[0]),
+        })
         arr[0], arr[heap_len - 1] = arr[heap_len - 1], arr[0]
 
         local new_heap_len = heap_len - 1
         add_step("sort",
             string.format("Heap size reduced to %d. Sorted region: [%d..%d]",
                 new_heap_len, new_heap_len, n - 1),
-            -1, -1, false, new_heap_len)
+            -1, -1, false, new_heap_len, {
+            string.format("Shrink the heap: size %d → %d.", heap_len, new_heap_len),
+            string.format("  The last %d element%s (green) %s now in final sorted position.",
+                n - new_heap_len, (n - new_heap_len) > 1 and "s" or "",
+                (n - new_heap_len) > 1 and "are" or "is"),
+            "  The remaining heap may violate the max-heap property at the root.",
+        })
 
         -- Sift down the new root
         if new_heap_len > 1 then
             add_step("sort",
                 string.format("Sift down new root arr[0]=%d", arr[0]),
-                0, -1, false, new_heap_len)
-            sift_down(0, new_heap_len, "sort")
+                0, -1, false, new_heap_len, {
+                string.format("The new root arr[0]=%d was swapped up from position %d.",
+                    arr[0], heap_len - 1),
+                "  It is likely smaller than its children → violates heap property.",
+                "  Sift it down to restore the max-heap for the next extraction.",
+            })
+            local ctx = string.format("Restoring heap after extraction round %d", extract_round)
+            sift_down(0, new_heap_len, "sort", ctx)
         end
     end
 
     -- Final sorted
-    add_step("done", "✓ Array is fully sorted!", -1, -1, false, 0)
+    add_step("done", "✓ Array is fully sorted!", -1, -1, false, 0, {
+        "HEAP SORT COMPLETE",
+        "",
+        string.format("  All %d elements have been sorted in ascending order.", n),
+        string.format("  Total extraction rounds: %d", n - 1),
+        "",
+        "  Time complexity:  O(n log n) — guaranteed, no worst case degradation.",
+        "  Space complexity: O(1) — fully in-place, no extra arrays needed.",
+        "",
+        "  Press [R] to replay, [r] for new data, or [q] to quit.",
+    })
 end
 
 -- ─────────────────────────── Rendering ───────────────────────────
@@ -553,60 +666,6 @@ local function render_heap_tree(snap, step_info)
     return lines
 end
 
--- Get contextual explanation of the heap sort algorithm based on current phase
-local function get_heap_explanation(step_info)
-    local phase = step_info.phase
-    if phase == "init" then
-        return {
-            C.bold .. C.cyan .. "What is Heap Sort?" .. C.reset,
-            C.white .. "Heap Sort is a comparison-based sorting algorithm that uses" .. C.reset,
-            C.white .. "a binary heap data structure. Time: O(n log n), Space: O(1)." .. C.reset,
-            "",
-            C.bold .. C.cyan .. "How it works:" .. C.reset,
-            C.white .. "1. BUILD: Convert array into a max-heap (largest on top)" .. C.reset,
-            C.white .. "2. SORT:  Repeatedly extract the max and rebuild the heap" .. C.reset,
-            "",
-            C.bold .. C.cyan .. "Heap Property:" .. C.reset,
-            C.white .. "Parent >= both children.  For index i:" .. C.reset,
-            C.gray .. "  Left child  = 2i + 1" .. C.reset,
-            C.gray .. "  Right child = 2i + 2" .. C.reset,
-            C.gray .. "  Parent      = (i - 1) / 2" .. C.reset,
-        }
-    elseif phase == "build" then
-        return {
-            C.bold .. C.yellow .. "Phase 1: Building Max-Heap" .. C.reset,
-            C.white .. "We process nodes from the last non-leaf up to the root." .. C.reset,
-            C.white .. "For each node, we \"sift down\" to restore the heap property:" .. C.reset,
-            "",
-            C.gray .. "  • Compare node with its children" .. C.reset,
-            C.gray .. "  • If a child is larger, swap them" .. C.reset,
-            C.gray .. "  • Continue sifting down the swapped position" .. C.reset,
-            "",
-            C.white .. "After this phase, arr[0] holds the maximum value." .. C.reset,
-        }
-    elseif phase == "sort" then
-        return {
-            C.bold .. C.magenta .. "Phase 2: Extracting Sorted Elements" .. C.reset,
-            C.white .. "Repeatedly move the max (root) to the sorted region:" .. C.reset,
-            "",
-            C.gray .. "  1. Swap arr[0] (max) with the last unsorted element" .. C.reset,
-            C.gray .. "  2. Shrink the heap size by 1 (element is now sorted)" .. C.reset,
-            C.gray .. "  3. Sift down the new root to restore heap property" .. C.reset,
-            "",
-            C.green .. "  Green cells = already sorted (final position)" .. C.reset,
-        }
-    elseif phase == "done" then
-        return {
-            C.bold .. C.green .. "✓ Sorting Complete!" .. C.reset,
-            "",
-            C.white .. "The array is now fully sorted in ascending order." .. C.reset,
-            C.white .. "All elements have been extracted from the heap." .. C.reset,
-            "",
-            C.gray .. "Press [r] to restart with new data, or [q] to quit." .. C.reset,
-        }
-    end
-    return {}
-end
 
 render_full_screen = function(step_idx, full_clear, auto_play_on, speed_ms)
     term_rows, term_cols = get_terminal_size()
@@ -734,24 +793,36 @@ render_full_screen = function(step_idx, full_clear, auto_play_on, speed_ms)
         row = row + 1
     end
 
-    -- Blank separator before explanation
-    if row < term_rows then
+    -- Step-by-step instruction panel
+    local instruction = step_info.instruction or {}
+    if #instruction > 0 then
         buf[#buf + 1] = string.format("\27[%d;1H", row)
-        buf[#buf + 1] = string.rep(" ", max_w)
+        buf[#buf + 1] = "  " .. C.bold .. C.cyan .. "┌─ Instruction " .. C.gray
+            .. "─────────────────────────────────────────────" .. C.reset
+            .. string.rep(" ", max_w)
         row = row + 1
-    end
 
-    -- Heap sort explanation (phase-contextual)
-    local explanation = get_heap_explanation(step_info)
-    for _, line in ipairs(explanation) do
-        if row >= term_rows then break end
-        buf[#buf + 1] = string.format("\27[%d;1H", row)
-        if line == "" then
-            buf[#buf + 1] = string.rep(" ", max_w)
-        else
-            buf[#buf + 1] = "  " .. line .. string.rep(" ", max_w)
+        for _, line in ipairs(instruction) do
+            if row >= term_rows then break end
+            buf[#buf + 1] = string.format("\27[%d;1H", row)
+            if line == "" then
+                buf[#buf + 1] = "  " .. C.gray .. "│" .. C.reset
+                    .. string.rep(" ", max_w)
+            else
+                buf[#buf + 1] = "  " .. C.gray .. "│ " .. C.reset
+                    .. C.white .. line .. C.reset
+                    .. string.rep(" ", max_w)
+            end
+            row = row + 1
         end
-        row = row + 1
+
+        if row < term_rows then
+            buf[#buf + 1] = string.format("\27[%d;1H", row)
+            buf[#buf + 1] = "  " .. C.bold .. C.cyan .. "└"
+                .. C.gray .. "──────────────────────────────────────────────────" .. C.reset
+                .. string.rep(" ", max_w)
+            row = row + 1
+        end
     end
 
     -- Clear remaining rows
