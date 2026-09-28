@@ -778,6 +778,59 @@ render_full_screen = function(step_idx, full_clear, auto_play_on, speed_ms)
     buf[#buf + 1] = string.rep(" ", max_w)
     row = row + 1
 
+    -- Algorithm Overview panel (static, always visible)
+    local algo_lines = {
+        { C.bold .. C.cyan, "What is Heap Sort?" },
+        { C.white,          "A comparison-based, in-place sorting algorithm using a binary heap." },
+        { "",               "" },
+        { C.bold .. C.cyan, "Two Phases:" },
+        { C.yellow,         "  1. BUILD  – Convert array into a max-heap (largest element at root)" },
+        { C.magenta,        "  2. SORT   – Repeatedly extract max → place at end → re-heapify" },
+        { "",               "" },
+        { C.bold .. C.cyan, "Max-Heap Property:" },
+        { C.white,          "  Parent ≥ both children.  For node at index i:" },
+        { C.gray,           "    Left child  = 2i + 1    Right child = 2i + 2    Parent = ⌊(i-1)/2⌋" },
+        { "",               "" },
+        { C.bold .. C.cyan, "Complexity:" },
+        { C.white,          "  Time: O(n log n) best/avg/worst  │  Space: O(1) in-place" },
+    }
+
+    buf[#buf + 1] = string.format("\27[%d;1H", row)
+    buf[#buf + 1] = "  " .. C.bold .. C.cyan .. "┌─ Algorithm Overview "
+        .. C.gray .. "────────────────────────────────────────" .. C.reset
+        .. string.rep(" ", max_w)
+    row = row + 1
+
+    for _, entry in ipairs(algo_lines) do
+        if row >= term_rows then break end
+        buf[#buf + 1] = string.format("\27[%d;1H", row)
+        local color, text = entry[1], entry[2]
+        if text == "" then
+            buf[#buf + 1] = "  " .. C.gray .. "│" .. C.reset
+                .. string.rep(" ", max_w)
+        else
+            buf[#buf + 1] = "  " .. C.gray .. "│ " .. C.reset
+                .. color .. text .. C.reset
+                .. string.rep(" ", max_w)
+        end
+        row = row + 1
+    end
+
+    if row < term_rows then
+        buf[#buf + 1] = string.format("\27[%d;1H", row)
+        buf[#buf + 1] = "  " .. C.bold .. C.cyan .. "└"
+            .. C.gray .. "──────────────────────────────────────────────────────────────" .. C.reset
+            .. string.rep(" ", max_w)
+        row = row + 1
+    end
+
+    -- Blank
+    if row < term_rows then
+        buf[#buf + 1] = string.format("\27[%d;1H", row)
+        buf[#buf + 1] = string.rep(" ", max_w)
+        row = row + 1
+    end
+
     -- Heap tree header
     buf[#buf + 1] = string.format("\27[%d;1H", row)
     buf[#buf + 1] = "  " .. C.bold .. C.cyan .. "Heap Tree View:" .. C.reset
