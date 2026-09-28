@@ -553,7 +553,62 @@ local function render_heap_tree(snap, step_info)
     return lines
 end
 
-render_full_screen = function(step_idx)
+-- Get contextual explanation of the heap sort algorithm based on current phase
+local function get_heap_explanation(step_info)
+    local phase = step_info.phase
+    if phase == "init" then
+        return {
+            C.bold .. C.cyan .. "What is Heap Sort?" .. C.reset,
+            C.white .. "Heap Sort is a comparison-based sorting algorithm that uses" .. C.reset,
+            C.white .. "a binary heap data structure. Time: O(n log n), Space: O(1)." .. C.reset,
+            "",
+            C.bold .. C.cyan .. "How it works:" .. C.reset,
+            C.white .. "1. BUILD: Convert array into a max-heap (largest on top)" .. C.reset,
+            C.white .. "2. SORT:  Repeatedly extract the max and rebuild the heap" .. C.reset,
+            "",
+            C.bold .. C.cyan .. "Heap Property:" .. C.reset,
+            C.white .. "Parent >= both children.  For index i:" .. C.reset,
+            C.gray .. "  Left child  = 2i + 1" .. C.reset,
+            C.gray .. "  Right child = 2i + 2" .. C.reset,
+            C.gray .. "  Parent      = (i - 1) / 2" .. C.reset,
+        }
+    elseif phase == "build" then
+        return {
+            C.bold .. C.yellow .. "Phase 1: Building Max-Heap" .. C.reset,
+            C.white .. "We process nodes from the last non-leaf up to the root." .. C.reset,
+            C.white .. "For each node, we \"sift down\" to restore the heap property:" .. C.reset,
+            "",
+            C.gray .. "  • Compare node with its children" .. C.reset,
+            C.gray .. "  • If a child is larger, swap them" .. C.reset,
+            C.gray .. "  • Continue sifting down the swapped position" .. C.reset,
+            "",
+            C.white .. "After this phase, arr[0] holds the maximum value." .. C.reset,
+        }
+    elseif phase == "sort" then
+        return {
+            C.bold .. C.magenta .. "Phase 2: Extracting Sorted Elements" .. C.reset,
+            C.white .. "Repeatedly move the max (root) to the sorted region:" .. C.reset,
+            "",
+            C.gray .. "  1. Swap arr[0] (max) with the last unsorted element" .. C.reset,
+            C.gray .. "  2. Shrink the heap size by 1 (element is now sorted)" .. C.reset,
+            C.gray .. "  3. Sift down the new root to restore heap property" .. C.reset,
+            "",
+            C.green .. "  Green cells = already sorted (final position)" .. C.reset,
+        }
+    elseif phase == "done" then
+        return {
+            C.bold .. C.green .. "✓ Sorting Complete!" .. C.reset,
+            "",
+            C.white .. "The array is now fully sorted in ascending order." .. C.reset,
+            C.white .. "All elements have been extracted from the heap." .. C.reset,
+            "",
+            C.gray .. "Press [r] to restart with new data, or [q] to quit." .. C.reset,
+        }
+    end
+    return {}
+end
+
+render_full_screen = function(step_idx, full_clear)
     term_rows, term_cols = get_terminal_size()
     local max_w = term_cols - 1
 
@@ -562,7 +617,11 @@ render_full_screen = function(step_idx)
 
     local buf = {}
     buf[#buf + 1] = "\27[?2026h"  -- begin synchronized update
-    buf[#buf + 1] = "\27[2J"      -- full clear (only on full redraws)
+
+    -- Only clear the entire screen on initial render / restart / resize
+    if full_clear then
+        buf[#buf + 1] = "\27[2J"
+    end
 
     -- Row 1: Title bar
     buf[#buf + 1] = "\27[1;1H"
@@ -575,7 +634,7 @@ render_full_screen = function(step_idx)
     -- Row 2: Controls
     buf[#buf + 1] = "\27[2;1H"
     buf[#buf + 1] = C.gray
-        .. clamp_str("  [Space/Enter] step  [a] auto-play  [r] restart  [q] quit", max_w)
+        .. pad_right("  [Space/Enter] step  [a] auto-play  [r] restart  [q] quit", max_w)
         .. C.reset
 
     -- Row 3: blank
@@ -597,22 +656,24 @@ render_full_screen = function(step_idx)
         phase_color = C.white
     end
     local phase_label = step_info.phase:upper()
-    buf[#buf + 1] = "  " .. C.bold .. phase_color .. "[" .. phase_label .. "]" .. C.reset
-        .. C.gray .. "  Step " .. step_idx .. "/" .. #steps .. C.reset
-        .. string.rep(" ", max_w)
+    buf[#buf + 1] = pad_right(
+        "  " .. C.bold .. phase_color .. "[" .. phase_label .. "]" .. C.reset
+        .. C.gray .. "  Step " .. step_idx .. "/" .. #steps .. C.reset,
+        max_w) .. C.reset
 
     -- Row 5: Description
     buf[#buf + 1] = "\27[5;1H"
-    buf[#buf + 1] = "  " .. C.bold .. C.white
-        .. clamp_str(step_info.desc, max_w - 4) .. C.reset
-        .. string.rep(" ", max_w)
+    buf[#buf + 1] = pad_right(
+        "  " .. C.bold .. C.white
+        .. clamp_str(step_info.desc, max_w - 4) .. C.reset,
+        max_w) .. C.reset
 
     -- Row 6: blank separator
     buf[#buf + 1] = "\27[6;1H"
     buf[#buf + 1] = string.rep(" ", max_w)
 
     -- Rows 7+: Bar chart
-    local bar_height = math.min(12, math.max(4, term_rows - 18))
+    local bar_height = math.min(10, math.max(3, term_rows - 24))
     local bar_lines = render_bars(snap, step_info, max_w, bar_height)
     local row = 7
     for _, line in ipairs(bar_lines) do
@@ -664,7 +725,27 @@ render_full_screen = function(step_idx)
     for _, line in ipairs(tree_lines) do
         if row >= term_rows then break end
         buf[#buf + 1] = string.format("\27[%d;1H", row)
-        buf[#buf + 1] = "    " .. line .. string.rep(" ", 20)
+        buf[#buf + 1] = "    " .. line .. string.rep(" ", 40)
+        row = row + 1
+    end
+
+    -- Blank separator before explanation
+    if row < term_rows then
+        buf[#buf + 1] = string.format("\27[%d;1H", row)
+        buf[#buf + 1] = string.rep(" ", max_w)
+        row = row + 1
+    end
+
+    -- Heap sort explanation (phase-contextual)
+    local explanation = get_heap_explanation(step_info)
+    for _, line in ipairs(explanation) do
+        if row >= term_rows then break end
+        buf[#buf + 1] = string.format("\27[%d;1H", row)
+        if line == "" then
+            buf[#buf + 1] = string.rep(" ", max_w)
+        else
+            buf[#buf + 1] = "  " .. line .. string.rep(" ", max_w)
+        end
         row = row + 1
     end
 
@@ -682,12 +763,13 @@ render_full_screen = function(step_idx)
     last_rendered_step = step_idx
 end
 
--- Differential render: only update the rows that change between steps
--- (status line, description line, array, bars, tree)
--- For simplicity in this visualization, we do a full render each step
--- since the bar chart changes substantially. We still use synchronized
--- output to prevent flicker.
-render_step = render_full_screen
+-- Differential render: redraws all rows via cursor positioning but
+-- does NOT clear the screen (\27[2J), preventing flicker.
+-- The synchronized update block (\27[?2026h / l) ensures the
+-- terminal applies all row overwrites atomically.
+render_step = function(step_idx)
+    render_full_screen(step_idx, false)
+end
 
 -- ─────────────────────────── Main loop ───────────────────────────
 
@@ -703,8 +785,8 @@ local function main()
     local auto_speed = 400  -- ms between auto steps
     local last_auto_time = get_time_ms()
 
-    -- Initial full render
-    render_full_screen(current_step)
+    -- Initial full render (clear screen once)
+    render_full_screen(current_step, true)
 
     while true do
         local key = read_key(50)  -- 50ms poll timeout
@@ -732,7 +814,7 @@ local function main()
             generate_steps()
             current_step = 1
             auto_play = false
-            render_full_screen(current_step)
+            render_full_screen(current_step, true)
         end
 
         -- Auto-play logic
