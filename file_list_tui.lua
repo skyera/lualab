@@ -58,6 +58,7 @@ int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
 int ioctl(int fd, unsigned long request, ...);
 int poll(struct pollfd *fds, unsigned long nfds, int timeout);
 long read(int fd, void *buf, unsigned long count);
+long write(int fd, const void *buf, unsigned long count);
 char *getcwd(char *buf, unsigned long size);
 DIR *opendir(const char *name);
 struct dirent *readdir(DIR *dirp);
@@ -66,6 +67,8 @@ int fork(void);
 int execvp(const char *file, char *const argv[]);
 int waitpid(int pid, int *status, int options);
 void _exit(int status);
+typedef void (*sighandler_t)(int);
+sighandler_t signal(int signum, sighandler_t handler);
 ]])
 
 
@@ -86,6 +89,10 @@ local DT_DIR = 4 -- dirent.d_type value indicating a directory
 --   \27[?1049l : Restore original screen buffer
 --   \27[?25l   : Hide text cursor to prevent visible flickering during redraw
 --   \27[?25h   : Show text cursor again
+--   \27[?7l    : Disable line auto-wrap (prevents terminal coordinate drift)
+--   \27[?7h    : Re-enable line auto-wrap
+--   \27[?2026h : Synchronized update start (atomic frame rendering)
+--   \27[?2026l : Synchronized update end
 --   \27[H      : Move cursor to home position (row 1, col 1)
 --   \27[2J     : Clear the entire display
 --   \27[K      : Clear from cursor to the end of the current line
@@ -188,54 +195,72 @@ raw[0].c_cflag = bit.bor(raw[0].c_cflag, CS8)
 raw[0].c_cc[6], raw[0].c_cc[5] = 0, 0 -- VMIN, VTIME on Linux
 assert(ffi.C.tcsetattr(STDIN, TCSANOW, raw) == 0, "could not enable raw mode")
 
--- Switch into full TUI display (alternate buffer, hide cursor)
+-- Switch into full TUI display (alternate buffer, hide cursor, disable auto-wrap)
 local function enable_terminal()
   assert(ffi.C.tcsetattr(STDIN, TCSANOW, raw) == 0, "could not enable raw mode")
-  write(esc("?1049h") .. esc("?25l"))
+  write(esc("?1049h") .. esc("?25l") .. esc("?7l"))
   io.stdout:flush()
 end
 
--- Restore terminal back to normal canonical mode (primary buffer, show cursor)
+-- Restore terminal back to normal canonical mode (primary buffer, show cursor, re-enable auto-wrap)
 local function restore_terminal()
   ffi.C.tcsetattr(STDIN, TCSANOW, original)
-  write(esc("?25h") .. esc("?1049l"))
+  write(esc("?7h") .. esc("?25h") .. esc("?1049l"))
   io.stdout:flush()
 end
+
+-- Signal trap to guarantee terminal restoration on SIGINT or SIGTERM
+local function on_sig(sig)
+  ffi.C.tcsetattr(STDIN, TCSANOW, original)
+  local reset_seq = "\27[?7h\27[?25h\27[?1049l"
+  ffi.C.write(STDOUT, reset_seq, #reset_seq)
+  ffi.C._exit(128 + sig)
+end
+local sig_cb = ffi.cast("sighandler_t", on_sig)
+ffi.C.signal(2, sig_cb)  -- SIGINT
+ffi.C.signal(15, sig_cb) -- SIGTERM
 
 --------------------------------------------------------------------------------
 -- Step 5: Screen layout, rendering engine, and dual-pane display
 --------------------------------------------------------------------------------
 local function main()
+  -- Forward declarations for rendering and navigation functions
+  local render_full_screen
+  local render_selection_differential
+  local reload
+  local open_selected
+  local go_parent
+
   local path = get_cwd()
   local entries, error_message = list_directory(path)
-  local selected, offset, dirty, message = 1, 0, true, error_message
+  local selected, offset, message = 1, 0, error_message
+  local prev_selected, prev_offset = selected, offset
   local last_rows, last_cols
   local input = ""
-  write(esc("?1049h") .. esc("?25l"))
 
-  -- Reload current directory listing when moving across directories
-  local function reload()
-    entries, error_message = list_directory(path)
-    entries = entries or {}
-    selected, offset, message, dirty = 1, 0, error_message, true
-  end
+  enable_terminal()
 
-  -- Main rendering function: redraws entire screen buffer whenever dirty = true
-  local function draw()
-    local rows, cols = terminal_size()
-    -- Reserve 4 rows: title bar (1), status bar (1), prompt line (1), margin (1)
+  -- Compute current layout boundaries and invariants
+  local function compute_layout()
+    local raw_rows, raw_cols = terminal_size()
+    -- Clamp layout width to raw_cols - 1 to prevent auto-wrap shifting cursor
+    local cols = math.max(10, raw_cols - 1)
+    local rows = raw_rows
+    -- Reserve 4 rows: title bar (1), status bar (1), help line (1), margin (1)
     local visible = math.max(0, rows - 4)
 
-    -- Keep selected index within valid range
-    if selected < 1 then selected = 1 end
-    if selected > #entries and #entries > 0 then selected = #entries end
+    -- Strict Viewport Bounds & Invariants
+    if #entries == 0 then
+      selected = 1
+      offset = 0
+    else
+      if selected < 1 then selected = 1 end
+      if selected > #entries then selected = #entries end
+      if selected <= offset then offset = selected - 1 end
+      if selected > offset + visible then offset = selected - visible end
+      offset = math.max(0, offset)
+    end
 
-    -- Adjust vertical scroll offset to keep selected row in view
-    if selected <= offset then offset = selected - 1 end
-    if selected > offset + visible then offset = selected - visible end
-    offset = math.max(0, offset)
-
-    -- Determine layout: split into dual panes when terminal width is >= 50 columns
     local split = cols >= 50
     local list_cols = cols
     local preview_cols = 0
@@ -244,10 +269,29 @@ local function main()
       preview_cols = cols - list_cols - 1 -- 1 column reserved for divider │
     end
 
-    -- Prepare preview content for currently selected item
+    return rows, cols, visible, split, list_cols, preview_cols
+  end
+
+  local function format_left_entry(item, is_selected, list_cols)
+    if not item then
+      return string.rep(" ", list_cols)
+    end
+    local label = (item.is_dir and "[D] " or "    ") .. clean_name(item.name)
+    if #label > list_cols - 2 then
+      label = label:sub(1, math.max(0, list_cols - 3)) .. "…"
+    end
+    local pad = string.rep(" ", math.max(0, list_cols - 2 - #label))
+    if is_selected then
+      return esc("7m> " .. label .. pad .. esc("0m"))
+    else
+      return "  " .. label .. pad
+    end
+  end
+
+  local function get_preview(visible)
     local preview_header = ""
     local preview_lines = {}
-    if split and entries[selected] then
+    if entries[selected] then
       local item = entries[selected]
       local item_path = path == "/" and "/" .. item.name or path .. "/" .. item.name
       if item.is_dir then
@@ -264,37 +308,36 @@ local function main()
         end
       end
     end
+    return preview_header, preview_lines
+  end
 
-    -- Reset cursor to top-left and clear display
-    write(esc("H") .. esc("2J"))
+  -- Full screen redraw with atomic synchronized update
+  -- full_clear is ONLY true for initial start, window resize, return from editor, or reload
+  render_full_screen = function(full_clear)
+    local rows, cols, visible, split, list_cols, preview_cols = compute_layout()
+    local preview_header, preview_lines = "", {}
+    if split then
+      preview_header, preview_lines = get_preview(visible)
+    end
+
+    -- Atomic Synchronized Frame Emission: \27[?2026h ... \27[?2026l
+    local buf = { esc("?2026h") }
+
+    if full_clear then
+      buf[#buf + 1] = esc("2J")
+    end
+    buf[#buf + 1] = esc("H")
 
     -- Render top title bar in inverted colors
     local title = " luals browser  " .. path
-    write(esc("7m") .. title:sub(1, cols) .. string.rep(" ", math.max(0, cols - #title)) .. esc("0m\r\n"))
+    buf[#buf + 1] = esc("7m") .. title:sub(1, cols) .. string.rep(" ", math.max(0, cols - #title)) .. esc("0m\r\n")
 
     -- Render main body rows (left file list + optional right preview pane)
     for row = 1, visible do
       local index = offset + row
       local item = entries[index]
-      local left_str = ""
+      local left_str = format_left_entry(item, index == selected, list_cols)
 
-      -- Format left list entry
-      if item then
-        local label = (item.is_dir and "[D] " or "    ") .. clean_name(item.name)
-        if #label > list_cols - 2 then
-          label = label:sub(1, math.max(0, list_cols - 3)) .. "…"
-        end
-        local pad = string.rep(" ", math.max(0, list_cols - 2 - #label))
-        if index == selected then
-          left_str = esc("7m> " .. label .. pad .. esc("0m"))
-        else
-          left_str = "  " .. label .. pad
-        end
-      else
-        left_str = string.rep(" ", list_cols)
-      end
-
-      -- If split view is enabled, append divider and right preview column
       if split then
         local right_str = ""
         if row == 1 then
@@ -309,25 +352,77 @@ local function main()
             right_str = string.rep(" ", preview_cols)
           end
         end
-        write(left_str .. "│" .. right_str)
+        buf[#buf + 1] = left_str .. "│" .. right_str
       else
-        write(left_str)
+        buf[#buf + 1] = left_str
       end
-      write(esc("K\r\n"))
+      buf[#buf + 1] = esc("K\r\n")
     end
 
     -- Render bottom status bar and keybinding help
     local status = message or ("%d item%s"):format(#entries, #entries == 1 and "" or "s")
-    write(esc("7m") .. status:sub(1, cols) .. esc("K") .. esc("0m\r\n"))
-    write(" ↑↓/j k move  Enter/right/l open  Backspace/left/h up  q quit" .. esc("K"))
+    buf[#buf + 1] = esc("7m") .. status:sub(1, cols) .. string.rep(" ", math.max(0, cols - #status)) .. esc("0m\r\n")
+    local help = " ↑↓/j k move  Enter/right/l open  Backspace/left/h up  q quit"
+    buf[#buf + 1] = help:sub(1, cols) .. esc("K")
+
+    buf[#buf + 1] = esc("?2026l")
+    io.stdout:write(table.concat(buf))
     io.stdout:flush()
 
     last_rows, last_cols = rows, cols
-    dirty = false
+    prev_selected, prev_offset = selected, offset
+  end
+
+  -- Differential update on local movement: updates only changed rows
+  render_selection_differential = function(old_sel, new_sel)
+    local rows, cols, visible, split, list_cols, preview_cols = compute_layout()
+    -- If viewport scrolled or in split pane mode (where preview pane reflects current file),
+    -- fall back to atomic synchronized full screen refresh (without full clear \27[2J).
+    if offset ~= prev_offset or split then
+      render_full_screen(false)
+      return
+    end
+
+    -- Single-pane differential update: only overwrite changed rows
+    local buf = { esc("?2026h") }
+
+    local old_row = 1 + (old_sel - offset)
+    local new_row = 1 + (new_sel - offset)
+
+    if old_row >= 2 and old_row <= visible + 1 then
+      buf[#buf + 1] = esc(string.format("%d;1H", old_row))
+      buf[#buf + 1] = format_left_entry(entries[old_sel], false, list_cols) .. esc("K")
+    end
+
+    if new_row >= 2 and new_row <= visible + 1 then
+      buf[#buf + 1] = esc(string.format("%d;1H", new_row))
+      buf[#buf + 1] = format_left_entry(entries[new_sel], true, list_cols) .. esc("K")
+    end
+
+    -- Update status bar
+    local status_row = visible + 2
+    buf[#buf + 1] = esc(string.format("%d;1H", status_row))
+    local status = message or ("%d item%s"):format(#entries, #entries == 1 and "" or "s")
+    buf[#buf + 1] = esc("7m") .. status:sub(1, cols) .. string.rep(" ", math.max(0, cols - #status)) .. esc("0m") .. esc("K")
+
+    buf[#buf + 1] = esc("?2026l")
+    io.stdout:write(table.concat(buf))
+    io.stdout:flush()
+
+    prev_selected, prev_offset = selected, offset
+  end
+
+  -- Reload current directory listing when moving across directories
+  reload = function()
+    entries, error_message = list_directory(path)
+    entries = entries or {}
+    selected, offset, message = 1, 0, error_message
+    prev_selected, prev_offset = 1, 0
+    render_full_screen(true)
   end
 
   -- Action: enter directory or launch external editor (nvim) for a file
-  local function open_selected()
+  open_selected = function()
     local item = entries[selected]
     if item and item.is_dir then
       path = path == "/" and "/" .. item.name or path .. "/" .. item.name
@@ -350,14 +445,17 @@ local function main()
       -- Re-enter raw mode and restore TUI screen after editor exits
       enable_terminal()
       message = bit.band(status[0], 0x7f) == 0 and ("closed nvim: " .. item.name) or ("nvim failed: " .. item.name)
-      dirty = true
+      render_full_screen(true)
     end
   end
 
   -- Action: navigate to parent directory
-  local function go_parent()
+  go_parent = function()
     local next_path = parent(path)
-    if next_path ~= path then path = next_path; reload() end
+    if next_path ~= path then
+      path = next_path
+      reload()
+    end
   end
 
   ------------------------------------------------------------------------------
@@ -373,8 +471,6 @@ local function main()
   ------------------------------------------------------------------------------
   reload()
   while true do
-    if dirty then draw() end
-
     -- Wait for input or timeout (timeout allows detecting window size changes)
     local fds = ffi.new("struct pollfd[1]")
     fds[0].fd, fds[0].events = STDIN, POLLIN
@@ -385,30 +481,91 @@ local function main()
       local count = tonumber(ffi.C.read(STDIN, buffer, 64))
       if count > 0 then input = input .. ffi.string(buffer, count) end
 
+      local old_sel = selected
+      local old_off = offset
+      local moved = false
+
       -- Process accumulated bytes from the input buffer
       while #input > 0 do
-        if input:sub(1, 3) == "\27[A" then selected = selected - 1; input = input:sub(4)
-        elseif input:sub(1, 3) == "\27[B" then selected = selected + 1; input = input:sub(4)
-        elseif input:sub(1, 3) == "\27[C" then open_selected(); input = input:sub(4)
-        elseif input:sub(1, 3) == "\27[D" then go_parent(); input = input:sub(4)
+        if input:sub(1, 3) == "\27[A" then
+          selected = selected - 1
+          input = input:sub(4)
+          moved = true
+        elseif input:sub(1, 3) == "\27[B" then
+          selected = selected + 1
+          input = input:sub(4)
+          moved = true
+        elseif input:sub(1, 3) == "\27[C" then
+          input = input:sub(4)
+          if moved then
+            selected = math.max(1, math.min(math.max(1, #entries), selected))
+            compute_layout()
+            moved = false
+          end
+          open_selected()
+          old_sel, old_off = selected, offset
+        elseif input:sub(1, 3) == "\27[D" then
+          input = input:sub(4)
+          if moved then
+            selected = math.max(1, math.min(math.max(1, #entries), selected))
+            compute_layout()
+            moved = false
+          end
+          go_parent()
+          old_sel, old_off = selected, offset
         elseif input:sub(1, 1) == "\27" and #input < 3 then
           -- Incomplete ANSI escape sequence; wait for subsequent bytes
           break
         else
-          local key = input:sub(1, 1); input = input:sub(2)
+          local key = input:sub(1, 1)
+          input = input:sub(2)
           if key == "q" or key == "\3" then return end
-          if key == "j" then selected = selected + 1 end
-          if key == "k" then selected = selected - 1 end
-          if key == "l" or key == "\r" or key == "\n" then open_selected() end
-          if key == "h" or key == "\127" then go_parent() end
+          if key == "j" then
+            selected = selected + 1
+            moved = true
+          elseif key == "k" then
+            selected = selected - 1
+            moved = true
+          elseif key == "l" or key == "\r" or key == "\n" then
+            if moved then
+              selected = math.max(1, math.min(math.max(1, #entries), selected))
+              compute_layout()
+              moved = false
+            end
+            open_selected()
+            old_sel, old_off = selected, offset
+          elseif key == "h" or key == "\127" then
+            if moved then
+              selected = math.max(1, math.min(math.max(1, #entries), selected))
+              compute_layout()
+              moved = false
+            end
+            go_parent()
+            old_sel, old_off = selected, offset
+          end
         end
+      end
+
+      -- Drain burst keystrokes cleanly before rendering
+      if moved then
         selected = math.max(1, math.min(math.max(1, #entries), selected))
-        message, dirty = nil, true
+        message = nil
+        if selected ~= old_sel then
+          compute_layout()
+          if offset ~= old_off then
+            render_full_screen(false)
+          else
+            render_selection_differential(old_sel, selected)
+          end
+        end
       end
     else
       -- Redraw if the terminal was resized during the poll interval
-      local rows, cols = terminal_size()
-      dirty = rows ~= last_rows or cols ~= last_cols
+      local raw_rows, raw_cols = terminal_size()
+      local cols = math.max(10, raw_cols - 1)
+      if raw_rows ~= last_rows or cols ~= last_cols then
+        render_full_screen(true)
+      end
     end
   end
 end
