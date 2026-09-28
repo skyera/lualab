@@ -315,65 +315,12 @@ local function main()
     return preview_header, preview_lines
   end
 
-  -- Render centered help modal overlay
-  local function render_help_overlay(buf, rows, cols)
-    local items = {
-      " Navigation",
-      "   ↑ / k           Move selection up",
-      "   ↓ / j           Move selection down",
-      "   ← / h / Backsp  Go to parent directory",
-      "",
-      " Actions",
-      "   → / l / Enter   Open dir / edit in nvim",
-      "   ?               Toggle this help screen",
-      "   q / Ctrl-C      Quit browser",
-      "",
-      "            Press ? or Esc to close",
-    }
-    local title = " Keyboard Shortcuts "
-    local box_w = math.min(cols - 2, 48)
-    local inner_w = box_w - 2
-    if inner_w < 15 then return end
-
-    local box_h = #items + 2
-    local start_row = math.max(2, math.floor((rows - box_h) / 2))
-    local start_col = math.max(1, math.floor((cols - box_w) / 2) + 1)
-
-    local border_dash = math.max(0, math.floor((inner_w - #title) / 2))
-    local border_right = math.max(0, inner_w - border_dash - #title)
-    local top_border = "┌" .. string.rep("─", border_dash) .. title .. string.rep("─", border_right) .. "┐"
-
-    buf[#buf + 1] = esc(string.format("%d;%dH", start_row, start_col))
-    buf[#buf + 1] = esc("7m") .. top_border .. esc("0m")
-
-    for i, line in ipairs(items) do
-      local r = start_row + i
-      if r < rows - 1 then
-        local padded = line
-        if #padded > inner_w then
-          padded = padded:sub(1, inner_w)
-        else
-          padded = padded .. string.rep(" ", inner_w - #padded)
-        end
-        buf[#buf + 1] = esc(string.format("%d;%dH", r, start_col))
-        buf[#buf + 1] = esc("7m│" .. padded .. "│") .. esc("0m")
-      end
-    end
-
-    local bottom_r = start_row + #items + 1
-    if bottom_r < rows - 1 then
-      local bottom_border = "└" .. string.rep("─", inner_w) .. "┘"
-      buf[#buf + 1] = esc(string.format("%d;%dH", bottom_r, start_col))
-      buf[#buf + 1] = esc("7m") .. bottom_border .. esc("0m")
-    end
-  end
-
   -- Full screen redraw with atomic synchronized update
   -- full_clear is ONLY true for initial start, window resize, return from editor, or reload
   render_full_screen = function(full_clear)
     local rows, cols, visible, split, list_cols, preview_cols = compute_layout()
     local preview_header, preview_lines = "", {}
-    if split then
+    if split and not show_help then
       preview_header, preview_lines = get_preview(visible)
     end
 
@@ -385,46 +332,75 @@ local function main()
     end
     buf[#buf + 1] = esc("H")
 
-    -- Render top title bar in inverted colors
-    local title = " luals browser  " .. path
-    buf[#buf + 1] = esc("7m") .. title:sub(1, cols) .. string.rep(" ", math.max(0, cols - #title)) .. esc("0m\r\n")
-
-    -- Render main body rows (left file list + optional right preview pane)
-    for row = 1, visible do
-      local index = offset + row
-      local item = entries[index]
-      local left_str = format_left_entry(item, index == selected, list_cols)
-
-      if split then
-        local right_str = ""
-        if row == 1 then
-          local hdr = preview_header:sub(1, preview_cols)
-          right_str = esc("7m") .. hdr .. string.rep(" ", math.max(0, preview_cols - #hdr)) .. esc("0m")
-        else
-          local pline = preview_lines[row - 1]
-          if pline then
-            pline = pline:sub(1, preview_cols)
-            right_str = pline .. string.rep(" ", math.max(0, preview_cols - #pline))
-          else
-            right_str = string.rep(" ", preview_cols)
-          end
-        end
-        buf[#buf + 1] = left_str .. "│" .. right_str
-      else
-        buf[#buf + 1] = left_str
-      end
-      buf[#buf + 1] = esc("K\r\n")
-    end
-
     if show_help then
-      render_help_overlay(buf, rows, cols)
-    end
+      -- Top title bar for help screen
+      local title = " luals browser  Help — Keyboard Shortcuts"
+      buf[#buf + 1] = esc("7m") .. title:sub(1, cols) .. string.rep(" ", math.max(0, cols - #title)) .. esc("0m\r\n")
 
-    -- Render bottom status bar and keybinding help
-    local status = message or ("%d item%s"):format(#entries, #entries == 1 and "" or "s")
-    buf[#buf + 1] = esc("7m") .. status:sub(1, cols) .. string.rep(" ", math.max(0, cols - #status)) .. esc("0m\r\n")
-    local help = show_help and " Press ? or Esc to close help" or " ↑↓/j k move  Enter/l open  h/Back up  ? help  q quit"
-    buf[#buf + 1] = help:sub(1, cols) .. esc("K")
+      local help_lines = {
+        "",
+        "  Navigation",
+        "    ↑ / k               Move selection up",
+        "    ↓ / j               Move selection down",
+        "    ← / h / Backspace   Navigate to parent directory",
+        "",
+        "  Actions",
+        "    → / l / Enter       Open directory or edit file in $EDITOR (nvim)",
+        "    ?                   Toggle this help screen",
+        "    q / Ctrl-C          Quit browser",
+        "",
+        "  Display & Layout",
+        "    Left pane           File & directory listing ([D] = directory)",
+        "    Right pane          File preview (on terminals ≥ 50 columns)",
+      }
+
+      for row = 1, visible do
+        local line = help_lines[row] or ""
+        buf[#buf + 1] = line:sub(1, cols) .. string.rep(" ", math.max(0, cols - #line)) .. esc("K\r\n")
+      end
+
+      local status = " Help View  (press ?, q, or Esc to return)"
+      buf[#buf + 1] = esc("7m") .. status:sub(1, cols) .. string.rep(" ", math.max(0, cols - #status)) .. esc("0m\r\n")
+      local help = " Press ?, q, or Esc to close help"
+      buf[#buf + 1] = help:sub(1, cols) .. esc("K")
+    else
+      -- Render top title bar in inverted colors
+      local title = " luals browser  " .. path
+      buf[#buf + 1] = esc("7m") .. title:sub(1, cols) .. string.rep(" ", math.max(0, cols - #title)) .. esc("0m\r\n")
+
+      -- Render main body rows (left file list + optional right preview pane)
+      for row = 1, visible do
+        local index = offset + row
+        local item = entries[index]
+        local left_str = format_left_entry(item, index == selected, list_cols)
+
+        if split then
+          local right_str = ""
+          if row == 1 then
+            local hdr = preview_header:sub(1, preview_cols)
+            right_str = esc("7m") .. hdr .. string.rep(" ", math.max(0, preview_cols - #hdr)) .. esc("0m")
+          else
+            local pline = preview_lines[row - 1]
+            if pline then
+              pline = pline:sub(1, preview_cols)
+              right_str = pline .. string.rep(" ", math.max(0, preview_cols - #pline))
+            else
+              right_str = string.rep(" ", preview_cols)
+            end
+          end
+          buf[#buf + 1] = left_str .. "│" .. right_str
+        else
+          buf[#buf + 1] = left_str
+        end
+        buf[#buf + 1] = esc("K\r\n")
+      end
+
+      -- Render bottom status bar and keybinding help
+      local status = message or ("%d item%s"):format(#entries, #entries == 1 and "" or "s")
+      buf[#buf + 1] = esc("7m") .. status:sub(1, cols) .. string.rep(" ", math.max(0, cols - #status)) .. esc("0m\r\n")
+      local help = " ↑↓/j k move  Enter/l open  h/Back up  ? help  q quit"
+      buf[#buf + 1] = help:sub(1, cols) .. esc("K")
+    end
 
     buf[#buf + 1] = esc("?2026l")
     io.stdout:write(table.concat(buf))
