@@ -608,7 +608,7 @@ local function get_heap_explanation(step_info)
     return {}
 end
 
-render_full_screen = function(step_idx, full_clear)
+render_full_screen = function(step_idx, full_clear, auto_play_on, speed_ms)
     term_rows, term_cols = get_terminal_size()
     local max_w = term_cols - 1
 
@@ -634,7 +634,7 @@ render_full_screen = function(step_idx, full_clear)
     -- Row 2: Controls
     buf[#buf + 1] = "\27[2;1H"
     buf[#buf + 1] = C.gray
-        .. pad_right("  [Space/Enter] step  [a] auto-play  [r] restart  [q] quit", max_w)
+        .. pad_right("  [Space/→] next  [b/←] back  [g] first  [G] last  [a] auto  [+/-] speed  [r] new  [R] replay  [q] quit", max_w)
         .. C.reset
 
     -- Row 3: blank
@@ -656,9 +656,14 @@ render_full_screen = function(step_idx, full_clear)
         phase_color = C.white
     end
     local phase_label = step_info.phase:upper()
+    local auto_indicator = ""
+    if auto_play_on then
+        auto_indicator = C.green .. "  ▶ AUTO " .. (speed_ms or 400) .. "ms" .. C.reset
+    end
     buf[#buf + 1] = pad_right(
         "  " .. C.bold .. phase_color .. "[" .. phase_label .. "]" .. C.reset
-        .. C.gray .. "  Step " .. step_idx .. "/" .. #steps .. C.reset,
+        .. C.gray .. "  Step " .. step_idx .. "/" .. #steps .. C.reset
+        .. auto_indicator,
         max_w) .. C.reset
 
     -- Row 5: Description
@@ -767,8 +772,8 @@ end
 -- does NOT clear the screen (\27[2J), preventing flicker.
 -- The synchronized update block (\27[?2026h / l) ensures the
 -- terminal applies all row overwrites atomically.
-render_step = function(step_idx)
-    render_full_screen(step_idx, false)
+render_step = function(step_idx, auto_play_on, speed_ms)
+    render_full_screen(step_idx, false, auto_play_on, speed_ms)
 end
 
 -- ─────────────────────────── Main loop ───────────────────────────
@@ -786,25 +791,66 @@ local function main()
     local last_auto_time = get_time_ms()
 
     -- Initial full render (clear screen once)
-    render_full_screen(current_step, true)
+    render_full_screen(current_step, true, auto_play, auto_speed)
 
     while true do
         local key = read_key(50)  -- 50ms poll timeout
 
         if key == "q" or key == "ESC" then
             break
-        elseif key == " " or key == "\n" or key == "\r" then
-            -- Advance one step
+
+        -- ── Forward ──
+        elseif key == " " or key == "\n" or key == "\r" or key == "RIGHT" then
             if current_step < #steps then
                 current_step = current_step + 1
-                render_step(current_step)
+                render_step(current_step, auto_play, auto_speed)
+            end
+            if key ~= "RIGHT" then
+                auto_play = false
+            end
+
+        -- ── Backward ──
+        elseif key == "b" or key == "LEFT" then
+            if current_step > 1 then
+                current_step = current_step - 1
+                render_step(current_step, auto_play, auto_speed)
             end
             auto_play = false
+
+        -- ── Jump to first step ──
+        elseif key == "g" then
+            if current_step ~= 1 then
+                current_step = 1
+                render_step(current_step, auto_play, auto_speed)
+            end
+            auto_play = false
+
+        -- ── Jump to last step ──
+        elseif key == "G" then
+            if current_step ~= #steps then
+                current_step = #steps
+                render_step(current_step, auto_play, auto_speed)
+            end
+            auto_play = false
+
+        -- ── Auto-play toggle ──
         elseif key == "a" then
             auto_play = not auto_play
             last_auto_time = get_time_ms()
+            render_step(current_step, auto_play, auto_speed)
+
+        -- ── Speed up (decrease interval) ──
+        elseif key == "+" or key == "=" then
+            auto_speed = math.max(50, auto_speed - 50)
+            render_step(current_step, auto_play, auto_speed)
+
+        -- ── Slow down (increase interval) ──
+        elseif key == "-" or key == "_" then
+            auto_speed = math.min(2000, auto_speed + 50)
+            render_step(current_step, auto_play, auto_speed)
+
+        -- ── New random data ──
         elseif key == "r" then
-            -- Restart with new random data
             math.randomseed(os.time() + math.floor(get_time_ms()))
             local new_nums = {}
             for _ = 1, n do
@@ -814,7 +860,15 @@ local function main()
             generate_steps()
             current_step = 1
             auto_play = false
-            render_full_screen(current_step, true)
+            render_full_screen(current_step, true, auto_play, auto_speed)
+
+        -- ── Replay same data ──
+        elseif key == "R" then
+            reset_array()
+            generate_steps()
+            current_step = 1
+            auto_play = false
+            render_full_screen(current_step, true, auto_play, auto_speed)
         end
 
         -- Auto-play logic
@@ -822,10 +876,11 @@ local function main()
             local now = get_time_ms()
             if now - last_auto_time >= auto_speed then
                 current_step = current_step + 1
-                render_step(current_step)
+                render_step(current_step, auto_play, auto_speed)
                 last_auto_time = now
                 if current_step >= #steps then
                     auto_play = false
+                    render_step(current_step, auto_play, auto_speed)
                 end
             end
         end
