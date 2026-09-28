@@ -301,7 +301,20 @@ local function launch_game(use_color)
         kernel32 = ffi.load("kernel32")
         msvcrt = ffi.load("msvcrt")
     else
-        ffi.cdef[[
+        -- macOS/BSD declare tcflag_t/speed_t as 64-bit and set NCCS to 20, while Linux
+-- uses 32-bit and NCCS=32.  Picking the wrong layout shifts every field offset
+-- and makes tcgetattr overrun the LuaJIT buffer, so select it at cdef time.
+-- On Linux the definition below passes through byte-for-byte unchanged.
+local function posix_termios_cdef(def)
+    if ffi.os == "OSX" or ffi.os == "BSD" then
+        def = def:gsub("unsigned%s+int(%s+[%w_]*tcflag_t)", "unsigned long%1")
+        def = def:gsub("unsigned%s+int(%s+[%w_]*speed_t)", "unsigned long%1")
+        def = def:gsub("c_cc%[32%]", "c_cc[20]")
+    end
+    return def
+end
+
+ffi.cdef(posix_termios_cdef[[
             typedef unsigned char breakout_cc_t;
             typedef unsigned int breakout_speed_t;
             typedef unsigned int breakout_tcflag_t;
@@ -327,7 +340,8 @@ local function launch_game(use_color)
             long write(int fd, const void *buf, size_t count);
             typedef void (*breakout_sighandler_t)(int);
             breakout_sighandler_t signal(int signum, breakout_sighandler_t handler);
-        ]]
+]])
+
     end
 
     local game = Game.new()
@@ -383,7 +397,7 @@ local function launch_game(use_color)
             original_termios = ffi.new("struct BreakoutTermios")
             assert(ffi.C.tcgetattr(0, original_termios) == 0, "Breakout requires an interactive terminal")
             local winsize = ffi.new("struct { unsigned short rows, cols, xpixel, ypixel; }")
-            if ffi.C.ioctl(1, 0x5413, winsize) == 0 and winsize.cols > 0 and
+            if ffi.C.ioctl(1, (ffi.os == "OSX" or ffi.os == "BSD") and 0x40087468 or 0x5413, winsize) == 0 and winsize.cols > 0 and
                (winsize.cols < WIDTH or winsize.rows < HEIGHT + 2) then
                 error("Breakout needs a terminal at least " .. WIDTH .. " columns by " .. (HEIGHT + 2) .. " rows")
             end

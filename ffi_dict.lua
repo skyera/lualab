@@ -60,7 +60,20 @@ ffi.cdef[[
 ]]
 
 if not is_windows then
-    ffi.cdef[[
+    -- macOS/BSD declare tcflag_t/speed_t as 64-bit and set NCCS to 20, while Linux
+-- uses 32-bit and NCCS=32.  Picking the wrong layout shifts every field offset
+-- and makes tcgetattr overrun the LuaJIT buffer, so select it at cdef time.
+-- On Linux the definition below passes through byte-for-byte unchanged.
+local function posix_termios_cdef(def)
+    if ffi.os == "OSX" or ffi.os == "BSD" then
+        def = def:gsub("unsigned%s+int(%s+[%w_]*tcflag_t)", "unsigned long%1")
+        def = def:gsub("unsigned%s+int(%s+[%w_]*speed_t)", "unsigned long%1")
+        def = def:gsub("c_cc%[32%]", "c_cc[20]")
+    end
+    return def
+end
+
+ffi.cdef(posix_termios_cdef[[
         struct winsize {
             unsigned short ws_row;
             unsigned short ws_col;
@@ -110,7 +123,8 @@ if not is_windows then
         typedef void (*sighandler_t)(int);
         sighandler_t signal(int signum, sighandler_t handler);
         int atexit(void (*func)(void));
-    ]]
+]])
+
 else
     ffi.cdef[[
         typedef void *HANDLE;
@@ -1576,7 +1590,7 @@ function Term.size()
         end
     else
         local ws = ffi.new("struct winsize")
-        if ffi.C.ioctl(1, 0x5413, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
+        if ffi.C.ioctl(1, (ffi.os == "OSX" or ffi.os == "BSD") and 0x40087468 or 0x5413, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
             return tonumber(ws.ws_col), tonumber(ws.ws_row)
         end
     end

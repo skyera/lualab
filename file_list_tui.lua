@@ -11,7 +11,20 @@
 local ffi = require("ffi")
 local bit = require("bit")
 
-ffi.cdef[[
+-- macOS/BSD declare tcflag_t/speed_t as 64-bit and set NCCS to 20, while Linux
+-- uses 32-bit and NCCS=32.  Picking the wrong layout shifts every field offset
+-- and makes tcgetattr overrun the LuaJIT buffer, so select it at cdef time.
+-- On Linux the definition below passes through byte-for-byte unchanged.
+local function posix_termios_cdef(def)
+    if ffi.os == "OSX" or ffi.os == "BSD" then
+        def = def:gsub("unsigned%s+int(%s+[%w_]*tcflag_t)", "unsigned long%1")
+        def = def:gsub("unsigned%s+int(%s+[%w_]*speed_t)", "unsigned long%1")
+        def = def:gsub("c_cc%[32%]", "c_cc[20]")
+    end
+    return def
+end
+
+ffi.cdef(posix_termios_cdef[[
 typedef unsigned int tcflag_t;
 typedef unsigned char cc_t;
 typedef unsigned int speed_t;
@@ -53,11 +66,12 @@ int fork(void);
 int execvp(const char *file, char *const argv[]);
 int waitpid(int pid, int *status, int options);
 void _exit(int status);
-]]
+]])
+
 
 -- Common POSIX constants
 local STDIN, STDOUT = 0, 1
-local TCSANOW, TIOCGWINSZ, POLLIN = 0, 0x5413, 0x001
+local TCSANOW, TIOCGWINSZ, POLLIN = 0, (ffi.os == "OSX" or ffi.os == "BSD") and 0x40087468 or 0x5413, 0x001
 
 -- termios flags for disabling canonical mode and echo
 local ICANON, ECHO, ISIG, IEXTEN = 0x0002, 0x0008, 0x0001, 0x8000

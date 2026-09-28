@@ -11,7 +11,20 @@
 local ffi = require("ffi")
 local bit = require("bit")
 
-ffi.cdef[[
+-- macOS/BSD declare tcflag_t/speed_t as 64-bit and set NCCS to 20, while Linux
+-- uses 32-bit and NCCS=32.  Picking the wrong layout shifts every field offset
+-- and makes tcgetattr overrun the LuaJIT buffer, so select it at cdef time.
+-- On Linux the definition below passes through byte-for-byte unchanged.
+local function posix_termios_cdef(def)
+    if ffi.os == "OSX" or ffi.os == "BSD" then
+        def = def:gsub("unsigned%s+int(%s+[%w_]*tcflag_t)", "unsigned long%1")
+        def = def:gsub("unsigned%s+int(%s+[%w_]*speed_t)", "unsigned long%1")
+        def = def:gsub("c_cc%[32%]", "c_cc[20]")
+    end
+    return def
+end
+
+ffi.cdef(posix_termios_cdef[[
     typedef struct {
         double x, y, old_x, old_y;
         int anchored;
@@ -39,10 +52,11 @@ ffi.cdef[[
     long read(int fd, void *buf, unsigned long count);
     int clock_gettime(int clock_id, struct VerletTimespec *tp);
     struct VerletWinsize { unsigned short rows, cols, xpixel, ypixel; };
-    int ioctl(int fd, unsigned long request, struct VerletWinsize *argp);
+    int ioctl(int fd, unsigned long request, ...);
     typedef void (*verlet_sighandler_t)(int);
     verlet_sighandler_t signal(int signum, verlet_sighandler_t handler);
-]]
+]])
+
 
 local WIDTH, HEIGHT = 74, 18
 local MAX_PARTICLES, MAX_CONSTRAINTS = 256, 1200
@@ -360,7 +374,7 @@ end
 
 local function run_interactive(use_color)
     local winsize = ffi.new("struct VerletWinsize")
-    if ffi.C.ioctl(0, 0x5413, winsize) == 0 and (winsize.cols < WIDTH + 3 or winsize.rows < 23) then
+    if ffi.C.ioctl(0, (ffi.os == "OSX" or ffi.os == "BSD") and 0x40087468 or 0x5413, winsize) == 0 and (winsize.cols < WIDTH + 3 or winsize.rows < 23) then
         error(string.format("terminal needs at least %d columns by 23 rows", WIDTH + 3))
     end
     local original = ffi.new("struct VerletTermios")

@@ -31,7 +31,20 @@ local bit = require("bit")
 -- ============================================================
 local IS_WIN = (ffi.os == "Windows")
 
-ffi.cdef[[
+-- macOS/BSD declare tcflag_t/speed_t as 64-bit and set NCCS to 20, while Linux
+-- uses 32-bit and NCCS=32.  Picking the wrong layout shifts every field offset
+-- and makes tcgetattr overrun the LuaJIT buffer, so select it at cdef time.
+-- On Linux the definition below passes through byte-for-byte unchanged.
+local function posix_termios_cdef(def)
+    if ffi.os == "OSX" or ffi.os == "BSD" then
+        def = def:gsub("unsigned%s+int(%s+[%w_]*tcflag_t)", "unsigned long%1")
+        def = def:gsub("unsigned%s+int(%s+[%w_]*speed_t)", "unsigned long%1")
+        def = def:gsub("c_cc%[32%]", "c_cc[20]")
+    end
+    return def
+end
+
+ffi.cdef(posix_termios_cdef[[
     typedef unsigned char  cc_t;
     typedef unsigned int   speed_t;
     typedef unsigned int   tcflag_t;
@@ -53,7 +66,8 @@ ffi.cdef[[
     struct timespec { time_t tv_sec; long tv_nsec; };
     int clock_gettime(int clk_id, struct timespec *tp);
     int usleep(unsigned int usec);
-]]
+]])
+
 
 local function get_time_sec()
     local ts = ffi.new("struct timespec")

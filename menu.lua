@@ -8,7 +8,20 @@ local ffi = require("ffi")
 local bit = require("bit")
 
 -- POSIX definitions for x86_64 Linux
-ffi.cdef[[
+-- macOS/BSD declare tcflag_t/speed_t as 64-bit and set NCCS to 20, while Linux
+-- uses 32-bit and NCCS=32.  Picking the wrong layout shifts every field offset
+-- and makes tcgetattr overrun the LuaJIT buffer, so select it at cdef time.
+-- On Linux the definition below passes through byte-for-byte unchanged.
+local function posix_termios_cdef(def)
+    if ffi.os == "OSX" or ffi.os == "BSD" then
+        def = def:gsub("unsigned%s+int(%s+[%w_]*tcflag_t)", "unsigned long%1")
+        def = def:gsub("unsigned%s+int(%s+[%w_]*speed_t)", "unsigned long%1")
+        def = def:gsub("c_cc%[32%]", "c_cc[20]")
+    end
+    return def
+end
+
+ffi.cdef(posix_termios_cdef[[
   typedef unsigned char cc_t;
   typedef unsigned int  speed_t;
   typedef unsigned int  tcflag_t;
@@ -44,12 +57,13 @@ ffi.cdef[[
   long read(int fd, void *buf, size_t count);
   long write(int fd, const void *buf, size_t count);
   int usleep(unsigned int usec);
-]]
+]])
+
 
 local C = ffi.C
 
 local TCSANOW    = 0
-local TIOCGWINSZ = 0x5413
+local TIOCGWINSZ = (ffi.os == "OSX" or ffi.os == "BSD") and 0x40087468 or 0x5413
 local POLLIN     = 0x0001
 
 --------------------------------------------------------------------------------

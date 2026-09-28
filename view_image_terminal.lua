@@ -60,7 +60,7 @@ local function get_terminal_size()
         return 80, 24
     else
         local ws = ffi.new("struct winsize")
-        local TIOCGWINSZ = 0x5413
+        local TIOCGWINSZ = (ffi.os == "OSX" or ffi.os == "BSD") and 0x40087468 or 0x5413
         -- fd 1 is stdout
         if ffi.C.ioctl(1, TIOCGWINSZ, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
             return tonumber(ws.ws_col), tonumber(ws.ws_row)

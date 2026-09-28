@@ -68,7 +68,7 @@ else
     ]]
 end
 
-local TIOCGWINSZ = 0x5413
+local TIOCGWINSZ = (ffi.os == "OSX" or ffi.os == "BSD") and 0x40087468 or 0x5413
 
 local function get_terminal_size()
     if is_windows then

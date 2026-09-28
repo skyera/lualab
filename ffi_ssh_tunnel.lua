@@ -64,7 +64,20 @@ if is_windows then
         int _getch(void);
     ]]
 else
-    ffi.cdef[[
+    -- macOS/BSD declare tcflag_t/speed_t as 64-bit and set NCCS to 20, while Linux
+-- uses 32-bit and NCCS=32.  Picking the wrong layout shifts every field offset
+-- and makes tcgetattr overrun the LuaJIT buffer, so select it at cdef time.
+-- On Linux the definition below passes through byte-for-byte unchanged.
+local function posix_termios_cdef(def)
+    if ffi.os == "OSX" or ffi.os == "BSD" then
+        def = def:gsub("unsigned%s+int(%s+[%w_]*tcflag_t)", "unsigned long%1")
+        def = def:gsub("unsigned%s+int(%s+[%w_]*speed_t)", "unsigned long%1")
+        def = def:gsub("c_cc%[32%]", "c_cc[20]")
+    end
+    return def
+end
+
+ffi.cdef(posix_termios_cdef[[
         // Sockets & Network probing
         int socket(int domain, int type, int protocol);
         int bind(int sockfd, const void *addr, uint32_t addrlen);
@@ -122,7 +135,8 @@ else
         };
         int clock_gettime(int clk_id, struct timespec *tp);
         int usleep(unsigned int usec);
-    ]]
+]])
+
 end
 
 -- Network socket constants
