@@ -1,7 +1,7 @@
 #!/usr/bin/env luajit
 --- A small dependency-free file browser for Linux terminals.
 --- Keys: Up/Down or j/k to move, Enter/right/l to open a directory or file,
---- Backspace/left/h to go up, q or Ctrl-C to quit.
+--- Backspace/left/h to go up, ? for help, q or Ctrl-C to quit.
 
 --------------------------------------------------------------------------------
 -- Step 1: C FFI and POSIX declarations
@@ -145,7 +145,10 @@ end
 local function terminal_size()
   local size = ffi.new("struct winsize[1]")
   if ffi.C.ioctl(STDOUT, TIOCGWINSZ, size) ~= 0 then return 24, 80 end
-  return math.max(1, tonumber(size[0].ws_row)), math.max(1, tonumber(size[0].ws_col))
+  local r = tonumber(size[0].ws_row)
+  local c = tonumber(size[0].ws_col)
+  if r <= 0 or c <= 0 then return 24, 80 end
+  return r, c
 end
 
 -- Safely inspect and read text file preview lines (filters out binary files)
@@ -234,6 +237,7 @@ local function main()
   local path = get_cwd()
   local entries, error_message = list_directory(path)
   local selected, offset, message = 1, 0, error_message
+  local show_help = false
   local prev_selected, prev_offset = selected, offset
   local last_rows, last_cols
   local input = ""
@@ -311,6 +315,59 @@ local function main()
     return preview_header, preview_lines
   end
 
+  -- Render centered help modal overlay
+  local function render_help_overlay(buf, rows, cols)
+    local items = {
+      " Navigation",
+      "   ↑ / k           Move selection up",
+      "   ↓ / j           Move selection down",
+      "   ← / h / Backsp  Go to parent directory",
+      "",
+      " Actions",
+      "   → / l / Enter   Open dir / edit in nvim",
+      "   ?               Toggle this help screen",
+      "   q / Ctrl-C      Quit browser",
+      "",
+      "            Press ? or Esc to close",
+    }
+    local title = " Keyboard Shortcuts "
+    local box_w = math.min(cols - 2, 48)
+    local inner_w = box_w - 2
+    if inner_w < 15 then return end
+
+    local box_h = #items + 2
+    local start_row = math.max(2, math.floor((rows - box_h) / 2))
+    local start_col = math.max(1, math.floor((cols - box_w) / 2) + 1)
+
+    local border_dash = math.max(0, math.floor((inner_w - #title) / 2))
+    local border_right = math.max(0, inner_w - border_dash - #title)
+    local top_border = "┌" .. string.rep("─", border_dash) .. title .. string.rep("─", border_right) .. "┐"
+
+    buf[#buf + 1] = esc(string.format("%d;%dH", start_row, start_col))
+    buf[#buf + 1] = esc("7m") .. top_border .. esc("0m")
+
+    for i, line in ipairs(items) do
+      local r = start_row + i
+      if r < rows - 1 then
+        local padded = line
+        if #padded > inner_w then
+          padded = padded:sub(1, inner_w)
+        else
+          padded = padded .. string.rep(" ", inner_w - #padded)
+        end
+        buf[#buf + 1] = esc(string.format("%d;%dH", r, start_col))
+        buf[#buf + 1] = esc("7m│" .. padded .. "│") .. esc("0m")
+      end
+    end
+
+    local bottom_r = start_row + #items + 1
+    if bottom_r < rows - 1 then
+      local bottom_border = "└" .. string.rep("─", inner_w) .. "┘"
+      buf[#buf + 1] = esc(string.format("%d;%dH", bottom_r, start_col))
+      buf[#buf + 1] = esc("7m") .. bottom_border .. esc("0m")
+    end
+  end
+
   -- Full screen redraw with atomic synchronized update
   -- full_clear is ONLY true for initial start, window resize, return from editor, or reload
   render_full_screen = function(full_clear)
@@ -359,10 +416,14 @@ local function main()
       buf[#buf + 1] = esc("K\r\n")
     end
 
+    if show_help then
+      render_help_overlay(buf, rows, cols)
+    end
+
     -- Render bottom status bar and keybinding help
     local status = message or ("%d item%s"):format(#entries, #entries == 1 and "" or "s")
     buf[#buf + 1] = esc("7m") .. status:sub(1, cols) .. string.rep(" ", math.max(0, cols - #status)) .. esc("0m\r\n")
-    local help = " ↑↓/j k move  Enter/right/l open  Backspace/left/h up  q quit"
+    local help = show_help and " Press ? or Esc to close help" or " ↑↓/j k move  Enter/l open  h/Back up  ? help  q quit"
     buf[#buf + 1] = help:sub(1, cols) .. esc("K")
 
     buf[#buf + 1] = esc("?2026l")
@@ -375,6 +436,10 @@ local function main()
 
   -- Differential update on local movement: updates only changed rows
   render_selection_differential = function(old_sel, new_sel)
+    if show_help then
+      render_full_screen(false)
+      return
+    end
     local rows, cols, visible, split, list_cols, preview_cols = compute_layout()
     -- If viewport scrolled or in split pane mode (where preview pane reflects current file),
     -- fall back to atomic synchronized full screen refresh (without full clear \27[2J).
@@ -418,6 +483,7 @@ local function main()
     entries = entries or {}
     selected, offset, message = 1, 0, error_message
     prev_selected, prev_offset = 1, 0
+    show_help = false
     render_full_screen(true)
   end
 
@@ -488,45 +554,23 @@ local function main()
       -- Process accumulated bytes from the input buffer
       while #input > 0 do
         if input:sub(1, 3) == "\27[A" then
-          selected = selected - 1
           input = input:sub(4)
-          moved = true
-        elseif input:sub(1, 3) == "\27[B" then
-          selected = selected + 1
-          input = input:sub(4)
-          moved = true
-        elseif input:sub(1, 3) == "\27[C" then
-          input = input:sub(4)
-          if moved then
-            selected = math.max(1, math.min(math.max(1, #entries), selected))
-            compute_layout()
-            moved = false
-          end
-          open_selected()
-          old_sel, old_off = selected, offset
-        elseif input:sub(1, 3) == "\27[D" then
-          input = input:sub(4)
-          if moved then
-            selected = math.max(1, math.min(math.max(1, #entries), selected))
-            compute_layout()
-            moved = false
-          end
-          go_parent()
-          old_sel, old_off = selected, offset
-        elseif input:sub(1, 1) == "\27" and #input < 3 then
-          -- Incomplete ANSI escape sequence; wait for subsequent bytes
-          break
-        else
-          local key = input:sub(1, 1)
-          input = input:sub(2)
-          if key == "q" or key == "\3" then return end
-          if key == "j" then
-            selected = selected + 1
-            moved = true
-          elseif key == "k" then
+          if not show_help then
             selected = selected - 1
             moved = true
-          elseif key == "l" or key == "\r" or key == "\n" then
+          end
+        elseif input:sub(1, 3) == "\27[B" then
+          input = input:sub(4)
+          if not show_help then
+            selected = selected + 1
+            moved = true
+          end
+        elseif input:sub(1, 3) == "\27[C" then
+          input = input:sub(4)
+          if show_help then
+            show_help = false
+            render_full_screen(false)
+          else
             if moved then
               selected = math.max(1, math.min(math.max(1, #entries), selected))
               compute_layout()
@@ -534,7 +578,13 @@ local function main()
             end
             open_selected()
             old_sel, old_off = selected, offset
-          elseif key == "h" or key == "\127" then
+          end
+        elseif input:sub(1, 3) == "\27[D" then
+          input = input:sub(4)
+          if show_help then
+            show_help = false
+            render_full_screen(false)
+          else
             if moved then
               selected = math.max(1, math.min(math.max(1, #entries), selected))
               compute_layout()
@@ -542,6 +592,47 @@ local function main()
             end
             go_parent()
             old_sel, old_off = selected, offset
+          end
+        elseif input:sub(1, 1) == "\27" and #input < 3 then
+          -- Incomplete ANSI escape sequence; wait for subsequent bytes
+          break
+        else
+          local key = input:sub(1, 1)
+          input = input:sub(2)
+          if key == "\3" then return end
+          if show_help then
+            if key == "?" or key == "q" or key == "\27" or key == "\r" or key == "\n" or key == " " then
+              show_help = false
+              render_full_screen(false)
+            end
+          else
+            if key == "q" then return end
+            if key == "?" then
+              show_help = true
+              render_full_screen(false)
+            elseif key == "j" then
+              selected = selected + 1
+              moved = true
+            elseif key == "k" then
+              selected = selected - 1
+              moved = true
+            elseif key == "l" or key == "\r" or key == "\n" then
+              if moved then
+                selected = math.max(1, math.min(math.max(1, #entries), selected))
+                compute_layout()
+                moved = false
+              end
+              open_selected()
+              old_sel, old_off = selected, offset
+            elseif key == "h" or key == "\127" then
+              if moved then
+                selected = math.max(1, math.min(math.max(1, #entries), selected))
+                compute_layout()
+                moved = false
+              end
+              go_parent()
+              old_sel, old_off = selected, offset
+            end
           end
         end
       end
