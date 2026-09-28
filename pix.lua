@@ -113,37 +113,6 @@ local VIDEO_EXTENSIONS = {
     rm   = true,
 }
 
-local bit = bit or require("bit")
--- macOS/BSD poll() is unreliable on character devices, so use select() there.
--- Mirrors poll()'s contract (return value plus pfd.revents) so callers that
--- inspect revents need no change. fd_set is FD_SETSIZE/8 == 128 bytes on both.
-local function posix_wait(pfd, timeout_ms)
-    if ffi.os ~= "OSX" and ffi.os ~= "BSD" then
-        return ffi.C.poll(pfd, 1, timeout_ms)
-    end
-    -- Callers pass either a scalar `struct pollfd` or a `struct pollfd[1]`.
-    -- Only the array form is indexable, so probe that rather than inspecting
-    -- the ctype (a scalar ctype has no `elemtype`/`kind` field).
-    local entry = pfd
-    local ok = pcall(function() return pfd[0] end)
-    if ok then entry = pfd[0] end
-    entry.revents = 0
-    -- Use bit.rshift/bit.band rather than the >> and & operators: the bundled
-    -- LuaJIT build used by the test suite is compiled with 5.2 compatibility,
-    -- where those operators are a syntax error.
-    local fds = ffi.new("unsigned char[128]")
-    local byte = bit.rshift(entry.fd, 3)
-    fds[byte] = fds[byte] + 2 ^ bit.band(entry.fd, 7)
-    local tv = ffi.new("PosixTimeval")
-    tv.tv_sec = math.floor(timeout_ms / 1000)
-    tv.tv_usec = (timeout_ms % 1000) * 1000
-    if ffi.C.select(entry.fd + 1, fds, nil, nil, tv) > 0 then
-        entry.revents = 1 -- POLLIN
-        return 1
-    end
-    return 0
-end
-
 local function is_animated_gif(path)
     local f = io.open(path, "rb")
     if not f then return false end
@@ -1274,8 +1243,6 @@ ffi.cdef(posix_termios_cdef[[
             short events;
             short revents;
         };
-        typedef struct { long tv_sec; long tv_usec; } PosixTimeval;
-        int select(int nfds, void *readfds, void *writefds, void *exceptfds, PosixTimeval *timeout);
         int poll(struct pollfd *fds, unsigned long nfds, int timeout);
         long read(int fd, void *buf, size_t count);
 
@@ -1435,7 +1402,7 @@ ffi.cdef(posix_termios_cdef[[
 
     read_key = function(timeout_ms)
         timeout_ms = timeout_ms or -1
-        local ret = posix_wait(pfd, timeout_ms)
+        local ret = ffi.C.poll(pfd, 1, timeout_ms)
         if ret > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
             local n = ffi.C.read(STDIN_FILENO, key_buf, 16)
             if n > 0 then
@@ -1493,7 +1460,7 @@ ffi.cdef(posix_termios_cdef[[
                     if c0 >= 192 and c0 < 248 then
                         local expected = (c0 >= 240 and 4) or (c0 >= 224 and 3) or 2
                         while n < expected do
-                            local r = posix_wait(pfd, 15)
+                            local r = ffi.C.poll(pfd, 1, 15)
                             if r > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
                                 local rn = ffi.C.read(STDIN_FILENO, key_buf + n, expected - n)
                                 if rn > 0 then n = n + rn else break end
