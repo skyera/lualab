@@ -771,6 +771,22 @@ local function format_cpu_time(sec)
     end
 end
 
+local function format_time_plus(sec)
+    if not sec or sec <= 0 then return "  0:00.00" end
+    local total_cs = math.floor(sec * 100 + 0.5)
+    local cs = total_cs % 100
+    local total_s = math.floor(total_cs / 100)
+    local s = total_s % 60
+    local total_m = math.floor(total_s / 60)
+    local m = total_m % 60
+    local h = math.floor(total_m / 60)
+    if h > 0 then
+        return string.format("%3d:%02d:%02d", h, m, s)
+    else
+        return string.format("%3d:%02d.%02d", m, s, cs)
+    end
+end
+
 local function make_meter_bar(pct, width, col_override)
     width = math.max(2, width or 10)
     pct = math.max(0.0, math.min(100.0, pct or 0.0))
@@ -2432,7 +2448,9 @@ local function build_process_tree(procs, sort_mode, sort_reverse, collapsed_pids
             val_a, val_b = (a.io_read_rate or 0), (b.io_read_rate or 0)
         elseif sort_mode == "iow" then
             val_a, val_b = (a.io_write_rate or 0), (b.io_write_rate or 0)
-        elseif sort_mode == "elapsed" or sort_mode == "time" then
+        elseif sort_mode == "time" then
+            val_a, val_b = (a.cpu_time_sec or 0), (b.cpu_time_sec or 0)
+        elseif sort_mode == "elapsed" then
             val_a, val_b = (a.elapsed_sec or 0), (b.elapsed_sec or 0)
         else
             val_a, val_b = a.cpu_pct, b.cpu_pct
@@ -2568,7 +2586,7 @@ Keybindings:
   Enter, i              Inspect selected process details
   k                     Open safe signal dispatcher modal
   R                     Open process renice modal
-  c, m, p, n, u, s, d, e   Sort by CPU, Mem, PID, Name, User, Threads, Disk I/O, Elapsed Time
+  c, m, p, n, u, s, d, e   Sort by CPU, Mem, PID, Name, User, Threads, Disk I/O, TIME+
   r                     Toggle sort order (Ascending / Descending)
   T                     Cycle color themes on the fly
   Space                 Pause / resume live monitoring (or fold/unfold tree)
@@ -2695,10 +2713,10 @@ Keybindings:
                             elseif k.x >= 28 and k.x <= 34 then new_mode = "mem"
                             elseif k.x >= 36 and k.x <= 44 then new_mode = "mem"
                             elseif k.x >= 46 and k.x <= 49 then new_mode = "threads"
-                            elseif k.x >= 57 and k.x <= 64 then new_mode = "elapsed"
-                            elseif show_io and k.x >= 66 and k.x <= 74 then new_mode = "ior"
-                            elseif show_io and k.x >= 76 and k.x <= 84 then new_mode = "iow"
-                            elseif (show_io and k.x >= 86) or (not show_io and k.x >= 66) then
+                            elseif k.x >= 57 and k.x <= 65 then new_mode = "time"
+                            elseif show_io and k.x >= 67 and k.x <= 75 then new_mode = "ior"
+                            elseif show_io and k.x >= 77 and k.x <= 85 then new_mode = "iow"
+                            elseif (show_io and k.x >= 87) or (not show_io and k.x >= 67) then
                                 new_mode = "name"
                             end
 
@@ -2879,13 +2897,13 @@ Keybindings:
                 elseif k == "d" then
                     sort_mode = "io"
                 elseif k == "e" then
-                    if sort_mode == "elapsed" then
+                    if sort_mode == "time" then
                         sort_reverse = not sort_reverse
                     else
-                        sort_mode = "elapsed"
+                        sort_mode = "time"
                         sort_reverse = false
                     end
-                    status_flash_msg = string.format("Sort: ELAPSED (%s)", sort_reverse and "ASC" or "DESC")
+                    status_flash_msg = string.format("Sort: TIME+ (%s)", sort_reverse and "ASC" or "DESC")
                     status_flash_expiry = os.clock() + 2.0
                 elseif k == "r" then
                     sort_reverse = not sort_reverse
@@ -2976,7 +2994,8 @@ Keybindings:
                     elseif sort_mode == "io" or sort_mode == "disk" then val_a, val_b = (a.io_total_rate or 0), (b.io_total_rate or 0)
                     elseif sort_mode == "ior" then val_a, val_b = (a.io_read_rate or 0), (b.io_read_rate or 0)
                     elseif sort_mode == "iow" then val_a, val_b = (a.io_write_rate or 0), (b.io_write_rate or 0)
-                    elseif sort_mode == "elapsed" or sort_mode == "time" then val_a, val_b = (a.elapsed_sec or 0), (b.elapsed_sec or 0)
+                    elseif sort_mode == "time" then val_a, val_b = (a.cpu_time_sec or 0), (b.cpu_time_sec or 0)
+                    elseif sort_mode == "elapsed" then val_a, val_b = (a.elapsed_sec or 0), (b.elapsed_sec or 0)
                     else val_a, val_b = a.cpu_pct, b.cpu_pct end
 
                     if val_a ~= val_b then
@@ -3336,7 +3355,7 @@ Keybindings:
             local h_res     = (sort_mode == "mem") and col_hdr("RES", "mem", 9) or string.format("%-9s", "RES")
             local h_th      = col_hdr("TH", "threads", 4)
             local h_stat    = string.format("%-5s", "STAT")
-            local h_elapsed = col_hdr("ELAPSED", "elapsed", 8)
+            local h_time    = col_hdr("TIME+", "time", 9)
             local h_cmd     = in_tree_mode and (C.title_col .. "PROCESS TREE [Space/Tab: Fold]" .. C.table_hdr) or col_hdr("COMMAND", "name", 15)
 
             local show_io_cols = (term_w >= 115)
@@ -3348,7 +3367,7 @@ Keybindings:
             end
 
             local th_str = string.format("  %s%s %s %s %s %s %s %s %s%s %s%s",
-                C.table_hdr, h_pid, h_user, h_cpu, h_mem, h_res, h_th, h_stat, h_elapsed, io_hdr_str, h_cmd, C.reset)
+                C.table_hdr, h_pid, h_user, h_cpu, h_mem, h_res, h_th, h_stat, h_time, io_hdr_str, h_cmd, C.reset)
             table.insert(out, draw_box_row(1, table_header_y, term_w, th_str))
 
             local visible_rows = bot_h - 3
@@ -3383,9 +3402,9 @@ Keybindings:
                         io_val_str = string.format(" %-9s %-9s", format_rate(pr.io_read_rate or 0), format_rate(pr.io_write_rate or 0))
                     end
 
-                    local elapsed_str = format_elapsed(pr.elapsed_sec or 0)
-                    local row_content = string.format("%-7d %-8s %s%5.1f%%%s %5.1f%% %-9s %-4d %-5s %-8s%s %s",
-                        pr.pid, user_str, cpu_col, cpu_val, C.reset, pr.mem_pct, format_bytes(res_val), pr.threads or 1, pr.state, elapsed_str, io_val_str, cmd_display)
+                    local time_str = format_time_plus(pr.cpu_time_sec or 0)
+                    local row_content = string.format("%-7d %-8s %s%5.1f%%%s %5.1f%% %-9s %-4d %-5s %s%s %s",
+                        pr.pid, user_str, cpu_col, cpu_val, C.reset, pr.mem_pct, format_bytes(res_val), pr.threads or 1, pr.state, time_str, io_val_str, cmd_display)
 
                     if is_sel then
                         table.insert(out, draw_box_row(1, table_header_y + i, term_w, C.sel_bg .. "▶ " .. row_content .. C.reset))
@@ -3411,7 +3430,7 @@ Keybindings:
                 table.insert(out, draw_box_row(mx, my + 3, mw, string.format(" %sUser:%s      %-8s (UID: %d)", C.bold, C.reset, pr.username, pr.uid or 0)))
                 table.insert(out, draw_box_row(mx, my + 4, mw, string.format(" %sState:%s     %-7s   %sThreads:%s  %d", C.bold, C.reset, pr.state, C.bold, C.reset, pr.threads or 1)))
                 table.insert(out, draw_box_row(mx, my + 5, mw, string.format(" %sPPID:%s      %-7d   %sNice:%s     %d", C.bold, C.reset, pr.ppid or 0, C.bold, C.reset, pr.nice or 0)))
-                table.insert(out, draw_box_row(mx, my + 6, mw, string.format(" %sElapsed:%s   %-10s %sCPU Time:%s %s", C.bold, C.reset, format_elapsed(pr.elapsed_sec or 0), C.bold, C.reset, format_cpu_time(pr.cpu_time_sec or 0))))
+                table.insert(out, draw_box_row(mx, my + 6, mw, string.format(" %sTIME+ (CPU):%s %-10s %sElapsed:%s   %s", C.bold, C.reset, format_time_plus(pr.cpu_time_sec or 0), C.bold, C.reset, format_elapsed(pr.elapsed_sec or 0))))
                 table.insert(out, draw_box_row(mx, my + 7, mw, string.format(" %sCPU%%:%s     %-6.1f%%   %sMemory%%:%s %-6.1f%%", C.bold, C.reset, pr.cpu_pct, C.bold, C.reset, pr.mem_pct)))
                 table.insert(out, draw_box_row(mx, my + 8, mw, string.format(" %sMemory:%s    RES: %s │ VIRT: %s", C.bold, C.reset, format_bytes(pr.res_kb), format_bytes(pr.vsize_kb or 0))))
                 table.insert(out, draw_box_row(mx, my + 9, mw, string.format(" %sDisk I/O:%s  Read: %s (Tot: %s) │ Write: %s (Tot: %s)",
@@ -3482,7 +3501,7 @@ Keybindings:
                 table.insert(out, draw_box_row(mx, my + 8, mw, "   k, R           Open signal dispatcher, Renice modal"))
                 table.insert(out, draw_box_row(mx, my + 9, mw, string.format(" %sDisplay & Sorting:%s", C.title_col, C.reset)))
                 table.insert(out, draw_box_row(mx, my + 10, mw, "   c, m, p, n     Sort by CPU, Memory, PID, or Name"))
-                table.insert(out, draw_box_row(mx, my + 11, mw, "   u, s, d, e     Sort by User, Threads, Disk I/O, Elapsed"))
+                table.insert(out, draw_box_row(mx, my + 11, mw, "   u, s, d, e     Sort by User, Threads, Disk I/O, TIME+"))
                 table.insert(out, draw_box_row(mx, my + 12, mw, "   r              Reverse current sort order"))
                 table.insert(out, draw_box_row(mx, my + 13, mw, "   C              CPU auto/summary/detail view"))
                 table.insert(out, draw_box_row(mx, my + 14, mw, "   T              Cycle color themes   Space Pause"))
@@ -3724,7 +3743,11 @@ local function run_self_test()
     assert(format_elapsed(90060) == " 1d 01:01", "format_elapsed(90060)")
     assert(format_cpu_time(0) == "00:00.00", "format_cpu_time(0)")
     assert(format_cpu_time(12.34) == "00:12.34", "format_cpu_time(12.34)")
-    print("  ✔ Visual Utilities: visual_len, truncate, format_elapsed, and format_cpu_time verified")
+    assert(format_time_plus(0) == "  0:00.00", "format_time_plus(0)")
+    assert(format_time_plus(8.83) == "  0:08.83", "format_time_plus(8.83)")
+    assert(format_time_plus(544.66) == "  9:04.66", "format_time_plus(544.66)")
+    assert(format_time_plus(3665) == "  1:01:05", "format_time_plus(3665)")
+    print("  ✔ Visual Utilities: visual_len, truncate, format_time_plus (TIME+), format_elapsed, and format_cpu_time verified")
 
     -- Smart filter test
     local test_proc = { pid = 9999, comm = "testworker", cmdline = "/usr/bin/testworker -d", username = "daemon", state = "S", cpu_pct = 12.5, res_kb = 64000, io_total_rate = 1024, elapsed_sec = 3600 }
@@ -3784,6 +3807,7 @@ local M = {
     format_rate           = format_rate,
     format_elapsed        = format_elapsed,
     format_cpu_time       = format_cpu_time,
+    format_time_plus      = format_time_plus,
     visual_len            = visual_len,
     truncate              = truncate,
     make_meter_bar        = make_meter_bar,
