@@ -388,6 +388,85 @@ TestRunner.describe("Suite: 6. TUI Layout Resize and Viewport Clamping", functio
         assert_true(list_scroll_offset ~= old_scroll, "Scroll offset must change when moving to end of list")
         assert_eq(list_scroll_offset, 5, "Scroll offset should now be 5")
     end)
+
+    TestRunner.it("should toggle Help View on F1 and ? unconditionally", function()
+        local show_help = false
+        local focus_pane = "search"
+        local query = ""
+
+        local function handle_key(key)
+            if show_help then
+                show_help = false
+                return "dismissed"
+            elseif key == "F1" or key == "?" then
+                show_help = true
+                return "opened"
+            elseif #key == 1 and focus_pane == "search" then
+                query = query .. key
+                return "typed"
+            end
+            return "ignored"
+        end
+
+        -- In empty search box, pressing ? opens help
+        assert_eq(handle_key("?"), "opened", "Pressing ? should open help")
+        assert_true(show_help, "show_help must be true")
+
+        -- Pressing ? again dismisses help
+        assert_eq(handle_key("?"), "dismissed", "? should dismiss help when active")
+        assert_false(show_help, "show_help must be false")
+
+        -- Pressing F1 always opens help
+        assert_eq(handle_key("F1"), "opened", "F1 should open help")
+        assert_true(show_help, "show_help must be true")
+
+        -- Esc dismisses help
+        assert_eq(handle_key("ESC"), "dismissed", "Esc should dismiss help")
+        assert_false(show_help, "show_help must be false")
+
+        -- Even when query already has text, pressing ? still opens help
+        query = "hello"
+        assert_eq(handle_key("?"), "opened", "? should open help even when query has text")
+        assert_true(show_help, "show_help must be true")
+        assert_eq(query, "hello", "query text should be preserved intact")
+
+        -- Esc dismisses help, query preserved
+        assert_eq(handle_key("ESC"), "dismissed", "Esc dismisses help")
+        assert_false(show_help, "show_help must be false")
+        assert_eq(query, "hello", "query text preserved")
+
+        -- And F1 also opens help with query text
+        assert_eq(handle_key("F1"), "opened", "F1 should open help with query text")
+        assert_true(show_help, "show_help must be true")
+    end)
+
+    TestRunner.it("should parse Windows console F1 scan codes and VT escape sequences", function()
+        local function parse_win_seq(c0, extra)
+            if c0 == 0 or c0 == 224 then
+                local c1 = extra[1]
+                if c1 == 72 then return "UP"
+                elseif c1 == 80 then return "DOWN"
+                elseif c1 == 59 or c1 == 84 or c1 == 94 or c1 == 104 then return "F1"
+                end
+            elseif c0 == 27 then
+                local seq = table.concat(extra)
+                if seq == "OP" or seq == "[11~" or seq == "[[A" or seq:find("OP$") then
+                    return "F1"
+                end
+                return "ESC"
+            end
+            return string.char(c0)
+        end
+
+        assert_eq(parse_win_seq(0, {59}), "F1", "Classic console F1 (scan 59) should return F1")
+        assert_eq(parse_win_seq(0, {84}), "F1", "Shift-F1 (scan 84) should return F1")
+        assert_eq(parse_win_seq(0, {94}), "F1", "Ctrl-F1 (scan 94) should return F1")
+        assert_eq(parse_win_seq(224, {59}), "F1", "Extended prefix F1 should return F1")
+        assert_eq(parse_win_seq(27, {"O", "P"}), "F1", "Windows Terminal VT F1 (ESC OP) should return F1")
+        assert_eq(parse_win_seq(27, {"[", "1", "1", "~"}), "F1", "Windows VT F1 (ESC [ 1 1 ~) should return F1")
+        assert_eq(parse_win_seq(27, {}), "ESC", "Standalone ESC should return ESC")
+        assert_eq(parse_win_seq(63, {}), "?", "ASCII 63 should return ?")
+    end)
 end)
 
 TestRunner.describe("7. SQLite3 Library Discovery, Validation and Selection", function()

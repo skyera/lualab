@@ -15,6 +15,8 @@ local STD_OUTPUT_HANDLE = 0xFFFFFFF5 -- ((uint32_t)-11)
 if is_windows then
     pcall(function() kernel32 = ffi.load("kernel32") end)
     pcall(function() msvcrt = ffi.load("msvcrt") end)
+    if not kernel32 then kernel32 = ffi.C end
+    if not msvcrt then msvcrt = ffi.C end
 end
 
 --------------------------------------------------------------------------------
@@ -2479,12 +2481,13 @@ function TUI.run(db, initial_query, tui_limit)
         timeout_ms = timeout_ms or 30
 
         if is_windows then
+            local crt = msvcrt or ffi.C
             local elapsed = 0
             while elapsed < timeout_ms do
-                if msvcrt and msvcrt._kbhit() ~= 0 then
-                    local c0 = msvcrt._getch()
+                if crt and crt._kbhit() ~= 0 then
+                    local c0 = crt._getch()
                     if c0 == 0 or c0 == 224 then
-                        local c1 = msvcrt._getch()
+                        local c1 = crt._getch()
                         if c1 == 72 then return "UP"
                         elseif c1 == 80 then return "DOWN"
                         elseif c1 == 75 then return "LEFT"
@@ -2493,8 +2496,33 @@ function TUI.run(db, initial_query, tui_limit)
                         elseif c1 == 81 then return "PAGE_DOWN"
                         elseif c1 == 71 then return "HOME"
                         elseif c1 == 79 then return "END"
+                        elseif c1 == 59 or c1 == 84 or c1 == 94 or c1 == 104 then return "F1"
                         end
                     elseif c0 == 27 then
+                        local seq = ""
+                        local t_wait = 0
+                        while t_wait < 30 and crt._kbhit() == 0 do
+                            if kernel32 then kernel32.Sleep(2) end
+                            t_wait = t_wait + 2
+                        end
+                        while crt._kbhit() ~= 0 do
+                            local c_next = crt._getch()
+                            seq = seq .. string.char(c_next)
+                        end
+                        if #seq > 0 then
+                            if seq == "OP" or seq == "[11~" or seq == "[[A" or seq:find("OP$") then
+                                return "F1"
+                            elseif seq == "[A" or seq == "OA" then return "UP"
+                            elseif seq == "[B" or seq == "OB" then return "DOWN"
+                            elseif seq == "[C" or seq == "OC" then return "RIGHT"
+                            elseif seq == "[D" or seq == "OD" then return "LEFT"
+                            elseif seq == "[5~" then return "PAGE_UP"
+                            elseif seq == "[6~" then return "PAGE_DOWN"
+                            elseif seq == "[H" or seq == "[1~" then return "HOME"
+                            elseif seq == "[F" or seq == "[4~" then return "END"
+                            elseif seq == "?" then return "?"
+                            end
+                        end
                         return "ESC"
                     elseif c0 == 9 then
                         return "TAB"
@@ -2542,7 +2570,11 @@ function TUI.run(db, initial_query, tui_limit)
                 while idx < n do
                     local c0 = key_buf[idx]
                     if c0 == 27 then -- ESC sequence
-                        if idx + 2 < n and key_buf[idx + 1] == 91 then -- '['
+                        if idx + 4 < n and key_buf[idx + 1] == 91 and key_buf[idx + 2] == 49 and key_buf[idx + 3] == 49 and key_buf[idx + 4] == 126 then -- ESC [ 1 1 ~ (F1)
+                            table.insert(key_queue, "F1"); idx = idx + 5
+                        elseif idx + 3 < n and key_buf[idx + 1] == 91 and key_buf[idx + 2] == 91 and key_buf[idx + 3] == 65 then -- ESC [ [ A (F1)
+                            table.insert(key_queue, "F1"); idx = idx + 4
+                        elseif idx + 2 < n and key_buf[idx + 1] == 91 then -- '['
                             local c2 = key_buf[idx + 2]
                             if c2 == 65 then table.insert(key_queue, "UP"); idx = idx + 3
                             elseif c2 == 66 then table.insert(key_queue, "DOWN"); idx = idx + 3
@@ -2641,6 +2673,7 @@ function TUI.run(db, initial_query, tui_limit)
     local error_msg = nil
     local status_bar_msg = nil
     local status_bar_time = 0
+    local show_help = false
 
     local current_preview_file = nil
     local current_preview_total_lines = 0
@@ -3124,6 +3157,8 @@ function TUI.run(db, initial_query, tui_limit)
         elseif #results == 0 and i == 2 then
             local prompt_msg = (#query == 0) and "  Type to search code..." or "  No matches found"
             return "\27[90m" .. pad_to(prompt_msg, text_w) .. "\27[0m" .. left_sb
+        elseif #results == 0 and i == 3 and #query == 0 then
+            return "\27[90m" .. pad_to("  (Press ? or F1 for help)", text_w) .. "\27[0m" .. left_sb
         else
             return string.rep(" ", text_w) .. left_sb
         end
@@ -3132,7 +3167,7 @@ function TUI.run(db, initial_query, tui_limit)
     -- Instant visual echo: update query prompt line in row 2 with zero flicker
     local function render_query_prompt_instant()
         local left_col_border = (focus_pane == "search") and "\27[1;36m" or "\27[90m"
-        local query_prompt = " > " .. query .. "|"
+        local query_prompt = (#query == 0) and " > |\27[90m (F1: help)\27[0m" or (" > " .. query .. "|")
         local ext_tag = active_ext_filter and ("\27[1;35m[." .. active_ext_filter .. "]\27[0m ") or ""
         local matches_badge = ext_tag .. ((#results > 0) and string.format("[%d/%d]", selected_idx, #results) or "[0 Matches]")
         local badge_w = visual_len(matches_badge)
@@ -3174,7 +3209,7 @@ function TUI.run(db, initial_query, tui_limit)
         local right_col_border = (focus_pane == "preview") and "\27[1;32m" or "\27[90m"
         local neutral_border = "\27[90m"
 
-        local query_prompt = " > " .. query .. "|"
+        local query_prompt = (#query == 0) and " > |\27[90m (F1: help)\27[0m" or (" > " .. query .. "|")
         local ext_tag = active_ext_filter and ("\27[1;35m[." .. active_ext_filter .. "]\27[0m ") or ""
         local matches_badge = ext_tag .. ((#results > 0) and string.format("[%d/%d]", selected_idx, #results) or "[0 Matches]")
         local badge_w = visual_len(matches_badge)
@@ -3273,7 +3308,69 @@ function TUI.run(db, initial_query, tui_limit)
         render_full_screen()
     end
 
+    local function render_help_view()
+        local neutral_border = "\27[90m"
+        local frame_buf = {}
+        local function emit_row(y, row_str)
+            table.insert(frame_buf, string.format("\27[%d;1H\27[2K%s", y, row_str))
+        end
+
+        local title = " CodeFind Help — Keyboard Shortcuts & Search Patterns "
+        local top_bar = pad_to(" " .. title, cur_cols - 2)
+        emit_row(1, neutral_border .. "┌" .. string.rep("─", cur_cols - 2) .. "┐\27[0m")
+        emit_row(2, string.format("%s│\27[1;30;46m%s\27[0m%s│\27[0m", neutral_border, top_bar, neutral_border))
+        emit_row(3, neutral_border .. "├" .. string.rep("─", cur_cols - 2) .. "┤\27[0m")
+
+        local help_content = {
+            "  \27[1;36mKeyboard Navigation & Shortcuts\27[0m",
+            "    \27[1mTab\27[0m             Switch focus between Search Box and Preview / Browse pane",
+            "    \27[1m↑ / ↓\27[0m           Navigate file list (or scroll preview in preview pane)",
+            "    \27[1mPgUp / PgDn\27[0m     Scroll 10 items / lines up or down",
+            "    \27[1mj / k\27[0m           Vim-style scroll in Browse pane",
+            "    \27[1mn / N\27[0m           Jump to next / previous search match in current file",
+            "    \27[1mEnter\27[0m           Open selected file at current match line in $EDITOR",
+            "    \27[1my\27[0m               Yank (copy) selected 'filepath:line' to clipboard",
+            "    \27[1mCtrl-W\27[0m          Delete word backward in search box",
+            "    \27[1mCtrl-U\27[0m          Clear entire search query",
+            "    \27[1mCtrl-R\27[0m          Trigger immediate incremental re-index of repository",
+            "    \27[1mEsc\27[0m             Clear search text / exit preview / return to search",
+            "    \27[1mq / Ctrl-Q\27[0m      Quit CodeFind",
+            "",
+            "  \27[1;36mSearch Pattern Syntax\27[0m",
+            "    \27[33mword1 word2\27[0m       Implicit AND — matches files containing BOTH terms",
+            "    \27[33mword1 OR word2\27[0m    Boolean OR — matches files containing EITHER term",
+            "    \27[33mword1 NOT word2\27[0m   Boolean NOT — matches 'word1' but excludes 'word2'",
+            "    \27[33m\"exact phrase\"\27[0m    Exact phrase search (preserves contiguous token order)",
+            "    \27[33mprefix*\27[0m           Prefix search — matches any word starting with prefix",
+            "    \27[33mfiles:<pattern>\27[0m   Filename match (e.g. files:config, files:*.md, files:test_*)",
+            "    \27[33m@<ext>\27[0m            Inline extension filter (e.g. 'handle @lua' or just '@md')",
+            "",
+            "  \27[90mPress ?, F1, Esc, q, or Enter to close this Help View and return to search\27[0m",
+        }
+
+        for i = 1, list_height do
+            local line = help_content[i] or ""
+            local padded = pad_to(line, cur_cols - 2)
+            emit_row(3 + i, string.format("%s│\27[0m%s%s│\27[0m", neutral_border, padded, neutral_border))
+        end
+
+        local div_y = 3 + list_height + 1
+        emit_row(div_y, neutral_border .. "├" .. string.rep("─", cur_cols - 2) .. "┤\27[0m")
+        local status_y = div_y + 1
+        local foot = pad_to("  [?, F1, Esc, q, or Enter] Close Help View", cur_cols - 2)
+        emit_row(status_y, string.format("%s│\27[1;30;47m%s\27[0m%s│\27[0m", neutral_border, foot, neutral_border))
+        local bot_y = status_y + 1
+        emit_row(bot_y, neutral_border .. "└" .. string.rep("─", cur_cols - 2) .. "┘\27[0m")
+
+        io.write("\27[?2026h" .. table.concat(frame_buf) .. "\27[?2026l")
+        io.flush()
+    end
+
     render_full_screen = function()
+        if show_help then
+            render_help_view()
+            return
+        end
         clamp_scroll()
         local left_col_border = (focus_pane == "search") and "\27[1;36m" or "\27[90m"
         local right_col_border = (focus_pane == "preview") and "\27[1;32m" or "\27[90m"
@@ -3307,29 +3404,37 @@ function TUI.run(db, initial_query, tui_limit)
         -- Row Footer / Keybindings
         local status_y = div_y + 1
         if status_bar_msg and (os.clock() - status_bar_time <= 3.0) then
-            local padded_status = pad_to("  " .. status_bar_msg, cur_cols - 2)
+            local help_hint = " [F1: Help] "
+            local hint_w = visual_len(help_hint)
+            local avail = cur_cols - 2 - hint_w
+            local msg_text = "  " .. status_bar_msg
+            if visual_len(msg_text) > avail then
+                msg_text = truncate(msg_text, avail)
+            end
+            local pad_spaces = string.rep(" ", math.max(0, avail - visual_len(msg_text)))
+            local padded_status = msg_text .. pad_spaces .. help_hint
             emit_row(status_y, string.format("%s│\27[1;30;47m%s\27[0m%s│\27[0m", neutral_border, padded_status, neutral_border))
         else
             local pills = {}
             if focus_pane == "search" then
                 pills = {
+                    {"Tab", "Browse"},
+                    {"F1", "Help"},
                     {"Enter", "Open"},
-                    {"Tab", "Browse (q quits)"},
                     {"Esc", #query > 0 and "Clear" or "Exit"},
-                    {"^Q", "Quit"},
                     {"@ext", "Filter"},
                     {"^W", "Del Word"},
-                    {"F1/?", "Help"}
+                    {"^Q", "Quit"}
                 }
             else
                 pills = {
-                    {"q", "Quit"},
-                    {"n/N", "Next/Prev Match"},
-                    {"j/k", "Scroll"},
-                    {"Tab", "Search Box"},
-                    {"y", "Copy Path"},
+                    {"Tab", "Search"},
+                    {"?", "Help"},
                     {"Enter", "Open"},
-                    {"?", "Help"}
+                    {"n/N", "Match"},
+                    {"j/k", "Scroll"},
+                    {"y", "Copy Path"},
+                    {"q", "Quit"}
                 }
             end
 
@@ -3370,8 +3475,19 @@ function TUI.run(db, initial_query, tui_limit)
         local poll_timeout = 40
         local key = read_key(poll_timeout)
         if key then
-            if key == "CTRL_C" or key == "CTRL_Q" then
+            if show_help then
+                if key == "CTRL_C" or key == "CTRL_Q" then
+                    running = false
+                else
+                    -- Any key (Esc, q, ?, F1, Enter, Tab, Space, etc.) dismisses Help View
+                    show_help = false
+                    needs_redraw = true
+                end
+            elseif key == "CTRL_C" or key == "CTRL_Q" then
                 running = false
+            elseif key == "F1" or key == "?" then
+                show_help = true
+                needs_redraw = true
             elseif key == "ESC" then
                 if focus_pane == "preview" then
                     -- If in preview pane, ESC switches back to search box
@@ -3605,12 +3721,9 @@ function TUI.run(db, initial_query, tui_limit)
                     set_status("Query cleared — type new search")
                     needs_redraw = true
                 elseif key == "?" or key == "F1" then
-                    set_status("Patterns: term1 OR term2 │ \"exact phrase\" │ files:pat │ @ext │ [Tab] Search")
+                    show_help = true
                     needs_redraw = true
                 end
-            elseif key == "F1" then
-                set_status("Patterns: term1 OR term2 │ \"exact phrase\" │ files:pat │ @ext │ [Tab] Browse")
-                needs_redraw = true
             elseif #key == 1 and focus_pane == "search" then
                 -- Search box is a text input: printable keys are literal, including 'q'.
                 -- Quit via Esc (empty box), Ctrl-C, Ctrl-Q, or Tab then q in Browse.
