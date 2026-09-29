@@ -1034,6 +1034,23 @@ local function is_binary_buffer(data)
     return false
 end
 
+local function get_filename(path)
+    return path:match("([^/\\]+)$") or path
+end
+
+local function normalize_path(path)
+    if not path or path == "" then return "." end
+    local p = path:gsub("\\", "/")
+    while p:find("^%./") do
+        p = p:sub(3)
+    end
+    p = p:gsub("/+", "/")
+    if #p > 1 and p:sub(-1) == "/" then
+        p = p:sub(1, -2)
+    end
+    return (p == "" or p == ".") and "." or p
+end
+
 --------------------------------------------------------------------------------
 -- 3. Database Engine & SQLite Wrapper
 --------------------------------------------------------------------------------
@@ -1143,10 +1160,13 @@ function Database:rollback()
 end
 
 function Database:get_file_info(filepath)
+    local canon = normalize_path(filepath)
+    local dot_variant = "./" .. canon
+
     local stmt = self._stmt_get_file_info
     if not stmt then
         local stmt_p = ffi.new("sqlite3_stmt*[1]")
-        local sql = "SELECT id, size, mtime FROM files WHERE filepath = ? LIMIT 1;"
+        local sql = "SELECT id, size, mtime, filepath FROM files WHERE filepath = ? OR filepath = ? LIMIT 1;"
         if sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_p, nil) ~= SQLITE_OK then
             return nil
         end
@@ -1156,24 +1176,28 @@ function Database:get_file_info(filepath)
         sqlite.sqlite3_reset(stmt)
     end
 
-    sqlite.sqlite3_bind_text(stmt, 1, filepath, #filepath, SQLITE_TRANSIENT)
+    sqlite.sqlite3_bind_text(stmt, 1, canon, #canon, SQLITE_TRANSIENT)
+    sqlite.sqlite3_bind_text(stmt, 2, dot_variant, #dot_variant, SQLITE_TRANSIENT)
     local res = nil
     if sqlite.sqlite3_step(stmt) == SQLITE_ROW then
         res = {
             id = tonumber(sqlite.sqlite3_column_int64(stmt, 0)),
             size = tonumber(sqlite.sqlite3_column_int64(stmt, 1)),
             mtime = tonumber(sqlite.sqlite3_column_int64(stmt, 2)),
+            filepath = ffi.string(sqlite.sqlite3_column_text(stmt, 3)),
         }
     end
     return res
 end
 
-function Database:index_file(filepath, filename, ext, size, mtime, content)
-    -- 1. Remove previous FTS and file entry if updating
+function Database:remove_file(filepath)
+    local canon = normalize_path(filepath)
+    local dot_variant = "./" .. canon
+
     local stmt_del_fts = self._stmt_del_fts
     if not stmt_del_fts then
         local stmt_p = ffi.new("sqlite3_stmt*[1]")
-        local sql = "DELETE FROM code_idx WHERE filepath = ?;"
+        local sql = "DELETE FROM code_idx WHERE filepath = ? OR filepath = ?;"
         if sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_p, nil) == SQLITE_OK then
             stmt_del_fts = stmt_p[0]
             self._stmt_del_fts = stmt_del_fts
@@ -1182,14 +1206,15 @@ function Database:index_file(filepath, filename, ext, size, mtime, content)
         sqlite.sqlite3_reset(stmt_del_fts)
     end
     if stmt_del_fts then
-        sqlite.sqlite3_bind_text(stmt_del_fts, 1, filepath, #filepath, SQLITE_TRANSIENT)
+        sqlite.sqlite3_bind_text(stmt_del_fts, 1, canon, #canon, SQLITE_TRANSIENT)
+        sqlite.sqlite3_bind_text(stmt_del_fts, 2, dot_variant, #dot_variant, SQLITE_TRANSIENT)
         sqlite.sqlite3_step(stmt_del_fts)
     end
 
     local stmt_del_files = self._stmt_del_files
     if not stmt_del_files then
         local stmt_p = ffi.new("sqlite3_stmt*[1]")
-        local sql = "DELETE FROM files WHERE filepath = ?;"
+        local sql = "DELETE FROM files WHERE filepath = ? OR filepath = ?;"
         if sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_p, nil) == SQLITE_OK then
             stmt_del_files = stmt_p[0]
             self._stmt_del_files = stmt_del_files
@@ -1198,9 +1223,18 @@ function Database:index_file(filepath, filename, ext, size, mtime, content)
         sqlite.sqlite3_reset(stmt_del_files)
     end
     if stmt_del_files then
-        sqlite.sqlite3_bind_text(stmt_del_files, 1, filepath, #filepath, SQLITE_TRANSIENT)
+        sqlite.sqlite3_bind_text(stmt_del_files, 1, canon, #canon, SQLITE_TRANSIENT)
+        sqlite.sqlite3_bind_text(stmt_del_files, 2, dot_variant, #dot_variant, SQLITE_TRANSIENT)
         sqlite.sqlite3_step(stmt_del_files)
     end
+end
+
+function Database:index_file(filepath, filename, ext, size, mtime, content)
+    filepath = normalize_path(filepath)
+    filename = filename or get_filename(filepath)
+
+    -- 1. Remove previous FTS and file entry if updating (cleans both canon and ./ variants)
+    self:remove_file(filepath)
 
     -- 2. Insert into files table
     local stmt_ins_f = self._stmt_ins_f
@@ -1243,40 +1277,6 @@ function Database:index_file(filepath, filename, ext, size, mtime, content)
     end
 end
 
-function Database:remove_file(filepath)
-    local stmt_del_fts = self._stmt_del_fts
-    if not stmt_del_fts then
-        local stmt_p = ffi.new("sqlite3_stmt*[1]")
-        local sql = "DELETE FROM code_idx WHERE filepath = ?;"
-        if sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_p, nil) == SQLITE_OK then
-            stmt_del_fts = stmt_p[0]
-            self._stmt_del_fts = stmt_del_fts
-        end
-    else
-        sqlite.sqlite3_reset(stmt_del_fts)
-    end
-    if stmt_del_fts then
-        sqlite.sqlite3_bind_text(stmt_del_fts, 1, filepath, #filepath, SQLITE_TRANSIENT)
-        sqlite.sqlite3_step(stmt_del_fts)
-    end
-
-    local stmt_del_files = self._stmt_del_files
-    if not stmt_del_files then
-        local stmt_p = ffi.new("sqlite3_stmt*[1]")
-        local sql = "DELETE FROM files WHERE filepath = ?;"
-        if sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_p, nil) == SQLITE_OK then
-            stmt_del_files = stmt_p[0]
-            self._stmt_del_files = stmt_del_files
-        end
-    else
-        sqlite.sqlite3_reset(stmt_del_files)
-    end
-    if stmt_del_files then
-        sqlite.sqlite3_bind_text(stmt_del_files, 1, filepath, #filepath, SQLITE_TRANSIENT)
-        sqlite.sqlite3_step(stmt_del_files)
-    end
-end
-
 function Database:get_all_filepaths()
     local stmt_p = ffi.new("sqlite3_stmt*[1]")
     local sql = "SELECT filepath FROM files;"
@@ -1296,7 +1296,7 @@ end
 function Database:search(query_str, options)
     options = options or {}
     local limit = options.limit
-    local limit_clause = (limit and limit > 0) and string.format(" LIMIT %d", limit) or ""
+    local limit_clause = (limit and limit > 0) and string.format(" LIMIT %d", limit * 3) or ""
     local ext_filter = options.extension
 
     -- Sanitize/escape query string for FTS5
@@ -1358,18 +1358,26 @@ function Database:search(query_str, options)
     sqlite.sqlite3_bind_text(stmt, 1, fts_query, #fts_query, SQLITE_TRANSIENT)
 
     local results = {}
+    local seen = {}
     while sqlite.sqlite3_step(stmt) == SQLITE_ROW do
         local fpath = ffi.string(sqlite.sqlite3_column_text(stmt, 0))
         local fname = ffi.string(sqlite.sqlite3_column_text(stmt, 1))
         local snip  = ffi.string(sqlite.sqlite3_column_text(stmt, 2))
         local rank  = sqlite.sqlite3_column_double(stmt, 3)
 
-        table.insert(results, {
-            filepath = fpath,
-            filename = fname,
-            snippet  = snip,
-            rank     = rank
-        })
+        local canon_path = normalize_path(fpath)
+        if not seen[canon_path] then
+            seen[canon_path] = true
+            table.insert(results, {
+                filepath = canon_path,
+                filename = fname,
+                snippet  = snip,
+                rank     = rank
+            })
+            if limit and limit > 0 and #results >= limit then
+                break
+            end
+        end
     end
     sqlite.sqlite3_finalize(stmt)
     return results
@@ -1515,10 +1523,6 @@ local function get_file_extension(path)
     return ext and ext:lower() or ""
 end
 
-local function get_filename(path)
-    return path:match("([^/\\]+)$") or path
-end
-
 local function has_ignored_dir(path)
     if not path then return false end
     for segment in path:gmatch("[^/\\]+") do
@@ -1652,7 +1656,7 @@ local function scan_directory_builtin(root_dir, callback)
                         if not IGNORED_DIRS[name] then walk(full_path) end
                     else
                         if not has_ignored_dir(full_path) then
-                            callback(full_path, name)
+                            callback(normalize_path(full_path), name)
                         end
                     end
                 end
@@ -1684,7 +1688,7 @@ local function scan_directory_builtin(root_dir, callback)
                         if not IGNORED_DIRS[name] then walk(full_path) end
                     elseif is_reg then
                         if not has_ignored_dir(full_path) then
-                            callback(full_path, name)
+                            callback(normalize_path(full_path), name)
                         end
                     end
                 end
@@ -1712,7 +1716,7 @@ local function scan_directory_fd(root_dir, callback)
     local p = io.popen(cmd, "r")
     if not p then return false end
     for line in p:lines() do
-        local raw = line:gsub("\r$", ""):gsub("^%./", ""):gsub("\\", "/")
+        local raw = normalize_path(line:gsub("\r$", ""))
         if not has_ignored_dir(raw) then
             local fname = get_filename(raw)
             callback(raw, fname)
@@ -1733,7 +1737,7 @@ local function scan_directory_find(root_dir, callback)
     local p = io.popen(cmd, "r")
     if not p then return false end
     for line in p:lines() do
-        local raw = line:gsub("\r$", ""):gsub("^%./", ""):gsub("\\", "/")
+        local raw = normalize_path(line:gsub("\r$", ""))
         if not has_ignored_dir(raw) then
             local fname = get_filename(raw)
             callback(raw, fname)
@@ -1795,10 +1799,15 @@ function Indexer.run(db, root_dir, verbose, allow_all, finder_mode)
             return
         end
 
+        local canon = normalize_path(full_path)
+        if visited_paths[canon] then
+            return
+        end
+        visited_paths[canon] = true
         visited_paths[full_path] = true
         visited_paths[full_path:gsub("^%./", "")] = true
         visited_paths["./" .. full_path:gsub("^%./", "")] = true
-        table.insert(candidate_files, { path = full_path, name = fname, ext = ext })
+        table.insert(candidate_files, { path = canon, name = fname, ext = ext })
     end, active_crawler)
 
     local total_files = #candidate_files
@@ -1866,15 +1875,9 @@ function Indexer.run(db, root_dir, verbose, allow_all, finder_mode)
         if not meta or meta.size > (5 * 1024 * 1024) then -- skip > 5MB single files
             files_skipped = files_skipped + 1
         else
-            -- Check if file already indexed and unchanged (check both relative and ./ forms)
+            -- Check if file already indexed and unchanged (must match size, mtime, and canonical path)
             local existing = db:get_file_info(full_path)
-            if not existing and full_path:find("^%./") then
-                existing = db:get_file_info(full_path:sub(3))
-            elseif not existing then
-                existing = db:get_file_info("./" .. full_path)
-            end
-
-            if existing and existing.size == meta.size and existing.mtime == meta.mtime then
+            if existing and existing.size == meta.size and existing.mtime == meta.mtime and existing.filepath == full_path then
                 files_skipped = files_skipped + 1
             else
                 local f = io.open(full_path, "rb")
@@ -1911,17 +1914,22 @@ function Indexer.run(db, root_dir, verbose, allow_all, finder_mode)
         io.flush()
     end
 
-    -- Prune deleted / stale files from database
+    -- Prune deleted / stale / duplicate files from database
     local files_pruned = 0
     local all_db_paths = db:get_all_filepaths()
-    local norm_root = root_dir:gsub("^%./", "")
+    local norm_root = normalize_path(root_dir)
+    local seen_db_canon = {}
     for _, db_path in ipairs(all_db_paths) do
+        local canon_db = normalize_path(db_path)
         -- Only prune files that belong under root_dir
-        local norm_db = db_path:gsub("^%./", "")
-        local belongs = (norm_root == "" or norm_root == ".") or (norm_db == norm_root) or (norm_db:sub(1, #norm_root + 1) == (norm_root .. "/"))
-        if belongs and not visited_paths[db_path] and not visited_paths[norm_db] and not visited_paths["./" .. norm_db] then
-            db:remove_file(db_path)
-            files_pruned = files_pruned + 1
+        local belongs = (norm_root == "" or norm_root == ".") or (canon_db == norm_root) or (canon_db:sub(1, #norm_root + 1) == (norm_root .. "/"))
+        if belongs then
+            if not visited_paths[canon_db] or seen_db_canon[canon_db] or db_path ~= canon_db then
+                db:remove_file(db_path)
+                files_pruned = files_pruned + 1
+            else
+                seen_db_canon[canon_db] = true
+            end
         end
     end
 
@@ -2932,6 +2940,38 @@ function TUI.run(db, initial_query, tui_limit)
         end
     end
 
+    local function shorten_path(path, max_len)
+        if visual_len(path) <= max_len then return path end
+        local fname = get_filename(path)
+        if visual_len(fname) >= max_len then
+            return truncate(fname, max_len)
+        end
+        local segments = {}
+        for seg in path:gmatch("[^/\\]+") do
+            table.insert(segments, seg)
+        end
+        if #segments <= 1 then
+            return truncate(path, max_len)
+        end
+        local candidate = fname
+        for k = #segments - 1, 1, -1 do
+            local sub = candidate:gsub("^%.%.%./", "")
+            local test_p = ".../" .. segments[k] .. "/" .. sub
+            if visual_len(test_p) <= max_len then
+                candidate = test_p
+            else
+                break
+            end
+        end
+        if candidate ~= fname then
+            return candidate
+        end
+        if visual_len(".../" .. fname) <= max_len then
+            return ".../" .. fname
+        end
+        return truncate(fname, max_len)
+    end
+
     -- Format a single file item in the left list
     local function format_left_item(item_idx, is_sel, list_thumb_pos, i)
         local res_item = results[item_idx]
@@ -2965,21 +3005,7 @@ function TUI.run(db, initial_query, tui_limit)
             local cnt_w = #cnt_tag
 
             local max_p_len = math.max(4, text_w - 2 - num_w_total - badge_w - cnt_w)
-            local clean_path = display_path
-            if visual_len(clean_path) > max_p_len then
-                local fname = get_filename(display_path)
-                local parent = display_path:match("([^/\\]+)[/\\][^/\\]+$")
-                local compact = parent and (parent .. "/" .. fname) or fname
-                if visual_len(compact) <= max_p_len then
-                    clean_path = compact
-                elseif visual_len(".../" .. fname) <= max_p_len then
-                    clean_path = ".../" .. fname
-                elseif visual_len(fname) <= max_p_len then
-                    clean_path = fname
-                else
-                    clean_path = truncate(fname, max_p_len)
-                end
-            end
+            local clean_path = shorten_path(display_path, max_p_len)
 
             local avail_space = math.max(0, text_w - 2 - num_w_total - badge_w - visual_len(clean_path) - cnt_w)
             local pad_spaces = string.rep(" ", avail_space)
@@ -4008,6 +4034,8 @@ if pcall(debug.getlocal, 4, 1) then
         scan_directory_builtin = scan_directory_builtin,
         scan_directory_fd = scan_directory_fd,
         scan_directory_find = scan_directory_find,
+        normalize_path = normalize_path,
+        get_filename = get_filename,
         IGNORED_DIRS = IGNORED_DIRS,
     }
 else

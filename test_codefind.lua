@@ -750,6 +750,101 @@ TestRunner.describe("9. Multi-Finder Crawler & Path Normalization", function()
     end)
 end)
 
+TestRunner.describe("10. Path Normalization, Deduplication and Monorepo Disambiguation", function()
+    local normalize_path = codefind.normalize_path
+
+    TestRunner.it("should normalize path variations (backslashes, leading ./, multiple slashes, trailing slashes)", function()
+        assert_eq(normalize_path([[src\utils\math.lua]]), "src/utils/math.lua", "Windows backslashes should convert to forward slashes")
+        assert_eq(normalize_path("./src/utils/math.lua"), "src/utils/math.lua", "Leading ./ should be stripped")
+        assert_eq(normalize_path("././src//utils///math.lua/"), "src/utils/math.lua", "Repeated ./ and slashes should be collapsed and stripped")
+        assert_eq(normalize_path("."), ".", "Current dir dot should remain dot")
+        assert_eq(normalize_path("./"), ".", "./ should normalize to dot")
+        assert_eq(normalize_path(""), ".", "Empty string should normalize to dot")
+    end)
+
+    TestRunner.it("should deduplicate search results when code_idx contains duplicate entries", function()
+        local dedup_db_path = tmp_base .. "/_test_cf_dedup_" .. os.time() .. ".db"
+        local d_db = Database.open(dedup_db_path)
+
+        d_db:begin()
+        d_db:index_file("src/engine.lua", "engine.lua", "lua", 200, 1000, "function start_engine() print('engine started') end")
+        d_db:commit()
+
+        -- Inject an un-normalized duplicate record directly into code_idx as legacy databases might contain
+        d_db:exec("INSERT INTO code_idx (filepath, filename, content) VALUES ('./src/engine.lua', 'engine.lua', 'function start_engine() duplicate end');")
+
+        local results = d_db:search("start_engine")
+        assert_eq(#results, 1, "Search must return exactly 1 deduplicated result despite duplicate rows in FTS index")
+        assert_eq(results[1].filepath, "src/engine.lua", "Result filepath must be canonical")
+
+        d_db:close()
+        os.remove(dedup_db_path)
+        os.remove(dedup_db_path .. "-wal")
+        os.remove(dedup_db_path .. "-shm")
+    end)
+
+    TestRunner.it("should prune legacy un-normalized and duplicate records during incremental re-index", function()
+        local tmpdir = make_tmpdir("_test_cf_prune_" .. os.time())
+        local f = io.open(tmpdir .. "/app.lua", "w")
+        f:write("function main() print('hello') end\n")
+        f:close()
+
+        local prune_db_path = tmpdir .. "/prune.db"
+        local p_db = Database.open(prune_db_path)
+
+        -- Initial index
+        local res1 = Indexer.run(p_db, tmpdir, false, false, "builtin")
+        assert_eq(res1.indexed, 1, "First index should index 1 file")
+
+        -- Inject duplicate legacy entry with leading ./ into files and code_idx
+        local legacy_path = "./" .. normalize_path(tmpdir .. "/app.lua")
+        p_db:exec(string.format("INSERT INTO files (filepath, filename, extension, size, mtime) VALUES ('%s', 'app.lua', 'lua', 50, 1000);", legacy_path))
+        p_db:exec(string.format("INSERT INTO code_idx (filepath, filename, content) VALUES ('%s', 'app.lua', 'function main() legacy end');", legacy_path))
+
+        -- Re-index: self-healing should detect and eliminate the legacy un-normalized entry
+        local res2 = Indexer.run(p_db, tmpdir, false, false, "builtin")
+        assert_eq(#p_db:get_all_filepaths(), 1, "Database must retain only 1 canonical path")
+
+        local search_res = p_db:search("main")
+        assert_eq(#search_res, 1, "Search should return exactly 1 result after self-healing re-index")
+
+        -- Also test pruning an orphaned file that no longer exists on disk
+        local del_path = normalize_path(tmpdir .. "/deleted.lua")
+        p_db:exec(string.format("INSERT INTO files (filepath, filename, extension, size, mtime) VALUES ('%s', 'deleted.lua', 'lua', 50, 1000);", del_path))
+        p_db:exec(string.format("INSERT INTO code_idx (filepath, filename, content) VALUES ('%s', 'deleted.lua', 'function deleted() end');", del_path))
+
+        local res3 = Indexer.run(p_db, tmpdir, false, false, "builtin")
+        assert_true(res3.pruned >= 1, "Indexer should prune orphaned files")
+        assert_eq(#p_db:get_all_filepaths(), 1, "Database must retain only existing file after pruning")
+
+        p_db:close()
+        rm_tmpdir(tmpdir)
+    end)
+
+    TestRunner.it("should remove both canonical and ./ variants when removing a file", function()
+        local rem_db_path = tmp_base .. "/_test_cf_rem_" .. os.time() .. ".db"
+        local r_db = Database.open(rem_db_path)
+
+        r_db:begin()
+        r_db:index_file("core/app.lua", "app.lua", "lua", 100, 1000, "function run() end")
+        r_db:commit()
+
+        -- Inject ./ variant into code_idx
+        r_db:exec("INSERT INTO code_idx (filepath, filename, content) VALUES ('./core/app.lua', 'app.lua', 'function run() end');")
+
+        -- Remove file
+        r_db:remove_file("core/app.lua")
+
+        local search_res = r_db:search("run")
+        assert_eq(#search_res, 0, "Both canonical and legacy variants should be removed")
+
+        r_db:close()
+        os.remove(rem_db_path)
+        os.remove(rem_db_path .. "-wal")
+        os.remove(rem_db_path .. "-shm")
+    end)
+end)
+
 db:close()
 os.remove(test_db_path)
 os.remove(test_db_path .. "-wal")
