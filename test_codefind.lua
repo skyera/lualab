@@ -278,6 +278,21 @@ TestRunner.describe("5. CLI Invocation & Options", function()
         assert_true(ret == 0 or ret == true, "Self-test execution failed")
     end)
 
+    TestRunner.it("should report version 0.1.0 on --version, -v, and module export", function()
+        local p = io.popen("luajit codefind.lua --version 2>&1")
+        local v_long = p and p:read("*a") or ""
+        if p then p:close() end
+        assert_true(v_long:find("codefind 0%.1%.0") ~= nil, "--version did not output expected version: " .. tostring(v_long))
+
+        local p2 = io.popen("luajit codefind.lua -v 2>&1")
+        local v_short = p2 and p2:read("*a") or ""
+        if p2 then p2:close() end
+        assert_true(v_short:find("codefind 0%.1%.0") ~= nil, "-v did not output expected version: " .. tostring(v_short))
+
+        assert_eq(codefind._VERSION, "0.1.0", "Module _VERSION should be 0.1.0")
+        assert_eq(codefind.version, "0.1.0", "Module version should be 0.1.0")
+    end)
+
     TestRunner.it("should index and search a fixture directory via CLI", function()
         local tmpdir = make_tmpdir("_test_cf_dir_" .. os.time())
         local f = io.open(tmpdir .. "/sample.lua", "w")

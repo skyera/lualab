@@ -8,6 +8,8 @@
 local ffi = require("ffi")
 local bit = require("bit")
 
+local CODEFIND_VERSION = "0.1.0"
+
 local is_windows = (ffi.os == "Windows")
 local kernel32, msvcrt
 local STD_INPUT_HANDLE  = 0xFFFFFFF6 -- ((uint32_t)-10)
@@ -905,6 +907,7 @@ local function diagnostics_lines(db_path, target_dir, allow_all, finder_mode)
 
     local L = {}
     local function add(k, v) L[#L + 1] = string.format("  %-11s %s", k, v) end
+    add("codefind", "v" .. CODEFIND_VERSION)
     add("interpreter", interp)
     add("platform", string.format("%s / %s   ffi.os=%s", is_windows and "Windows" or ffi.os, ffi.arch, ffi.os))
     add("sqlite3", string.format("v%s  %s", sqlite_version(), tostring(sqlite_lib_name)))
@@ -3315,7 +3318,7 @@ function TUI.run(db, initial_query, tui_limit)
             table.insert(frame_buf, string.format("\27[%d;1H\27[2K%s", y, row_str))
         end
 
-        local title = " CodeFind Help — Keyboard Shortcuts & Search Patterns "
+        local title = " CodeFind v" .. CODEFIND_VERSION .. " — Keyboard Shortcuts & Search Patterns "
         local top_bar = pad_to(" " .. title, cur_cols - 2)
         emit_row(1, neutral_border .. "┌" .. string.rep("─", cur_cols - 2) .. "┐\27[0m")
         emit_row(2, string.format("%s│\27[1;30;46m%s\27[0m%s│\27[0m", neutral_border, top_bar, neutral_border))
@@ -3755,7 +3758,7 @@ end
 --------------------------------------------------------------------------------
 local function print_help()
     print([[
-CodeFind — High-Performance Local Code & Document Search Engine
+CodeFind v]] .. CODEFIND_VERSION .. [[ — High-Performance Local Code & Document Search Engine
 Powered by LuaJIT FFI & SQLite FTS5 (Zero dependencies)
 
 Usage:
@@ -3773,6 +3776,8 @@ Commands:
   --test                 Run built-in unit & integration test suite
 
 Options:
+  -v, --version          Print version information and exit
+  -h, --help             Show this help message and exit
   --tui                  Launch interactive full-screen TUI (supports live search, scroll, open)
   --json                 Output search results as JSON (for scripting/editor integration)
   --watch[=N]            After indexing, poll every N seconds (default 3) for changed files
@@ -3939,6 +3944,11 @@ local function main(args)
         return
     end
 
+    if args[1] == "--version" or args[1] == "-v" then
+        print("codefind " .. CODEFIND_VERSION)
+        return
+    end
+
     if args[1] == "--test" then
         run_self_tests()
         return
@@ -3961,7 +3971,13 @@ local function main(args)
     local i = 1
     while i <= #args do
         local a = args[i]
-        if a == "--tui" then
+        if a == "--version" or a == "-v" then
+            print("codefind " .. CODEFIND_VERSION)
+            return
+        elseif a == "--help" or a == "-h" then
+            print_help()
+            return
+        elseif a == "--tui" then
             use_tui = true
         elseif a == "--json" then
             use_json = true   -- #1: JSON output mode
@@ -4319,6 +4335,8 @@ end
 
 if pcall(debug.getlocal, 4, 1) then
     return {
+        _VERSION = CODEFIND_VERSION,
+        version  = CODEFIND_VERSION,
         Database = Database,
         Indexer  = Indexer,
         TUI      = TUI,
