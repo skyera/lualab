@@ -1655,8 +1655,8 @@ detect_available_finders = function()
         local line = p:read("*l")
         p:close()
         if line and #line > 0 then
-            local vstr = "available"
-            local vp = io.popen("fd --version 2>nul", "r")
+            local vp_cmd = is_windows and "fd --version 2>nul" or "fd --version 2>/dev/null"
+            local vp = io.popen(vp_cmd, "r")
             if vp then
                 local vl = vp:read("*l")
                 vp:close()
@@ -3605,11 +3605,11 @@ function TUI.run(db, initial_query, tui_limit)
                     set_status("Query cleared — type new search")
                     needs_redraw = true
                 elseif key == "?" or key == "F1" then
-                    set_status("Shortcuts: [Tab] Pane, [n/N] Match, [PgUp/Dn] Scroll, [@ext] Filter, [y] Yank, [^W] Del Word")
+                    set_status("Patterns: term1 OR term2 │ \"exact phrase\" │ files:pat │ @ext │ [Tab] Search")
                     needs_redraw = true
                 end
             elseif key == "F1" then
-                set_status("Shortcuts: [Tab] Pane, [n/N] Match, [PgUp/Dn] Scroll, [@ext] Filter, [^W] Del Word, [^U] Clear")
+                set_status("Patterns: term1 OR term2 │ \"exact phrase\" │ files:pat │ @ext │ [Tab] Browse")
                 needs_redraw = true
             elseif #key == 1 and focus_pane == "search" then
                 -- Search box is a text input: printable keys are literal, including 'q'.
@@ -3671,29 +3671,32 @@ Options:
   --db <path>            Custom database file path (default: .codefind.db)
   --quiet                Suppress the environment block printed before indexing
 
-Search Query Syntax (FTS5):
-  sqlite3 prepare        Implicit AND — files containing BOTH terms
-  sqlite3 OR prepare     OR — files containing either term
-  sqlite3 NOT prepare    Exclude files containing 'prepare'
-  "sqlite3_prepare"      Exact phrase match
-  sqlite3*               Prefix match (any word starting with sqlite3)
-  files:config.ts        Search by filename pattern (not content)
-  files:*.lua            All indexed .lua filenames
-  @lua                   TUI: filter results to .lua files only (also ext: prefix)
+Search Pattern Syntax:
+  • Full-Text (Content):
+      sqlite3 prepare        Implicit AND — matches files containing BOTH terms
+      sqlite3 OR prepare     Boolean OR — matches files containing EITHER term
+      sqlite3 NOT prepare    Boolean NOT — matches 'sqlite3' but excludes 'prepare'
+      "sqlite3_prepare_v2"   Exact phrase match (preserves contiguous order)
+      sqlite*                Prefix wildcard — matches tokens starting with 'sqlite'
+      Note: '.' and '_' are token characters; identifiers (e.g. mod.fn, foo_bar)
+            are indexed as single cohesive tokens.
+
+  • Filename / Path Search:
+      files:config           Search file names containing 'config' (bypasses FTS5)
+      files:*.md             Search all Markdown files by name
+      files:test_*           Search files starting with 'test_'
+
+  • Extension Filters:
+      --ext <ext>            CLI option to restrict to extension (e.g. --ext lua)
+      @<ext> or ext:<ext>    Inline filter in query or TUI (e.g. "prepare @c", "@lua")
 
 Examples:
-  luajit codefind.lua index .
   luajit codefind.lua index . --watch
-  luajit codefind.lua index . --watch=5
-  luajit codefind.lua index . --finder=fd
-  luajit codefind.lua index . --all
-  luajit codefind.lua finder
   luajit codefind.lua search "sqlite3_prepare"
   luajit codefind.lua search "sqlite3 OR prepare" --json
-  luajit codefind.lua search "files:*.lua"
-  luajit codefind.lua search "strtok" --tui
-  luajit codefind.lua --tui
-  luajit codefind.lua tui "metatype"
+  luajit codefind.lua search "files:*.md"
+  luajit codefind.lua search "open @lua"
+  luajit codefind.lua tui "files:config"
 ]])
 end
 
