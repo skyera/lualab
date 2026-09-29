@@ -120,7 +120,7 @@ While the architectural foundation is exceptionally solid, several key UX fricti
 ---
 
 #### 2.3 Empty Search State & Guidance
-* **Status**: ✅ **Implemented & Verified**
+* **Status**: ✅ **Implemented & Verified** (Commit: [`f1b605a`](https://github.com/skyera/lualab/commit/f1b605a))
 * **Observation**:
   - When a query yielded 0 results, the preview pane showed `(No file selected)` with blank lines, and the left pane displayed a static `No matches found`.
   - On program startup with no initial query, the user saw an empty left list and empty preview pane with minimal guidance.
@@ -213,5 +213,5 @@ Automatically maximizes screen real estate without border overflow:
 | **1.3** | Split footer status bar (keep shortcut pills visible during alerts) | ✅ Implemented | [`df0efff`](https://github.com/skyera/lualab/commit/df0efff) | Low | ⭐⭐⭐ |
 | **2.1** | Responsive single-pane mode (< 75 cols) & full-width zoom (`F2`/`z`) | ✅ Implemented | [`dd1206b`](https://github.com/skyera/lualab/commit/dd1206b) | Medium | ⭐⭐ |
 | **2.2** | Rust, Go, Shell, JSON/YAML preview syntax highlighting | ⏳ Pending | — | Medium | ⭐⭐ |
-| **2.3** | Empty state contextual search tips and syntax guidance | ✅ Implemented | Pending commit | Medium | ⭐⭐ |
+| **2.3** | Empty state contextual search tips and syntax guidance | ✅ Implemented | [`f1b605a`](https://github.com/skyera/lualab/commit/f1b605a) | Medium | ⭐⭐ |
 | **2.4** | In-line cursor navigation (`←`/`→`/`Home`/`End`) & sliding window | ✅ Implemented | [`d099a43`](https://github.com/skyera/lualab/commit/d099a43) | Medium | ⭐⭐ |
