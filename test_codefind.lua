@@ -738,6 +738,64 @@ TestRunner.describe("Suite: 6. TUI Layout Resize and Viewport Clamping", functio
         assert_eq(parse_edit_seq(0, {83}), "DELETE", "Windows console 83 should return DELETE")
         assert_eq(parse_edit_seq(27, {"[", "3", "~"}), "DELETE", "POSIX VT ESC [ 3 ~ should return DELETE")
     end)
+
+    TestRunner.it("should render contextual empty state search tips and syntax guidance", function()
+        local get_left = codefind.get_empty_state_left_lines
+        local get_right = codefind.get_empty_state_right_lines
+        local visual_len = codefind.visual_len
+
+        -- 1. Initial state (empty query): Left pane guidance
+        local left_empty = get_left("", 40)
+        local all_left_empty = table.concat(left_empty, "\n")
+        assert_true(all_left_empty:find("CodeFind") ~= nil, "Empty query left pane should display CodeFind title")
+        assert_true(all_left_empty:find("term%*") ~= nil, "Empty query left pane should mention wildcard")
+        assert_true(all_left_empty:find("a AND b") ~= nil, "Empty query left pane should mention boolean ops")
+        assert_true(all_left_empty:find("files:%*%.lua") ~= nil, "Empty query left pane should mention files pattern")
+        assert_true(all_left_empty:find("@lua") ~= nil, "Empty query left pane should mention ext filter")
+
+        -- 2. 0-matches state (typed query): Left pane contextual suggestions
+        local left_no_match = get_left("foo_bar", 40)
+        local all_left_no_match = table.concat(left_no_match, "\n")
+        assert_true(all_left_no_match:find("No matches found") ~= nil, "0 matches left pane should announce No matches found")
+        assert_true(all_left_no_match:find("foo_bar") ~= nil, "0 matches left pane should show query term")
+        assert_true(all_left_no_match:find("Wildcard") ~= nil, "0 matches left pane should suggest wildcard search")
+        assert_true(all_left_no_match:find("Boolean OR") ~= nil, "0 matches left pane should suggest boolean OR")
+        assert_true(all_left_no_match:find("Exact phrase") ~= nil, "0 matches left pane should suggest exact phrase")
+        assert_true(all_left_no_match:find("files:%*%.ext") ~= nil, "0 matches left pane should suggest filename search")
+
+        -- 3. Right pane syntax and keyboard cheat sheet
+        local right_guide = get_right("foo_bar", 55)
+        local all_right_guide = table.concat(right_guide, "\n")
+        assert_true(all_right_guide:find("FTS5") ~= nil, "Right pane should display FTS5 reference title")
+        assert_true(all_right_guide:find("Wildcard") ~= nil, "Right pane should document wildcard")
+        assert_true(all_right_guide:find("Implicit AND") ~= nil, "Right pane should document implicit AND")
+        assert_true(all_right_guide:find("Boolean OR") ~= nil, "Right pane should document boolean OR")
+        assert_true(all_right_guide:find("Negation") ~= nil, "Right pane should document negation NOT")
+        assert_true(all_right_guide:find("Keyboard Controls") ~= nil, "Right pane should document keyboard controls")
+        assert_true(all_right_guide:find("Tab") ~= nil, "Right pane should document Tab key")
+        assert_true(all_right_guide:find("F2 / z") ~= nil, "Right pane should document zoom toggle")
+
+        -- 4. Invariant: Width safety across narrow and wide terminal sizes
+        for _, w in ipairs({20, 30, 36, 45, 60, 80}) do
+            local l_empty = get_left("", w)
+            for _, line in ipairs(l_empty) do
+                local s = codefind.truncate(line, w)
+                assert_true(visual_len(s) <= w, string.format("Empty left line exceeded width %d: %s", w, line))
+            end
+
+            local l_query = get_left("very_long_nonexistent_identifier_that_does_not_exist", w)
+            for _, line in ipairs(l_query) do
+                local s = codefind.truncate(line, w)
+                assert_true(visual_len(s) <= w, string.format("Query left line exceeded width %d: %s", w, line))
+            end
+
+            local r_lines = get_right("some_query", w)
+            for _, line in ipairs(r_lines) do
+                local s = codefind.truncate(line, w)
+                assert_true(visual_len(s) <= w, string.format("Right guide line exceeded width %d: %s", w, line))
+            end
+        end
+    end)
 end)
 
 TestRunner.describe("7. SQLite3 Library Discovery, Validation and Selection", function()

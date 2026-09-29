@@ -50,41 +50,49 @@ While the architectural foundation is exceptionally solid, several key UX fricti
 ---
 
 #### 1.2 Line Number Gutter Overflow for Large Files (> 9,999 Lines)
+* **Status**: ✅ **Implemented & Verified** (Commit: [`c7d8540`](https://github.com/skyera/lualab/commit/c7d8540))
 * **Observation**: In `build_right_cell`:
   ```lua
   local max_code_w = math.max(0, r_text_w - 9)
   right_cell = string.format("  \27[90m%4d │ \27[0m%s%s%s", file_line_num, highlighted, line_pad, right_sb)
   ```
-  The line number width is hardcoded to 4 digits (`%4d`, total gutter width = 9 columns).
+  The line number width was hardcoded to 4 digits (`%4d`, total gutter width = 9 columns).
 * **Bug**:
   - In files with $\ge 10,000$ lines (e.g., SQLite amalgamation `sqlite3.c` with ~150,000 lines, generated code, large JSON data), `%4d` expands to 5 or 6 digits (`12345 │ `).
-  - This pushes the code snippet to the right, exceeding `r_text_w` and displacing the right border and scrollbar.
-* **Fix**:
-  Dynamically compute gutter width based on `current_preview_total_lines`:
-  ```lua
-  local gutter_digits = math.max(3, #tostring(current_preview_total_lines))
-  local gutter_w = gutter_digits + 5  -- "  " (2) + digits + " │ " (3)
-  local max_code_w = math.max(0, r_text_w - gutter_w)
-  local gutter_fmt = string.format("  \27[90m%%%dd │ \27[0m", gutter_digits)
-  ```
+  - This pushed the code snippet to the right, exceeding `r_text_w` and displacing the right border and scrollbar.
+* **Resolution**:
+  - Implemented dynamic gutter width calculation in `format_preview_gutter(total_lines)`:
+    ```lua
+    local gutter_digits = math.max(3, #tostring(total_lines or 1))
+    local gutter_w = gutter_digits + 5  -- "  " (2) + digits + " │ " (3)
+    local max_code_w = math.max(0, r_text_w - gutter_w)
+    local gutter_fmt = string.format("  \27[90m%%%dd │ \27[0m", gutter_digits)
+    ```
+  - For small files ($\le 999$ lines), gutter is compacted to 3 digits (`"    42 │ "`), giving 1 extra character of code width.
+  - For large files (10,000 to 1,000,000+ lines), gutter automatically expands cleanly without pushing borders or displacing the scrollbar.
+  - Added unit test validation in `test_codefind.lua` Suite 6 covering 1 to 1,000,000 line counts.
 
 ---
 
 #### 1.3 Footer Status Notifications Obscure All Keybinding Pills
-* **Observation**: When `set_status()` is called (e.g., "📄 foo.lua — 3 match(es) [n/N to navigate]" or "✔ Copied to clipboard"), the entire footer row of keybinding pills is replaced for 3.0 seconds.
+* **Status**: ✅ **Implemented & Verified** (Commit: [`df0efff`](https://github.com/skyera/lualab/commit/df0efff))
+* **Observation**: When `set_status()` was called (e.g., "📄 foo.lua — 3 match(es) [n/N to navigate]" or "✔ Copied to clipboard"), the entire footer row of keybinding pills was replaced for 3.0 seconds.
 * **UX Friction**:
-  - Navigating files or jumping to matches (`n`/`N`) triggers status updates, which causes the key shortcuts to constantly vanish right when a user needs to reference them.
-* **Fix**:
-  - Keep status messages and keybindings distinct:
-    - Display file-match counts in the Preview Pane Header (where match count and line numbers already reside: `[Match 1/3] [Line 42/500]`).
-    - Or render a split footer: transient message on the left, essential shortcut pills (`[F1] Help`, `[Tab] Switch`, `[^Q] Quit`) preserved on the right.
+  - Navigating files or jumping to matches (`n`/`N`) triggered status updates, causing key shortcuts to constantly vanish right when users needed to reference them.
+* **Resolution**:
+  - Implemented two-zone split footer in `build_footer_content(status_msg, focus_pane, is_zoomed, total_w)`:
+    - Left side displays the transient status message (with ellipsis truncation if long).
+    - Right side persistently displays essential keyboard shortcuts (`[Tab] Browse/Search`, `[Enter] Open`, `[F1] Help`, `[^Q] Quit`).
+    - Normal state displays comprehensive shortcut bar (`[Tab] Browse │ [F1] Help │ [Enter] Open │ [Esc] Clear │ [@ext] Filter`).
+  - Integrated file match counts directly into preview pane header (`📄 foo.lua:42 [Match 1/3] [Line 42/98]`) so normal cursor traversal does not trigger intrusive status messages.
+  - Fully tested across multiple terminal widths in `test_codefind.lua` Suite 6.
 
 ---
 
 ### Priority 2: Medium Impact (Visual Polish & Ergonomics)
 
 #### 2.1 Narrow Terminal Behavior (< 80 Columns)
-* **Status**: ✅ **Implemented & Verified** (commit pending)
+* **Status**: ✅ **Implemented & Verified** (Commit: [`dd1206b`](https://github.com/skyera/lualab/commit/dd1206b))
 * **Observation**:
   - Layout sets `cur_cols = math.max(60, raw_cols - 1)`.
   - When the terminal is 60–75 columns wide, `left_col_w` was ~34 columns and `right_col_w` was ~24–38 columns.
@@ -112,24 +120,25 @@ While the architectural foundation is exceptionally solid, several key UX fricti
 ---
 
 #### 2.3 Empty Search State & Guidance
+* **Status**: ✅ **Implemented & Verified**
 * **Observation**:
-  - When a query yields 0 results, the preview pane shows `(No file selected)` with blank lines, and the left pane displays a static `No matches found`.
-* **Recommendation**:
-  - Display contextual search tips on empty results:
-    ```text
-      No matches found for 'query'
-      Try:
-        • Wildcard search : term*
-        • Boolean OR      : term1 OR term2
-        • Exact phrase    : "exact phrase"
-        • Filename search : files:pattern
-        • Filter by ext   : @lua or @c
-    ```
+  - When a query yielded 0 results, the preview pane showed `(No file selected)` with blank lines, and the left pane displayed a static `No matches found`.
+  - On program startup with no initial query, the user saw an empty left list and empty preview pane with minimal guidance.
+* **Resolution**:
+  - Implemented `get_empty_state_left_lines(query, text_w)`:
+    - **Initial State** (empty search box): displays CodeFind header, quick syntax cheat sheet (`term*`, `a AND b`, `"exact match"`, `files:*.lua`, `@lua`), and shortcut hints.
+    - **No Matches Found** (`#results == 0`): displays warning `⚠ No matches found for '<query>'` and actionable suggestions (Wildcard search, Boolean OR, Exact phrase, Filename search, Extension filter).
+    - Width-adaptive formatting cleanly compacts descriptions for narrow terminal columns ($< 36$).
+  - Implemented `get_empty_state_right_lines(query, avail_w)`:
+    - Transforms previously blank preview pane into a syntax-highlighted **CodeFind & FTS5 Search Reference** and **Keyboard Controls** cheat sheet.
+    - Right header dynamically updates to `📄 Quick Reference & Shortcuts` (initial) or `📄 Syntax & Search Guidance` (0 matches).
+  - Updated status notification on empty search to `No matches for '<query>' — see search tips`.
+  - Added comprehensive test coverage in `test_codefind.lua` Suite 6 verifying text contents and strict visual width safety across widths 20 to 80 cols.
 
 ---
 
 #### 2.4 Cursor Navigation Within Search Query
-* **Status**: ✅ **Implemented & Verified**
+* **Status**: ✅ **Implemented & Verified** (Commit: [`d099a43`](https://github.com/skyera/lualab/commit/d099a43))
 * **Observation**:
   - The terminal cursor was hidden, and `query` was displayed with a static trailing cursor bar (`> query|`).
   - Pressing `Left` or `Right` arrow did not move an insertion cursor within the query string.
@@ -156,41 +165,53 @@ While the architectural foundation is exceptionally solid, several key UX fricti
 
 ## 4. UI Layout Mockups
 
-### Current TUI Layout
+### Dual-Pane Layout (Normal Mode)
+Features dynamic gutter width, in-line query cursor, and split footer status preservation:
 ```
 ┌──────────────────────────────────────┬──────────────────────────────────────┐
-│ > query| (F1: help)      [12 Matches]│ 📄 foo.lua:42 [Match 1/3] [Line 42/98]│
+│ > data|base             [12 Matches]│ 📄 src/db.lua:42 [Match 1/3] [Line 42]│
 ├──────────────────────────────────────┼──────────────────────────────────────┤
 │ ▶  1. [lua] src/main.lua        450L │    40 │ local function init()        │
 │    2. [lua] src/db.lua         1.2kL │    41 │     local db = open()        │
 │    3. [lua] src/search.lua      890L │ >  42 │     db:search(query)         │
-│    4. [c]   src/sqlite.c       15.2kL│    43 │     return db                │
+│    4. [c]   src/sqlite.c      150.2kL│ 15243 │     return db;               │
 ├──────────────────────────────────────┴──────────────────────────────────────┤
-│ [Tab] Browse │ [F1] Help │ [Enter] Open │ [Esc] Clear │ [@ext] Filter       │
+│ ✔ Copied to clipboard     │ [Tab] Browse  [Enter] Open  [F1] Help  [^Q] Quit│
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Proposed Enhanced TUI Layout
+### Responsive Single-Pane Layout (< 75 Columns or `F2` / `z` Zoom)
+Automatically maximizes screen real estate without border overflow:
 ```
-┌──────────────────────────────────────┬──────────────────────────────────────┐
-│ > query| (F1: help)      [12 Matches]│ 📄 foo.lua:42 [Match 1/3] [Line 42/98]│
-├──────────────────────────────────────┼──────────────────────────────────────┤
-│ ▶  1. [lua] src/main.lua        450L │    40 │ local function init()        │
-│    2. [lua] src/db.lua         1.2kL │    41 │     local db = open()        │
-│    3. [lua] src/search.lua      890L │ >  42 │     db:search(query)         │
-│    4. [c]   src/sqlite.c       15.2kL│    43 │     return db                │
-├──────────────────────────────────────┴──────────────────────────────────────┤
-│ 📄 Match 1/3 (line 42)    │ [Tab] Browse  [Enter] Open  [F1] Help  [^Q] Quit│
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ > data|base                                                    [12 Matches] │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ ▶  1. [lua] src/main.lua                                              450L  │
+│    2. [lua] src/db.lua                                               1.2kL  │
+│    3. [lua] src/search.lua                                            890L  │
+│    4. [c]   src/sqlite.c                                            150.2kL │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ [Tab] Preview │ [F1] Help │ [F2] Unzoom │ [Enter] Open │ [^Q] Quit          │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
-*(Notice: Status notices do not erase essential shortcut pills on the right; gutter width dynamically adapts to line count).*
+
+### Horizontal Prompt Sliding Window (Long Queries)
+```
+┌──────────────────────────────────────┬──────────────────────────────────────┐
+│ > <unction search_record|(filters)>  │ 📄 src/db.lua:42          [Line 42/98│
+└──────────────────────────────────────┴──────────────────────────────────────┘
+```
 
 ---
 
-## 5. Implementation Roadmap
+## 5. Implementation Roadmap & Status Tracker
 
-| Phase | Improvements | Complexity | Impact |
-|:---|:---|:---:|:---:|
-| **Phase 1: Layout & Core Alignment** | • Dynamic line number gutter width (files $> 9,999$ lines)<br>• Dynamic Enter key pill (`Search` vs `Open`)<br>• Split status bar (keep shortcut pills visible) | Low | ⭐⭐⭐ |
-| **Phase 2: Search Guidance & Ergonomics** | • Empty state contextual help tips<br>• In-line cursor navigation (`Left`/`Right` arrow in query) | Medium | ⭐⭐ |
-| **Phase 3: Syntax & Responsive View** | • Rust, Go, Shell, JSON/YAML preview syntax highlighting<br>• Responsive single-pane mode for narrow terminals ($< 75$ cols) | Medium | ⭐⭐ |
+| Issue | Description | Status | Commit | Complexity | Impact |
+|:---|:---|:---:|:---:|:---:|:---:|
+| **1.1** | Dynamic Enter key pill (`Search` vs `Open`) / Adaptive live search | ⏳ Pending | — | Low | ⭐⭐⭐ |
+| **1.2** | Dynamic line number gutter width (files $\ge 10,000$ lines) | ✅ Implemented | [`c7d8540`](https://github.com/skyera/lualab/commit/c7d8540) | Low | ⭐⭐⭐ |
+| **1.3** | Split footer status bar (keep shortcut pills visible during alerts) | ✅ Implemented | [`df0efff`](https://github.com/skyera/lualab/commit/df0efff) | Low | ⭐⭐⭐ |
+| **2.1** | Responsive single-pane mode (< 75 cols) & full-width zoom (`F2`/`z`) | ✅ Implemented | [`dd1206b`](https://github.com/skyera/lualab/commit/dd1206b) | Medium | ⭐⭐ |
+| **2.2** | Rust, Go, Shell, JSON/YAML preview syntax highlighting | ⏳ Pending | — | Medium | ⭐⭐ |
+| **2.3** | Empty state contextual search tips and syntax guidance | ✅ Implemented | Pending commit | Medium | ⭐⭐ |
+| **2.4** | In-line cursor navigation (`←`/`→`/`Home`/`End`) & sliding window | ✅ Implemented | [`d099a43`](https://github.com/skyera/lualab/commit/d099a43) | Medium | ⭐⭐ |

@@ -2514,6 +2514,90 @@ local function format_query_prompt(query, cursor_pos, avail_w, is_focused)
     return prefix .. lead .. before .. cursor .. after .. trail
 end
 
+local function get_empty_state_left_lines(query, text_w)
+    query = query or ""
+    text_w = text_w or 40
+    local lines = {}
+    if #query == 0 then
+        lines[1] = ""
+        if text_w >= 36 then
+            lines[2] = "  \27[1;36m🔍 CodeFind — Local Code Search\27[0m"
+        else
+            lines[2] = "  \27[1;36m🔍 CodeFind\27[0m"
+        end
+        lines[3] = "  \27[90mType keywords to search code or files.\27[0m"
+        lines[4] = ""
+        lines[5] = "  \27[1;37mSearch Syntax:\27[0m"
+        if text_w >= 36 then
+            lines[6] = "    \27[1m•\27[0m Wildcard  : \27[33mterm*\27[0m"
+            lines[7] = "    \27[1m•\27[0m Boolean   : \27[33ma AND b\27[0m, \27[33ma OR b\27[0m"
+            lines[8] = "    \27[1m•\27[0m Phrase    : \27[33m\"exact match\"\27[0m"
+            lines[9] = "    \27[1m•\27[0m File path : \27[33mfiles:*.lua\27[0m"
+            lines[10] = "   \27[1m•\27[0m Extension : \27[33m@lua\27[0m, \27[33m@c\27[0m, \27[33m@py\27[0m"
+        else
+            lines[6] = "  \27[1m•\27[0m Wildcard : \27[33mterm*\27[0m"
+            lines[7] = "  \27[1m•\27[0m Boolean  : \27[33ma OR b\27[0m"
+            lines[8] = "  \27[1m•\27[0m Phrase   : \27[33m\"match\"\27[0m"
+            lines[9] = "  \27[1m•\27[0m Files    : \27[33mfiles:pat\27[0m"
+            lines[10] = "  \27[1m•\27[0m Filter   : \27[33m@lua\27[0m"
+        end
+        lines[11] = ""
+        lines[12] = "  \27[90m(Press F1 or ? for help)\27[0m"
+    else
+        lines[1] = ""
+        if text_w >= 34 then
+            local q_disp = truncate(query, math.max(4, text_w - 24))
+            lines[2] = string.format("  \27[1;33m⚠ No matches found\27[0m for '%s'", q_disp)
+        else
+            lines[2] = "  \27[1;33m⚠ No matches found\27[0m"
+        end
+        lines[3] = ""
+        lines[4] = "  \27[1;36mSearch Suggestions:\27[0m"
+        if text_w >= 36 then
+            lines[5] = "    \27[1m•\27[0m Wildcard search : \27[33mterm*\27[0m"
+            lines[6] = "    \27[1m•\27[0m Boolean OR      : \27[33mterm1 OR term2\27[0m"
+            lines[7] = "    \27[1m•\27[0m Exact phrase    : \27[33m\"exact words\"\27[0m"
+            lines[8] = "    \27[1m•\27[0m Filename search : \27[33mfiles:*.ext\27[0m"
+            lines[9] = "    \27[1m•\27[0m Filter by ext   : \27[33m@lua\27[0m or \27[33m@c\27[0m"
+        else
+            lines[5] = "  \27[1m•\27[0m Wildcard : \27[33mterm*\27[0m"
+            lines[6] = "  \27[1m•\27[0m Boolean  : \27[33ma OR b\27[0m"
+            lines[7] = "  \27[1m•\27[0m Phrase   : \27[33m\"words\"\27[0m"
+            lines[8] = "  \27[1m•\27[0m Files    : \27[33mfiles:pat\27[0m"
+            lines[9] = "  \27[1m•\27[0m Filter   : \27[33m@ext\27[0m"
+        end
+        lines[10] = ""
+        lines[11] = "  \27[90m(Press F1 or ? for full help)\27[0m"
+    end
+    return lines
+end
+
+local function get_empty_state_right_lines(query, avail_w)
+    avail_w = avail_w or 40
+    local lines = {}
+    lines[1] = ""
+    lines[2] = "  \27[1;36mCodeFind & FTS5 Search Reference\27[0m"
+    local div_len = math.max(10, math.min(avail_w - 4, 54))
+    lines[3] = "  \27[90m" .. string.rep("─", div_len) .. "\27[0m"
+    lines[4] = "  \27[1;37mWildcard / Prefix\27[0m   \27[33mterm*\27[0m           Match identifiers starting with 'term'"
+    lines[5] = "  \27[1;37mImplicit AND\27[0m        \27[33mopen sqlite\27[0m     Match documents containing all words"
+    lines[6] = "  \27[1;37mBoolean OR\27[0m          \27[33mfoo OR bar\27[0m      Match either keyword"
+    lines[7] = "  \27[1;37mNegation / NOT\27[0m      \27[33mauth NOT test\27[0m   Exclude matching terms"
+    lines[8] = "  \27[1;37mExact Phrase\27[0m        \27[33m\"int main()\"\27[0m    Preserve exact spaces and punctuation"
+    lines[9] = "  \27[1;37mFilename Search\27[0m     \27[33mfiles:*.lua\27[0m     Search file paths instead of content"
+    lines[10] = "  \27[1;37mExtension Filter\27[0m    \27[35m@lua\27[0m, \27[35m@c\27[0m, \27[35m@py\27[0m   Quick filter results by extension"
+    lines[11] = ""
+    lines[12] = "  \27[1;36mKeyboard Controls\27[0m"
+    lines[13] = "  \27[90m" .. string.rep("─", div_len) .. "\27[0m"
+    lines[14] = "  \27[1mTab\27[0m                 Toggle focus: Search Box ⇄ Preview / Browse"
+    lines[15] = "  \27[1mEnter\27[0m               Execute search, or open match in $EDITOR"
+    lines[16] = "  \27[1mF2 / z\27[0m              Toggle full-width pane zoom"
+    lines[17] = "  \27[1m← / → / Home / End\27[0m Move cursor in search query (Ctrl-B / Ctrl-F)"
+    lines[18] = "  \27[1mCtrl-U / Esc\27[0m        Clear search box / reset search"
+    lines[19] = "  \27[1mF1 / ?\27[0m              Open full keyboard shortcuts & help overlay"
+    return lines
+end
+
 local function compute_layout_geometry(cur_cols, cur_rows, focus_pane, is_zoomed)
     local is_narrow = (cur_cols < 75)
     local is_single_pane = is_narrow or (is_zoomed == true)
@@ -3432,11 +3516,10 @@ function TUI.run(db, initial_query, tui_limit)
                 local colored_line = marker .. num_col .. badge_col .. badge_plain .. "\27[0;37m" .. clean_path .. "\27[0m" .. pad_spaces .. right_part
                 return pad_to(colored_line, text_w) .. left_sb
             end
-        elseif #results == 0 and i == 2 then
-            local prompt_msg = (#query == 0) and "  Type to search code..." or "  No matches found"
-            return "\27[90m" .. pad_to(prompt_msg, text_w) .. "\27[0m" .. left_sb
-        elseif #results == 0 and i == 3 and #query == 0 then
-            return "\27[90m" .. pad_to("  (Press ? or F1 for help)", text_w) .. "\27[0m" .. left_sb
+        elseif #results == 0 then
+            local empty_lines = get_empty_state_left_lines(query, text_w)
+            local line_str = empty_lines[i] or ""
+            return pad_to(line_str, text_w) .. left_sb
         else
             return string.rep(" ", text_w) .. left_sb
         end
@@ -3516,6 +3599,10 @@ function TUI.run(db, initial_query, tui_limit)
             end
             local line_badge = string.format(" \27[90m[Line %d/%d]\27[0m", preview_scroll_offset + 1, current_preview_total_lines)
             right_head_title = string.format(" 📄 %s:%d%s%s", sanitize_terminal_text(get_filename(current_preview_file)), first_ln, match_badge, line_badge)
+        elseif #results == 0 and #query > 0 then
+            right_head_title = " 📄 Syntax & Search Guidance"
+        elseif #results == 0 and #query == 0 then
+            right_head_title = " 📄 Quick Reference & Shortcuts"
         else
             right_head_title = " 📄 Preview: (No file selected)"
         end
@@ -3575,7 +3662,9 @@ function TUI.run(db, initial_query, tui_limit)
                 right_cell = string.rep(" ", r_text_w) .. right_sb
             end
         else
-            right_cell = string.rep(" ", r_text_w) .. right_sb
+            local empty_lines = get_empty_state_right_lines(query, r_text_w)
+            local line_str = empty_lines[i] or ""
+            right_cell = pad_to(line_str, r_text_w) .. right_sb
         end
         return right_cell
     end
@@ -3940,7 +4029,7 @@ function TUI.run(db, initial_query, tui_limit)
                     if #results > 0 then
                         set_status(string.format("Found %d matches for '%s'", #results, query))
                     else
-                        set_status(string.format("No matches found for '%s'", query))
+                        set_status(string.format("No matches for '%s' — see search tips", query))
                     end
                 else
                     -- Results are displayed and unchanged, or in NORMAL mode: open in editor
@@ -4683,6 +4772,8 @@ if pcall(debug.getlocal, 4, 1) then
         compute_layout_geometry = compute_layout_geometry,
         format_preview_gutter = format_preview_gutter,
         format_query_prompt = format_query_prompt,
+        get_empty_state_left_lines = get_empty_state_left_lines,
+        get_empty_state_right_lines = get_empty_state_right_lines,
         visual_len = visual_len,
         truncate = truncate,
         -- exposed for tests: console-independent selection logic
