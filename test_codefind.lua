@@ -845,6 +845,164 @@ TestRunner.describe("10. Path Normalization, Deduplication and Monorepo Disambig
     end)
 end)
 
+-- ============================================================
+-- Suite 11: @ext / files: filter coverage
+-- (#16 test @ext filtering, #6 test files: prefix search, #4 meta table)
+-- ============================================================
+TestRunner.describe("11. Extension Filter and files: Prefix Search", function()
+    TestRunner.it("should filter search results by extension", function()
+        local fdb_path = tmp_base .. "/_test_cf_extfil_" .. os.time() .. ".db"
+        local fdb = Database.open(fdb_path)
+        fdb:begin()
+        fdb:index_file("src/main.lua",   "main.lua",  "lua", 100, 1000, "function main() return true end")
+        fdb:index_file("src/helper.c",   "helper.c",  "c",   200, 1000, "int main() { return 0; }")
+        fdb:index_file("test/spec.lua",  "spec.lua",  "lua", 150, 1000, "function test_main() assert(true) end")
+        fdb:index_file("docs/README.md", "README.md", "md",  300, 1000, "# Main project documentation")
+        fdb:commit()
+
+        local all_res = fdb:search("main")
+        assert_true(#all_res >= 3, "Should find 'main' in at least 3 files without ext filter")
+
+        local lua_res = fdb:search("main", { extension = "lua" })
+        assert_true(#lua_res >= 1, "Should find .lua results with ext=lua filter")
+        for _, r in ipairs(lua_res) do
+            assert_true(r.filepath:match("%.lua$") ~= nil,
+                "All ext=lua results must be .lua files, got: " .. r.filepath)
+        end
+
+        local c_res = fdb:search("main", { extension = "c" })
+        assert_true(#c_res >= 1, "Should find .c results with ext=c filter")
+        for _, r in ipairs(c_res) do
+            assert_true(r.filepath:match("%.c$") ~= nil,
+                "All ext=c results must be .c files, got: " .. r.filepath)
+        end
+
+        fdb:close()
+        os.remove(fdb_path); os.remove(fdb_path .. "-wal"); os.remove(fdb_path .. "-shm")
+    end)
+
+    TestRunner.it("files: prefix should search by filename not content", function()
+        local fdb_path = tmp_base .. "/_test_cf_files_" .. os.time() .. ".db"
+        local fdb = Database.open(fdb_path)
+        fdb:begin()
+        fdb:index_file("src/config.lua",    "config.lua",   "lua", 100, 1000, "return {}")
+        fdb:index_file("src/config.ts",     "config.ts",    "ts",  200, 1000, "export default {}")
+        fdb:index_file("lib/auth.lua",      "auth.lua",     "lua", 150, 1000, "local M = {}")
+        fdb:index_file("lib/database.lua",  "database.lua", "lua", 250, 1000, "local DB = {}")
+        fdb:commit()
+
+        local cfg_res = fdb:search("files:config")
+        assert_true(#cfg_res >= 2,
+            "files:config should match >=2 files named 'config.*', got " .. #cfg_res)
+        for _, r in ipairs(cfg_res) do
+            assert_true(r.filename:lower():find("config", 1, true) ~= nil,
+                "files: result filename must contain 'config', got: " .. r.filename)
+        end
+
+        local lua_files = fdb:search("files:*.lua")
+        assert_true(#lua_files >= 3,
+            "files:*.lua should match at least 3 .lua files, got " .. #lua_files)
+
+        fdb:close()
+        os.remove(fdb_path); os.remove(fdb_path .. "-wal"); os.remove(fdb_path .. "-shm")
+    end)
+
+    TestRunner.it("set_meta and get_meta should persist key-value data", function()
+        local mdb_path = tmp_base .. "/_test_cf_meta_" .. os.time() .. ".db"
+        local mdb = Database.open(mdb_path)
+        mdb:set_meta("last_index", "2026-09-28 22:00:00")
+        local v = mdb:get_meta("last_index")
+        assert_eq(v, "2026-09-28 22:00:00", "get_meta should return what set_meta stored")
+        mdb:set_meta("last_index", "2026-09-28 23:00:00")
+        local v2 = mdb:get_meta("last_index")
+        assert_eq(v2, "2026-09-28 23:00:00", "set_meta should overwrite existing key")
+        local v3 = mdb:get_meta("nonexistent")
+        assert_true(v3 == nil, "get_meta for missing key should return nil")
+        mdb:close()
+        os.remove(mdb_path); os.remove(mdb_path .. "-wal"); os.remove(mdb_path .. "-shm")
+    end)
+
+    TestRunner.it("Indexer.run should write last_index to meta", function()
+        local tmpdir = make_tmpdir("idxmeta")
+        local fw = io.open(tmpdir .. "/hello.lua", "w")
+        if fw then fw:write("return 42") fw:close() end
+        local idb_path = tmp_base .. "/_test_cf_idxmeta_" .. os.time() .. ".db"
+        local idb = Database.open(idb_path)
+        Indexer.run(idb, tmpdir, false, false, "builtin")
+        local ts = idb:get_meta("last_index")
+        assert_true(ts ~= nil, "Indexer.run should write last_index to meta table")
+        assert_true(#ts > 0, "last_index must be a non-empty timestamp string")
+        idb:close()
+        os.remove(idb_path); os.remove(idb_path .. "-wal"); os.remove(idb_path .. "-shm")
+        rm_tmpdir(tmpdir)
+    end)
+end)
+
+-- ============================================================
+-- Suite 12: Performance / Benchmark Regression (#15)
+-- ============================================================
+TestRunner.describe("12. Performance Regression Benchmarks", function()
+    TestRunner.it("indexing 200 synthetic files should complete in <5s", function()
+        local tmpdir = make_tmpdir("bench")
+        for i = 1, 200 do
+            local fpath = tmpdir .. "/bench_" .. i .. ".lua"
+            local fw = io.open(fpath, "w")
+            if fw then
+                fw:write(string.format(
+                    "local mod_%d = {}\nfunction compute(x) return x * %d end\nreturn mod_%d\n",
+                    i, i, i))
+                fw:close()
+            end
+        end
+        local bdb_path = tmp_base .. "/_test_cf_bench_" .. os.time() .. ".db"
+        local bdb = Database.open(bdb_path)
+
+        local t0 = os.clock()
+        local stat = Indexer.run(bdb, tmpdir, false, false, "builtin")
+        local elapsed = os.clock() - t0
+
+        assert_true(stat.indexed >= 100,
+            "Should index at least 100 synthetic files, got " .. stat.indexed)
+        assert_true(elapsed < 5.0,
+            string.format("Indexing 200 files should take <5s, took %.2fs", elapsed))
+
+        local t1 = os.clock()
+        local sr = bdb:search("compute", { limit = 20 })
+        local search_elapsed = os.clock() - t1
+        assert_true(#sr >= 1, "Search should find results in benchmark DB")
+        assert_true(search_elapsed < 0.5,
+            string.format("Search over 200-file DB should take <500ms, took %.3fs", search_elapsed))
+
+        bdb:close()
+        os.remove(bdb_path); os.remove(bdb_path .. "-wal"); os.remove(bdb_path .. "-shm")
+        rm_tmpdir(tmpdir)
+    end)
+
+    TestRunner.it("files: prefix search should be fast", function()
+        local tmpdir = make_tmpdir("benchfiles")
+        local names = {"config","auth","router","middleware","handler","service","model","view","controller","utils"}
+        for i = 1, 50 do
+            local name = names[((i-1) % #names) + 1] .. "_" .. i .. ".lua"
+            local fw = io.open(tmpdir .. "/" .. name, "w")
+            if fw then fw:write("return {}") fw:close() end
+        end
+        local bdb2_path = tmp_base .. "/_test_cf_benchf_" .. os.time() .. ".db"
+        local bdb2 = Database.open(bdb2_path)
+        Indexer.run(bdb2, tmpdir, false, false, "builtin")
+
+        local t2 = os.clock()
+        local fres = bdb2:search("files:config")
+        local fts_elapsed = os.clock() - t2
+        assert_true(#fres >= 1, "files: search should find at least 1 config.* file")
+        assert_true(fts_elapsed < 0.2,
+            string.format("files: prefix search should be <200ms, took %.3fs", fts_elapsed))
+
+        bdb2:close()
+        os.remove(bdb2_path); os.remove(bdb2_path .. "-wal"); os.remove(bdb2_path .. "-shm")
+        rm_tmpdir(tmpdir)
+    end)
+end)
+
 db:close()
 os.remove(test_db_path)
 os.remove(test_db_path .. "-wal")

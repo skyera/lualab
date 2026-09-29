@@ -1102,8 +1102,14 @@ function Database:exec(sql)
     local err_p = ffi.new("char*[1]")
     local rc = sqlite.sqlite3_exec(self.db, sql, nil, nil, err_p)
     if rc ~= SQLITE_OK then
-        local err = err_p[0] ~= nil and ffi.string(err_p[0]) or ffi.string(sqlite.sqlite3_errmsg(self.db))
-        if err_p[0] ~= nil then sqlite.sqlite3_free(err_p[0]) end
+        -- Copy error string to Lua BEFORE freeing the C pointer (prevents use-after-free)
+        local err
+        if err_p[0] ~= nil then
+            err = ffi.string(err_p[0])
+            sqlite.sqlite3_free(err_p[0])
+        else
+            err = ffi.string(sqlite.sqlite3_errmsg(self.db))
+        end
         return false, err
     end
     return true
@@ -1129,6 +1135,15 @@ function Database:init_schema()
     local ok, err = self:exec(sql_files)
     if not ok then error("Error creating files table: " .. err) end
 
+    -- Key-Value meta table (stores last_index timestamp, etc.)
+    local ok_meta = self:exec([[
+        CREATE TABLE IF NOT EXISTS meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+    ]])
+    -- non-fatal if it already exists or fails
+
     -- Full-Text Search 5 virtual table (unicode61 tokenchars to match symbols like _, .)
     local sql_fts = [[
         CREATE VIRTUAL TABLE IF NOT EXISTS code_idx USING fts5(
@@ -1146,6 +1161,7 @@ function Database:init_schema()
         if not ok_fb then error("Failed to create FTS5 index: " .. err_fb) end
     end
 end
+
 
 function Database:begin()
     return self:exec("BEGIN TRANSACTION;")
@@ -1299,17 +1315,78 @@ function Database:search(query_str, options)
     local limit_clause = (limit and limit > 0) and string.format(" LIMIT %d", limit * 3) or ""
     local ext_filter = options.extension
 
+    -- Handle "files:<pattern>" prefix — searches by filename, not content
+    local files_prefix = query_str:match("^[Ff]iles?:(.*)$")
+    if files_prefix then
+        local pattern = files_prefix:gsub("%*", "%%"):gsub("^%%", ""):gsub("%%$", "")
+        if #pattern == 0 then pattern = "%" end
+        local like_pat = "%" .. pattern .. "%"
+        local sql = "SELECT filepath, filename, '' AS snip, 0.0 AS rank FROM files WHERE filename LIKE ?" ..
+                    (ext_filter and (" AND extension = '" .. ext_filter:gsub("'","''") .. "'") or "") ..
+                    " ORDER BY filename" ..
+                    ((limit and limit > 0) and (" LIMIT " .. limit) or "") .. ";"
+        local stmt_p = ffi.new("sqlite3_stmt*[1]")
+        if sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_p, nil) ~= SQLITE_OK then
+            return {}, "files: search query failed"
+        end
+        sqlite.sqlite3_bind_text(stmt_p[0], 1, like_pat, #like_pat, SQLITE_TRANSIENT)
+        local results = {}
+        local seen = {}
+        while sqlite.sqlite3_step(stmt_p[0]) == SQLITE_ROW do
+            local fpath = ffi.string(sqlite.sqlite3_column_text(stmt_p[0], 0))
+            local fname = ffi.string(sqlite.sqlite3_column_text(stmt_p[0], 1))
+            local canon_path = normalize_path(fpath)
+            if not seen[canon_path] then
+                seen[canon_path] = true
+                table.insert(results, { filepath = canon_path, filename = fname, snippet = "", rank = 0.0 })
+                if limit and limit > 0 and #results >= limit then break end
+            end
+        end
+        sqlite.sqlite3_finalize(stmt_p[0])
+        return results
+    end
+
+    -- Handle empty / wildcard search when extension filter is set (e.g. typing @lua in TUI)
+    if (#query_str == 0 or query_str == "*" or query_str:match("^%s*$")) and ext_filter and #ext_filter > 0 then
+        local sql = string.format("SELECT filepath, filename, '' AS snip, 0.0 AS rank FROM files WHERE extension = '%s' ORDER BY filename%s;",
+            ext_filter:gsub("'", "''"),
+            (limit and limit > 0) and (" LIMIT " .. (limit * 3)) or "")
+        local stmt_p = ffi.new("sqlite3_stmt*[1]")
+        if sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_p, nil) ~= SQLITE_OK then
+            return {}
+        end
+        local results = {}
+        local seen = {}
+        while sqlite.sqlite3_step(stmt_p[0]) == SQLITE_ROW do
+            local fpath = ffi.string(sqlite.sqlite3_column_text(stmt_p[0], 0))
+            local fname = ffi.string(sqlite.sqlite3_column_text(stmt_p[0], 1))
+            local canon_path = normalize_path(fpath)
+            if not seen[canon_path] then
+                seen[canon_path] = true
+                table.insert(results, { filepath = canon_path, filename = fname, snippet = "", rank = 0.0 })
+                if limit and limit > 0 and #results >= limit then break end
+            end
+        end
+        sqlite.sqlite3_finalize(stmt_p[0])
+        return results
+    end
+
     -- Sanitize/escape query string for FTS5
-    -- If user did not wrap in quotes and has no special syntax, wrap tokens or support prefix
+    -- If user did not wrap in quotes and has no special syntax, wrap tokens or support prefix.
+    -- #5: Preserve boolean operators (AND, OR, NOT) so users can use multi-token OR/NOT queries.
     local fts_query = query_str
     if not query_str:find('"') and not query_str:find("%*") then
         local words = {}
         for w in query_str:gmatch("%S+") do
-            -- escape double quotes
-            local escaped = w:gsub('"', '""')
-            table.insert(words, string.format('"%s"*', escaped))
+            if w == "OR" or w == "AND" or w == "NOT" then
+                table.insert(words, w)
+            else
+                local escaped = w:gsub('"', '""')
+                table.insert(words, string.format('"%s"*', escaped))
+            end
         end
-        fts_query = table.concat(words, " ")
+        local join_sep = (options.op == "OR" or options["or"]) and " OR " or " "
+        fts_query = table.concat(words, join_sep)
     end
 
     if #fts_query == 0 then return {} end
@@ -1383,8 +1460,34 @@ function Database:search(query_str, options)
     return results
 end
 
+function Database:set_meta(key, value)
+    local sql = "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?);"
+    local stmt_p = ffi.new("sqlite3_stmt*[1]")
+    if sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_p, nil) ~= SQLITE_OK then return false end
+    sqlite.sqlite3_bind_text(stmt_p[0], 1, key, #key, SQLITE_TRANSIENT)
+    local vs = tostring(value)
+    sqlite.sqlite3_bind_text(stmt_p[0], 2, vs, #vs, SQLITE_TRANSIENT)
+    sqlite.sqlite3_step(stmt_p[0])
+    sqlite.sqlite3_finalize(stmt_p[0])
+    return true
+end
+
+function Database:get_meta(key)
+    local sql = "SELECT value FROM meta WHERE key = ?;"
+    local stmt_p = ffi.new("sqlite3_stmt*[1]")
+    if sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_p, nil) ~= SQLITE_OK then return nil end
+    sqlite.sqlite3_bind_text(stmt_p[0], 1, key, #key, SQLITE_TRANSIENT)
+    local val = nil
+    if sqlite.sqlite3_step(stmt_p[0]) == SQLITE_ROW then
+        local t = sqlite.sqlite3_column_text(stmt_p[0], 0)
+        if t ~= nil then val = ffi.string(t) end
+    end
+    sqlite.sqlite3_finalize(stmt_p[0])
+    return val
+end
+
 function Database:get_stats()
-    local stats = { total_files = 0, total_size = 0, extensions = {} }
+    local stats = { total_files = 0, total_size = 0, extensions = {}, last_index = nil }
     local stmt_p = ffi.new("sqlite3_stmt*[1]")
     local sql = "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files;"
     if sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_p, nil) == SQLITE_OK then
@@ -1405,8 +1508,12 @@ function Database:get_stats()
         sqlite.sqlite3_finalize(stmt_p[0])
     end
 
+    -- Read last index timestamp from meta table (may not exist on older DBs)
+    stats.last_index = self:get_meta("last_index")
+
     return stats
 end
+
 
 --------------------------------------------------------------------------------
 -- 4. Fast Directory Walker & File Classifier
@@ -1821,6 +1928,7 @@ function Indexer.run(db, root_dir, verbose, allow_all, finder_mode)
     -- Phase 2: Indexing pipeline with progress and ETA
     local files_indexed = 0
     local files_skipped = 0
+    local large_skipped = 0    -- #10: track files skipped due to >5MB separately
     local total_bytes = 0
     local batch_count = 0
     local last_progress_time = 0
@@ -1873,6 +1981,9 @@ function Indexer.run(db, root_dir, verbose, allow_all, finder_mode)
 
         local meta = get_file_metadata(full_path)
         if not meta or meta.size > (5 * 1024 * 1024) then -- skip > 5MB single files
+            if meta and meta.size > (5 * 1024 * 1024) then
+                large_skipped = large_skipped + 1  -- #10: count large files separately
+            end
             files_skipped = files_skipped + 1
         else
             -- Check if file already indexed and unchanged (must match size, mtime, and canonical path)
@@ -1934,6 +2045,11 @@ function Indexer.run(db, root_dir, verbose, allow_all, finder_mode)
     end
 
     db:commit()
+
+    -- #4: Write last_index timestamp to meta table
+    local ts = os.date("%Y-%m-%d %H:%M:%S")
+    pcall(function() db:set_meta("last_index", ts) end)
+
     local elapsed = wall_now() - t_start
     local t_indexed = wall_now() - t_discovered
 
@@ -1943,7 +2059,10 @@ function Indexer.run(db, root_dir, verbose, allow_all, finder_mode)
                             math.floor(total_files / math.max(0.001, elapsed))))
         print(string.format("  - Scanned: %d files", total_files))
         print(string.format("  - Indexed/Updated: %d files (%.2f MB)", files_indexed, total_bytes / (1024*1024)))
-        print(string.format("  - Unchanged/Skipped: %d files", files_skipped))
+        print(string.format("  - Unchanged/Skipped: %d files", files_skipped - large_skipped))
+        if large_skipped > 0 then
+            print(string.format("  - Too large (>5 MB): %d files  (skipped)", large_skipped))
+        end
         if files_pruned > 0 then
             print(string.format("  - Pruned (deleted): %d files", files_pruned))
         end
@@ -1956,11 +2075,13 @@ function Indexer.run(db, root_dir, verbose, allow_all, finder_mode)
         scanned = total_files,
         indexed = files_indexed,
         skipped = files_skipped,
+        large_skipped = large_skipped,
         pruned  = files_pruned,
         bytes   = total_bytes,
         time    = elapsed,
         crawler = active_crawler,
         discover_time = t_discovered - t_start,
+
         index_time    = t_indexed
     }
 end
@@ -1968,20 +2089,6 @@ end
 --------------------------------------------------------------------------------
 -- 6. Highlighting & Terminal Formatting
 --------------------------------------------------------------------------------
-local function colorize_text_matches(line, query_tokens)
-    -- Highlight matched tokens within the line
-    local highlighted = line
-    for _, token in ipairs(query_tokens) do
-        if #token > 0 then
-            -- Case-insensitive match replace
-            local pat = token:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1")
-            highlighted = highlighted:gsub("(?i)" .. pat, function(m)
-                return "\27[1;33m" .. m .. "\27[0m"
-            end)
-        end
-    end
-    return highlighted
-end
 
 local function extract_file_matches(filepath, query_tokens, max_matches_per_file)
     max_matches_per_file = max_matches_per_file or 3
@@ -2138,14 +2245,25 @@ local function make_preview_reader(window_size, max_cached_files)
         if not filepath then return 0 end
         if line_count_cache[filepath] then return line_count_cache[filepath] end
         local cnt = 0
-        local f = io.open(filepath, "r")
+        local f = io.open(filepath, "rb")
         if f then
-            for _ in f:lines() do cnt = cnt + 1 end
+            local has_any = false
+            local last_byte = 0
+            while true do
+                local chunk = f:read(65536)
+                if not chunk or #chunk == 0 then break end
+                has_any = true
+                local _, n = chunk:gsub("\n", "")
+                cnt = cnt + n
+                last_byte = chunk:byte(#chunk)
+            end
             f:close()
+            if has_any and last_byte ~= 10 then cnt = cnt + 1 end
         end
         line_count_cache[filepath] = cnt
         return cnt
     end
+
 
     local function touch_lru(filepath)
         for i, path in ipairs(file_order) do
@@ -2216,19 +2334,22 @@ local function make_preview_reader(window_size, max_cached_files)
         local total_lines = 0
 
         if not filepath then return match_lines, match_list, 0 end
+        local has_terms = terms and #terms > 0
+        if not has_terms then
+            total_lines = get_total_lines(filepath)
+            return match_lines, match_list, total_lines
+        end
+
         local f = io.open(filepath, "r")
         if f then
-            local has_terms = terms and #terms > 0
             for line in f:lines() do
                 total_lines = total_lines + 1
-                if has_terms then
-                    local l_lower = line:lower()
-                    for _, term in ipairs(terms) do
-                        if l_lower:find(term, 1, true) then
-                            match_lines[total_lines] = true
-                            table.insert(match_list, total_lines)
-                            break
-                        end
+                local l_lower = line:lower()
+                for _, term in ipairs(terms) do
+                    if l_lower:find(term, 1, true) then
+                        match_lines[total_lines] = true
+                        table.insert(match_list, total_lines)
+                        break
                     end
                 end
             end
@@ -2557,6 +2678,11 @@ function TUI.run(db, initial_query, tui_limit)
             preview_scroll_offset = cached_match.scroll_offset
             current_preview_patterns = cached_match.patterns or {}
             current_preview_total_lines = cached_match.total_lines or preview_reader.get_total_lines(filepath)
+            -- #12: Show match count immediately on file load (from cache)
+            if #current_match_list > 0 then
+                set_status(string.format("📄 %s — %d match(es) [n/N to navigate]",
+                    get_filename(filepath), #current_match_list))
+            end
             return
         end
 
@@ -2576,6 +2702,9 @@ function TUI.run(db, initial_query, tui_limit)
         if #current_match_list > 0 then
             preview_scroll_offset = math.max(0, current_match_list[1] - 4)
             current_match_pos = 1
+            -- #12: Show match count immediately on file load (fresh scan)
+            set_status(string.format("📄 %s — %d match(es) [n/N to navigate]",
+                get_filename(filepath), #current_match_list))
         end
 
         -- Warm up preview window around initial preview_scroll_offset
@@ -2592,6 +2721,7 @@ function TUI.run(db, initial_query, tui_limit)
             total_lines = current_preview_total_lines,
         }
     end
+
 
     local active_ext_filter = nil
 
@@ -2758,7 +2888,10 @@ function TUI.run(db, initial_query, tui_limit)
         if #results > 0 and results[selected_idx] then
             disable_raw()
             local chosen = results[selected_idx].filepath
-            local first_ln = current_match_list[1] or 1
+            local target_ln = (current_match_list and current_match_list[current_match_pos])
+                           or (current_match_list and current_match_list[1])
+                           or (preview_scroll_offset and preview_scroll_offset > 0 and (preview_scroll_offset + 1))
+                           or 1
             local editor = os.getenv("EDITOR")
             if not editor or editor == "" then
                 if not is_windows and os.execute("which nvim >/dev/null 2>&1") == 0 then
@@ -2767,14 +2900,14 @@ function TUI.run(db, initial_query, tui_limit)
                     editor = "vim"
                 end
             end
-            local edit_cmd = string.format('%s +%d "%s"', editor, first_ln, chosen)
+            local edit_cmd = string.format('%s +%d "%s"', editor, target_ln, chosen)
             os.execute(edit_cmd)
 
             -- Re-initialize raw terminal mode and alternate screen buffer
             enable_raw()
             io.write("\27[H\27[2J")
             io.flush()
-            set_status(string.format("✔ Returned from %s (%s:%d)", editor, get_filename(chosen), first_ln))
+            set_status(string.format("✔ Returned from %s (%s:%d)", editor, get_filename(chosen), target_ln))
             needs_redraw = true
         end
     end
@@ -2865,79 +2998,48 @@ function TUI.run(db, initial_query, tui_limit)
     end
 
     -- Filetype color icons
+    -- #8: Single FILE_BADGES data table replaces three near-identical 25-line switch functions
+    local FILE_BADGES = {
+        -- Groups: keys = extensions that share a badge
+        c   = { exts={"c","cpp","cc","cxx"},      label="[c]",   color="\27[1;34m" },
+        h   = { exts={"h","hpp","hh"},            label="[h]",   color="\27[1;36m" },
+        lua = { exts={"lua","luau"},              label="[lua]", color="\27[1;35m" },
+        py  = { exts={"py","pyw"},                label="[py]",  color="\27[1;33m" },
+        js  = { exts={"js","ts","jsx","tsx","mjs","cjs"}, label="[js]", color="\27[1;32m" },
+        txt = { exts={"md","txt","rst","markdown"},label="[txt]",color="\27[37m"   },
+        cfg = { exts={"json","yaml","yml","toml","ini","conf"}, label="[cfg]", color="\27[33m" },
+        sh  = { exts={"sh","bash","zsh","fish"},  label="[sh]",  color="\27[1;32m" },
+        rs  = { exts={"rs"},                      label="[rs]",  color="\27[1;31m" },
+        go  = { exts={"go"},                      label="[go]",  color="\27[1;36m" },
+        rb  = { exts={"rb"},                      label="[rb]",  color="\27[1;31m" },
+        java= { exts={"java","kt","kts"},         label="[jv]",  color="\27[1;33m" },
+    }
+    -- Build fast ext→badge lookup table once
+    local _ext_badge = {}
+    for _, bd in pairs(FILE_BADGES) do
+        for _, e in ipairs(bd.exts) do _ext_badge[e] = bd end
+    end
+    local function _badge_for(path)
+        local ext = path:match("%.([%w_%-]+)$")
+        if not ext then return nil, nil, nil end
+        ext = ext:lower()
+        local bd = _ext_badge[ext]
+        if bd then return bd.label, bd.color, ext end
+        return "[" .. ext:sub(1,3) .. "]", "\27[90m", ext
+    end
     local function get_file_badge(path)
-        local ext = path:match("%.([%w_%-]+)$")
-        if not ext then return "\27[90m·\27[0m " end
-        ext = ext:lower()
-        if ext == "c" or ext == "cpp" or ext == "cc" or ext == "cxx" then
-            return "\27[1;34m[c]\27[0m "
-        elseif ext == "h" or ext == "hpp" or ext == "hh" then
-            return "\27[1;36m[h]\27[0m "
-        elseif ext == "lua" then
-            return "\27[1;35m[lua]\27[0m "
-        elseif ext == "py" then
-            return "\27[1;33m[py]\27[0m "
-        elseif ext == "js" or ext == "ts" or ext == "jsx" or ext == "tsx" then
-            return "\27[1;32m[js]\27[0m "
-        elseif ext == "md" or ext == "txt" or ext == "rst" then
-            return "\27[37m[txt]\27[0m "
-        elseif ext == "json" or ext == "yaml" or ext == "yml" or ext == "toml" then
-            return "\27[33m[cfg]\27[0m "
-        elseif ext == "sh" or ext == "bash" or ext == "zsh" then
-            return "\27[1;32m[sh]\27[0m "
-        else
-            return "\27[90m[" .. ext:sub(1, 3) .. "]\27[0m "
-        end
+        local label, color = _badge_for(path)
+        if not label then return "\27[90m·\27[0m " end
+        return color .. label .. "\27[0m "
     end
-
     local function get_file_badge_plain(path)
-        local ext = path:match("%.([%w_%-]+)$")
-        if not ext then return "· " end
-        ext = ext:lower()
-        if ext == "c" or ext == "cpp" or ext == "cc" or ext == "cxx" then
-            return "[c] "
-        elseif ext == "h" or ext == "hpp" or ext == "hh" then
-            return "[h] "
-        elseif ext == "lua" then
-            return "[lua] "
-        elseif ext == "py" then
-            return "[py] "
-        elseif ext == "js" or ext == "ts" or ext == "jsx" or ext == "tsx" then
-            return "[js] "
-        elseif ext == "md" or ext == "txt" or ext == "rst" then
-            return "[txt] "
-        elseif ext == "json" or ext == "yaml" or ext == "yml" or ext == "toml" then
-            return "[cfg] "
-        elseif ext == "sh" or ext == "bash" or ext == "zsh" then
-            return "[sh] "
-        else
-            return "[" .. ext:sub(1, 3) .. "] "
-        end
+        local label = _badge_for(path)
+        if not label then return "· " end
+        return label .. " "
     end
-
     local function get_file_badge_color(path)
-        local ext = path:match("%.([%w_%-]+)$")
-        if not ext then return "\27[90m" end
-        ext = ext:lower()
-        if ext == "c" or ext == "cpp" or ext == "cc" or ext == "cxx" then
-            return "\27[1;34m"
-        elseif ext == "h" or ext == "hpp" or ext == "hh" then
-            return "\27[1;36m"
-        elseif ext == "lua" then
-            return "\27[1;35m"
-        elseif ext == "py" then
-            return "\27[1;33m"
-        elseif ext == "js" or ext == "ts" or ext == "jsx" or ext == "tsx" then
-            return "\27[1;32m"
-        elseif ext == "md" or ext == "txt" or ext == "rst" then
-            return "\27[37m"
-        elseif ext == "json" or ext == "yaml" or ext == "yml" or ext == "toml" then
-            return "\27[33m"
-        elseif ext == "sh" or ext == "bash" or ext == "zsh" then
-            return "\27[1;32m"
-        else
-            return "\27[90m"
-        end
+        local _, color = _badge_for(path)
+        return color or "\27[90m"
     end
 
     local function shorten_path(path, max_len)
@@ -3550,7 +3652,7 @@ Commands:
   index  [dir]           Index or update repository files (default: current directory)
   search <query>         Fast ranked full-text search with context snippets
   tui    [query]         Interactive search browser with live side-by-side preview
-  stats                  Show index database statistics (file counts, size, extensions)
+  stats                  Show index statistics (files, size, extensions, last-indexed time)
   clean                  Drop index database and vacuum
   doctor                 Print environment diagnostics (interpreter, sqlite3, script in use)
   pin [n|path]           Remember which sqlite3 library to use (--list, --clear)
@@ -3559,19 +3661,36 @@ Commands:
 
 Options:
   --tui                  Launch interactive full-screen TUI (supports live search, scroll, open)
+  --json                 Output search results as JSON (for scripting/editor integration)
+  --watch[=N]            After indexing, poll every N seconds (default 3) for changed files
   --finder <mode>        File crawler to use: fd, find, builtin, or auto (default: auto)
   --ext <extension>      Filter by file extension (e.g. --ext lua, --ext c)
   --all                  Index all text files (disables source code extension filter)
-  --limit <n>            Maximum results to return (default: 20 for CLI, 0 for unlimited; unlimited by default in TUI)
+  --limit <n>            Maximum results (default: 20). Use 0, 'all', or --no-limit for unlimited
+  --no-limit             Return all results (no cap)
   --db <path>            Custom database file path (default: .codefind.db)
   --quiet                Suppress the environment block printed before indexing
 
+Search Query Syntax (FTS5):
+  sqlite3 prepare        Implicit AND — files containing BOTH terms
+  sqlite3 OR prepare     OR — files containing either term
+  sqlite3 NOT prepare    Exclude files containing 'prepare'
+  "sqlite3_prepare"      Exact phrase match
+  sqlite3*               Prefix match (any word starting with sqlite3)
+  files:config.ts        Search by filename pattern (not content)
+  files:*.lua            All indexed .lua filenames
+  @lua                   TUI: filter results to .lua files only (also ext: prefix)
+
 Examples:
   luajit codefind.lua index .
+  luajit codefind.lua index . --watch
+  luajit codefind.lua index . --watch=5
   luajit codefind.lua index . --finder=fd
   luajit codefind.lua index . --all
   luajit codefind.lua finder
   luajit codefind.lua search "sqlite3_prepare"
+  luajit codefind.lua search "sqlite3 OR prepare" --json
+  luajit codefind.lua search "files:*.lua"
   luajit codefind.lua search "strtok" --tui
   luajit codefind.lua --tui
   luajit codefind.lua tui "metatype"
@@ -3714,6 +3833,8 @@ local function main(args)
     local command = nil
     local cmd_args = {}
     local use_tui = false
+    local use_json = false    -- #1: --json output mode
+    local watch_interval = nil -- #3: --watch mode interval in seconds
     local ext_filter = nil
     local limit = 20
     local limit_specified = false
@@ -3726,6 +3847,12 @@ local function main(args)
         local a = args[i]
         if a == "--tui" then
             use_tui = true
+        elseif a == "--json" then
+            use_json = true   -- #1: JSON output mode
+        elseif a == "--watch" then
+            watch_interval = 3   -- #3: default 3s poll interval
+        elseif a:match("^%-%-watch=(%d+)$") then
+            watch_interval = tonumber(a:match("^%-%-watch=(%d+)$")) or 3
         elseif a == "--all" then
             allow_all = true
         elseif a == "--quiet" or a == "-q" then
@@ -3742,9 +3869,18 @@ local function main(args)
             ext_filter = args[i + 1]:lower():gsub("^%.", "")
             i = i + 1
         elseif a == "--limit" and i + 1 <= #args then
-            limit = tonumber(args[i + 1])
+            -- #13: Accept --limit 0, --limit all, --limit unlimited, --no-limit as "no limit"
+            local raw_lim = args[i + 1]:lower()
+            if raw_lim == "all" or raw_lim == "unlimited" or raw_lim == "none" then
+                limit = 0  -- 0 means unlimited
+            else
+                limit = tonumber(raw_lim) or 0
+            end
             limit_specified = true
             i = i + 1
+        elseif a == "--no-limit" or a == "--unlimited" then
+            limit = 0
+            limit_specified = true
         elseif not command then
             command = a
         else
@@ -3937,6 +4073,26 @@ local function main(args)
                             allow_all and "ALL" or "SOURCE ONLY",
                             active_f))
         Indexer.run(db, target_dir, true, allow_all, finder_mode)
+        -- #3: --watch mode: poll at interval and re-index only changed files
+        if watch_interval then
+            print(string.format("\27[90m👁  Watch mode active (poll every %ds). Ctrl-C to stop.\27[0m", watch_interval))
+            while true do
+                -- Sleep using io.popen sleep (portable)
+                if is_windows then
+                    os.execute("timeout /t " .. tostring(watch_interval) .. " >nul 2>&1")
+                else
+                    os.execute("sleep " .. tostring(watch_interval))
+                end
+                local t0 = wall_now()
+                local stat_res = Indexer.run(db, target_dir, false, allow_all, finder_mode)
+                local dt = wall_now() - t0
+                if stat_res.indexed > 0 or stat_res.pruned > 0 then
+                    io.write(string.format("\r\27[2K\27[32m✔ [%s] Reindexed %d, pruned %d (%.1fs)\27[0m\n",
+                        os.date("%H:%M:%S"), stat_res.indexed, stat_res.pruned, dt))
+                    io.flush()
+                end
+            end
+        end
     elseif command == "search" then
         local query = table.concat(cmd_args, " ")
         local tui_limit = limit_specified and ((limit and limit > 0) and limit or nil) or nil
@@ -3952,39 +4108,56 @@ local function main(args)
             local t0 = os.clock()
             local search_limit = (limit and limit > 0) and limit or nil
             local results, err = db:search(query, { extension = ext_filter, limit = search_limit })
-        local elapsed = (os.clock() - t0) * 1000
+            local elapsed = (os.clock() - t0) * 1000
 
-        if err then
-            print(string.format("\27[31mError: %s\27[0m", err))
-            db:close()
-            os.exit(1)
-        end
-
-        if #results == 0 then
-            print(string.format("\27[90mNo matches found for '%s' (%.1fms)\27[0m", query, elapsed))
-        else
-            print(string.format("\27[1;36m🔍 Results for '%s' (%d matching files in %.2fms):\27[0m\n", query, #results, elapsed))
-            
-            -- Extract query search terms for token highlighting
-            local terms = {}
-            for t in query:gmatch("[%w_%-]+") do
-                table.insert(terms, t)
+            if err then
+                print(string.format("\27[31mError: %s\27[0m", err))
+                db:close()
+                os.exit(1)
             end
 
-            for idx, res in ipairs(results) do
-                local ctx = extract_file_matches(res.filepath, terms, 3)
-                if ctx then
-                    local loc_str = string.format("%s:%d", res.filepath, ctx.first_line)
-                    print(string.format("  \27[1;34m📄 %s\27[0m  \27[90m(score: %.2f)\27[0m", loc_str, res.rank))
-                    print(ctx.formatted .. "\n")
+            -- #1: --json output mode
+            if use_json then
+                io.write("[\n")
+                for idx, res in ipairs(results) do
+                    local comma = (idx < #results) and "," or ""
+                    -- minimal JSON serializer (no deps)
+                    local function jstr(s)
+                        return '"' .. tostring(s or ""):gsub('\\','\\\\'):gsub('"','\\"'):gsub('\n','\\n'):gsub('\r','\\r'):gsub('\t','\\t') .. '"'
+                    end
+                    io.write(string.format('  {"filepath":%s,"filename":%s,"rank":%.4f,"snippet":%s}%s\n',
+                        jstr(res.filepath), jstr(res.filename), res.rank, jstr(res.snippet), comma))
+                end
+                io.write("]\n")
+            else
+                if #results == 0 then
+                    -- #5: Hint FTS5 operators when nothing found
+                    print(string.format("\27[90mNo matches found for '%s' (%.1fms)\27[0m", query, elapsed))
+                    print("\27[90mTip: FTS5 supports AND/OR/NOT operators and \"exact phrase\" queries.\27[0m")
                 else
-                    -- Fallback to FTS5 snippet if file couldn't be read directly
-                    local colored = colorize_snippet(res.snippet)
-                    print(string.format("  \27[1;34m📄 %s\27[0m  \27[90m(score: %.2f)\27[0m", res.filepath, res.rank))
-                    print(colored .. "\n")
+                    print(string.format("\27[1;36m🔍 Results for '%s' (%d matching files in %.2fms):\27[0m\n", query, #results, elapsed))
+
+                    -- Extract query search terms for token highlighting
+                    local terms = {}
+                    for t in query:gmatch("[%w_%-]+") do
+                        table.insert(terms, t)
+                    end
+
+                    for idx, res in ipairs(results) do
+                        local ctx = extract_file_matches(res.filepath, terms, 3)
+                        if ctx then
+                            local loc_str = string.format("%s:%d", res.filepath, ctx.first_line)
+                            print(string.format("  \27[1;34m📄 %s\27[0m  \27[90m(score: %.2f)\27[0m", loc_str, res.rank))
+                            print(ctx.formatted .. "\n")
+                        else
+                            -- Fallback to FTS5 snippet if file couldn't be read directly
+                            local colored = colorize_snippet(res.snippet)
+                            print(string.format("  \27[1;34m📄 %s\27[0m  \27[90m(score: %.2f)\27[0m", res.filepath, res.rank))
+                            print(colored .. "\n")
+                        end
+                    end
                 end
             end
-        end
         end
     elseif command == "tui" then
         local query = table.concat(cmd_args, " ")
@@ -3992,8 +4165,26 @@ local function main(args)
         TUI.run(db, query, tui_limit)
     elseif command == "stats" then
         local stats = db:get_stats()
+        -- #4: Show DB file size/age and last-index timestamp
+        local db_size = file_size(db_path)
+        local db_age_str = ""
+        if db_size then
+            local mtime_buf = ffi.new("struct stat")
+            if not is_windows and posix_stat and posix_stat(db_path, mtime_buf) == 0 then
+                local age_sec = os.difftime(os.time(), tonumber(mtime_buf.st_mtime))
+                if age_sec < 60 then
+                    db_age_str = string.format(", modified %ds ago", math.floor(age_sec))
+                elseif age_sec < 3600 then
+                    db_age_str = string.format(", modified %dm ago", math.floor(age_sec / 60))
+                else
+                    db_age_str = string.format(", modified %dh ago", math.floor(age_sec / 3600))
+                end
+            end
+        end
         print("\n=== CodeFind Database Statistics ===")
-        print(string.format("Database Path : %s", db_path))
+        print(string.format("Database Path : %s%s", db_path,
+            db_size and ("  (" .. human_size(db_size) .. db_age_str .. ")") or ""))
+        print(string.format("Last Indexed  : %s", stats.last_index or "(not recorded — run 'index' first)"))
         print(string.format("Indexed Files : %d", stats.total_files))
         print(string.format("Total Size    : %s", format_bytes(stats.total_size)))
         print("\nTop File Extensions:")
@@ -4005,6 +4196,7 @@ local function main(args)
         print("Unknown command: " .. command)
         print_help()
     end
+
 
     db:close()
 end
