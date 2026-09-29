@@ -482,6 +482,59 @@ TestRunner.describe("Suite: 6. TUI Layout Resize and Viewport Clamping", functio
         assert_eq(parse_win_seq(27, {}), "ESC", "Standalone ESC should return ESC")
         assert_eq(parse_win_seq(63, {}), "?", "ASCII 63 should return ?")
     end)
+
+    TestRunner.it("should format split footer and preserve essential shortcut pills during notifications", function()
+        local build_footer = codefind.build_footer_content
+        local visual_len = codefind.visual_len
+
+        -- 1. Normal Search Mode: no status notification, exact visual width = cols - 2
+        local footer_search = build_footer(80, nil, false, "search", "")
+        assert_eq(visual_len(footer_search), 78, "Footer visual length must equal cols - 2")
+        assert_true(footer_search:find("Tab") ~= nil, "Tab pill should be present")
+        assert_true(footer_search:find("Browse") ~= nil, "Browse label should be present")
+        assert_true(footer_search:find("F1") ~= nil, "F1 pill should be present")
+        assert_true(footer_search:find("Enter") ~= nil, "Enter pill should be present")
+
+        local footer_search_100 = build_footer(100, nil, false, "search", "")
+        assert_eq(visual_len(footer_search_100), 98, "Footer visual length must equal cols - 2")
+        assert_true(footer_search_100:find("Quit") ~= nil, "Quit pill should be present on 100 cols")
+
+        -- 2. Normal Preview Mode: no status notification
+        local footer_prev = build_footer(100, nil, false, "preview", "")
+        assert_eq(visual_len(footer_prev), 98, "Footer visual length must equal cols - 2")
+        assert_true(footer_prev:find("Search") ~= nil, "Search pill should be present")
+        assert_true(footer_prev:find("Match") ~= nil, "Match pill should be present")
+        assert_true(footer_prev:find("Quit") ~= nil, "Quit pill should be present")
+
+        -- 3. Active Status Notification with checkmark (clipboard copy): split footer
+        local footer_yank = build_footer(80, "✔ Copied 'foo.lua:42' to clipboard", true, "preview", "")
+        assert_eq(visual_len(footer_yank), 78, "Yank footer visual length must equal cols - 2")
+        assert_true(footer_yank:find("DONE") ~= nil, "DONE badge should be displayed")
+        assert_true(footer_yank:find("Copied 'foo.lua:42'") ~= nil, "Message text should be displayed")
+        assert_true(footer_yank:find("Help") ~= nil, "Help pill must be preserved on right")
+        assert_true(footer_yank:find("Quit") ~= nil, "Quit pill must be preserved on right")
+
+        -- 4. Active Status Notification with lightning (sync indexing)
+        local footer_sync = build_footer(100, "⚡ Re-indexed 5 files", true, "search", "")
+        assert_eq(visual_len(footer_sync), 98, "Sync footer visual length must equal cols - 2")
+        assert_true(footer_sync:find("SYNC") ~= nil, "SYNC badge should be displayed")
+        assert_true(footer_sync:find("Re%-indexed 5 files") ~= nil, "Re-indexed text should be displayed")
+        assert_true(footer_sync:find("F1") ~= nil, "F1 pill must be preserved on right")
+        assert_true(footer_sync:find("%^Q") ~= nil, "^Q pill must be preserved on right")
+
+        -- 5. Narrow terminal (60 cols) with long message: properly truncated without overflow
+        local long_msg = "A very long status message that would otherwise wrap around the screen and corrupt cursor"
+        local footer_narrow = build_footer(60, long_msg, true, "search", "")
+        assert_eq(visual_len(footer_narrow), 58, "Narrow footer visual length must equal 58")
+        assert_true(footer_narrow:find("INFO") ~= nil, "INFO badge should be displayed")
+        assert_true(footer_narrow:find("%^Q") ~= nil, "^Q pill must be preserved on right")
+
+        -- 6. Expired notification: returns to normal pills
+        local footer_expired = build_footer(80, "✔ Old message", false, "search", "")
+        assert_eq(visual_len(footer_expired), 78, "Expired footer visual length must equal 78")
+        assert_true(footer_expired:find("DONE") == nil, "DONE badge should not be present when expired")
+        assert_true(footer_expired:find("Browse") ~= nil, "Standard pills should be back")
+    end)
 end)
 
 TestRunner.describe("7. SQLite3 Library Discovery, Validation and Selection", function()

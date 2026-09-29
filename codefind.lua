@@ -2375,6 +2375,190 @@ local function make_preview_reader(window_size, max_cached_files)
     }
 end
 
+local function visual_len(str)
+    local clean = tostring(str):gsub("\27%[[%d;]*[mK]", "")
+    local w = 0
+    for c in clean:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+        if #c == 1 then
+            w = w + 1
+        elseif (c >= "─" and c <= "╿") or (c >= "┌" and c <= "▟") or c == "▶" then
+            w = w + 1
+        else
+            w = w + 2
+        end
+    end
+    return w
+end
+
+local function truncate(str, max_w)
+    local len = visual_len(str)
+    if len <= max_w then return str end
+    if max_w <= 3 then return string.rep(".", math.max(0, max_w)) end
+
+    local out = {}
+    local curr = 0
+    local pos = 1
+    local raw = tostring(str)
+    while pos <= #raw and curr < max_w - 3 do
+        local ansi = raw:match("^\27%[[%d;]*[mK]", pos)
+        if ansi then
+            table.insert(out, ansi)
+            pos = pos + #ansi
+        else
+            local c = raw:match("^[%z\1-\127\194-\244][\128-\191]*", pos)
+            if c then
+                local cw = 1
+                if #c > 1 and not ((c >= "─" and c <= "╿") or (c >= "┌" and c <= "▟") or c == "▶") then
+                    cw = 2
+                end
+                if curr + cw > max_w - 3 then break end
+                table.insert(out, c)
+                curr = curr + cw
+                pos = pos + #c
+            else
+                break
+            end
+        end
+    end
+    local has_ansi = (raw:find("\27[", 1, true) ~= nil)
+    return table.concat(out) .. "..." .. (has_ansi and "\27[0m" or "")
+end
+
+local function pad_to(str, target_width)
+    local s = truncate(str, target_width)
+    local vlen = visual_len(s)
+    if vlen < target_width then
+        return s .. string.rep(" ", target_width - vlen)
+    else
+        return s
+    end
+end
+
+local function format_footer_pill(key, desc)
+    return string.format("\27[1;30;46m %s \27[0;37;40m %s \27[0m", key, desc)
+end
+
+local function footer_pill_width(key, desc)
+    return visual_len(key) + visual_len(desc) + 4
+end
+
+local function build_footer_content(cur_cols, status_bar_msg, is_status_active, focus_pane, query)
+    local inner_w = cur_cols - 2
+    query = query or ""
+
+    if not is_status_active or not status_bar_msg or status_bar_msg == "" then
+        local pills = {}
+        if focus_pane == "search" then
+            pills = {
+                {"Tab", "Browse"},
+                {"F1", "Help"},
+                {"Enter", "Open"},
+                {"Esc", #query > 0 and "Clear" or "Exit"},
+                {"@ext", "Filter"},
+                {"^W", "Del Word"},
+                {"^Q", "Quit"}
+            }
+        else
+            pills = {
+                {"Tab", "Search"},
+                {"?", "Help"},
+                {"Enter", "Open"},
+                {"n/N", "Match"},
+                {"j/k", "Scroll"},
+                {"y", "Copy Path"},
+                {"q", "Quit"}
+            }
+        end
+
+        local parts = {}
+        local curr_w = 0
+        for _, item in ipairs(pills) do
+            local key, desc = item[1], item[2]
+            local item_w = footer_pill_width(key, desc)
+            local sep_w = (#parts > 0) and 1 or 0
+            if curr_w + sep_w + item_w <= inner_w then
+                table.insert(parts, format_footer_pill(key, desc))
+                curr_w = curr_w + sep_w + item_w
+            else
+                break
+            end
+        end
+        local combined = table.concat(parts, " ")
+        local pad_w = math.max(0, inner_w - curr_w)
+        return combined .. string.rep(" ", pad_w)
+    else
+        -- Status notification active: split footer into Left (Alert) and Right (Persistent Pills)
+        local msg = tostring(status_bar_msg)
+        local badge_text, badge_bg, clean_msg
+        if msg:find("^✔%s*") then
+            badge_text = " DONE "
+            badge_bg = "42" -- green
+            clean_msg = msg:gsub("^✔%s*", "")
+        elseif msg:find("^⚡%s*") then
+            badge_text = " SYNC "
+            badge_bg = "43" -- yellow
+            clean_msg = msg:gsub("^⚡%s*", "")
+        else
+            badge_text = " INFO "
+            badge_bg = "46" -- cyan
+            clean_msg = msg
+        end
+
+        local badge_w = visual_len(badge_text)
+        local min_right_w = 23 -- Room for at least [F1] Help / [^Q] Quit or [?] Help / [q] Quit
+        local max_msg_w = math.max(15, inner_w - min_right_w - badge_w - 3)
+        if visual_len(clean_msg) > max_msg_w then
+            clean_msg = truncate(clean_msg, max_msg_w)
+        end
+
+        local left_w = badge_w + visual_len(clean_msg) + 2
+        local left_str = string.format("\27[1;30;%sm%s\27[0;37;40m %s \27[0m", badge_bg, badge_text, clean_msg)
+
+        local right_avail_w = math.max(0, inner_w - left_w - 1)
+        local candidate_pills = (focus_pane == "search") and {
+            {"Tab", "Browse"},
+            {"Enter", "Open"},
+            {"F1", "Help"},
+            {"^Q", "Quit"}
+        } or {
+            {"Tab", "Search"},
+            {"Enter", "Open"},
+            {"?", "Help"},
+            {"q", "Quit"}
+        }
+
+        local chosen_pills = {}
+        for start_idx = 1, #candidate_pills do
+            local test_pills = {}
+            local total_w = 0
+            for k = start_idx, #candidate_pills do
+                local item = candidate_pills[k]
+                local item_w = footer_pill_width(item[1], item[2])
+                local sep_w = (#test_pills > 0) and 1 or 0
+                total_w = total_w + sep_w + item_w
+                table.insert(test_pills, item)
+            end
+            if total_w <= right_avail_w then
+                chosen_pills = test_pills
+                break
+            end
+        end
+
+        local right_parts = {}
+        local right_w = 0
+        for _, item in ipairs(chosen_pills) do
+            local item_w = footer_pill_width(item[1], item[2])
+            local sep_w = (#right_parts > 0) and 1 or 0
+            table.insert(right_parts, format_footer_pill(item[1], item[2]))
+            right_w = right_w + sep_w + item_w
+        end
+
+        local right_str = table.concat(right_parts, " ")
+        local pad_w = math.max(0, inner_w - left_w - right_w)
+        return left_str .. string.rep(" ", pad_w) .. right_str
+    end
+end
+
 local TUI = {}
 
 function TUI.run(db, initial_query, tui_limit)
@@ -2696,7 +2880,7 @@ function TUI.run(db, initial_query, tui_limit)
 
     local function set_status(msg)
         status_bar_msg = msg
-        status_bar_time = os.clock()
+        status_bar_time = wall_now()
         needs_redraw = true
     end
 
@@ -2811,65 +2995,6 @@ function TUI.run(db, initial_query, tui_limit)
     end
 
     refresh_search()
-
-    local function visual_len(str)
-        local clean = tostring(str):gsub("\27%[[%d;]*[mK]", "")
-        local w = 0
-        for c in clean:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
-            if #c == 1 then
-                w = w + 1
-            elseif (c >= "─" and c <= "╿") or (c >= "┌" and c <= "▟") or c == "▶" then
-                w = w + 1
-            else
-                w = w + 2
-            end
-        end
-        return w
-    end
-
-    local function truncate(str, max_w)
-        local len = visual_len(str)
-        if len <= max_w then return str end
-        if max_w <= 3 then return string.rep(".", math.max(0, max_w)) end
-
-        local out = {}
-        local curr = 0
-        local pos = 1
-        local raw = tostring(str)
-        while pos <= #raw and curr < max_w - 3 do
-            local ansi = raw:match("^\27%[[%d;]*[mK]", pos)
-            if ansi then
-                table.insert(out, ansi)
-                pos = pos + #ansi
-            else
-                local c = raw:match("^[%z\1-\127\194-\244][\128-\191]*", pos)
-                if c then
-                    local cw = 1
-                    if #c > 1 and not ((c >= "─" and c <= "╿") or (c >= "┌" and c <= "▟") or c == "▶") then
-                        cw = 2
-                    end
-                    if curr + cw > max_w - 3 then break end
-                    table.insert(out, c)
-                    curr = curr + cw
-                    pos = pos + #c
-                else
-                    break
-                end
-            end
-        end
-        local has_ansi = (raw:find("\27[", 1, true) ~= nil)
-        return table.concat(out) .. "..." .. (has_ansi and "\27[0m" or "")
-    end
-
-    local function pad_to(str, target_width)
-        local s = truncate(str, target_width)
-        local vlen = visual_len(s)
-        if vlen < target_width then
-            return s .. string.rep(" ", target_width - vlen)
-        else
-            return s
-        end
-    end
 
     local running = true
 
@@ -3406,57 +3531,9 @@ function TUI.run(db, initial_query, tui_limit)
 
         -- Row Footer / Keybindings
         local status_y = div_y + 1
-        if status_bar_msg and (os.clock() - status_bar_time <= 3.0) then
-            local help_hint = " [F1: Help] "
-            local hint_w = visual_len(help_hint)
-            local avail = cur_cols - 2 - hint_w
-            local msg_text = "  " .. status_bar_msg
-            if visual_len(msg_text) > avail then
-                msg_text = truncate(msg_text, avail)
-            end
-            local pad_spaces = string.rep(" ", math.max(0, avail - visual_len(msg_text)))
-            local padded_status = msg_text .. pad_spaces .. help_hint
-            emit_row(status_y, string.format("%s│\27[1;30;47m%s\27[0m%s│\27[0m", neutral_border, padded_status, neutral_border))
-        else
-            local pills = {}
-            if focus_pane == "search" then
-                pills = {
-                    {"Tab", "Browse"},
-                    {"F1", "Help"},
-                    {"Enter", "Open"},
-                    {"Esc", #query > 0 and "Clear" or "Exit"},
-                    {"@ext", "Filter"},
-                    {"^W", "Del Word"},
-                    {"^Q", "Quit"}
-                }
-            else
-                pills = {
-                    {"Tab", "Search"},
-                    {"?", "Help"},
-                    {"Enter", "Open"},
-                    {"n/N", "Match"},
-                    {"j/k", "Scroll"},
-                    {"y", "Copy Path"},
-                    {"q", "Quit"}
-                }
-            end
-
-            local parts = {}
-            local curr_w = 0
-            for _, item in ipairs(pills) do
-                local key, desc = item[1], item[2]
-                local item_w = visual_len(key) + visual_len(desc) + 4
-                if curr_w + item_w + 1 <= cur_cols - 2 then
-                    table.insert(parts, string.format("\27[1;30;46m %s \27[0;37;40m %s \27[0m", key, desc))
-                    curr_w = curr_w + item_w + 1
-                else
-                    break
-                end
-            end
-            local combined = table.concat(parts, " ")
-            local pad_w = math.max(0, (cur_cols - 2) - curr_w)
-            emit_row(status_y, string.format("%s│%s%s%s│\27[0m", neutral_border, combined, string.rep(" ", pad_w), neutral_border))
-        end
+        local is_status_active = (status_bar_msg ~= nil) and (wall_now() - status_bar_time <= 3.0)
+        local footer_content = build_footer_content(cur_cols, status_bar_msg, is_status_active, focus_pane, query)
+        emit_row(status_y, string.format("%s│%s%s│\27[0m", neutral_border, footer_content, neutral_border))
 
         -- Final Bottom Border
         local bot_y = status_y + 1
@@ -3496,7 +3573,6 @@ function TUI.run(db, initial_query, tui_limit)
                     -- If in preview pane, ESC switches back to search box
                     focus_pane = "search"
                     vim_mode = "INSERT"
-                    set_status("Active Pane: SEARCH")
                     needs_redraw = true
                 elseif #query > 0 then
                     -- If search box has text, ESC clears it
@@ -3504,7 +3580,7 @@ function TUI.run(db, initial_query, tui_limit)
                     selected_idx = 1
                     vim_mode = "INSERT"
                     render_query_prompt_instant()
-                    set_status("Query cleared (Press Esc again, Ctrl-Q, or q in Browse to exit)")
+                    set_status("Query cleared")
                     needs_redraw = true
                 else
                     -- Query is already empty: ESC quits
@@ -3560,11 +3636,9 @@ function TUI.run(db, initial_query, tui_limit)
                 if focus_pane == "search" then
                     focus_pane = "preview"
                     vim_mode = "NORMAL"
-                    set_status("PREVIEW / BROWSE: [q] Quit  [n/N] Matches  [j/k] Scroll  [Tab] Search")
                 else
                     focus_pane = "search"
                     vim_mode = "INSERT"
-                    set_status("SEARCH BOX: Type to filter  [Tab] Preview  [Esc] Clear/Exit")
                 end
                 needs_redraw = true
             elseif key == "CTRL_U" then
@@ -3611,7 +3685,7 @@ function TUI.run(db, initial_query, tui_limit)
                     selected_idx = 1
                     refresh_search()
                     if #results > 0 then
-                        set_status(string.format("Found %d matches for '%s' (Press Enter to open)", #results, query))
+                        set_status(string.format("Found %d matches for '%s'", #results, query))
                     else
                         set_status(string.format("No matches found for '%s'", query))
                     end
@@ -3684,7 +3758,6 @@ function TUI.run(db, initial_query, tui_limit)
                         current_match_pos = (current_match_pos % #current_match_list) + 1
                         local target_ln = current_match_list[current_match_pos]
                         preview_scroll_offset = math.max(0, target_ln - 4)
-                        set_status(string.format("Match %d/%d (line %d)", current_match_pos, #current_match_list, target_ln))
                         needs_redraw = true
                     end
                 elseif key == "N" then
@@ -3694,7 +3767,6 @@ function TUI.run(db, initial_query, tui_limit)
                         if current_match_pos < 1 then current_match_pos = #current_match_list end
                         local target_ln = current_match_list[current_match_pos]
                         preview_scroll_offset = math.max(0, target_ln - 4)
-                        set_status(string.format("Match %d/%d (line %d)", current_match_pos, #current_match_list, target_ln))
                         needs_redraw = true
                     end
                 elseif key == "y" then
@@ -3742,7 +3814,7 @@ function TUI.run(db, initial_query, tui_limit)
             end
         else
             -- Check if status bar message timed out
-            if status_bar_msg and (os.clock() - status_bar_time > 3.0) then
+            if status_bar_msg and (wall_now() - status_bar_time > 3.0) then
                 status_bar_msg = nil
                 needs_redraw = true
             end
@@ -4342,6 +4414,9 @@ if pcall(debug.getlocal, 4, 1) then
         TUI      = TUI,
         make_preview_reader = make_preview_reader,
         sanitize_terminal_text = sanitize_terminal_text,
+        build_footer_content = build_footer_content,
+        visual_len = visual_len,
+        truncate = truncate,
         -- exposed for tests: console-independent selection logic
         choose_candidate = choose_candidate,
         classify_source = classify_source,
