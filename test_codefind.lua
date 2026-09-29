@@ -535,6 +535,47 @@ TestRunner.describe("Suite: 6. TUI Layout Resize and Viewport Clamping", functio
         assert_true(footer_expired:find("DONE") == nil, "DONE badge should not be present when expired")
         assert_true(footer_expired:find("Browse") ~= nil, "Standard pills should be back")
     end)
+
+    TestRunner.it("should dynamically scale preview line gutter without border overflow", function()
+        local format_gutter = codefind.format_preview_gutter
+        local visual_len = codefind.visual_len
+
+        -- 1. Small file (< 1,000 lines): minimum 3 digits, gutter width = 8 (2 prefix + 3 digits + 3 separator)
+        local g_small, w_small, d_small = format_gutter(42, 500, false)
+        assert_eq(d_small, 3, "Small file should have 3 digits")
+        assert_eq(w_small, 8, "Small file gutter width should be 8")
+        assert_eq(visual_len(g_small), 8, "Gutter visual length must equal calculated width")
+        assert_true(g_small:find("42 │") ~= nil, "Gutter should contain line number")
+
+        -- 2. Medium file (1,000 - 9,999 lines): 4 digits, gutter width = 9
+        local g_med, w_med, d_med = format_gutter(1420, 5000, true)
+        assert_eq(d_med, 4, "Medium file should have 4 digits")
+        assert_eq(w_med, 9, "Medium file gutter width should be 9")
+        assert_eq(visual_len(g_med), 9, "Gutter visual length must equal 9")
+        assert_true(g_med:find(">") ~= nil and g_med:find("1420 │") ~= nil, "Hit gutter should contain > indicator")
+
+        -- 3. Large file (10,000 - 99,999 lines): 5 digits, gutter width = 10 (no overflow)
+        local g_large, w_large, d_large = format_gutter(14250, 25000, true)
+        assert_eq(d_large, 5, "Large file should dynamically expand to 5 digits")
+        assert_eq(w_large, 10, "Large file gutter width should be 10")
+        assert_eq(visual_len(g_large), 10, "Gutter visual length must equal 10")
+
+        -- 4. Huge amalgamation file (>= 100,000 lines, e.g. sqlite3.c ~150k lines): 6 digits, gutter width = 11
+        local g_huge, w_huge, d_huge = format_gutter(145000, 150000, false)
+        assert_eq(d_huge, 6, "Huge file should dynamically expand to 6 digits")
+        assert_eq(w_huge, 11, "Huge file gutter width should be 11")
+        assert_eq(visual_len(g_huge), 11, "Gutter visual length must equal 11")
+
+        -- 5. Full cell width invariant: gutter + code + padding + scrollbar exactly equals right_col_w
+        local right_col_w = 60
+        local r_text_w = right_col_w - 1
+        local right_sb = "│"
+        local max_code_w = math.max(0, r_text_w - w_huge)
+        local code_str = codefind.truncate("int sqlite3_step(sqlite3_stmt *pStmt) {", max_code_w)
+        local line_pad = string.rep(" ", math.max(0, max_code_w - visual_len(code_str)))
+        local full_cell = g_huge .. code_str .. line_pad .. right_sb
+        assert_eq(visual_len(full_cell), right_col_w, "Full right cell width must exactly equal right_col_w")
+    end)
 end)
 
 TestRunner.describe("7. SQLite3 Library Discovery, Validation and Selection", function()

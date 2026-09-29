@@ -2559,6 +2559,14 @@ local function build_footer_content(cur_cols, status_bar_msg, is_status_active, 
     end
 end
 
+local function format_preview_gutter(line_num, total_lines, is_hit)
+    local gutter_digits = math.max(3, #tostring(total_lines or 1))
+    local gutter_w = gutter_digits + 5
+    local gutter_fmt = is_hit and string.format("\27[1;33m> \27[90m%%%dd │ \27[0m", gutter_digits)
+                               or string.format("  \27[90m%%%dd │ \27[0m", gutter_digits)
+    return string.format(gutter_fmt, line_num), gutter_w, gutter_digits
+end
+
 local TUI = {}
 
 function TUI.run(db, initial_query, tui_limit)
@@ -3391,17 +3399,13 @@ function TUI.run(db, initial_query, tui_limit)
                 local line_content = sanitize_terminal_text(preview_reader.get_line(current_preview_file, file_line_num) or "")
                 local is_hit = current_match_lines[file_line_num]
 
-                local max_code_w = math.max(0, r_text_w - 9)
+                local gutter_str, gutter_w = format_preview_gutter(file_line_num, current_preview_total_lines, is_hit)
+                local max_code_w = math.max(0, r_text_w - gutter_w)
                 local code_str = truncate(line_content, max_code_w)
                 local line_pad = string.rep(" ", math.max(0, max_code_w - visual_len(code_str)))
 
                 local highlighted = highlight_code_line(code_str, cur_file_ext, current_preview_patterns, is_hit)
-
-                if is_hit then
-                    right_cell = string.format("\27[1;33m> \27[90m%4d │ \27[0m%s%s%s", file_line_num, highlighted, line_pad, right_sb)
-                else
-                    right_cell = string.format("  \27[90m%4d │ \27[0m%s%s%s", file_line_num, highlighted, line_pad, right_sb)
-                end
+                right_cell = gutter_str .. highlighted .. line_pad .. right_sb
             else
                 right_cell = string.rep(" ", r_text_w) .. right_sb
             end
@@ -4415,6 +4419,7 @@ if pcall(debug.getlocal, 4, 1) then
         make_preview_reader = make_preview_reader,
         sanitize_terminal_text = sanitize_terminal_text,
         build_footer_content = build_footer_content,
+        format_preview_gutter = format_preview_gutter,
         visual_len = visual_len,
         truncate = truncate,
         -- exposed for tests: console-independent selection logic
