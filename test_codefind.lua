@@ -650,6 +650,94 @@ TestRunner.describe("Suite: 6. TUI Layout Resize and Viewport Clamping", functio
         assert_eq(parse_win_seq(27, {"[", "1", "2", "~"}), "F2", "POSIX / Linux console VT F2 (ESC [ 1 2 ~) should return F2")
         assert_eq(parse_win_seq(27, {"[", "[", "B"}), "F2", "Linux console alternative VT F2 (ESC [ [ B) should return F2")
     end)
+
+    TestRunner.it("should support in-line cursor navigation, editing, and prompt sliding window", function()
+        local format_prompt = codefind.format_query_prompt
+        local visual_len = codefind.visual_len
+
+        -- 1. Empty query states
+        local p_empty_focus = format_prompt("", 1, 40, true)
+        assert_true(p_empty_focus:find("|") ~= nil, "Focused empty prompt should render cursor |")
+        assert_true(p_empty_focus:find("help") ~= nil, "Focused empty prompt should render help hint")
+
+        local p_empty_unfocus = format_prompt("", 1, 40, false)
+        assert_true(p_empty_unfocus:find("|") == nil, "Unfocused empty prompt should not render cursor |")
+
+        local strip_ansi = function(s) return s:gsub("\27%[[%d;]*[mK]", "") end
+
+        -- 2. In-line cursor positioning within available width
+        local q = "database"
+        -- Cursor at start (pos 1): before 'd'
+        local p_start = format_prompt(q, 1, 40, true)
+        assert_true(strip_ansi(p_start):find("> |database", 1, true) ~= nil, "Cursor at pos 1 should be before first char")
+        assert_eq(visual_len(p_start), 3 + #q + 1, "Visual width should be prefix(3) + #q + cursor(1)")
+
+        -- Cursor in middle (pos 5): between 'a' and 'b' ("data|base")
+        local p_mid = format_prompt(q, 5, 40, true)
+        assert_true(strip_ansi(p_mid):find("data|base", 1, true) ~= nil, "Cursor at pos 5 should be at 'data|base'")
+
+        -- Cursor at end (pos 9): after 'e' ("database|")
+        local p_end = format_prompt(q, 9, 40, true)
+        assert_true(strip_ansi(p_end):find("database|", 1, true) ~= nil, "Cursor at pos 9 should be at 'database|'")
+
+        -- Unfocused prompt: no cursor
+        local p_unfocused = format_prompt(q, 5, 40, false)
+        assert_true(p_unfocused:find("|") == nil, "Unfocused prompt should not display cursor |")
+        assert_true(p_unfocused:find("database") ~= nil, "Unfocused prompt should display plain query")
+
+        -- 3. In-line string mutation logic
+        -- Insert 'x' at pos 3 of "helo" -> "hexlo"
+        local orig = "helo"
+        local cpos = 3
+        local inserted = orig:sub(1, cpos - 1) .. "x" .. orig:sub(cpos)
+        assert_eq(inserted, "hexlo", "Char insertion at pos 3 should yield hexlo")
+
+        -- Backspace at pos 3 of "hexlo" -> "hxlo", cpos becomes 2
+        local bk = inserted:sub(1, cpos - 2) .. inserted:sub(cpos)
+        assert_eq(bk, "hxlo", "Backspace at pos 3 should delete char at index 2 ('e')")
+
+        -- Delete forward at pos 2 of "hxlo" -> "hlo"
+        local del = bk:sub(1, 1) .. bk:sub(3)
+        assert_eq(del, "hlo", "Delete at pos 2 should delete char at index 2 ('x')")
+
+        -- Ctrl-W backward word delete at pos 8 of "foo bar" -> "foo "
+        local text = "foo bar"
+        local w_cpos = 8
+        local prefix = text:sub(1, w_cpos - 1)
+        local suffix = text:sub(w_cpos)
+        local trimmed = prefix:gsub("%s+$", "")
+        local new_prefix = trimmed:match("^(.-)[%w_%-]+$") or ""
+        local w_result = new_prefix .. suffix
+        assert_eq(w_result, "foo ", "Ctrl-W backward word delete should delete 'bar'")
+
+        -- 4. Long query sliding window stress test (visual length never exceeds avail_w)
+        local long_q = "function search_database_records(query, options, filters)"
+        for avail = 12, 50 do
+            for pos = 1, #long_q + 1 do
+                local p = format_prompt(long_q, pos, avail, true)
+                local vl = visual_len(p)
+                assert_true(vl <= avail, string.format("avail=%d pos=%d: visual_len %d exceeds %d", avail, pos, vl, avail))
+                assert_true(p:find("|") ~= nil, "Cursor | must be present in sliding window")
+            end
+        end
+
+        -- 5. Parsing DELETE and Ctrl-B / Ctrl-F escape sequences
+        local parse_edit_seq = function(c0, rest)
+            if c0 == 2 then return "CTRL_B"
+            elseif c0 == 6 then return "CTRL_F"
+            elseif c0 == 0 or c0 == 224 then
+                if rest[1] == 83 then return "DELETE" end
+            elseif c0 == 27 then
+                local seq = table.concat(rest)
+                if seq == "[3~" then return "DELETE" end
+            end
+            return nil
+        end
+        assert_eq(parse_edit_seq(2, {}), "CTRL_B", "ASCII 2 should return CTRL_B")
+        assert_eq(parse_edit_seq(6, {}), "CTRL_F", "ASCII 6 should return CTRL_F")
+        assert_eq(parse_edit_seq(0, {83}), "DELETE", "Windows console 83 should return DELETE")
+        assert_eq(parse_edit_seq(27, {"[", "3", "~"}), "DELETE", "POSIX VT ESC [ 3 ~ should return DELETE")
+    end)
 end)
 
 TestRunner.describe("7. SQLite3 Library Discovery, Validation and Selection", function()

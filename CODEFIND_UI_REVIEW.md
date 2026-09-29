@@ -129,11 +129,28 @@ While the architectural foundation is exceptionally solid, several key UX fricti
 ---
 
 #### 2.4 Cursor Navigation Within Search Query
+* **Status**: ✅ **Implemented & Verified**
 * **Observation**:
-  - The terminal cursor is hidden, and `query` is displayed with a static trailing cursor bar (`> query|`).
-  - Pressing `Left` or `Right` arrow does not move an insertion cursor within the query string.
-* **Recommendation**:
-  - Track `cursor_pos` within `query` to allow in-line `Left`/`Right` arrow movement, `Home`/`End`, and character insertion/deletion at arbitrary positions.
+  - The terminal cursor was hidden, and `query` was displayed with a static trailing cursor bar (`> query|`).
+  - Pressing `Left` or `Right` arrow did not move an insertion cursor within the query string.
+  - Backspace always deleted from the end of the query string regardless of desired edit location.
+* **Resolution**:
+  - Implemented dynamic `cursor_pos` tracking (`1 <= cursor_pos <= #query + 1`) in `TUI.run`.
+  - Added horizontal prompt sliding window `format_query_prompt(query, cursor_pos, avail_w, is_focused)` with visual indicators (`<` and `>`) when queries exceed prompt width, guaranteeing visual length never overflows or wraps.
+  - Supported cursor navigation:
+    - `Left` / `Ctrl-B`: Move insertion cursor backward 1 character.
+    - `Right` / `Ctrl-F`: Move insertion cursor forward 1 character.
+    - `Home` / `Ctrl-A`: Jump to start of query (`cursor_pos = 1`).
+    - `End` / `Ctrl-E`: Jump to end of query (`cursor_pos = #query + 1`).
+  - Supported in-line editing:
+    - Character insertion at `cursor_pos` for single keystrokes and fast key queues.
+    - `Backspace`: Delete character before cursor (`cursor_pos - 1`).
+    - `Delete` / `Ctrl-D`: Delete character under cursor (`cursor_pos`).
+    - `Ctrl-W`: Delete backward word before cursor.
+    - `Ctrl-U`: Clear entire query and reset `cursor_pos = 1`.
+  - Added ANSI-highlighted cursor bar (`\27[1;36m|\27[0m`) when search box is focused, cleanly hidden when preview pane is focused.
+  - Added Windows console (`crt._getch()`), Windows VT, and POSIX VT keycode decoders for `DELETE`, `CTRL_B`, and `CTRL_F`.
+  - Integrated into instant 0ms visual echo prompt renderer and Help View modal (`F1` / `?`).
 
 ---
 

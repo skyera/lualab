@@ -2442,6 +2442,78 @@ local function footer_pill_width(key, desc)
     return visual_len(key) + visual_len(desc) + 4
 end
 
+local function format_query_prompt(query, cursor_pos, avail_w, is_focused)
+    query = query or ""
+    cursor_pos = math.max(1, math.min(#query + 1, cursor_pos or (#query + 1)))
+    local prefix = " > "
+    local prefix_w = 3
+    local text_w = math.max(4, avail_w - prefix_w)
+
+    if #query == 0 then
+        if is_focused then
+            local hint = " (F1: help)"
+            if text_w >= 1 + #hint then
+                return prefix .. "|\27[90m" .. hint .. "\27[0m"
+            else
+                return prefix .. "|"
+            end
+        else
+            return prefix .. "\27[90m(search)\27[0m"
+        end
+    end
+
+    if not is_focused then
+        if #query <= text_w then
+            return prefix .. query
+        else
+            return prefix .. query:sub(1, text_w - 1) .. "\27[90m>\27[0m"
+        end
+    end
+
+    local cursor = "\27[1;36m|\27[0m"
+    if #query + 1 <= text_w then
+        local before = query:sub(1, cursor_pos - 1)
+        local after = query:sub(cursor_pos)
+        return prefix .. before .. cursor .. after
+    end
+
+    -- Windowing when query + cursor exceeds text_w
+    local lead = ""
+    local trail = ""
+    local start_idx, end_idx
+    if cursor_pos <= text_w - 1 then
+        trail = "\27[90m>\27[0m"
+        local q_cap = text_w - 2
+        start_idx = 1
+        end_idx = math.min(#query, start_idx + q_cap - 1)
+    elseif cursor_pos > #query - (text_w - 3) then
+        lead = "\27[90m<\27[0m"
+        local q_cap = text_w - 2
+        end_idx = #query
+        start_idx = math.max(1, end_idx - q_cap + 1)
+    else
+        lead = "\27[90m<\27[0m"
+        trail = "\27[90m>\27[0m"
+        local q_cap = math.max(1, text_w - 3)
+        local half = math.floor(q_cap / 2)
+        start_idx = math.max(1, cursor_pos - half)
+        end_idx = math.min(#query, start_idx + q_cap - 1)
+        if end_idx - start_idx + 1 < q_cap then
+            start_idx = math.max(1, end_idx - q_cap + 1)
+        end
+    end
+
+    local before = ""
+    local after = ""
+    if cursor_pos > start_idx then
+        before = query:sub(start_idx, cursor_pos - 1)
+    end
+    if cursor_pos <= end_idx then
+        after = query:sub(cursor_pos, end_idx)
+    end
+    return prefix .. lead .. before .. cursor .. after .. trail
+end
+
 local function compute_layout_geometry(cur_cols, cur_rows, focus_pane, is_zoomed)
     local is_narrow = (cur_cols < 75)
     local is_single_pane = is_narrow or (is_zoomed == true)
@@ -2728,6 +2800,7 @@ function TUI.run(db, initial_query, tui_limit)
                         elseif c1 == 81 then return "PAGE_DOWN"
                         elseif c1 == 71 then return "HOME"
                         elseif c1 == 79 then return "END"
+                        elseif c1 == 83 then return "DELETE"
                         elseif c1 == 59 or c1 == 84 or c1 == 94 or c1 == 104 then return "F1"
                         elseif c1 == 60 or c1 == 85 or c1 == 95 or c1 == 105 then return "F2"
                         end
@@ -2753,6 +2826,7 @@ function TUI.run(db, initial_query, tui_limit)
                             elseif seq == "[D" or seq == "OD" then return "LEFT"
                             elseif seq == "[5~" then return "PAGE_UP"
                             elseif seq == "[6~" then return "PAGE_DOWN"
+                            elseif seq == "[3~" then return "DELETE"
                             elseif seq == "[H" or seq == "[1~" then return "HOME"
                             elseif seq == "[F" or seq == "[4~" then return "END"
                             elseif seq == "?" then return "?"
@@ -2773,6 +2847,10 @@ function TUI.run(db, initial_query, tui_limit)
                         return "CTRL_A"
                     elseif c0 == 5 then  -- Ctrl-E
                         return "CTRL_E"
+                    elseif c0 == 2 then  -- Ctrl-B
+                        return "CTRL_B"
+                    elseif c0 == 6 then  -- Ctrl-F
+                        return "CTRL_F"
                     elseif c0 == 14 then -- Ctrl-N
                         return "CTRL_N"
                     elseif c0 == 16 then -- Ctrl-P
@@ -2821,6 +2899,7 @@ function TUI.run(db, initial_query, tui_limit)
                             elseif c2 == 68 then table.insert(key_queue, "LEFT"); idx = idx + 3
                             elseif c2 == 53 and idx + 3 < n and key_buf[idx + 3] == 126 then table.insert(key_queue, "PAGE_UP"); idx = idx + 4
                             elseif c2 == 54 and idx + 3 < n and key_buf[idx + 3] == 126 then table.insert(key_queue, "PAGE_DOWN"); idx = idx + 4
+                            elseif c2 == 51 and idx + 3 < n and key_buf[idx + 3] == 126 then table.insert(key_queue, "DELETE"); idx = idx + 4
                             elseif c2 == 72 then table.insert(key_queue, "HOME"); idx = idx + 3
                             elseif c2 == 70 then table.insert(key_queue, "END"); idx = idx + 3
                             else table.insert(key_queue, "ESC"); idx = idx + 1 end
@@ -2868,6 +2947,12 @@ function TUI.run(db, initial_query, tui_limit)
                     elseif c0 == 5 then -- Ctrl-E
                         table.insert(key_queue, "CTRL_E")
                         idx = idx + 1
+                    elseif c0 == 2 then -- Ctrl-B
+                        table.insert(key_queue, "CTRL_B")
+                        idx = idx + 1
+                    elseif c0 == 6 then -- Ctrl-F
+                        table.insert(key_queue, "CTRL_F")
+                        idx = idx + 1
                     elseif c0 == 14 then -- Ctrl-N
                         table.insert(key_queue, "CTRL_N")
                         idx = idx + 1
@@ -2905,6 +2990,7 @@ function TUI.run(db, initial_query, tui_limit)
     end
 
     local query = initial_query or ""
+    local cursor_pos = #query + 1
     local selected_idx = 1
     local list_scroll_offset = 0
     local preview_scroll_offset = 0
@@ -3359,13 +3445,14 @@ function TUI.run(db, initial_query, tui_limit)
     -- Instant visual echo: update query prompt line in row 2 with zero flicker
     local function render_query_prompt_instant()
         local left_col_border = (focus_pane == "search") and "\27[1;36m" or "\27[90m"
-        local query_prompt = (#query == 0) and " > |\27[90m (F1: help)\27[0m" or (" > " .. query .. "|")
         local ext_tag = active_ext_filter and ("\27[1;35m[." .. active_ext_filter .. "]\27[0m ") or ""
         local matches_badge = ext_tag .. ((#results > 0) and string.format("[%d/%d]", selected_idx, #results) or "[0 Matches]")
         local badge_w = visual_len(matches_badge)
+        local avail_prompt_w = (left_col_w > badge_w + 4) and (left_col_w - badge_w) or left_col_w
+        local query_prompt = format_query_prompt(query, cursor_pos, avail_prompt_w, focus_pane == "search")
         local left_head = ""
         if left_col_w > badge_w + 4 then
-            left_head = pad_to(query_prompt, left_col_w - badge_w) .. matches_badge
+            left_head = pad_to(query_prompt, avail_prompt_w) .. matches_badge
         else
             left_head = pad_to(query_prompt, left_col_w)
         end
@@ -3408,13 +3495,14 @@ function TUI.run(db, initial_query, tui_limit)
         local right_col_border = (focus_pane == "preview") and "\27[1;32m" or "\27[90m"
         local neutral_border = "\27[90m"
 
-        local query_prompt = (#query == 0) and " > |\27[90m (F1: help)\27[0m" or (" > " .. query .. "|")
         local ext_tag = active_ext_filter and ("\27[1;35m[." .. active_ext_filter .. "]\27[0m ") or ""
         local matches_badge = ext_tag .. ((#results > 0) and string.format("[%d/%d]", selected_idx, #results) or "[0 Matches]")
         local badge_w = visual_len(matches_badge)
+        local avail_prompt_w = (left_col_w > badge_w + 4) and (left_col_w - badge_w) or left_col_w
+        local query_prompt = format_query_prompt(query, cursor_pos, avail_prompt_w, focus_pane == "search")
         local left_head = ""
         if left_col_w > badge_w + 4 then
-            left_head = pad_to(query_prompt, left_col_w - badge_w) .. matches_badge
+            left_head = pad_to(query_prompt, avail_prompt_w) .. matches_badge
         else
             left_head = pad_to(query_prompt, left_col_w)
         end
@@ -3545,6 +3633,9 @@ function TUI.run(db, initial_query, tui_limit)
             "  \27[1;36mKeyboard Navigation & Shortcuts\27[0m",
             "    \27[1mTab\27[0m             Switch focus between Search Box and Preview / Browse pane",
             "    \27[1mF2 / z\27[0m          Toggle full-width pane zoom (Search list or Preview)",
+            "    \27[1m← / →\27[0m           Move cursor inside search query (Ctrl-B / Ctrl-F)",
+            "    \27[1mHome / End\27[0m      Jump to start / end of search query (Ctrl-A / Ctrl-E)",
+            "    \27[1mDel\27[0m            Delete character under cursor (Ctrl-D)",
             "    \27[1m↑ / ↓\27[0m           Navigate file list (or scroll preview in preview pane)",
             "    \27[1mPgUp / PgDn\27[0m     Scroll 10 items / lines up or down",
             "    \27[1mj / k\27[0m           Vim-style scroll in Browse pane",
@@ -3711,6 +3802,7 @@ function TUI.run(db, initial_query, tui_limit)
                 elseif #query > 0 then
                     -- If search box has text, ESC clears it
                     query = ""
+                    cursor_pos = 1
                     selected_idx = 1
                     vim_mode = "INSERT"
                     render_query_prompt_instant()
@@ -3780,6 +3872,7 @@ function TUI.run(db, initial_query, tui_limit)
                 needs_redraw = true
             elseif key == "CTRL_U" then
                 query = ""
+                cursor_pos = 1
                 selected_idx = 1
                 vim_mode = "INSERT"
                 focus_pane = "search"
@@ -3791,28 +3884,51 @@ function TUI.run(db, initial_query, tui_limit)
                 local stat_res = Indexer.run(db, ".", false)
                 set_status(string.format("✔ Re-indexed %d files (Total: %d)", stat_res.indexed, db:get_stats().total_files))
                 refresh_search()
-            elseif key == "CTRL_W" then
-                if vim_mode == "INSERT" and #query > 0 then
-                    -- Delete backward word
-                    local trimmed = query:gsub("%s+$", "")
-                    local new_q = trimmed:match("^(.-)[%w_%-]+$")
-                    query = new_q or ""
-                    selected_idx = 1
+            elseif key == "LEFT" or (focus_pane == "search" and key == "CTRL_B") then
+                if focus_pane == "search" then
+                    if cursor_pos > 1 then
+                        cursor_pos = cursor_pos - 1
+                        render_query_prompt_instant()
+                    end
+                end
+            elseif key == "RIGHT" or (focus_pane == "search" and key == "CTRL_F") then
+                if focus_pane == "search" then
+                    if cursor_pos <= #query then
+                        cursor_pos = cursor_pos + 1
+                        render_query_prompt_instant()
+                    end
+                end
+            elseif key == "CTRL_A" or (focus_pane == "search" and key == "HOME") then
+                if focus_pane == "search" then
+                    cursor_pos = 1
                     render_query_prompt_instant()
                 end
-            elseif key == "CTRL_A" or (vim_mode == "INSERT" and key == "HOME") then
-                if vim_mode == "INSERT" then
-                    set_status("Cursor at start of query")
-                    render_query_prompt_instant()
-                end
-            elseif key == "CTRL_E" or (vim_mode == "INSERT" and key == "END") then
-                if vim_mode == "INSERT" then
-                    set_status("Cursor at end of query")
+            elseif key == "CTRL_E" or (focus_pane == "search" and key == "END") then
+                if focus_pane == "search" then
+                    cursor_pos = #query + 1
                     render_query_prompt_instant()
                 end
             elseif key == "BACKSPACE" then
-                if vim_mode == "INSERT" and #query > 0 then
-                    query = query:sub(1, -2)
+                if focus_pane == "search" and cursor_pos > 1 then
+                    query = query:sub(1, cursor_pos - 2) .. query:sub(cursor_pos)
+                    cursor_pos = cursor_pos - 1
+                    selected_idx = 1
+                    render_query_prompt_instant()
+                end
+            elseif key == "DELETE" or (focus_pane == "search" and key == "CTRL_D") then
+                if focus_pane == "search" and cursor_pos <= #query then
+                    query = query:sub(1, cursor_pos - 1) .. query:sub(cursor_pos + 1)
+                    selected_idx = 1
+                    render_query_prompt_instant()
+                end
+            elseif key == "CTRL_W" then
+                if focus_pane == "search" and cursor_pos > 1 then
+                    local prefix = query:sub(1, cursor_pos - 1)
+                    local suffix = query:sub(cursor_pos)
+                    local trimmed = prefix:gsub("%s+$", "")
+                    local new_prefix = trimmed:match("^(.-)[%w_%-]+$") or ""
+                    query = new_prefix .. suffix
+                    cursor_pos = #new_prefix + 1
                     selected_idx = 1
                     render_query_prompt_instant()
                 end
@@ -3934,6 +4050,7 @@ function TUI.run(db, initial_query, tui_limit)
                     running = false
                 elseif key == "c" then
                     query = ""
+                    cursor_pos = 1
                     selected_idx = 1
                     vim_mode = "INSERT"
                     focus_pane = "search"
@@ -3949,11 +4066,13 @@ function TUI.run(db, initial_query, tui_limit)
                 -- Search box is a text input: printable keys are literal, including 'q'.
                 -- Quit via Esc (empty box), Ctrl-C, Ctrl-Q, or Tab then q in Browse.
                 vim_mode = "INSERT"
-                query = query .. key
+                local chars = key
                 -- Drain any additional pending single-character keys from the queue
                 while #key_queue > 0 and #key_queue[1] == 1 do
-                    query = query .. table.remove(key_queue, 1)
+                    chars = chars .. table.remove(key_queue, 1)
                 end
+                query = query:sub(1, cursor_pos - 1) .. chars .. query:sub(cursor_pos)
+                cursor_pos = cursor_pos + #chars
                 selected_idx = 1
                 -- Instant 0ms visual echo to the prompt bar
                 render_query_prompt_instant()
@@ -4563,6 +4682,7 @@ if pcall(debug.getlocal, 4, 1) then
         build_footer_content = build_footer_content,
         compute_layout_geometry = compute_layout_geometry,
         format_preview_gutter = format_preview_gutter,
+        format_query_prompt = format_query_prompt,
         visual_len = visual_len,
         truncate = truncate,
         -- exposed for tests: console-independent selection logic
