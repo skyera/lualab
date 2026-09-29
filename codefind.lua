@@ -2442,31 +2442,68 @@ local function footer_pill_width(key, desc)
     return visual_len(key) + visual_len(desc) + 4
 end
 
-local function build_footer_content(cur_cols, status_bar_msg, is_status_active, focus_pane, query)
+local function compute_layout_geometry(cur_cols, cur_rows, focus_pane, is_zoomed)
+    local is_narrow = (cur_cols < 75)
+    local is_single_pane = is_narrow or (is_zoomed == true)
+    local content_w = cur_cols - 2
+    local left_col_w, right_col_w
+    if is_single_pane then
+        if focus_pane == "preview" then
+            left_col_w = 0
+            right_col_w = content_w
+        else
+            left_col_w = content_w
+            right_col_w = 0
+        end
+    else
+        left_col_w = math.max(34, math.floor((cur_cols - 3) * 0.44))
+        right_col_w = cur_cols - 3 - left_col_w
+    end
+    local list_height = math.max(5, (cur_rows or 24) - 6)
+    return {
+        is_narrow = is_narrow,
+        is_single_pane = is_single_pane,
+        left_col_w = left_col_w,
+        right_col_w = right_col_w,
+        list_height = list_height,
+        content_w = content_w
+    }
+end
+
+local function build_footer_content(cur_cols, status_bar_msg, is_status_active, focus_pane, query, is_zoomed, is_single_pane)
     local inner_w = cur_cols - 2
     query = query or ""
+    if is_single_pane == nil then
+        is_single_pane = (cur_cols < 75) or (is_zoomed == true)
+    end
+
+    local tab_desc = is_single_pane and ((focus_pane == "search") and "Preview" or "Search")
+                                     or ((focus_pane == "search") and "Browse" or "Search")
+    local zoom_desc = is_zoomed and "Unzoom" or "Zoom"
 
     if not is_status_active or not status_bar_msg or status_bar_msg == "" then
         local pills = {}
         if focus_pane == "search" then
             pills = {
-                {"Tab", "Browse"},
+                {"Tab", tab_desc},
                 {"F1", "Help"},
                 {"Enter", "Open"},
                 {"Esc", #query > 0 and "Clear" or "Exit"},
+                {"F2", zoom_desc},
                 {"@ext", "Filter"},
-                {"^W", "Del Word"},
-                {"^Q", "Quit"}
+                {"^Q", "Quit"},
+                {"^W", "Del Word"}
             }
         else
             pills = {
-                {"Tab", "Search"},
+                {"Tab", tab_desc},
                 {"?", "Help"},
                 {"Enter", "Open"},
+                {"z", zoom_desc},
                 {"n/N", "Match"},
                 {"j/k", "Scroll"},
-                {"y", "Copy Path"},
-                {"q", "Quit"}
+                {"q", "Quit"},
+                {"y", "Copy Path"}
             }
         end
 
@@ -2516,12 +2553,12 @@ local function build_footer_content(cur_cols, status_bar_msg, is_status_active, 
 
         local right_avail_w = math.max(0, inner_w - left_w - 1)
         local candidate_pills = (focus_pane == "search") and {
-            {"Tab", "Browse"},
+            {"Tab", tab_desc},
             {"Enter", "Open"},
             {"F1", "Help"},
             {"^Q", "Quit"}
         } or {
-            {"Tab", "Search"},
+            {"Tab", tab_desc},
             {"Enter", "Open"},
             {"?", "Help"},
             {"q", "Quit"}
@@ -2692,6 +2729,7 @@ function TUI.run(db, initial_query, tui_limit)
                         elseif c1 == 71 then return "HOME"
                         elseif c1 == 79 then return "END"
                         elseif c1 == 59 or c1 == 84 or c1 == 94 or c1 == 104 then return "F1"
+                        elseif c1 == 60 or c1 == 85 or c1 == 95 or c1 == 105 then return "F2"
                         end
                     elseif c0 == 27 then
                         local seq = ""
@@ -2707,6 +2745,8 @@ function TUI.run(db, initial_query, tui_limit)
                         if #seq > 0 then
                             if seq == "OP" or seq == "[11~" or seq == "[[A" or seq:find("OP$") then
                                 return "F1"
+                            elseif seq == "OQ" or seq == "[12~" or seq == "[[B" or seq:find("OQ$") then
+                                return "F2"
                             elseif seq == "[A" or seq == "OA" then return "UP"
                             elseif seq == "[B" or seq == "OB" then return "DOWN"
                             elseif seq == "[C" or seq == "OC" then return "RIGHT"
@@ -2767,8 +2807,12 @@ function TUI.run(db, initial_query, tui_limit)
                     if c0 == 27 then -- ESC sequence
                         if idx + 4 < n and key_buf[idx + 1] == 91 and key_buf[idx + 2] == 49 and key_buf[idx + 3] == 49 and key_buf[idx + 4] == 126 then -- ESC [ 1 1 ~ (F1)
                             table.insert(key_queue, "F1"); idx = idx + 5
+                        elseif idx + 4 < n and key_buf[idx + 1] == 91 and key_buf[idx + 2] == 49 and key_buf[idx + 3] == 50 and key_buf[idx + 4] == 126 then -- ESC [ 1 2 ~ (F2)
+                            table.insert(key_queue, "F2"); idx = idx + 5
                         elseif idx + 3 < n and key_buf[idx + 1] == 91 and key_buf[idx + 2] == 91 and key_buf[idx + 3] == 65 then -- ESC [ [ A (F1)
                             table.insert(key_queue, "F1"); idx = idx + 4
+                        elseif idx + 3 < n and key_buf[idx + 1] == 91 and key_buf[idx + 2] == 91 and key_buf[idx + 3] == 66 then -- ESC [ [ B (F2)
+                            table.insert(key_queue, "F2"); idx = idx + 4
                         elseif idx + 2 < n and key_buf[idx + 1] == 91 then -- '['
                             local c2 = key_buf[idx + 2]
                             if c2 == 65 then table.insert(key_queue, "UP"); idx = idx + 3
@@ -2782,6 +2826,8 @@ function TUI.run(db, initial_query, tui_limit)
                             else table.insert(key_queue, "ESC"); idx = idx + 1 end
                         elseif idx + 2 < n and key_buf[idx + 1] == 79 and key_buf[idx + 2] == 80 then -- ESC O P (F1)
                             table.insert(key_queue, "F1"); idx = idx + 3
+                        elseif idx + 2 < n and key_buf[idx + 1] == 79 and key_buf[idx + 2] == 81 then -- ESC O Q (F2)
+                            table.insert(key_queue, "F2"); idx = idx + 3
                         elseif idx + 1 == n then
                             -- Only 1 byte ESC at end of buffer
                             local more = ffi.C.poll(pfd, 1, 15)
@@ -3006,13 +3052,17 @@ function TUI.run(db, initial_query, tui_limit)
 
     local running = true
 
+    local is_zoomed = false
+
     -- Cached layout dimensions (subtract 1 col to avoid hitting terminal auto-wrap edge)
     local raw_cols, raw_rows = get_term_size()
     local cur_cols = math.max(60, raw_cols - 1)
     local cur_rows = math.max(15, raw_rows)
-    local left_col_w = math.max(34, math.floor((cur_cols - 3) * 0.44))
-    local right_col_w = cur_cols - 3 - left_col_w
-    local list_height = math.max(5, cur_rows - 6)
+    local init_geom = compute_layout_geometry(cur_cols, cur_rows, focus_pane, is_zoomed)
+    local left_col_w = init_geom.left_col_w
+    local right_col_w = init_geom.right_col_w
+    local list_height = init_geom.list_height
+    local is_single_pane = init_geom.is_single_pane
     local render_full_screen = nil
     local render_selection = nil
 
@@ -3037,18 +3087,24 @@ function TUI.run(db, initial_query, tui_limit)
         end
     end
 
-    local function update_layout()
+    local function update_layout(force_calc)
         local cols, rows = get_term_size()
         cols = math.max(60, cols - 1)
         rows = math.max(15, rows)
-        if cols ~= cur_cols or rows ~= cur_rows then
+        local geom = compute_layout_geometry(cols, rows, focus_pane, is_zoomed)
+        local size_changed = (cols ~= cur_cols or rows ~= cur_rows)
+        local geom_changed = (geom.left_col_w ~= left_col_w or geom.right_col_w ~= right_col_w or geom.is_single_pane ~= is_single_pane)
+        if size_changed or geom_changed or force_calc then
             cur_cols = cols
             cur_rows = rows
-            left_col_w = math.max(34, math.floor((cols - 3) * 0.44))
-            right_col_w = cols - 3 - left_col_w
-            list_height = math.max(5, rows - 6)
+            left_col_w = geom.left_col_w
+            right_col_w = geom.right_col_w
+            list_height = geom.list_height
+            is_single_pane = geom.is_single_pane
             clamp_scroll()
-            io.write("\27[H\27[2J")
+            if size_changed then
+                io.write("\27[H\27[2J")
+            end
             needs_redraw = true
         end
     end
@@ -3313,10 +3369,17 @@ function TUI.run(db, initial_query, tui_limit)
         else
             left_head = pad_to(query_prompt, left_col_w)
         end
-        -- Write left half of row 2 with synchronized updates up to the divider
-        io.write(string.format("\27[?2026h\27[2;1H%s│\27[0m%s\27[0m\27[90m│\27[0m\27[?2026l",
-            left_col_border,
-            pad_to(left_head, left_col_w)))
+        -- Write left half or full row 2 with synchronized updates up to the border
+        if is_single_pane then
+            io.write(string.format("\27[?2026h\27[2;1H%s│\27[0m%s%s│\27[0m\27[?2026l",
+                left_col_border,
+                pad_to(left_head, left_col_w),
+                left_col_border))
+        else
+            io.write(string.format("\27[?2026h\27[2;1H%s│\27[0m%s\27[0m\27[90m│\27[0m\27[?2026l",
+                left_col_border,
+                pad_to(left_head, left_col_w)))
+        end
         io.flush()
     end
 
@@ -3377,6 +3440,20 @@ function TUI.run(db, initial_query, tui_limit)
             right_head = pad_to(right_head_title, right_col_w)
         end
 
+        if is_single_pane then
+            if focus_pane == "search" then
+                return string.format("%s│\27[0m%s%s│\27[0m",
+                    left_col_border,
+                    pad_to(left_head, left_col_w),
+                    left_col_border)
+            else
+                return string.format("%s│\27[0m%s%s│\27[0m",
+                    right_col_border,
+                    pad_to(right_head, right_col_w),
+                    right_col_border)
+            end
+        end
+
         return string.format("%s│\27[0m%s%s│\27[0m%s%s│\27[0m",
             left_col_border,
             pad_to(left_head, left_col_w),
@@ -3420,6 +3497,17 @@ function TUI.run(db, initial_query, tui_limit)
         local right_col_border = (focus_pane == "preview") and "\27[1;32m" or "\27[90m"
         local neutral_border = "\27[90m"
 
+        if is_single_pane then
+            if focus_pane == "search" then
+                local item_idx = list_scroll_offset + i
+                local left_cell = format_left_item(item_idx, (item_idx == selected_idx), list_thumb_pos, i)
+                return string.format("%s│\27[0m%s%s│\27[0m", left_col_border, left_cell, left_col_border)
+            else
+                local right_cell = build_right_cell(i, prev_thumb_pos, prev_total, cur_file_ext)
+                return string.format("%s│\27[0m%s%s│\27[0m", right_col_border, right_cell, right_col_border)
+            end
+        end
+
         local item_idx = list_scroll_offset + i
         local left_cell = format_left_item(item_idx, (item_idx == selected_idx), list_thumb_pos, i)
         local right_cell = build_right_cell(i, prev_thumb_pos, prev_total, cur_file_ext)
@@ -3456,6 +3544,7 @@ function TUI.run(db, initial_query, tui_limit)
         local help_content = {
             "  \27[1;36mKeyboard Navigation & Shortcuts\27[0m",
             "    \27[1mTab\27[0m             Switch focus between Search Box and Preview / Browse pane",
+            "    \27[1mF2 / z\27[0m          Toggle full-width pane zoom (Search list or Preview)",
             "    \27[1m↑ / ↓\27[0m           Navigate file list (or scroll preview in preview pane)",
             "    \27[1mPgUp / PgDn\27[0m     Scroll 10 items / lines up or down",
             "    \27[1mj / k\27[0m           Vim-style scroll in Browse pane",
@@ -3507,41 +3596,74 @@ function TUI.run(db, initial_query, tui_limit)
         local left_col_border = (focus_pane == "search") and "\27[1;36m" or "\27[90m"
         local right_col_border = (focus_pane == "preview") and "\27[1;32m" or "\27[90m"
         local neutral_border = "\27[90m"
+        local active_border = (focus_pane == "preview") and right_col_border or left_col_border
 
         local frame_buf = {}
         local function emit_row(y, row_str)
             table.insert(frame_buf, string.format("\27[%d;1H\27[2K%s", y, row_str))
         end
 
-        -- Row 1: Top Border
-        emit_row(1, neutral_border .. "┌" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┬" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┐\27[0m")
-
-        -- Row 2: Header Information Bar
-        emit_row(2, build_header_row())
-
-        -- Row 3: Split Divider
-        emit_row(3, neutral_border .. "├" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┼" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┤\27[0m")
-
         local list_thumb_pos, prev_thumb_pos, prev_total, cur_file_ext = get_thumb_positions()
 
-        -- Rows 4 .. (4 + list_height - 1): Content rows
-        for i = 1, list_height do
-            emit_row(3 + i, build_content_row(i, list_thumb_pos, prev_thumb_pos, prev_total, cur_file_ext))
+        if is_single_pane then
+            -- Single-pane mode (Narrow terminal or Zoomed)
+            -- Row 1: Top Border
+            emit_row(1, neutral_border .. "┌" .. active_border .. string.rep("─", cur_cols - 2) .. neutral_border .. "┐\27[0m")
+
+            -- Row 2: Header Information Bar
+            emit_row(2, build_header_row())
+
+            -- Row 3: Split Divider
+            emit_row(3, neutral_border .. "├" .. active_border .. string.rep("─", cur_cols - 2) .. neutral_border .. "┤\27[0m")
+
+            -- Rows 4 .. (4 + list_height - 1): Content rows
+            for i = 1, list_height do
+                emit_row(3 + i, build_content_row(i, list_thumb_pos, prev_thumb_pos, prev_total, cur_file_ext))
+            end
+
+            -- Row Bottom Divider
+            local div_y = 3 + list_height + 1
+            emit_row(div_y, neutral_border .. "├" .. active_border .. string.rep("─", cur_cols - 2) .. neutral_border .. "┤\27[0m")
+
+            -- Row Footer / Keybindings
+            local status_y = div_y + 1
+            local is_status_active = (status_bar_msg ~= nil) and (wall_now() - status_bar_time <= 3.0)
+            local footer_content = build_footer_content(cur_cols, status_bar_msg, is_status_active, focus_pane, query, is_zoomed, is_single_pane)
+            emit_row(status_y, string.format("%s│%s%s│\27[0m", neutral_border, footer_content, neutral_border))
+
+            -- Final Bottom Border
+            local bot_y = status_y + 1
+            emit_row(bot_y, neutral_border .. "└" .. string.rep("─", cur_cols - 2) .. "┘\27[0m")
+        else
+            -- Two-pane mode (Default on wide terminals)
+            -- Row 1: Top Border
+            emit_row(1, neutral_border .. "┌" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┬" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┐\27[0m")
+
+            -- Row 2: Header Information Bar
+            emit_row(2, build_header_row())
+
+            -- Row 3: Split Divider
+            emit_row(3, neutral_border .. "├" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┼" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┤\27[0m")
+
+            -- Rows 4 .. (4 + list_height - 1): Content rows
+            for i = 1, list_height do
+                emit_row(3 + i, build_content_row(i, list_thumb_pos, prev_thumb_pos, prev_total, cur_file_ext))
+            end
+
+            -- Row Bottom Divider
+            local div_y = 3 + list_height + 1
+            emit_row(div_y, neutral_border .. "├" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┴" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┤\27[0m")
+
+            -- Row Footer / Keybindings
+            local status_y = div_y + 1
+            local is_status_active = (status_bar_msg ~= nil) and (wall_now() - status_bar_time <= 3.0)
+            local footer_content = build_footer_content(cur_cols, status_bar_msg, is_status_active, focus_pane, query, is_zoomed, is_single_pane)
+            emit_row(status_y, string.format("%s│%s%s│\27[0m", neutral_border, footer_content, neutral_border))
+
+            -- Final Bottom Border
+            local bot_y = status_y + 1
+            emit_row(bot_y, neutral_border .. "└" .. string.rep("─", cur_cols - 2) .. "┘\27[0m")
         end
-
-        -- Row Bottom Divider
-        local div_y = 3 + list_height + 1
-        emit_row(div_y, neutral_border .. "├" .. left_col_border .. string.rep("─", left_col_w) .. neutral_border .. "┴" .. right_col_border .. string.rep("─", right_col_w) .. neutral_border .. "┤\27[0m")
-
-        -- Row Footer / Keybindings
-        local status_y = div_y + 1
-        local is_status_active = (status_bar_msg ~= nil) and (wall_now() - status_bar_time <= 3.0)
-        local footer_content = build_footer_content(cur_cols, status_bar_msg, is_status_active, focus_pane, query)
-        emit_row(status_y, string.format("%s│%s%s│\27[0m", neutral_border, footer_content, neutral_border))
-
-        -- Final Bottom Border
-        local bot_y = status_y + 1
-        emit_row(bot_y, neutral_border .. "└" .. string.rep("─", cur_cols - 2) .. "┘\27[0m")
 
         -- Atomically write frame buffer with synchronized updates (Zero flicker)
         io.write("\27[?2026h" .. table.concat(frame_buf) .. "\27[?2026l")
@@ -3572,11 +3694,19 @@ function TUI.run(db, initial_query, tui_limit)
             elseif key == "F1" or key == "?" then
                 show_help = true
                 needs_redraw = true
+            elseif key == "F2" then
+                is_zoomed = not is_zoomed
+                update_layout(true)
+                set_status(is_zoomed and "🔍 Full-width pane zoom enabled (F2 / z to toggle)" or "🔍 Two-pane view restored")
+                needs_redraw = true
             elseif key == "ESC" then
                 if focus_pane == "preview" then
                     -- If in preview pane, ESC switches back to search box
                     focus_pane = "search"
                     vim_mode = "INSERT"
+                    if is_single_pane then
+                        update_layout(true)
+                    end
                     needs_redraw = true
                 elseif #query > 0 then
                     -- If search box has text, ESC clears it
@@ -3644,6 +3774,9 @@ function TUI.run(db, initial_query, tui_limit)
                     focus_pane = "search"
                     vim_mode = "INSERT"
                 end
+                if is_single_pane then
+                    update_layout(true)
+                end
                 needs_redraw = true
             elseif key == "CTRL_U" then
                 query = ""
@@ -3703,7 +3836,13 @@ function TUI.run(db, initial_query, tui_limit)
                 if key == "i" or key == "/" then
                     vim_mode = "INSERT"
                     focus_pane = "search"
+                    if is_single_pane then update_layout(true) end
                     set_status("INSERT mode")
+                elseif key == "z" or key == "Z" then
+                    is_zoomed = not is_zoomed
+                    update_layout(true)
+                    set_status(is_zoomed and "🔍 Full-width pane zoom enabled (F2 / z to toggle)" or "🔍 Two-pane view restored")
+                    needs_redraw = true
                 elseif key == "j" then
                     if focus_pane == "preview" then
                         if preview_scroll_offset + 1 < current_preview_total_lines then
@@ -3730,9 +3869,11 @@ function TUI.run(db, initial_query, tui_limit)
                     end
                 elseif key == "h" then
                     focus_pane = "search"
+                    if is_single_pane then update_layout(true) end
                     needs_redraw = true
                 elseif key == "l" then
                     focus_pane = "preview"
+                    if is_single_pane then update_layout(true) end
                     needs_redraw = true
                 elseif key == "g" then
                     if focus_pane == "preview" then
@@ -3796,6 +3937,7 @@ function TUI.run(db, initial_query, tui_limit)
                     selected_idx = 1
                     vim_mode = "INSERT"
                     focus_pane = "search"
+                    if is_single_pane then update_layout(true) end
                     render_query_prompt_instant()
                     set_status("Query cleared — type new search")
                     needs_redraw = true
@@ -4419,6 +4561,7 @@ if pcall(debug.getlocal, 4, 1) then
         make_preview_reader = make_preview_reader,
         sanitize_terminal_text = sanitize_terminal_text,
         build_footer_content = build_footer_content,
+        compute_layout_geometry = compute_layout_geometry,
         format_preview_gutter = format_preview_gutter,
         visual_len = visual_len,
         truncate = truncate,

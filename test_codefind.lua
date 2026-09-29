@@ -576,6 +576,80 @@ TestRunner.describe("Suite: 6. TUI Layout Resize and Viewport Clamping", functio
         local full_cell = g_huge .. code_str .. line_pad .. right_sb
         assert_eq(visual_len(full_cell), right_col_w, "Full right cell width must exactly equal right_col_w")
     end)
+
+    TestRunner.it("should compute responsive single-pane layout on narrow screens and zoom toggle", function()
+        local geom_fn = codefind.compute_layout_geometry
+        local build_footer = codefind.build_footer_content
+        local visual_len = codefind.visual_len
+
+        -- 1. Narrow terminal (< 75 columns, e.g. 60 cols) auto switches to single-pane
+        local g60_search = geom_fn(60, 24, "search", false)
+        assert_true(g60_search.is_narrow, "60 cols should be flagged as narrow")
+        assert_true(g60_search.is_single_pane, "60 cols should automatically activate single-pane")
+        assert_eq(g60_search.left_col_w, 58, "Search pane should occupy full content width (60 - 2)")
+        assert_eq(g60_search.right_col_w, 0, "Preview pane should be hidden (0 cols)")
+        assert_eq(g60_search.content_w, 58, "Content width should be 58")
+
+        local g60_prev = geom_fn(60, 24, "preview", false)
+        assert_true(g60_prev.is_single_pane, "Preview pane on 60 cols should be single-pane")
+        assert_eq(g60_prev.left_col_w, 0, "Search pane should be hidden (0 cols)")
+        assert_eq(g60_prev.right_col_w, 58, "Preview pane should occupy full content width (60 - 2)")
+
+        -- Check footer in narrow single-pane mode: Tab flips to Preview/Search
+        local foot60_search = build_footer(60, nil, false, "search", "", false, true)
+        assert_eq(visual_len(foot60_search), 58, "Visual width must equal 58")
+        assert_true(foot60_search:find("Preview") ~= nil, "Tab in search single-pane should prompt Preview")
+
+        local foot60_prev = build_footer(60, nil, false, "preview", "", false, true)
+        assert_eq(visual_len(foot60_prev), 58, "Visual width must equal 58")
+        assert_true(foot60_prev:find("Search") ~= nil, "Tab in preview single-pane should prompt Search")
+
+        -- 2. Standard terminal (>= 75 columns, e.g. 80 and 120 cols) defaults to two-pane
+        local g80 = geom_fn(80, 30, "search", false)
+        assert_false(g80.is_narrow, "80 cols should not be narrow")
+        assert_false(g80.is_single_pane, "80 cols should default to two-pane")
+        assert_eq(g80.left_col_w + g80.right_col_w + 3, 80, "Two-pane invariant: left + right + 3 == cols")
+        assert_true(g80.left_col_w >= 34, "Left col width should be at least 34")
+
+        local g120 = geom_fn(120, 40, "search", false)
+        assert_false(g120.is_single_pane, "120 cols should default to two-pane")
+        assert_eq(g120.left_col_w + g120.right_col_w + 3, 120, "120 cols invariant: left + right + 3 == cols")
+
+        -- 3. Zoom mode on standard terminal (F2 / z toggle) activates full-width single-pane
+        local g100_zoomed_search = geom_fn(100, 30, "search", true)
+        assert_false(g100_zoomed_search.is_narrow, "100 cols is not narrow")
+        assert_true(g100_zoomed_search.is_single_pane, "Zoom should activate single pane")
+        assert_eq(g100_zoomed_search.left_col_w, 98, "Zoomed search should occupy full content width (98 cols)")
+        assert_eq(g100_zoomed_search.right_col_w, 0, "Zoomed search should hide preview pane")
+
+        local g100_zoomed_prev = geom_fn(100, 30, "preview", true)
+        assert_true(g100_zoomed_prev.is_single_pane, "Zoomed preview should be single pane")
+        assert_eq(g100_zoomed_prev.left_col_w, 0, "Zoomed preview should hide search pane")
+        assert_eq(g100_zoomed_prev.right_col_w, 98, "Zoomed preview should occupy full content width (98 cols)")
+
+        -- Footer pills under zoom: displays 'Unzoom'
+        local foot100_zoomed = build_footer(100, nil, false, "search", "", true, true)
+        assert_eq(visual_len(foot100_zoomed), 98, "Zoomed footer width must equal 98")
+        assert_true(foot100_zoomed:find("Unzoom") ~= nil, "Zoomed footer should offer Unzoom")
+
+        -- 4. F2 key parsing in Windows VT and POSIX sequences
+        local parse_win_seq = function(c0, rest)
+            if c0 == 0 or c0 == 224 then
+                local c1 = rest[1]
+                if c1 == 60 or c1 == 85 or c1 == 95 or c1 == 105 then return "F2" end
+            elseif c0 == 27 then
+                local seq = table.concat(rest)
+                if seq == "OQ" or seq == "[12~" or seq == "[[B" or seq:find("OQ$") then
+                    return "F2"
+                end
+            end
+            return nil
+        end
+        assert_eq(parse_win_seq(0, {60}), "F2", "Windows console F2 should return F2")
+        assert_eq(parse_win_seq(27, {"O", "Q"}), "F2", "Windows Terminal VT F2 (ESC OQ) should return F2")
+        assert_eq(parse_win_seq(27, {"[", "1", "2", "~"}), "F2", "POSIX / Linux console VT F2 (ESC [ 1 2 ~) should return F2")
+        assert_eq(parse_win_seq(27, {"[", "[", "B"}), "F2", "Linux console alternative VT F2 (ESC [ [ B) should return F2")
+    end)
 end)
 
 TestRunner.describe("7. SQLite3 Library Discovery, Validation and Selection", function()

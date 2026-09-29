@@ -84,12 +84,17 @@ While the architectural foundation is exceptionally solid, several key UX fricti
 ### Priority 2: Medium Impact (Visual Polish & Ergonomics)
 
 #### 2.1 Narrow Terminal Behavior (< 80 Columns)
+* **Status**: ✅ **Implemented & Verified** (commit pending)
 * **Observation**:
   - Layout sets `cur_cols = math.max(60, raw_cols - 1)`.
-  - When the terminal is 60–75 columns wide, `left_col_w` is ~34 columns and `right_col_w` is ~24–38 columns.
-  - After subtracting borders, line numbers, file badges, and indicators, the file path has only ~14 characters and the preview has ~12 characters of code.
-* **Recommendation**:
-  - Implement a responsive layout: when `cur_cols < 75`, switch to a single full-width pane with `Tab` toggling between List and Preview, or allow a manual pane zoom toggle (`Z` / `F2`).
+  - When the terminal is 60–75 columns wide, `left_col_w` was ~34 columns and `right_col_w` was ~24–38 columns.
+  - After subtracting borders, line numbers, file badges, and indicators, the file path had only ~14 characters and the preview had ~12 characters of code.
+* **Resolution**:
+  - Automatically switches to a full-width single pane (`content_w = cur_cols - 2`) when `cur_cols < 75`.
+  - `Tab` seamlessly toggles between full-width file list and full-width code preview with zero flicker.
+  - Added manual full-width pane zoom on any terminal size via `F2` (any mode) or `z` / `Z` (normal mode).
+  - Single-pane borders omit middle dividers (`┌───┐`, `├───┤`, `└───┘`) with cyan/green active border indicators.
+  - Footer dynamically labels `[Tab] Preview` vs `[Tab] Search` and provides `[F2] Zoom/Unzoom` and `[z] Zoom/Unzoom` pills.
 
 ---
 
