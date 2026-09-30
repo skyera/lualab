@@ -15,8 +15,8 @@ A systematic audit against [`AGENTS.md`](file:///home/zliu/test/lualab/AGENTS.md
 | ID | Issue / Feature | Severity / Type | Status | Commit | Verification |
 |---|---|---|---|---|---|
 | **1.1** | Screen Flashing Elimination (`\27[2J` removed on user actions) | High / TUI Standard | ✅ **Fixed** | [`938fb04`](file:///home/zliu/test/lualab/pix.lua) | 0 interactive `\27[2J` escapes |
-| **1.2** | Full Screen Redraw on Local Cursor Steps | High / Performance | ✅ **Fixed** | Pending commit | Test 43, PTY verification |
-| **1.3** | Terminal Autowrap Shift & Layout Clamping | High / TUI Standard | ✅ **Fixed** | Pending commit | PTY wrap test, ?7l escapes |
+| **1.2** | Full Screen Redraw on Local Cursor Steps | High / Performance | ✅ **Fixed** | [`7567576`](file:///home/zliu/test/lualab/pix.lua) | Test 43, PTY verification |
+| **1.3** | Terminal Autowrap Shift & Layout Clamping | High / TUI Standard | ✅ **Fixed** | [`7567576`](file:///home/zliu/test/lualab/pix.lua) | PTY wrap test, ?7l escapes |
 | **1.4** | Terminal Signal Masking (`ISIG`/`IEXTEN`) | High / Reliability | Pending | — | Clean restoration |
 | **2.1** | Native Chafa Symbols Fallback (Tier 3) | Medium / Feature | Pending | — | Test 6 |
 | **2.2** | Test 20 LuaJIT Binary Resolution in Subshell | Medium / Test Suite | Pending | — | Test 20 |
@@ -63,7 +63,7 @@ A systematic audit against [`AGENTS.md`](file:///home/zliu/test/lualab/AGENTS.md
 ---
 
 #### 1.2 Flicker-Free Differential Row Refresh on Local Cursor Movement
-* **Status**: ✅ **FIXED** (Pending commit)
+* **Status**: ✅ **FIXED** ([Commit 7567576](file:///home/zliu/test/lualab/pix.lua))
 * **Resolution**:
   - Extracted `format_item_line()` for reusable single-line item rendering with column formatting, UTF-8 truncation, and selection markers.
   - Implemented `render_selection_differential(images, old_sel, new_sel, page_offset, icon_mode)` addressing lines via `\27[row;1H` (row 10 to `term_h - 2`) wrapped in atomic synchronized update escapes (`\27[?2026h` ... `\27[?2026l`).
@@ -80,7 +80,7 @@ A systematic audit against [`AGENTS.md`](file:///home/zliu/test/lualab/AGENTS.md
 ---
 
 #### 1.3 Terminal Autowrap Shift & Layout Width Clamping
-* **Status**: ✅ **FIXED** (Pending commit)
+* **Status**: ✅ **FIXED** ([Commit 7567576](file:///home/zliu/test/lualab/pix.lua))
 * **Resolution**:
   - Emitted `\27[?7l` (disable autowrap) in `enable_raw_mode()` on both Windows and POSIX platforms, and restored `\27[?7h` in `disable_raw_mode()`.
   - Made the header key legend responsive across terminal widths (`>= 115`, `>= 95`, `>= 80`, `< 80` columns) so 80-column terminals no longer overflow and cause terminal wrap.
