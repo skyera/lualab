@@ -12,17 +12,17 @@ A systematic audit against [`AGENTS.md`](file:///home/zliu/test/lualab/AGENTS.md
 
 ### Issue & Resolution Summary Matrix
 
-| ID | Issue / Feature | Severity / Type | Recommended Resolution | Verification Status |
-|---|---|---|---|---|
-| **1.1** | Screen Clear (`\27[2J`) Emission on User Actions | High / TUI Standard | Replace `\27[2J` in modals, headers, and view screens with `\27[H` + line overwrites (`\27[K\n`) and frame clear (`\27[J`). Wrap in synchronized updates (`\27[?2026h`...`\27[?2026l`). | Verified (0 occurrences of `\27[2J`) |
-| **1.2** | Full Screen Redraw on Local Cursor Steps | High / Performance | Implement `render_selection_differential()` and `format_item_line()`. On `j`/`k`/arrows within page, overwrite strictly the 2 affected rows via VT100 coordinates. | Verified (Test 45) |
-| **1.3** | Terminal Autowrap Shift & Layout Clamping | High / TUI Standard | Emit `\27[?7l` on raw mode entry, restore with `\27[?7h` on exit. Clamp layout width to `math.max(40, raw_cols - 1)`. | Verified (Test 44) |
-| **1.4** | Terminal Signal Masking (`ISIG`/`IEXTEN`) | High / Reliability | Clear `ISIG` and `IEXTEN` in POSIX `termios.c_lflag` so `Ctrl+C` arrives cleanly as byte `\3` and invokes graceful terminal restoration. | Verified |
-| **2.1** | Native Chafa Symbols Fallback (Tier 3) | Medium / Feature | Implement `render_image_native_symbols` using `find_best_glyph_quarter()` and label output as `Chafa Symbols (Native LuaJIT)` when CLI is unavailable. | Verified (Test 6) |
-| **2.2** | Test 20 LuaJIT Binary Resolution in Subshell | Medium / Test Suite | Resolve active `luajit` path via `which luajit` / `where luajit` so subshells with isolated `PATH=""` locate the interpreter. | Verified (Test 20) |
-| **2.3** | LRU Image Cache Eviction on File Deletion | Medium / Correctness | Forward-declare and invoke `invalidate_image_cache(filepath)` on `[d]` deletion to evict entries from `image_cache` and `animated_cache`. | Verified (Test 42) |
-| **2.4** | Viewer Pan Drift & Hysteresis | Low / UX & Ergonomics | Clamp `viewer_pan_x` and `viewer_pan_y` to `[-max_p_x, max_p_x]` and `[-max_p_y, max_p_y]` during zoom navigation (`w`/`a`/`s`/`d`). | Verified (Test 46) |
-| **2.5** | Sort Status Feedback Toasts | Low / UX Feedback | Provide transient status toasts (`current_msg`) on sort keys `s` and `r`: `Sort: <MODE> (<ASC/DESC>)`. | Verified |
+| ID | Issue / Feature | Severity / Type | Status | Commit | Verification |
+|---|---|---|---|---|---|
+| **1.1** | Screen Flashing Elimination (`\27[2J` removed on user actions) | High / TUI Standard | ✅ **Fixed** | [`938fb04`](file:///home/zliu/test/lualab/pix.lua) | 0 interactive `\27[2J` escapes |
+| **1.2** | Full Screen Redraw on Local Cursor Steps | High / Performance | Pending | — | Test 45 |
+| **1.3** | Terminal Autowrap Shift & Layout Clamping | High / TUI Standard | Pending | — | Test 44 |
+| **1.4** | Terminal Signal Masking (`ISIG`/`IEXTEN`) | High / Reliability | Pending | — | Clean restoration |
+| **2.1** | Native Chafa Symbols Fallback (Tier 3) | Medium / Feature | Pending | — | Test 6 |
+| **2.2** | Test 20 LuaJIT Binary Resolution in Subshell | Medium / Test Suite | Pending | — | Test 20 |
+| **2.3** | LRU Image Cache Eviction on File Deletion | Medium / Correctness | Pending | — | Test 42 |
+| **2.4** | Viewer Pan Drift & Hysteresis | Low / UX & Ergonomics | Pending | — | Test 46 |
+| **2.5** | Sort Status Feedback Toasts | Low / UX Feedback | Pending | — | Status toasts |
 
 ---
 
@@ -50,12 +50,15 @@ A systematic audit against [`AGENTS.md`](file:///home/zliu/test/lualab/AGENTS.md
 ### Priority 1: High Impact (TUI Standards & Visual Stability)
 
 #### 1.1 Elimination of Screen Flashing (`\27[2J`)
+* **Status**: ✅ **FIXED** ([Commit 938fb04](file:///home/zliu/test/lualab/pix.lua))
+* **Resolution**:
+  - Removed all `\27[2J` calls across all 17 interactive locations (image viewer fallback routines, modal dialogs, video player static header, OSD toggle, and music player `draw_screen` loop).
+  - Screen transitions and frame refreshes now reposition to home (`\27[H`) and cleanly overwrite rows (`\27[K\n`) with trailing screen clear (`\27[J`).
+  - Wrapped frame buffers in atomic synchronized update escapes (`\27[?2026h` ... `\27[?2026l`).
 * **Problem**:
   Multiple interactive paths (`show_mpv_failure`, `render_help_modal`, `play_music_screen`, `draw_static_header`, engine cycling, and image viewing fallback routines) previously emitted `\27[2J` (clear full screen) on keypresses or mode transitions, producing noticeable visual screen flashing.
 * **Standard Requirement ([AGENTS.md](file:///home/zliu/test/lualab/AGENTS.md#L43-L46))**:
   > *"`\27[2J` (clear screen) MUST NEVER be emitted in response to any user-driven action — this includes key presses (Space, Enter, arrow keys, hotkeys), cursor navigation, list traversal, typing, stepping through algorithms, toggling modes, confirming prompts, or any other interactive input. The screen must remain visually stable at all times during normal interaction."*
-* **Remediation**:
-  Replace `\27[2J` with `\27[H` (cursor home) followed by line overwrites (`\27[K\n`) and frame clear (`\27[J`). Wrap all output in atomic synchronized update escapes (`\27[?2026h` ... `\27[?2026l`).
 
 ---
 
@@ -327,8 +330,8 @@ The test suite in [`test_pix.lua`](file:///home/zliu/test/lualab/test_pix.lua) w
 
 Per [`AGENTS.md`](file:///home/zliu/test/lualab/AGENTS.md) conventions (one atomic commit per logical fix):
 
-1. **Commit 1**: `fix(pix): resolve luajit binary in test_pix.lua and mask terminal signals`
-2. **Commit 2**: `refactor(pix): eliminate interactive screen clearing escapes and enforce atomic frames`
-3. **Commit 3**: `perf(pix): implement flicker-free differential row refresh on local cursor navigation`
+1. **Commit [`938fb04`](file:///home/zliu/test/lualab/pix.lua)**: `refactor(pix): eliminate interactive screen clearing escapes and enforce atomic frames` (✅ **Completed**)
+2. **Commit 2**: `perf(pix): implement flicker-free differential row refresh on local cursor navigation`
+3. **Commit 3**: `fix(pix): add terminal autowrap disable and safe Ctrl+C restoration`
 4. **Commit 4**: `feat(pix): add native chafa symbols fallback, cache eviction, and zoom pan clamping`
 5. **Commit 5**: `test(pix): expand test suite to 46 cases covering TUI stability standards`
