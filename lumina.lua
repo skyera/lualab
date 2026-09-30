@@ -1539,7 +1539,7 @@ local function show_fuzzy_finder(root_dir, show_hidden)
         end
 
         -- Footer / Key Hints
-        local hint_text = " [Enter] Open  [Tab] Engine  [↑/↓] Select  [Esc] Cancel "
+        local hint_text = " [Enter] Open  [Tab] Engine  [↑/↓/PgUp/PgDn] Select  [Esc] Cancel "
         local hint_pad = string.rep("─", math.max(0, box_w - 2 - visual_len(hint_text)))
         table.insert(out, string.format("\27[%d;%dH%s╰%s%s%s%s╯%s",
             start_y + box_h - 1, start_x, bcol, C.dim, hint_text, bcol, hint_pad, C.reset))
@@ -1576,6 +1576,26 @@ local function show_fuzzy_finder(root_dir, show_hidden)
             elseif k == "DOWN" then
                 if sel_idx < #matches then
                     sel_idx = sel_idx + 1
+                    render_modal(matches)
+                end
+            elseif k == "PAGE_UP" or k == "\21" or k == "CTRL_U" then
+                if sel_idx > 1 then
+                    sel_idx = math.max(1, sel_idx - visible_rows)
+                    render_modal(matches)
+                end
+            elseif k == "PAGE_DOWN" or k == "\4" or k == "CTRL_D" then
+                if sel_idx < #matches then
+                    sel_idx = math.min(#matches, sel_idx + visible_rows)
+                    render_modal(matches)
+                end
+            elseif k == "HOME" then
+                if sel_idx > 1 then
+                    sel_idx = 1
+                    render_modal(matches)
+                end
+            elseif k == "END" then
+                if sel_idx < #matches then
+                    sel_idx = #matches
                     render_modal(matches)
                 end
             elseif k == "BACKSPACE" then
@@ -1811,9 +1831,9 @@ local function preview_cache_put(key, lines)
     end
 end
 
-local function generate_preview(entry, max_lines, max_cols, show_hidden)
+local function get_preview_cache_key(entry, max_lines, max_cols, show_hidden)
     local buffer_lines = math.max(max_lines * 5, 200)
-    local key = table.concat({
+    return table.concat({
         entry.path,
         entry.ext,
         tostring(entry.size),
@@ -1821,8 +1841,23 @@ local function generate_preview(entry, max_lines, max_cols, show_hidden)
         tostring(max_cols),
         show_hidden and "hidden" or "visible",
     }, "\31")
+end
+
+local function should_render_preview_instantly(entry, max_lines, max_cols, show_hidden)
+    if not entry then return true end
+    local key = get_preview_cache_key(entry, max_lines, max_cols, show_hidden)
+    if preview_cache_get(key) ~= nil then return true end
+    if entry.is_dir then return true end
+    if is_text_file(entry) and entry.size and entry.size < 65536 then return true end
+    return false
+end
+
+local function generate_preview(entry, max_lines, max_cols, show_hidden)
+    local key = get_preview_cache_key(entry, max_lines, max_cols, show_hidden)
     local cached = preview_cache_get(key)
     if cached then return cached end
+
+    local buffer_lines = math.max(max_lines * 5, 200)
 
     local lines
     if entry.is_dir then
@@ -1949,6 +1984,10 @@ local function main(args)
     local bookmarks = {}
     local mark_mode = false
     local jump_mode = false
+    local status_message = nil
+    local function set_status_message(msg)
+        status_message = msg
+    end
     local function count_selected()
         local c = 0
         for _ in pairs(selected_paths) do c = c + 1 end
@@ -2156,14 +2195,17 @@ local function main(args)
         -- Column 3: Live Preview Pane
         local sel_entry = current_entries[sel_index]
         local preview_lines
-        if preview_pending then
+        local can_instant = sel_entry and should_render_preview_instantly(sel_entry, visible_rows, col3_w - 4, show_hidden)
+        if preview_pending and not can_instant then
             preview_lines = {
                 C.dim .. "Loading preview..." .. C.reset,
                 C.dim .. "Pause briefly to render the selected item." .. C.reset,
             }
         elseif sel_entry then
+            preview_pending = false
             preview_lines = generate_preview(sel_entry, visible_rows, col3_w - 4, show_hidden)
         else
+            preview_pending = false
             preview_lines = { C.dim .. "(Empty Directory)" .. C.reset }
         end
 
@@ -2209,6 +2251,10 @@ local function main(args)
         elseif #filter_query > 0 then
             status_text = string.format("%sFilter: /%s\27[0m", C.status_accent or "\27[1;38;2;251;191;36m", filter_query)
             help_hint = "[h/l] Nav  [Space/v] Tag  [s] Sort  [j/k] Move  [/] Filter  [f] Find  [Esc] Clear"
+        elseif status_message then
+            status_text = status_message
+            local op_hint = (clip_cnt > 0) and "  [p] Paste" or ""
+            help_hint = string.format("[?] Help  [h/l] Nav  [Space] Tag  [y/d] Copy/Cut%s  [a] New  [D] Del  [q] Quit", op_hint)
         else
             status_text = string.format("%s%s%s%s%s", clip_badge, sel_badge, C.dim, sel_entry and sel_entry.path or current_dir, C.reset)
             local op_hint = (clip_cnt > 0) and "  [p] Paste" or ""
@@ -2282,14 +2328,17 @@ local function main(args)
         -- 3. Overwrite Col 3 (Preview)
         local sel_entry = current_entries[sel_index]
         local preview_lines
-        if preview_pending then
+        local can_instant = sel_entry and should_render_preview_instantly(sel_entry, visible_rows, col3_w - 4, show_hidden)
+        if preview_pending and not can_instant then
             preview_lines = {
                 C.dim .. "Loading preview..." .. C.reset,
                 C.dim .. "Pause briefly to render the selected item." .. C.reset,
             }
         elseif sel_entry then
+            preview_pending = false
             preview_lines = generate_preview(sel_entry, visible_rows, col3_w - 4, show_hidden)
         else
+            preview_pending = false
             preview_lines = { C.dim .. "(Empty Directory)" .. C.reset }
         end
 
@@ -2315,7 +2364,12 @@ local function main(args)
         local clip_cnt = count_clipboard()
         local clip_badge = (clip_cnt > 0) and string.format("\27[1;33m[%s %d]\27[0m ",
             clipboard.mode == "cut" and "CUT" or "YANK", clip_cnt) or ""
-        local status_text = string.format("%s%s%s%s%s", clip_badge, sel_badge, C.dim, sel_entry and sel_entry.path or current_dir, C.reset)
+        local status_text
+        if status_message then
+            status_text = status_message
+        else
+            status_text = string.format("%s%s%s%s%s", clip_badge, sel_badge, C.dim, sel_entry and sel_entry.path or current_dir, C.reset)
+        end
         local op_hint = (clip_cnt > 0) and "  [p] Paste" or ""
         local help_hint = string.format("[?] Help  [h/l] Nav  [Space] Tag  [y/d] Copy/Cut%s  [a] New  [D] Del  [q] Quit", op_hint)
         local footer_line = string.format("\27[%d;1H\27[2K  %s \27[90m│\27[0m \27[90m%s\27[0m",
@@ -2346,6 +2400,7 @@ local function main(args)
         if k then
             local previous_dir = current_dir
             local previous_selection = sel_index
+            status_message = nil
             needs_redraw = true
             if is_searching then
                 if k == "ENTER" then
@@ -2403,12 +2458,15 @@ local function main(args)
             elseif mark_mode then
                 mark_mode = false
                 if k and #k == 1 and k:match("^[a-zA-Z0-9]$") then
-                    bookmarks[k:lower()] = current_dir
+                    local mark_key = k:lower()
+                    bookmarks[mark_key] = current_dir
+                    set_status_message(string.format("\27[1;36m★ Bookmark '%s' set to %s\27[0m", mark_key, get_dir_display_name(current_dir)))
                 end
             elseif jump_mode then
                 jump_mode = false
                 if k and #k == 1 and k:match("^[a-zA-Z0-9]$") then
-                    local target = bookmarks[k:lower()]
+                    local mark_key = k:lower()
+                    local target = bookmarks[mark_key]
                     if target then
                         current_dir = target
                         filter_query = ""
@@ -2417,6 +2475,9 @@ local function main(args)
                         preview_scroll_offset = 0
                         preview_pending = true
                         reload_current()
+                        set_status_message(string.format("\27[1;36m★ Jumped to bookmark '%s'\27[0m", mark_key))
+                    else
+                        set_status_message(string.format("\27[1;31m✗ Bookmark '%s' is not set\27[0m", mark_key))
                     end
                 end
             elseif k == "m" then
@@ -2574,11 +2635,13 @@ local function main(args)
                 end
             elseif k == "t" then
                 cycle_theme(1)
+                set_status_message(string.format("\27[1;35m🎨 Theme: %s\27[0m", C.name or "Theme"))
                 clear_preview_cache()
                 preview_pending = true
                 needs_redraw = true
             elseif k == "T" then
                 cycle_theme(-1)
+                set_status_message(string.format("\27[1;35m🎨 Theme: %s\27[0m", C.name or "Theme"))
                 clear_preview_cache()
                 preview_pending = true
                 needs_redraw = true
@@ -2636,6 +2699,7 @@ local function main(args)
                 if #targets > 0 then
                     clipboard = { mode = "copy", items = targets }
                     selected_paths = {}
+                    set_status_message(string.format("\27[1;32m✓ Copied %d item(s) to clipboard\27[0m", #targets))
                     needs_redraw = true
                 end
             elseif k == "d" or k == "x" then
@@ -2644,11 +2708,13 @@ local function main(args)
                 if #targets > 0 then
                     clipboard = { mode = "cut", items = targets }
                     selected_paths = {}
+                    set_status_message(string.format("\27[1;33m✓ Cut %d item(s) to clipboard\27[0m", #targets))
                     needs_redraw = true
                 end
             elseif k == "p" then
                 -- p: Paste clipboard items into current_dir
                 if clipboard.items and #clipboard.items > 0 then
+                    local count = #clipboard.items
                     for _, item in ipairs(clipboard.items) do
                         local item_name = item.name or item.path:match("([^/\\]+)$")
                         local dst_path = (current_dir == "/" and ("/" .. item_name) or (current_dir .. "/" .. item_name))
@@ -2663,6 +2729,7 @@ local function main(args)
                     if clipboard.mode == "cut" then
                         clipboard = { mode = nil, items = {} }
                     end
+                    set_status_message(string.format("\27[1;32m✓ Pasted %d item(s) into %s\27[0m", count, get_dir_display_name(current_dir)))
                     clear_preview_cache()
                     preview_pending = true
                     reload_current()
@@ -2686,6 +2753,7 @@ local function main(args)
                             local f = io.open(target, "a")
                             if f then f:close() end
                         end
+                        set_status_message(string.format("\27[1;32m✓ Created %s '%s'\27[0m", is_new_dir and "folder" or "file", clean_name))
                         clear_preview_cache()
                         preview_pending = true
                         reload_current()
@@ -2707,6 +2775,7 @@ local function main(args)
                         new_name = new_name:gsub("^%s+", ""):gsub("%s+$", "")
                         local new_path = (current_dir == "/" and ("/" .. new_name) or (current_dir .. "/" .. new_name))
                         move_file_or_dir(cur.path, new_path)
+                        set_status_message(string.format("\27[1;32m✓ Renamed to '%s'\27[0m", new_name))
                         clear_preview_cache()
                         preview_pending = true
                         reload_current()
@@ -2726,10 +2795,12 @@ local function main(args)
                     local prompt_msg = (#targets == 1) and string.format("Delete '%s'?", targets[1].name)
                                                       or string.format("Delete %d selected items?", #targets)
                     if show_confirm_modal("CONFIRM DELETION", prompt_msg) then
+                        local count = #targets
                         for _, item in ipairs(targets) do
                             delete_file_or_dir(item.path, item.is_dir)
                             selected_paths[item.path] = nil
                         end
+                        set_status_message(string.format("\27[1;32m✓ Deleted %d item(s)\27[0m", count))
                         clear_preview_cache()
                         preview_pending = true
                         reload_current()
@@ -2782,9 +2853,12 @@ local M = {
     resolve_text_editor = resolve_text_editor,
     read_dir_entries    = read_dir_entries,
     sort_entries        = sort_entries,
-    enable_raw_mode     = enable_raw_mode,
-    disable_raw_mode    = disable_raw_mode,
-    main                = main,
+    enable_raw_mode                 = enable_raw_mode,
+    disable_raw_mode                = disable_raw_mode,
+    clear_preview_cache             = clear_preview_cache,
+    preview_cache_get               = preview_cache_get,
+    should_render_preview_instantly = should_render_preview_instantly,
+    main                            = main,
 }
 
 local is_entry_point = false

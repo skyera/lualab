@@ -1297,6 +1297,60 @@ assert_true(l_code_diff:find("render_selection_differential%(previous_selection,
 assert_true(l_code_diff:find("prev_page_offset") ~= nil,
     "lumina.lua tracks prev_page_offset to safely fall back to full screen when boundary crosses")
 
+-- Test Suite 25: Instant Preview Caching, Modal Paging & Toast Notifications --
+print("\n-- Test Suite 25: Instant Preview Caching, Modal Paging & Toast Notifications --")
+local lf_suite25 = io.open("lumina.lua", "r")
+local l_code25 = lf_suite25:read("*all")
+lf_suite25:close()
+
+-- 1. Fuzzy Finder Modal Paging & Shortcuts
+local fzf_block = l_code25:match("local function show_fuzzy_finder(.-)\nlocal function show_input_modal")
+assert_true(fzf_block ~= nil, "Located show_fuzzy_finder implementation")
+assert_true(fzf_block:find('k%s*==%s*"PAGE_UP"') ~= nil, "show_fuzzy_finder supports PAGE_UP key")
+assert_true(fzf_block:find('k%s*==%s*"PAGE_DOWN"') ~= nil, "show_fuzzy_finder supports PAGE_DOWN key")
+assert_true(fzf_block:find('k%s*==%s*"\\21"') ~= nil or fzf_block:find('k%s*==%s*"CTRL_U"') ~= nil, "show_fuzzy_finder supports Ctrl+U scroll up")
+assert_true(fzf_block:find('k%s*==%s*"\\4"') ~= nil or fzf_block:find('k%s*==%s*"CTRL_D"') ~= nil, "show_fuzzy_finder supports Ctrl+D scroll down")
+assert_true(fzf_block:find('k%s*==%s*"HOME"') ~= nil, "show_fuzzy_finder supports HOME key to jump to top")
+assert_true(fzf_block:find('k%s*==%s*"END"') ~= nil, "show_fuzzy_finder supports END key to jump to bottom")
+
+-- 2. Instant Preview Caching and Small File / Directory Bypass
+assert_true(type(Lumina.should_render_preview_instantly) == "function", "Lumina exports should_render_preview_instantly")
+assert_true(type(Lumina.clear_preview_cache) == "function", "Lumina exports clear_preview_cache")
+Lumina.clear_preview_cache()
+
+local test_dir_entry = { path = "/tmp/testdir", name = "testdir", is_dir = true, ext = "", size = 4096 }
+local test_small_text = { path = "/tmp/test.txt", name = "test.txt", is_dir = false, ext = "txt", size = 2048 }
+local test_large_bin = { path = "/tmp/test.bin", name = "test.bin", is_dir = false, ext = "bin", size = 1048576 }
+
+assert_true(Lumina.should_render_preview_instantly(test_dir_entry, 20, 80, false) == true,
+    "Directory previews render instantly without debounce delay")
+assert_true(Lumina.should_render_preview_instantly(test_small_text, 20, 80, false) == true,
+    "Small text files (<64KB) render instantly without debounce delay")
+assert_true(Lumina.should_render_preview_instantly(test_large_bin, 20, 80, false) == false,
+    "Large uncached binary files defer preview rendering for smooth navigation")
+
+-- 3. Toast Notifications & Status Messages
+assert_true(l_code25:find("local status_message%s*=%s*nil") ~= nil, "lumina.lua declares status_message variable")
+assert_true(l_code25:find("local function set_status_message") ~= nil, "lumina.lua defines set_status_message helper")
+assert_true(l_code25:find("status_message%s*=%s*nil") ~= nil, "lumina.lua clears status_message on keypress")
+
+-- Ensure status_message is displayed in footer bars
+assert_true(l_code25:find("elseif status_message then%s*status_text%s*=%s*status_message") ~= nil,
+    "render_full_screen displays status_message in footer bar")
+assert_true(l_code25:find("if status_message then%s*status_text%s*=%s*status_message") ~= nil,
+    "render_selection_differential displays status_message in footer bar")
+
+-- Ensure all key operations trigger notifications
+assert_true(l_code25:find("✓ Copied") ~= nil, "Copy operation (y) sets confirmation toast")
+assert_true(l_code25:find("✓ Cut") ~= nil, "Cut operation (d/x) sets confirmation toast")
+assert_true(l_code25:find("✓ Pasted") ~= nil, "Paste operation (p) sets confirmation toast")
+assert_true(l_code25:find("★ Bookmark '%%s' set to") ~= nil, "Setting bookmark (m) sets confirmation toast")
+assert_true(l_code25:find("★ Jumped to bookmark") ~= nil, "Jumping bookmark sets confirmation toast")
+assert_true(l_code25:find("✓ Created") ~= nil, "Create file/dir (a) sets confirmation toast")
+assert_true(l_code25:find("✓ Renamed to") ~= nil, "Rename operation (R) sets confirmation toast")
+assert_true(l_code25:find("✓ Deleted") ~= nil, "Delete operation (D) sets confirmation toast")
+assert_true(l_code25:find("🎨 Theme:") ~= nil, "Cycle theme (t/T) sets confirmation toast")
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)
