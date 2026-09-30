@@ -3212,7 +3212,7 @@ local function render_image_unicode_block(img_entry, current_idx, total_count, t
     -- Build output buffer
     local out  = {}
     local blen = math.max(20, term_w - 4)
-    table.insert(out, "\27[H\27[2J")
+    table.insert(out, "\27[H")
     table.insert(out, "\27[1;36m" .. string.rep("═", blen) .. "\27[0m\n")
     table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
         current_idx, total_count, to_display_text(img_entry.filename)))
@@ -3325,7 +3325,8 @@ local function render_image_unicode_block(img_entry, current_idx, total_count, t
         table.insert(out, table.concat(line))
     end
 
-    io.write("\27[?2026h" .. table.concat(out) .. "\27[?2026l")
+    local frame = table.concat(out):gsub("\n", "\27[K\n") .. "\27[J"
+    io.write("\27[?2026h" .. frame .. "\27[?2026l")
     io.flush()
     return true
 end
@@ -3579,7 +3580,7 @@ local function render_image_chafa(img_entry, current_idx, total_count, term_w, t
 
     local out = {}
     local bar_len = math.max(20, term_w - 4)
-    table.insert(out, "\27[H\27[2J")
+    table.insert(out, "\27[H")
     table.insert(out, "\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
     table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
         current_idx, total_count, to_display_text(img_entry.filename)))
@@ -3607,7 +3608,8 @@ local function render_image_chafa(img_entry, current_idx, total_count, term_w, t
         table.insert(out, pad .. l .. "\27[0m\n")
     end
 
-    io.write("\27[?2026h" .. table.concat(out) .. "\27[?2026l")
+    local frame = table.concat(out):gsub("\n", "\27[K\n") .. "\27[J"
+    io.write("\27[?2026h" .. frame .. "\27[?2026l")
     io.flush()
     return true
 end
@@ -3762,7 +3764,7 @@ local function render_image_timg_cli(img_entry, current_idx, total_count, term_w
 
     local out = {}
     local bar_len = math.max(20, term_w - 4)
-    table.insert(out, "\27[H\27[2J")
+    table.insert(out, "\27[H")
     table.insert(out, "\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
     table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
         current_idx, total_count, to_display_text(img_entry.filename)))
@@ -3784,7 +3786,8 @@ local function render_image_timg_cli(img_entry, current_idx, total_count, term_w
         table.insert(out, pad .. l .. "\27[0m\n")
     end
 
-    io.write(table.concat(out))
+    local frame = table.concat(out):gsub("\n", "\27[K\n") .. "\27[J"
+    io.write("\27[?2026h" .. frame .. "\27[?2026l")
     io.flush()
     return true
 end
@@ -3828,7 +3831,7 @@ local function render_image_chafa_cli_direct(img_entry, current_idx, total_count
 
     local out = {}
     local bar_len = math.max(20, term_w - 4)
-    table.insert(out, "\27[H\27[2J")
+    table.insert(out, "\27[H")
     table.insert(out, "\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
     table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
         current_idx, total_count, to_display_text(img_entry.filename)))
@@ -3844,14 +3847,14 @@ local function render_image_chafa_cli_direct(img_entry, current_idx, total_count
         or "  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"
     table.insert(out, cycle_hint)
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
-    table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
     if pad_top > 0 then table.insert(out, string.rep("\n", pad_top)) end
     for _, l in ipairs(rendered_lines) do
         table.insert(out, pad .. l .. "\27[0m\n")
     end
 
-    io.write(table.concat(out))
+    local frame = table.concat(out):gsub("\n", "\27[K\n") .. "\27[J"
+    io.write("\27[?2026h" .. frame .. "\27[?2026l")
     io.flush()
     return true
 end
@@ -4042,11 +4045,11 @@ local function render_image_kitty(img_entry, current_idx, total_count, term_w, t
 
     -- Header
     local bar_len = math.max(20, term_w - 4)
-    io.write("\27[H\27[2J") -- Clear screen & home cursor
     kitty_clear_screen()
 
-    io.write("\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
-    io.write(string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
+    local out = { "\27[H" }
+    table.insert(out, "\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
+    table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
         current_idx, total_count, to_display_text(img_entry.filename)))
     local date_disp, date_src = get_image_timestamp(img_entry)
     local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
@@ -4054,13 +4057,15 @@ local function render_image_kitty(img_entry, current_idx, total_count, term_w, t
     local path_cols = math.max(15, term_w - 60)
     if display_width(disp_path) > path_cols then disp_path = utf8_tail(disp_path, path_cols) end
     local eng_prefix = (cur_e and total_e) and string.format("[%d/%d] ", cur_e, total_e) or ""
-    io.write(string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s\27[1;95mKitty Graphics Protocol\27[90m | Path: %s\27[0m\n",
+    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s\27[1;95mKitty Graphics Protocol\27[90m | Path: %s\27[0m\n",
         img_entry.size_str, iw, ih, date_info, eng_prefix, disp_path))
     local cycle_hint = total_e and string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine (%d available)   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n", total_e)
         or "  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"
-    io.write(cycle_hint)
-    io.write("\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
-    if pad_top > 0 then io.write(string.rep("\n", pad_top)) end
+    table.insert(out, cycle_hint)
+    table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
+    if pad_top > 0 then table.insert(out, string.rep("\n", pad_top)) end
+    local frame = table.concat(out):gsub("\n", "\27[K\n") .. "\27[J"
+    io.write(frame)
 
     -- Stream chunks (4096 bytes per chunk as recommended by Kitty spec)
     local chunk_size = 4096
@@ -4102,7 +4107,7 @@ local function render_image_halfblock(img_entry, current_idx, total_count, term_
     pan_y = pan_y or 0
 
     local out = {}
-    table.insert(out, "\27[H\27[2J") -- Clear screen & home cursor
+    table.insert(out, "\27[H")
 
     -- Top header bar
     local bar_len = math.max(20, term_w - 4)
@@ -4203,7 +4208,8 @@ local function render_image_halfblock(img_entry, current_idx, total_count, term_
         table.insert(out, table.concat(line))
     end
 
-    io.write("\27[?2026h" .. table.concat(out) .. "\27[?2026l")
+    local frame = table.concat(out):gsub("\n", "\27[K\n") .. "\27[J"
+    io.write("\27[?2026h" .. frame .. "\27[?2026l")
     io.flush()
     return true
 end
@@ -4266,11 +4272,11 @@ local function render_image_iterm2(img_entry, current_idx, total_count, term_w, 
     local pad = string.rep(" ", pad_left)
 
     local bar_len = math.max(20, term_w - 4)
-    io.write("\27[H\27[2J") -- Clear screen & home cursor
     kitty_clear_screen()
 
-    io.write("\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
-    io.write(string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
+    local out = { "\27[H" }
+    table.insert(out, "\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
+    table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
         current_idx, total_count, to_display_text(img_entry.filename)))
     local date_disp, date_src = get_image_timestamp(img_entry)
     local date_info = (date_src == "EXIF" or date_src == "tIME") and (date_disp .. " (" .. date_src .. ")") or (date_src == "File" and (date_disp .. " (File)") or date_disp)
@@ -4278,13 +4284,15 @@ local function render_image_iterm2(img_entry, current_idx, total_count, term_w, 
     local path_cols = math.max(15, term_w - 60)
     if display_width(disp_path) > path_cols then disp_path = utf8_tail(disp_path, path_cols) end
     local eng_prefix = (cur_e and total_e) and string.format("[%d/%d] ", cur_e, total_e) or ""
-    io.write(string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s\27[1;94miTerm2 Inline Protocol\27[90m | Path: %s\27[0m\n",
+    table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s\27[1;94miTerm2 Inline Protocol\27[90m | Path: %s\27[0m\n",
         img_entry.size_str, iw, ih, date_info, eng_prefix, disp_path))
     local cycle_hint = total_e and string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine (%d available)   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n", total_e)
         or "  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"
-    io.write(cycle_hint)
-    io.write("\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
-    if pad_top > 0 then io.write(string.rep("\n", pad_top)) end
+    table.insert(out, cycle_hint)
+    table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
+    if pad_top > 0 then table.insert(out, string.rep("\n", pad_top)) end
+    local frame = table.concat(out):gsub("\n", "\27[K\n") .. "\27[J"
+    io.write(frame)
 
     local iterm_seq = string.format("\27]1337;File=inline=1;width=%d;height=%d;preserveAspectRatio=1:%s\007\n",
         fit_cols, fit_rows, b64)
@@ -4382,8 +4390,7 @@ local function render_image_sixel(img_entry, current_idx, total_count, term_w, t
     local max_cols = math.max(10, term_w - 4)
 
     local bar_len = math.max(20, term_w - 4)
-    io.write("\27[H\27[2J")
-    local out = {}
+    local out = { "\27[H" }
     table.insert(out, "\27[1;36m" .. string.rep("═", bar_len) .. "\27[0m\n")
     table.insert(out, string.format("  \27[1;37mIMAGE VIEWER [%d/%d]: \27[1;93m%s\27[0m\n",
         current_idx, total_count, to_display_text(img_entry.filename)))
@@ -4399,7 +4406,8 @@ local function render_image_sixel(img_entry, current_idx, total_count, term_w, t
         or "  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"
     table.insert(out, cycle_hint)
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
-    io.write(table.concat(out))
+    local frame = table.concat(out):gsub("\n", "\27[K\n") .. "\27[J"
+    io.write(frame)
 
     if get_has_chafa_cli_direct() then
         local devnull = is_windows and "nul" or "/dev/null"
@@ -4695,7 +4703,7 @@ local function get_mpv_stderr_log_path()
 end
 
 local function show_mpv_failure(log_path, status)
-    io.write("\27[H\27[2J")
+    io.write("\27[H\27[J")
     io.write(string.format("\27[1;31m  ⚠ mpv exited with status %s\27[0m\n\n", tostring(status)))
 
     local tail = {}
@@ -4736,7 +4744,7 @@ local function launch_mpv(filepath, seek_sec, use_window)
     local rm_opts = is_rm and " --video-sync=audio --autosync=30 --framedrop=vo --hr-seek=no --msg-level=ffmpeg=error" or ""
     local mpv_cmd
     if use_window then
-        io.write("\27[H\27[2J")
+        io.write("\27[H\27[J")
         io.write("\27[1;36m> Launching MPV window: \27[1;33m" .. filepath .. "\27[0m\n")
         if is_rm then
             io.write("  \27[90m(RealMedia A/V sync recovery active: --video-sync=audio --autosync=30 --framedrop=vo --hr-seek=no)\27[0m\n")
@@ -4763,7 +4771,7 @@ local function launch_mpv(filepath, seek_sec, use_window)
         ret = os.execute(mpv_cmd)
         enable_raw_mode()
     end
-    io.write("\27[H\27[2J\27[?25l") -- clear screen, hide cursor
+    io.write("\27[H\27[J\27[?25l") -- clear screen, hide cursor
     io.flush()
 
     if not is_windows then
@@ -4790,7 +4798,7 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
 
     local use_ffi = (video_play_engine == "ffi")
     if not inline_engine then
-        io.write("\27[H\27[2J")
+        io.write("\27[H\27[J")
         io.write("\n  \27[1;31m⚠ Video Player Dependencies Not Found\27[0m\n\n")
         io.write("  Video playback requires \27[1;36mmpv\27[0m, \27[1;36mlibavcodec\27[0m FFI libraries,\n")
         io.write("  or \27[1;36mffmpeg\27[0m in your system PATH.\n")
@@ -4924,7 +4932,7 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
 
     local function draw_static_header()
         if not show_osd then return end
-        io.write("\27[H\27[2J")
+        io.write("\27[H")
         local out = {}
         table.insert(out, "\27[1;34m" .. string.rep("═", bar_len) .. "\27[0m\n")
         local dim_str = (v_info.width > 0) and string.format("%dx%d, %.1ffps", v_info.width, v_info.height, fps) or string.format("%.1ffps", fps)
@@ -5141,7 +5149,7 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
                     draw_static_header()
                     update_dynamic_header(current_fps)
                 else
-                    io.write("\27[H\27[2J")
+                    io.write("\27[1;1H\27[K\27[2;1H\27[K\27[3;1H\27[K\27[4;1H\27[K\27[5;1H\27[K")
                     io.flush()
                 end
             elseif k == "r" or k == "HOME" then
@@ -5249,7 +5257,7 @@ end
 
 local function play_music_screen(audio_entry, current_idx, total_count)
     if not get_has_ffplay() then
-        io.write("\27[H\27[2J")
+        io.write("\27[H\27[J")
         io.write("\n  \27[1;31m⚠ Music Player Dependency Not Found\27[0m\n\n")
         io.write("  Music playback requires \27[1;36mffplay\27[0m in your system PATH.\n")
         io.write("  Install with: \27[93msudo apt install ffmpeg\27[0m\n\n")
@@ -5291,14 +5299,16 @@ local function play_music_screen(audio_entry, current_idx, total_count)
         local status = is_eof and "ENDED" or (is_paused and "PAUSED" or "PLAYING")
         local speed = playback_speed ~= 1.0 and string.format("  %.1fx", playback_speed) or ""
 
-        io.write("\27[H\27[2J")
-        io.write("\27[1;34m" .. string.rep("═", bar_len) .. "\27[0m\n")
-        io.write(string.format("  \27[1;37mMUSIC PLAYER\27[0m \27[1;36m[%d/%d]\27[0m: \27[1;93m%s\27[0m  \27[1;92m[%s]\27[0m%s\27[K\n",
+        local out = { "\27[H" }
+        table.insert(out, "\27[1;34m" .. string.rep("═", bar_len) .. "\27[0m\n")
+        table.insert(out, string.format("  \27[1;37mMUSIC PLAYER\27[0m \27[1;36m[%d/%d]\27[0m: \27[1;93m%s\27[0m  \27[1;92m[%s]\27[0m%s\n",
             current_idx, total_count, to_display_text(audio_entry.filename), status, speed))
-        io.write(string.format("  \27[90mFormat: %s  Size: %s\27[0m\27[K\n\n", audio_entry.extension, audio_entry.size_str))
-        io.write(string.format("  \27[1;37m%s\27[0m  \27[1;36m%s\27[0m\27[K\n", format_position(), bar))
-        io.write("\n  \27[93m[Space/p]\27[0m Pause  \27[93m[←/→]\27[0m ±5s  \27[93m[↑/↓]\27[0m ±60s  \27[93m[[/]]\27[0m Speed  \27[91m[q]\27[0m Back\27[K\n")
-        io.write("\27[90m" .. string.rep("─", bar_len) .. "\27[0m\27[K")
+        table.insert(out, string.format("  \27[90mFormat: %s  Size: %s\27[0m\n\n", audio_entry.extension, audio_entry.size_str))
+        table.insert(out, string.format("  \27[1;37m%s\27[0m  \27[1;36m%s\27[0m\n", format_position(), bar))
+        table.insert(out, "\n  \27[93m[Space/p]\27[0m Pause  \27[93m[←/→]\27[0m ±5s  \27[93m[↑/↓]\27[0m ±60s  \27[93m[[/]]\27[0m Speed  \27[91m[q]\27[0m Back\n")
+        table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
+        local frame = table.concat(out):gsub("\n", "\27[K\n") .. "\27[J"
+        io.write("\27[?2026h" .. frame .. "\27[?2026l")
         io.flush()
     end
 
@@ -5475,19 +5485,21 @@ local function render_help_modal(term_w, term_h, active_protocol)
     local pad_left = math.max(0, math.floor((term_w - modal_w) / 2))
     local margin = string.rep(" ", pad_left)
 
-    io.write("\27[H\27[2J") -- Clear screen
-    io.write(string.rep("\n", start_row))
+    local out = { "\27[H" }
+    table.insert(out, string.rep("\n", start_row))
     for idx, l in ipairs(lines) do
         if idx == 1 or idx == 3 or idx == (#lines - 1) then
-            io.write(margin .. "\27[1;36m" .. l .. "\27[0m\n")
+            table.insert(out, margin .. "\27[1;36m" .. l .. "\27[0m\n")
         elseif idx == 2 then
-            io.write(margin .. "\27[1;97;44m" .. l .. "\27[0m\n")
+            table.insert(out, margin .. "\27[1;97;44m" .. l .. "\27[0m\n")
         elseif idx == #lines then
-            io.write(margin .. "\27[1;93m" .. l .. "\27[0m\n")
+            table.insert(out, margin .. "\27[1;93m" .. l .. "\27[0m\n")
         else
-            io.write(margin .. "\27[37m" .. l .. "\27[0m\n")
+            table.insert(out, margin .. "\27[37m" .. l .. "\27[0m\n")
         end
     end
+    local frame = table.concat(out):gsub("\n", "\27[K\n") .. "\27[J"
+    io.write("\27[?2026h" .. frame .. "\27[?2026l")
     io.flush()
 end
 
