@@ -666,7 +666,7 @@ if is_windows then
         kernel32.SetConsoleMode(hIn, new_mode)
         raw_mode_enabled = true
 
-        io.write("\27[?1049h\27[?25l") -- Alternate screen buffer + Hide cursor
+        io.write("\27[?1049h\27[?25l\27[?7l") -- Alternate screen buffer + Hide cursor + Disable autowrap
         io.flush()
         return true
     end
@@ -674,7 +674,7 @@ if is_windows then
     disable_raw_mode = function()
         if win_stop_audio then win_stop_audio() end
         if raw_mode_enabled then
-            io.write("\27[?1049l\27[?25h\27[0m") -- Restore main screen + show cursor
+            io.write("\27[?1049l\27[?25h\27[?7h\27[0m") -- Restore main screen + show cursor + Restore autowrap
             io.flush()
             local hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
             kernel32.SetConsoleMode(hIn, orig_in_mode[0])
@@ -1357,7 +1357,7 @@ ffi.cdef(posix_termios_cdef[[
         ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
         raw_mode_enabled = true
 
-        io.write("\27[?1049h\27[?25l") -- Alternate screen buffer + Hide cursor
+        io.write("\27[?1049h\27[?25l\27[?7l") -- Alternate screen buffer + Hide cursor + Disable autowrap
         io.flush()
         return true
     end
@@ -1390,7 +1390,7 @@ ffi.cdef(posix_termios_cdef[[
     disable_raw_mode = function()
         if posix_stop_audio then posix_stop_audio() end
         if raw_mode_enabled then
-            io.write("\27[?1049l\27[?25h\27[0m") -- Restore main screen + show cursor
+            io.write("\27[?1049l\27[?25h\27[?7h\27[0m") -- Restore main screen + show cursor + Restore autowrap
             io.flush()
             ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
             raw_mode_enabled = false
@@ -5503,7 +5503,83 @@ local function render_help_modal(term_w, term_h, active_protocol)
     io.flush()
 end
 
-local function render_file_list(dir_path, images, total_unfiltered, selected_idx, page_offset, msg, search_mode, search_query, sort_mode, sort_desc, recursive, icon_mode, show_hidden, confirm_item)
+local format_item_line
+local render_selection_differential
+local render_file_list
+
+format_item_line = function(images, i, is_sel, col2_w, icon_mode)
+    local img = images[i]
+    if not img then return "" end
+    local icon = get_file_icon(img.extension, icon_mode)
+    local icon_prefix = (icon ~= "") and (icon .. " ") or ""
+    -- Measure the icon as well: emoji, nerd-font glyphs and the unicode set (where some
+    -- entries carry their own trailing space) are not all the same width, so a fixed
+    -- allowance left every PNG/DIR/GIF row one column out.
+    local icon_cols = display_width(icon_prefix)
+    local max_fn_w = col2_w - icon_cols
+    -- Names arrive from the OS in its own encoding (ANSI on Windows) and may be wide (CJK),
+    -- so transcode for the UTF-8 console and measure/cut by display columns, not bytes.
+    local fn = utf8_truncate(to_display_text(img.filename), max_fn_w)
+
+    local display_fn = icon_prefix .. fn
+    local pad_len = math.max(0, col2_w - (display_width(fn) + icon_cols))
+    local padded_col2 = display_fn .. string.rep(" ", pad_len)
+
+    local date_disp, date_src = get_image_timestamp(img)
+    local list_date = (date_disp and date_disp ~= "-") and date_disp:sub(1, 10) or (img.date_str or "-")
+    if (date_src == "EXIF" or date_src == "tIME") and list_date ~= "-" then
+        list_date = list_date .. "*"
+    end
+
+    local line_str = string.format("%-6s %s %-8s %-12s %-12s",
+        string.format("[%d]", i),
+        padded_col2,
+        img.extension,
+        img.size_str,
+        list_date
+    )
+
+    if is_sel then
+        return string.format("\27[1;93m▶ \27[1;97;44m%s\27[0m", line_str)
+    else
+        return string.format("  \27[37m%s\27[0m", line_str)
+    end
+end
+
+render_selection_differential = function(images, old_sel, new_sel, page_offset, icon_mode)
+    if not images or #images == 0 then return end
+    local term_w, term_h = get_terminal_size()
+    local header_rows = 9
+    local max_items_per_page = math.max(4, term_h - header_rows - 3)
+    local page_start = page_offset or 1
+    local page_end = math.min(#images, page_start + max_items_per_page - 1)
+
+    local col1_w = 6   -- Index
+    local col3_w = 8   -- Format
+    local col4_w = 12  -- Size
+    local col5_w = 12  -- Date
+    local col2_w = math.max(20, term_w - (col1_w + col3_w + col4_w + col5_w + 10))
+
+    local out = { "\27[?2026h" }
+
+    if old_sel and old_sel >= page_start and old_sel <= page_end then
+        local old_row = 10 + (old_sel - page_start)
+        local line = format_item_line(images, old_sel, false, col2_w, icon_mode)
+        table.insert(out, string.format("\27[%d;1H%s\27[K", old_row, line))
+    end
+
+    if new_sel and new_sel >= page_start and new_sel <= page_end then
+        local new_row = 10 + (new_sel - page_start)
+        local line = format_item_line(images, new_sel, true, col2_w, icon_mode)
+        table.insert(out, string.format("\27[%d;1H%s\27[K", new_row, line))
+    end
+
+    table.insert(out, "\27[?2026l")
+    io.write(table.concat(out))
+    io.flush()
+end
+
+render_file_list = function(dir_path, images, total_unfiltered, selected_idx, page_offset, msg, search_mode, search_query, sort_mode, sort_desc, recursive, icon_mode, show_hidden, confirm_item)
     local term_w, term_h = get_terminal_size()
     local out = {}
     table.insert(out, "\27[H") -- Home cursor without blanking the frame
@@ -5533,14 +5609,24 @@ local function render_file_list(dir_path, images, total_unfiltered, selected_idx
     local hidden_tag = show_hidden
         and "   \27[1;96m[.]\27[0m \27[90mHidden: \27[1;92mON\27[0m"
         or "   \27[1;96m[.]\27[0m \27[90mHidden: \27[90mOFF\27[0m"
-    table.insert(out, string.format("  \27[90mDir:\27[0m \27[1;33m%s\27[0m \27[90m(%d total, %s)\27[0m%s\n", to_display_text(dir_path), total_unfiltered, scan_type, hidden_tag))
+    local max_dir_w = math.max(10, term_w - (35 + #tostring(total_unfiltered) + #scan_type))
+    local dir_disp = utf8_truncate(to_display_text(dir_path), max_dir_w)
+    table.insert(out, string.format("  \27[90mDir:\27[0m \27[1;33m%s\27[0m \27[90m(%d total, %s)\27[0m%s\n", dir_disp, total_unfiltered, scan_type, hidden_tag))
 
     if search_mode then
         table.insert(out, string.format("  \27[1;97;44m SEARCH: \27[0m \27[1;93m%s_\27[0m \27[90m(Type to filter, Enter to select, Esc to cancel)\27[0m\n", to_display_text(search_query)))
     elseif #search_query > 0 then
-        table.insert(out, string.format("  \27[90mFilter: \27[1;93m'%s'\27[0m \27[90m(%d matches) [Esc/ / to clear]\27[0m   \27[93m[?]\27[0m Help   \27[91m[Q]\27[0m Quit\n", to_display_text(search_query), #images))
-    else
+        local max_sq_w = math.max(6, term_w - 55)
+        local sq_disp = utf8_truncate(to_display_text(search_query), max_sq_w)
+        table.insert(out, string.format("  \27[90mFilter: \27[1;93m'%s'\27[0m \27[90m(%d matches) [Esc/ / to clear]\27[0m   \27[93m[?]\27[0m Help   \27[91m[Q]\27[0m Quit\n", sq_disp, #images))
+    elseif term_w >= 115 then
         table.insert(out, string.format("  \27[93m[↑/↓/k/j]\27[0m Move   \27[1;92m[Enter/l]\27[0m Open/View   \27[93m[h/Backsp]\27[0m Up   \27[91m[d]\27[0m Delete   \27[93m[/]\27[0m Filter   \27[93m[i]\27[0m Icon   \27[93m[?]\27[0m Help   \27[91m[Q]\27[0m Quit\n"))
+    elseif term_w >= 95 then
+        table.insert(out, string.format("  \27[93m[↑/↓/k/j]\27[0m Move  \27[1;92m[Enter/l]\27[0m View  \27[93m[h]\27[0m Up  \27[91m[d]\27[0m Del  \27[93m[/]\27[0m Filter  \27[93m[i]\27[0m Icon  \27[93m[?]\27[0m Help  \27[91m[Q]\27[0m Quit\n"))
+    elseif term_w >= 80 then
+        table.insert(out, string.format("  \27[93m[↑/↓/k/j]\27[0m Move  \27[1;92m[Enter]\27[0m View  \27[93m[h]\27[0m Up  \27[91m[d]\27[0m Del  \27[93m[/]\27[0m Find  \27[93m[?]\27[0m Help  \27[91m[Q]\27[0m Quit\n"))
+    else
+        table.insert(out, string.format("  \27[93m[↑/↓]\27[0m Move  \27[1;92m[Enter]\27[0m View  \27[93m[h]\27[0m Up  \27[91m[d]\27[0m Del  \27[93m[?]\27[0m Help  \27[91m[Q]\27[0m Quit\n"))
     end
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
@@ -5550,9 +5636,10 @@ local function render_file_list(dir_path, images, total_unfiltered, selected_idx
         table.insert(out, string.format(
             "  \27[1;41;97m DELETE \27[0m \27[1;91mRemove '%s' permanently?  \27[1;92m[y]\27[1;91m Yes   \27[1;93m[n/Esc]\27[0m\27[1;91m Cancel\27[0m\n\n", nm))
     elseif msg and #msg > 0 then
-        table.insert(out, string.format("  \27[1;93mℹ %s\27[0m\n\n", msg))
+        local msg_disp = utf8_truncate(msg, math.max(10, term_w - 6))
+        table.insert(out, string.format("  \27[1;93mℹ %s\27[0m\n\n", msg_disp))
     else
-        table.insert(out, "\n")
+        table.insert(out, "\n\n")
     end
 
     if #images == 0 then
@@ -5586,42 +5673,8 @@ local function render_file_list(dir_path, images, total_unfiltered, selected_idx
     table.insert(out, "  \27[90m" .. string.rep("─", math.min(bar_len - 2, col1_w + col2_w + col3_w + col4_w + col5_w + 4)) .. "\27[0m\n")
 
     for i = page_start, page_end do
-        local img = images[i]
-        local is_sel = (i == selected_idx)
-        local icon = get_file_icon(img.extension, icon_mode)
-        local icon_prefix = (icon ~= "") and (icon .. " ") or ""
-        -- Measure the icon as well: emoji, nerd-font glyphs and the unicode set (where some
-        -- entries carry their own trailing space) are not all the same width, so a fixed
-        -- allowance left every PNG/DIR/GIF row one column out.
-        local icon_cols = display_width(icon_prefix)
-        local max_fn_w = col2_w - icon_cols
-        -- Names arrive from the OS in its own encoding (ANSI on Windows) and may be wide (CJK),
-        -- so transcode for the UTF-8 console and measure/cut by display columns, not bytes.
-        local fn = utf8_truncate(to_display_text(img.filename), max_fn_w)
-
-        local display_fn = icon_prefix .. fn
-        local pad_len = math.max(0, col2_w - (display_width(fn) + icon_cols))
-        local padded_col2 = display_fn .. string.rep(" ", pad_len)
-
-        local date_disp, date_src = get_image_timestamp(img)
-        local list_date = (date_disp and date_disp ~= "-") and date_disp:sub(1, 10) or (img.date_str or "-")
-        if (date_src == "EXIF" or date_src == "tIME") and list_date ~= "-" then
-            list_date = list_date .. "*"
-        end
-
-        local line_str = string.format("%-6s %s %-8s %-12s %-12s",
-            string.format("[%d]", i),
-            padded_col2,
-            img.extension,
-            img.size_str,
-            list_date
-        )
-
-        if is_sel then
-            table.insert(out, string.format("\27[1;93m▶ \27[1;97;44m%s\27[0m\n", line_str))
-        else
-            table.insert(out, string.format("  \27[37m%s\27[0m\n", line_str))
-        end
+        local line = format_item_line(images, i, i == selected_idx, col2_w, icon_mode)
+        table.insert(out, line .. "\n")
     end
 
     table.insert(out, "\n")
@@ -5953,6 +6006,13 @@ local function main()
     -- 5. Interactive Mode with Alternate Screen Buffer & pcall Safety
     enable_raw_mode()
 
+    local reload_directory
+    local navigate_to_parent
+    local update_page_window
+    local drop_deleted_item
+    local apply_search_query
+    local get_image_indices
+
     local search_mode = false
     local search_query = ""
     local search_query_before_edit = ""
@@ -5966,8 +6026,10 @@ local function main()
     local viewer_zoom = 1.0
     local viewer_pan_x = 0
     local viewer_pan_y = 0
+    local needs_full_redraw = true
+    local last_term_w, last_term_h = 0, 0
 
-    local function reload_directory(new_dir)
+    reload_directory = function(new_dir)
         target_dir = new_dir or target_dir
         -- Normalize path
         target_dir = target_dir:gsub("/%./", "/"):gsub("/+$", "")
@@ -5976,6 +6038,7 @@ local function main()
         local new_items, scan_err = scan_directory_images(target_dir, recursive, show_hidden)
         if not new_items then
             current_msg = "Cannot open directory: " .. to_display_text(tostring(scan_err))
+            needs_full_redraw = true
             return false
         end
 
@@ -5987,10 +6050,11 @@ local function main()
         filtered_images = filter_images(raw_images, search_query)
         selected_idx = 1
         page_offset = 1
+        needs_full_redraw = true
         return true
     end
 
-    local function navigate_to_parent()
+    navigate_to_parent = function()
         local parent_path
         if target_dir == "." or target_dir == "" then
             parent_path = ".."
@@ -6005,7 +6069,7 @@ local function main()
         reload_directory(parent_path)
     end
 
-    local function update_page_window()
+    update_page_window = function()
         local _, term_h = get_terminal_size()
         local max_items = math.max(4, term_h - 12)
         if selected_idx < page_offset then
@@ -6016,7 +6080,7 @@ local function main()
     end
 
     -- Drop a successfully removed file from both lists and keep the selection in range.
-    local function drop_deleted_item(item)
+    drop_deleted_item = function(item)
         for i, it in ipairs(raw_images) do
             if it == item then
                 table.remove(raw_images, i)
@@ -6032,17 +6096,19 @@ local function main()
             page_offset = math.max(1, math.min(page_offset, selected_idx))
             update_page_window()
         end
+        needs_full_redraw = true
     end
 
-    local function apply_search_query(query)
+    apply_search_query = function(query)
         search_query = query or ""
         filtered_images = filter_images(raw_images, search_query)
         selected_idx = 1
         page_offset = 1
+        needs_full_redraw = true
     end
 
     -- Build a list of indices that correspond to actual media files (excluding directories)
-    local function get_image_indices()
+    get_image_indices = function()
         local indices = {}
         for idx, item in ipairs(filtered_images) do
             if not item.is_dir then
@@ -6060,11 +6126,13 @@ local function main()
                 local k = read_key()
                 if k then
                     in_help = false
+                    needs_full_redraw = true
                 end
             elseif in_viewer then
                 local cur_img = filtered_images[selected_idx]
                 if not cur_img or cur_img.is_dir then
                     in_viewer = false
+                    needs_full_redraw = true
                 else
                     local img_indices = get_image_indices()
                     local img_pos = 1
@@ -6083,6 +6151,7 @@ local function main()
                         elseif action == "back" then
                             kitty_clear_screen()
                             in_viewer = false
+                            needs_full_redraw = true
                         elseif action == "next" then
                             kitty_clear_screen()
                             if #img_indices > 1 then
@@ -6105,6 +6174,7 @@ local function main()
                         elseif action == "back" then
                             kitty_clear_screen()
                             in_viewer = false
+                            needs_full_redraw = true
                         elseif action == "next" then
                             kitty_clear_screen()
                             if #img_indices > 1 then
@@ -6125,6 +6195,7 @@ local function main()
                     if not ok then
                         in_viewer = false
                         current_msg = "Failed to load image: " .. to_display_text(tostring(view_err))
+                        needs_full_redraw = true
                     else
                         local k = read_key()
                         if k == "Q" or k == "CTRL_C" then
@@ -6134,6 +6205,7 @@ local function main()
                             kitty_clear_screen()
                             in_viewer = false
                             viewer_zoom = 1.0; viewer_pan_x = 0; viewer_pan_y = 0
+                            needs_full_redraw = true
                         elseif k == "+" or k == "=" or k == "z" then
                             viewer_zoom = math.min(16.0, viewer_zoom * 1.4)
                         elseif k == "-" or k == "_" then
@@ -6201,9 +6273,22 @@ local function main()
                 end
             end
             else
+                local cur_w, cur_h = get_terminal_size()
+                if cur_w ~= last_term_w or cur_h ~= last_term_h then
+                    needs_full_redraw = true
+                    last_term_w, last_term_h = cur_w, cur_h
+                end
+
                 update_page_window()
-                render_file_list(target_dir, filtered_images, #raw_images, selected_idx, page_offset, current_msg, search_mode, search_query, sort_mode, sort_desc, recursive, icon_mode, show_hidden, pending_delete)
-                current_msg = nil
+
+                if needs_full_redraw then
+                    render_file_list(target_dir, filtered_images, #raw_images, selected_idx, page_offset, current_msg, search_mode, search_query, sort_mode, sort_desc, recursive, icon_mode, show_hidden, pending_delete)
+                    current_msg = nil
+                    needs_full_redraw = false
+                end
+
+                local old_sel = selected_idx
+                local old_page = page_offset
 
                 local k = read_key()
                 local _, term_h = get_terminal_size()
@@ -6275,14 +6360,17 @@ local function main()
                             filtered_images = filter_images(raw_images, search_query)
                             selected_idx = 1
                             page_offset = 1
+                            needs_full_redraw = true
                         else
                             break
                         end
                     elseif k == "/" then
                         search_query_before_edit = search_query
                         search_mode = true
+                        needs_full_redraw = true
                     elseif k == "?" then
                         in_help = true
+                        needs_full_redraw = true
                     elseif k == "d" then
                         local item = filtered_images[selected_idx]
                         if item and item.is_dir then
@@ -6290,6 +6378,7 @@ local function main()
                         elseif item then
                             pending_delete = item
                         end
+                        needs_full_redraw = true
                     elseif k == "i" then
                         if icon_mode == "unicode" then
                             icon_mode = "nerd"
@@ -6301,6 +6390,7 @@ local function main()
                             icon_mode = "unicode"
                             current_msg = "Icons: Standard Unicode"
                         end
+                        needs_full_redraw = true
                     elseif k == "s" then
                         if sort_mode == "name" then
                             sort_mode = "date"
@@ -6316,12 +6406,14 @@ local function main()
                         filtered_images = filter_images(raw_images, search_query)
                         selected_idx = 1
                         page_offset = 1
+                        needs_full_redraw = true
                     elseif k == "." then
                         -- Toggle hidden (dot) files and folders
                         show_hidden = not show_hidden
                         if reload_directory(target_dir) then
                             current_msg = show_hidden and "Hidden: ON" or "Hidden: OFF"
                         end
+                        needs_full_redraw = true
                     elseif k == "w" or k == "W" then
                         use_mpv_window = not use_mpv_window
                         if use_mpv_window and get_has_mpv() then
@@ -6330,10 +6422,12 @@ local function main()
                             video_play_engine = resolve_inline_play_engine() or "mpv"
                         end
                         current_msg = use_mpv_window and "MPV Window Mode: ON (GUI Window)" or "MPV Window Mode: OFF (Terminal TCT)"
+                        needs_full_redraw = true
                     elseif k == "r" then
                         sort_desc = not sort_desc
                         sort_images(raw_images, sort_mode, sort_desc)
                         filtered_images = filter_images(raw_images, search_query)
+                        needs_full_redraw = true
                     elseif k == "UP" or k == "k" or k == "CTRL_Y" then
                         if selected_idx > 1 then selected_idx = selected_idx - 1 end
                     elseif k == "DOWN" or k == "j" or k == "CTRL_E" then
@@ -6381,6 +6475,24 @@ local function main()
                                 in_viewer = true
                             end
                         end
+                    end
+                end
+
+                local post_w, post_h = get_terminal_size()
+                if post_w ~= last_term_w or post_h ~= last_term_h then
+                    needs_full_redraw = true
+                    last_term_w, last_term_h = post_w, post_h
+                end
+
+                if in_viewer or in_help or search_mode or pending_delete or current_msg or needs_full_redraw then
+                    needs_full_redraw = true
+                else
+                    update_page_window()
+                    if selected_idx ~= old_sel and page_offset == old_page then
+                        render_selection_differential(filtered_images, old_sel, selected_idx, page_offset, icon_mode)
+                        needs_full_redraw = false
+                    elseif page_offset ~= old_page then
+                        needs_full_redraw = true
                     end
                 end
             end

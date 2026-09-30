@@ -483,6 +483,64 @@ assert(del("") == false, "empty path must be rejected")
 os.execute("rm -rf " .. tmp)
 print("OK_DELETE_FILE")' ]==],
         expect = "OK_DELETE_FILE"
+    },
+    {
+        name = "Differential row refresh emits atomic synchronized frame and only modified row escapes",
+        cmd = luajit .. [[ -e '
+local f = assert(io.open("pix.lua", "rb"))
+local s = f:read("*all")
+f:close()
+
+local i = s:find("format_item_line = function", 1, true)
+assert(i, "format_item_line not found")
+local j = s:find("\nrender_file_list = function", i, true)
+assert(j, "render_file_list boundary not found")
+local chunk = s:sub(i, j) .. "\nreturn format_item_line, render_selection_differential\n"
+
+local written = {}
+local env = {
+    get_file_icon = function() return "" end,
+    display_width = function(str) return #str end,
+    utf8_truncate = function(str, w) return str:sub(1, w) end,
+    to_display_text = function(str) return str end,
+    get_image_timestamp = function(img) return "2026-09-30", "FS" end,
+    get_terminal_size = function() return 80, 24 end,
+    math = math,
+    string = string,
+    table = table,
+    io = {
+        write = function(str) table.insert(written, str) end,
+        flush = function() end
+    }
+}
+
+local loader = assert(loadstring(chunk, "diff_refresh"))
+setfenv(loader, env)
+local fmt_fn, diff_fn = loader()
+
+local fake_images = {
+    { filename = "alpha.png", extension = "PNG", size_str = "1.2 MB" },
+    { filename = "beta.jpg", extension = "JPG", size_str = "450 KB" }
+}
+local unsel_line = fmt_fn(fake_images, 1, false, 30, "none")
+local sel_line = fmt_fn(fake_images, 2, true, 30, "none")
+assert(unsel_line:find("alpha.png", 1, true), "unselected filename missing")
+assert(not unsel_line:find("▶", 1, true), "unselected line has cursor icon")
+assert(sel_line:find("beta.jpg", 1, true), "selected filename missing")
+assert(sel_line:find("▶", 1, true), "selected line missing cursor icon")
+
+diff_fn(fake_images, 1, 2, 1, "none")
+local output = table.concat(written)
+assert(output:find("\27[?2026h", 1, true), "missing synchronized frame start")
+assert(output:find("\27[?2026l", 1, true), "missing synchronized frame end")
+assert(output:find("\27[10;1H", 1, true), "missing row 10 coordinate overwrite")
+assert(output:find("\27[11;1H", 1, true), "missing row 11 coordinate overwrite")
+assert(not output:find("\27[12;1H", 1, true), "untouched row should not be emitted")
+assert(not output:find("\27[2J", 1, true), "full screen clear must not be emitted")
+assert(not output:find("\27[H", 1, true), "home screen escape must not be emitted")
+
+print("OK_DIFF_REFRESH")' ]],
+        expect = "OK_DIFF_REFRESH"
     }
 }
 

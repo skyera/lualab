@@ -15,8 +15,8 @@ A systematic audit against [`AGENTS.md`](file:///home/zliu/test/lualab/AGENTS.md
 | ID | Issue / Feature | Severity / Type | Status | Commit | Verification |
 |---|---|---|---|---|---|
 | **1.1** | Screen Flashing Elimination (`\27[2J` removed on user actions) | High / TUI Standard | ✅ **Fixed** | [`938fb04`](file:///home/zliu/test/lualab/pix.lua) | 0 interactive `\27[2J` escapes |
-| **1.2** | Full Screen Redraw on Local Cursor Steps | High / Performance | Pending | — | Test 45 |
-| **1.3** | Terminal Autowrap Shift & Layout Clamping | High / TUI Standard | Pending | — | Test 44 |
+| **1.2** | Full Screen Redraw on Local Cursor Steps | High / Performance | ✅ **Fixed** | Pending commit | Test 43, PTY verification |
+| **1.3** | Terminal Autowrap Shift & Layout Clamping | High / TUI Standard | ✅ **Fixed** | Pending commit | PTY wrap test, ?7l escapes |
 | **1.4** | Terminal Signal Masking (`ISIG`/`IEXTEN`) | High / Reliability | Pending | — | Clean restoration |
 | **2.1** | Native Chafa Symbols Fallback (Tier 3) | Medium / Feature | Pending | — | Test 6 |
 | **2.2** | Test 20 LuaJIT Binary Resolution in Subshell | Medium / Test Suite | Pending | — | Test 20 |
@@ -63,6 +63,13 @@ A systematic audit against [`AGENTS.md`](file:///home/zliu/test/lualab/AGENTS.md
 ---
 
 #### 1.2 Flicker-Free Differential Row Refresh on Local Cursor Movement
+* **Status**: ✅ **FIXED** (Pending commit)
+* **Resolution**:
+  - Extracted `format_item_line()` for reusable single-line item rendering with column formatting, UTF-8 truncation, and selection markers.
+  - Implemented `render_selection_differential(images, old_sel, new_sel, page_offset, icon_mode)` addressing lines via `\27[row;1H` (row 10 to `term_h - 2`) wrapped in atomic synchronized update escapes (`\27[?2026h` ... `\27[?2026l`).
+  - Added `needs_full_redraw` loop tracking in `main()`: local cursor movements (`j`, `k`, `UP`, `DOWN`, `H`, `M`, `L`, etc.) update only the two affected rows (unhighlighting previous row, highlighting new row) with zero screen flash or header repaint; page boundary crossings and mode switches automatically trigger full page redraws.
+  - Fixed header slot height to a constant 2 rows (`\n\n`) when no status message is active, guaranteeing invariant item row positioning at row 10.
+  - Verified live via pseudo-terminal (PTY) navigation: emits exactly 224 bytes updating rows 10 & 11 without `\27[2J` or `\27[H`; boundary navigation emits 0 bytes.
 * **Problem**:
   Navigating items in the file list (`j`, `k`, `UP`, `DOWN`, `CTRL_E`, `CTRL_Y`, `H`, `M`, `L`) previously called `render_file_list()`, redrawing the entire screen, including banner lines, table headers, column separators, and footer status, causing unnecessary terminal I/O.
 * **Standard Requirement ([AGENTS.md](file:///home/zliu/test/lualab/AGENTS.md#L47))**:
@@ -73,6 +80,12 @@ A systematic audit against [`AGENTS.md`](file:///home/zliu/test/lualab/AGENTS.md
 ---
 
 #### 1.3 Terminal Autowrap Shift & Layout Width Clamping
+* **Status**: ✅ **FIXED** (Pending commit)
+* **Resolution**:
+  - Emitted `\27[?7l` (disable autowrap) in `enable_raw_mode()` on both Windows and POSIX platforms, and restored `\27[?7h` in `disable_raw_mode()`.
+  - Made the header key legend responsive across terminal widths (`>= 115`, `>= 95`, `>= 80`, `< 80` columns) so 80-column terminals no longer overflow and cause terminal wrap.
+  - Clamped `dir_path` with `utf8_truncate()` to prevent long directory paths from spilling onto multiple lines.
+  - Verified live via pseudo-terminal (PTY) emulation at 80x24: items [1]-[8] appear strictly once with zero vertical row shift or duplicate items.
 * **Problem**:
   Terminal line autowrap was not disabled on raw mode entry. If terminal columns shrank or wide filenames extended to the terminal margin, terminal auto-wrap caused lines to spill over, shifting vertical line coordinates.
 * **Standard Requirement ([AGENTS.md](file:///home/zliu/test/lualab/AGENTS.md#L49))**:
