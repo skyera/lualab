@@ -1410,21 +1410,19 @@ local function show_image_fullscreen(images, selected_idx)
         local footer = "  " .. C.dim .. "[←/→] Previous/Next  [q/Esc/Enter] Return to Lumina" .. C.reset
         local image_lines = generate_image_preview(entry.path, math.max(1, term_w - 2), math.max(1, term_h - 4))
 
-        io.write("\27[H\27[2J\27[?25l")
-        io.write(header .. "\n")
+        local out = { "\27[?2026h\27[H\27[?25l", header, "\n" }
         for _, line in ipairs(image_lines) do
-            io.write(line .. "\n")
+            table.insert(out, line .. "\n")
         end
-        io.write(string.format("\27[%d;1H\27[2K%s", term_h, footer))
+        table.insert(out, string.format("\27[%d;1H\27[2K%s\27[?2026l", term_h, footer))
+        io.write(table.concat(out))
         io.flush()
     end
 
     render()
     while true do
         local k = read_key()
-        if k == "q" or k == "Q" or k == "ESC" or k == "ENTER" then
-            io.write("\27[H\27[2J")
-            io.flush()
+        if k == "q" or k == "Q" or k == "ESC" or k == "ENTER" or k == "\3" then
             return image_indices[image_pos]
         elseif k == "LEFT" and #image_indices > 1 then
             image_pos = (image_pos - 2 + #image_indices) % #image_indices + 1
@@ -1486,7 +1484,7 @@ local function show_fuzzy_finder(root_dir, show_hidden)
             scroll_offset = sel_idx - visible_rows
         end
 
-        local out = {}
+        local out = { "\27[?2026h" }
         local bcol = C.border_focus
 
         -- Header with live engine badge
@@ -1546,6 +1544,7 @@ local function show_fuzzy_finder(root_dir, show_hidden)
         table.insert(out, string.format("\27[%d;%dH%s╰%s%s%s%s╯%s",
             start_y + box_h - 1, start_x, bcol, C.dim, hint_text, bcol, hint_pad, C.reset))
 
+        table.insert(out, "\27[?2026l")
         io.write(table.concat(out))
         io.flush()
     end
@@ -1556,13 +1555,9 @@ local function show_fuzzy_finder(root_dir, show_hidden)
     while true do
         local k = read_key()
         if k then
-            if k == "ESC" then
-                io.write("\27[H\27[2J")
-                io.flush()
+            if k == "ESC" or k == "\3" then
                 return nil
             elseif k == "ENTER" then
-                io.write("\27[H\27[2J")
-                io.flush()
                 return matches[sel_idx]
             elseif k == "TAB" then
                 -- Cycle find engine: fd -> find -> lua
@@ -1615,7 +1610,7 @@ local function show_input_modal(title, prompt_label, default_text)
     local bcol = C.border_focus
 
     local function render()
-        local out = {}
+        local out = { "\27[?2026h" }
         local title_str = string.format(" %s ", title)
         local top_fill = string.rep("─", math.max(0, box_w - 2 - visual_len(title_str)))
         table.insert(out, string.format("\27[%d;%dH%s╭%s%s%s%s╮%s",
@@ -1639,6 +1634,7 @@ local function show_input_modal(title, prompt_label, default_text)
         table.insert(out, string.format("\27[%d;%dH%s╰%s%s%s%s╯%s",
             start_y + box_h - 1, start_x, bcol, C.dim, hint, bcol, bot_fill, C.reset))
 
+        table.insert(out, "\27[?2026l")
         io.write(table.concat(out))
         io.flush()
     end
@@ -1647,13 +1643,9 @@ local function show_input_modal(title, prompt_label, default_text)
     while true do
         local k = read_key()
         if k then
-            if k == "ESC" then
-                io.write("\27[H\27[2J")
-                io.flush()
+            if k == "ESC" or k == "\3" then
                 return nil
             elseif k == "ENTER" then
-                io.write("\27[H\27[2J")
-                io.flush()
                 return text
             elseif k == "BACKSPACE" then
                 if #text > 0 then
@@ -1676,7 +1668,7 @@ local function show_confirm_modal(title, message)
     local start_y = math.floor((term_h - box_h) / 2)
     local bcol = "\27[1;38;2;239;68;68m" -- red accent
 
-    local out = {}
+    local out = { "\27[?2026h" }
     local title_str = string.format(" %s ", title)
     local top_fill = string.rep("─", math.max(0, box_w - 2 - visual_len(title_str)))
     table.insert(out, string.format("\27[%d;%dH%s╭%s%s%s%s╮%s",
@@ -1697,14 +1689,13 @@ local function show_confirm_modal(title, message)
     table.insert(out, string.format("\27[%d;%dH%s╰%s%s%s%s╯%s",
         start_y + box_h - 1, start_x, bcol, C.dim, hint, bcol, bot_fill, C.reset))
 
+    table.insert(out, "\27[?2026l")
     io.write(table.concat(out))
     io.flush()
 
     while true do
         local k = read_key()
         if k then
-            io.write("\27[H\27[2J")
-            io.flush()
             if k == "y" or k == "Y" then
                 return true
             else
@@ -1750,7 +1741,7 @@ local function show_help_modal()
     local start_y = math.floor((term_h - box_h) / 2)
     local bcol = C.border_focus
 
-    local out = {}
+    local out = { "\27[?2026h" }
     local title_str = " LUMINA CHEATSHEET "
     local top_fill = string.rep("─", math.max(0, box_w - 2 - visual_len(title_str)))
     table.insert(out, string.format("\27[%d;%dH%s╭%s%s%s%s╮%s",
@@ -1785,14 +1776,13 @@ local function show_help_modal()
     table.insert(out, string.format("\27[%d;%dH%s╰%s%s%s%s╯%s",
         start_y + box_h - 1, start_x, bcol, C.dim, hint, bcol, bot_fill, C.reset))
 
+    table.insert(out, "\27[?2026l")
     io.write(table.concat(out))
     io.flush()
 
     while true do
         local k = read_key()
         if k then
-            io.write("\27[H\27[2J")
-            io.flush()
             break
         end
     end
@@ -2076,16 +2066,16 @@ local function main(args)
     end
 
     while true do
-        local term_w, term_h = get_terminal_size()
-        if term_w ~= last_w or term_h ~= last_h then
-            last_w, last_h = term_w, term_h
+        local raw_cols, raw_rows = get_terminal_size()
+        local term_w, term_h = math.max(40, raw_cols - 1), raw_rows
+        if raw_cols ~= last_w or raw_rows ~= last_h then
+            last_w, last_h = raw_cols, raw_rows
             needs_redraw = true
             io.write("\27[H\27[2J")
         end
 
         if needs_redraw then
-            local out = {}
-            table.insert(out, "\27[H") -- Home cursor without flash
+            local out = { "\27[?2026h\27[H" }
 
             -- 1. Top Header Bar
             local left_info = string.format("  %s⚡ LUMINA%s %s│%s %s%s%s %s(%d items)%s",
@@ -2230,6 +2220,7 @@ local function main(args)
             local footer_line = string.format("\27[%d;1H\27[2K  %s \27[90m│\27[0m \27[90m%s\27[0m",
                 footer_y, status_text, help_hint)
             table.insert(out, footer_line)
+            table.insert(out, "\27[?2026l")
 
             io.write(table.concat(out))
             io.flush()
@@ -2405,8 +2396,6 @@ local function main(args)
                 sel_index = 1
                 clear_preview_cache()
                 preview_pending = true
-                io.write("\27[H\27[2J")
-                io.flush()
                 reload_current()
             elseif k == "H" then
                 -- 'H': Jump straight to Start Directory
@@ -2416,8 +2405,6 @@ local function main(args)
                 sel_index = 1
                 clear_preview_cache()
                 preview_pending = true
-                io.write("\27[H\27[2J")
-                io.flush()
                 reload_current()
             elseif k == "~" then
                 -- '~': Jump straight to User's Home Directory
@@ -2428,8 +2415,6 @@ local function main(args)
                 sel_index = 1
                 clear_preview_cache()
                 preview_pending = true
-                io.write("\27[H\27[2J")
-                io.flush()
                 reload_current()
             elseif k == "LEFT" or k == "h" or k == "BACKSPACE" then
                 g_prefix = false
@@ -2440,8 +2425,6 @@ local function main(args)
                     filter_query = ""
                     clear_preview_cache()
                     preview_pending = true
-                    io.write("\27[H\27[2J")
-                    io.flush()
                     current_entries = read_dir_entries(current_dir, show_hidden)
                     parent_dir = get_parent_dir(current_dir)
                     parent_entries = is_root_dir(current_dir) and {} or read_dir_entries(parent_dir, show_hidden)
@@ -2464,8 +2447,6 @@ local function main(args)
                     sel_index = 1
                     clear_preview_cache()
                     preview_pending = true
-                    io.write("\27[H\27[2J")
-                    io.flush()
                     reload_current()
                 elseif k == "ENTER" and IMAGE_EXTS[sel and sel.ext] then
                     sel_index = show_image_fullscreen(current_entries, sel_index) or sel_index
@@ -2649,8 +2630,6 @@ local function main(args)
                 clear_preview_cache()
                 preview_scroll_offset = 0
                 preview_pending = true
-                io.write("\27[H\27[2J")
-                io.flush()
             elseif sel_index ~= previous_selection then
                 preview_scroll_offset = 0
                 preview_pending = true

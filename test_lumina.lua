@@ -1258,6 +1258,30 @@ local Lumina = require("lumina")
 assert_true(type(Lumina.enable_raw_mode) == "function", "Lumina exports enable_raw_mode function")
 assert_true(type(Lumina.disable_raw_mode) == "function", "Lumina exports disable_raw_mode function")
 
+-- Test Suite 23: Synchronized Frame Emission & Screen Clear Elimination --
+print("\n-- Test Suite 23: Synchronized Frame Emission & Screen Clear Elimination --")
+assert_true(l_code:find("%?2026h") ~= nil, "lumina.lua uses synchronized update escape \\27[?2026h")
+assert_true(l_code:find("%?2026l") ~= nil, "lumina.lua uses synchronized update end escape \\27[?2026l")
+assert_true(l_code:find("raw_cols %- 1") ~= nil, "lumina.lua clamps layout width to raw_cols - 1")
+
+-- Check that navigation sections do not emit 2J
+local nav_block = l_code:match("k == \"g_prefix\".-elseif k == \"t\"") or l_code:match("elseif g_prefix.-elseif k == \"t\"")
+assert_true(nav_block ~= nil, "Located navigation keybinding block")
+assert_true(nav_block:find("2J") == nil, "Navigation block contains zero calls to \\27[2J")
+
+-- Check that modals do not emit 2J on exit
+local fuzzy_exit = l_code:match("local function show_fuzzy_finder(.-)\nlocal function show_input_modal")
+assert_true(fuzzy_exit ~= nil and fuzzy_exit:find("2J") == nil, "show_fuzzy_finder exits without \\27[2J")
+
+local input_exit = l_code:match("function show_input_modal.-end%s*\n%s*\n%s*local function show_confirm_modal")
+assert_true(input_exit ~= nil and input_exit:find("2J") == nil, "show_input_modal exits without \\27[2J")
+
+local confirm_exit = l_code:match("function show_confirm_modal.-end%s*\n%s*\n%s*local function show_help_modal")
+assert_true(confirm_exit ~= nil and confirm_exit:find("2J") == nil, "show_confirm_modal exits without \\27[2J")
+
+local help_exit = l_code:match("function show_help_modal.-end%s*\n%s*\n%s*local PREVIEW_CACHE_LIMIT")
+assert_true(help_exit ~= nil and help_exit:find("2J") == nil, "show_help_modal exits without \\27[2J")
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)
