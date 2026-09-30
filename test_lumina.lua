@@ -1282,6 +1282,21 @@ assert_true(confirm_exit ~= nil and confirm_exit:find("2J") == nil, "show_confir
 local help_exit = l_code:match("function show_help_modal.-end%s*\n%s*\n%s*local PREVIEW_CACHE_LIMIT")
 assert_true(help_exit ~= nil and help_exit:find("2J") == nil, "show_help_modal exits without \\27[2J")
 
+-- Test Suite 24: Differential Selection Refresh on Local Movement --
+print("\n-- Test Suite 24: Differential Selection Refresh on Local Movement --")
+local lf_suite24 = io.open("lumina.lua", "r")
+local l_code_diff = lf_suite24:read("*all")
+lf_suite24:close()
+
+assert_true(l_code_diff:find("local render_full_screen,%s*render_selection_differential") ~= nil,
+    "lumina.lua declares forward declarations for render_full_screen and render_selection_differential")
+assert_true(l_code_diff:find("render_selection_differential%s*=%s*function") ~= nil,
+    "lumina.lua defines render_selection_differential function")
+assert_true(l_code_diff:find("render_selection_differential%(previous_selection,%s*sel_index%)") ~= nil,
+    "lumina.lua triggers render_selection_differential on local cursor movement keys")
+assert_true(l_code_diff:find("prev_page_offset") ~= nil,
+    "lumina.lua tracks prev_page_offset to safely fall back to full screen when boundary crosses")
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)

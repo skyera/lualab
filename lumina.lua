@@ -2065,6 +2065,268 @@ local function main(args)
         needs_redraw = true
     end
 
+    local render_full_screen, render_selection_differential
+    local prev_page_offset = 1
+
+    render_full_screen = function()
+        local raw_cols, raw_rows = get_terminal_size()
+        local term_w, term_h = math.max(40, raw_cols - 1), raw_rows
+        local out = { "\27[?2026h\27[H" }
+
+        -- 1. Top Header Bar
+        local left_info = string.format("  %s⚡ LUMINA%s %s│%s %s%s%s %s(%d items)%s",
+            C.bold .. (C.header_accent or C.border_focus), C.reset, C.dim, C.reset,
+            C.bold .. (C.header_path or "\27[38;2;241;245;249m"), current_dir, C.reset,
+            C.dim, #current_entries, C.reset)
+        local badge_text = string.format("🎨 %s ", C.name or "Theme")
+        local left_len = visual_len(left_info)
+        local badge_len = visual_len(badge_text)
+
+        local header_str
+        if term_w > left_len + badge_len + 4 then
+            local gap = term_w - left_len - badge_len
+            local theme_badge = string.format("%s%s%s", C.syn_header or C.border_focus, badge_text, C.reset)
+            header_str = left_info .. string.rep(" ", gap) .. theme_badge .. "\27[K"
+        else
+            header_str = truncate(left_info, term_w) .. "\27[K"
+        end
+        table.insert(out, header_str .. "\n")
+
+        -- 2. Miller Columns Geometry
+        local usable_h = math.max(10, term_h - 3)
+        local col1_w = math.max(16, math.floor(term_w * 0.22))
+        local col2_w = math.max(22, math.floor(term_w * 0.32))
+        local col3_w = math.max(24, term_w - col1_w - col2_w)
+
+        local col1_x = 1
+        local col2_x = col1_x + col1_w
+        local col3_x = col2_x + col2_w
+        local start_y = 2
+
+        -- Column 1: Parent Directory
+        local parent_title = is_root_dir(current_dir) and "" or get_dir_display_name(parent_dir)
+        draw_pane(out, col1_x, start_y, col1_w, usable_h, parent_title, false)
+        local visible_rows = usable_h - 2
+        for i = 1, visible_rows do
+            local pe = parent_entries[i]
+            if pe then
+                local is_cur_folder = (pe.path == current_dir)
+                local icon, col = get_file_type_info(pe)
+                local line_content = string.format(" %s %s", icon, pe.name)
+                if is_cur_folder then
+                    table.insert(out, draw_row(col1_x, start_y + i, col1_w, C.parent_bg .. line_content .. C.reset))
+                else
+                    table.insert(out, draw_row(col1_x, start_y + i, col1_w, col .. line_content .. C.reset))
+                end
+            else
+                table.insert(out, draw_row(col1_x, start_y + i, col1_w, ""))
+            end
+        end
+
+        -- Column 2: Current Directory (Active Cursor)
+        local cur_title = string.format("%s [%s]", get_dir_display_name(current_dir), sort_labels[sort_mode] or sort_mode)
+        draw_pane(out, col2_x, start_y, col2_w, usable_h, cur_title, true)
+
+        -- Scroll offset for current directory
+        local page_offset = 1
+        if sel_index > visible_rows then
+            page_offset = sel_index - visible_rows + 1
+        end
+        prev_page_offset = page_offset
+
+        for i = 1, visible_rows do
+            local idx = page_offset + i - 1
+            local e = current_entries[idx]
+            if e then
+                local is_sel = (idx == sel_index)
+                local is_tagged = selected_paths[e.path]
+                local icon, col = get_file_type_info(e)
+                local tag_badge = is_tagged and "\27[1;32m[✓]\27[0m " or ""
+                local line_content = string.format(" %s%s %-18s %s", tag_badge, icon, e.name, e.size_str)
+                if is_sel then
+                    table.insert(out, draw_row(col2_x, start_y + i, col2_w, C.cursor_bg .. "▶" .. line_content .. C.reset))
+                else
+                    table.insert(out, draw_row(col2_x, start_y + i, col2_w, col .. " " .. line_content .. C.reset))
+                end
+            else
+                table.insert(out, draw_row(col2_x, start_y + i, col2_w, ""))
+            end
+        end
+
+        -- Column 3: Live Preview Pane
+        local sel_entry = current_entries[sel_index]
+        local preview_lines
+        if preview_pending then
+            preview_lines = {
+                C.dim .. "Loading preview..." .. C.reset,
+                C.dim .. "Pause briefly to render the selected item." .. C.reset,
+            }
+        elseif sel_entry then
+            preview_lines = generate_preview(sel_entry, visible_rows, col3_w - 4, show_hidden)
+        else
+            preview_lines = { C.dim .. "(Empty Directory)" .. C.reset }
+        end
+
+        local max_scroll = math.max(0, #preview_lines - visible_rows)
+        preview_scroll_offset = math.max(0, math.min(preview_scroll_offset, max_scroll))
+
+        local preview_title = sel_entry and sel_entry.name or "Preview"
+        if #preview_lines > visible_rows then
+            local pct = math.floor((preview_scroll_offset / math.max(1, max_scroll)) * 100)
+            preview_title = string.format("%s (%d%%)", preview_title, pct)
+        end
+        draw_pane(out, col3_x, start_y, col3_w, usable_h, preview_title, false)
+
+        for i = 1, visible_rows do
+            local pline = preview_lines[preview_scroll_offset + i] or ""
+            table.insert(out, draw_row(col3_x, start_y + i, col3_w, pline))
+        end
+
+        -- 3. Bottom Status & Keybinding Bar
+        local footer_y = term_h - 1
+        local status_text = ""
+        local help_hint = ""
+        local sel_cnt = count_selected()
+        local sel_badge = (sel_cnt > 0) and string.format("\27[1;32m(%d tagged)\27[0m ", sel_cnt) or ""
+        local clip_cnt = count_clipboard()
+        local clip_badge = (clip_cnt > 0) and string.format("\27[1;33m[%s %d]\27[0m ",
+            clipboard.mode == "cut" and "CUT" or "YANK", clip_cnt) or ""
+        if is_searching then
+            status_text = string.format("%s/%s\27[7m \27[0m", C.status_accent or "\27[1;38;2;251;191;36m", search_query)
+            help_hint = "\27[90m[Enter] Confirm  [Esc] Cancel  [↑/↓] Select\27[0m"
+        elseif is_sorting then
+            status_text = string.format("%sSORT BY:%s [n] Name  [s] Size  [m] Time  [e] Ext  [r] Reverse",
+                C.bold .. (C.status_accent or "\27[1;38;2;251;191;36m"), C.reset)
+            help_hint = "\27[90m[Esc] Cancel\27[0m"
+        elseif mark_mode then
+            status_text = string.format("%sSET BOOKMARK:%s Press any letter (a-z) to mark current folder",
+                C.bold .. (C.status_accent or "\27[1;38;2;251;191;36m"), C.reset)
+            help_hint = "\27[90m[Esc] Cancel\27[0m"
+        elseif jump_mode then
+            status_text = string.format("%sJUMP TO BOOKMARK:%s Press bookmark letter (a-z)",
+                C.bold .. (C.status_accent or "\27[1;38;2;251;191;36m"), C.reset)
+            help_hint = "\27[90m[Esc] Cancel\27[0m"
+        elseif #filter_query > 0 then
+            status_text = string.format("%sFilter: /%s\27[0m", C.status_accent or "\27[1;38;2;251;191;36m", filter_query)
+            help_hint = "[h/l] Nav  [Space/v] Tag  [s] Sort  [j/k] Move  [/] Filter  [f] Find  [Esc] Clear"
+        else
+            status_text = string.format("%s%s%s%s%s", clip_badge, sel_badge, C.dim, sel_entry and sel_entry.path or current_dir, C.reset)
+            local op_hint = (clip_cnt > 0) and "  [p] Paste" or ""
+            help_hint = string.format("[?] Help  [h/l] Nav  [Space] Tag  [y/d] Copy/Cut%s  [a] New  [D] Del  [q] Quit", op_hint)
+        end
+        local footer_line = string.format("\27[%d;1H\27[2K  %s \27[90m│\27[0m \27[90m%s\27[0m",
+            footer_y, status_text, help_hint)
+        table.insert(out, footer_line)
+        table.insert(out, "\27[?2026l")
+
+        io.write(table.concat(out))
+        io.flush()
+    end
+
+    render_selection_differential = function(old_sel, new_sel)
+        local raw_cols, raw_rows = get_terminal_size()
+        local term_w, term_h = math.max(40, raw_cols - 1), raw_rows
+        local usable_h = math.max(10, term_h - 3)
+        local visible_rows = usable_h - 2
+
+        local page_offset = 1
+        if sel_index > visible_rows then
+            page_offset = sel_index - visible_rows + 1
+        end
+
+        if page_offset ~= prev_page_offset or raw_cols ~= last_w or raw_rows ~= last_h then
+            render_full_screen()
+            return
+        end
+
+        local col1_w = math.max(16, math.floor(term_w * 0.22))
+        local col2_w = math.max(22, math.floor(term_w * 0.32))
+        local col3_w = math.max(24, term_w - col1_w - col2_w)
+        local col1_x = 1
+        local col2_x = col1_x + col1_w
+        local col3_x = col2_x + col2_w
+        local start_y = 2
+
+        local out = { "\27[?2026h" }
+
+        -- 1. Unhighlight old item in Col 2
+        if old_sel and old_sel >= page_offset and old_sel < page_offset + visible_rows then
+            local old_r = old_sel - page_offset + 1
+            local old_e = current_entries[old_sel]
+            if old_e then
+                local is_tagged = selected_paths[old_e.path]
+                local icon, col = get_file_type_info(old_e)
+                local tag_badge = is_tagged and "\27[1;32m[✓]\27[0m " or ""
+                local line_content = string.format(" %s%s %-18s %s", tag_badge, icon, old_e.name, old_e.size_str)
+                table.insert(out, draw_row(col2_x, start_y + old_r, col2_w, col .. " " .. line_content .. C.reset))
+            else
+                table.insert(out, draw_row(col2_x, start_y + old_r, col2_w, ""))
+            end
+        end
+
+        -- 2. Highlight new item in Col 2
+        if new_sel and new_sel >= page_offset and new_sel < page_offset + visible_rows then
+            local new_r = new_sel - page_offset + 1
+            local new_e = current_entries[new_sel]
+            if new_e then
+                local is_tagged = selected_paths[new_e.path]
+                local icon, col = get_file_type_info(new_e)
+                local tag_badge = is_tagged and "\27[1;32m[✓]\27[0m " or ""
+                local line_content = string.format(" %s%s %-18s %s", tag_badge, icon, new_e.name, new_e.size_str)
+                table.insert(out, draw_row(col2_x, start_y + new_r, col2_w, C.cursor_bg .. "▶" .. line_content .. C.reset))
+            else
+                table.insert(out, draw_row(col2_x, start_y + new_r, col2_w, ""))
+            end
+        end
+
+        -- 3. Overwrite Col 3 (Preview)
+        local sel_entry = current_entries[sel_index]
+        local preview_lines
+        if preview_pending then
+            preview_lines = {
+                C.dim .. "Loading preview..." .. C.reset,
+                C.dim .. "Pause briefly to render the selected item." .. C.reset,
+            }
+        elseif sel_entry then
+            preview_lines = generate_preview(sel_entry, visible_rows, col3_w - 4, show_hidden)
+        else
+            preview_lines = { C.dim .. "(Empty Directory)" .. C.reset }
+        end
+
+        local max_scroll = math.max(0, #preview_lines - visible_rows)
+        preview_scroll_offset = math.max(0, math.min(preview_scroll_offset, max_scroll))
+
+        local preview_title = sel_entry and sel_entry.name or "Preview"
+        if #preview_lines > visible_rows then
+            local pct = math.floor((preview_scroll_offset / math.max(1, max_scroll)) * 100)
+            preview_title = string.format("%s (%d%%)", preview_title, pct)
+        end
+        draw_pane(out, col3_x, start_y, col3_w, usable_h, preview_title, false)
+
+        for i = 1, visible_rows do
+            local pline = preview_lines[preview_scroll_offset + i] or ""
+            table.insert(out, draw_row(col3_x, start_y + i, col3_w, pline))
+        end
+
+        -- 4. Overwrite Bottom Status Bar
+        local footer_y = term_h - 1
+        local sel_cnt = count_selected()
+        local sel_badge = (sel_cnt > 0) and string.format("\27[1;32m(%d tagged)\27[0m ", sel_cnt) or ""
+        local clip_cnt = count_clipboard()
+        local clip_badge = (clip_cnt > 0) and string.format("\27[1;33m[%s %d]\27[0m ",
+            clipboard.mode == "cut" and "CUT" or "YANK", clip_cnt) or ""
+        local status_text = string.format("%s%s%s%s%s", clip_badge, sel_badge, C.dim, sel_entry and sel_entry.path or current_dir, C.reset)
+        local op_hint = (clip_cnt > 0) and "  [p] Paste" or ""
+        local help_hint = string.format("[?] Help  [h/l] Nav  [Space] Tag  [y/d] Copy/Cut%s  [a] New  [D] Del  [q] Quit", op_hint)
+        local footer_line = string.format("\27[%d;1H\27[2K  %s \27[90m│\27[0m \27[90m%s\27[0m",
+            footer_y, status_text, help_hint)
+        table.insert(out, footer_line)
+
+        table.insert(out, "\27[?2026l")
+        io.write(table.concat(out))
+        io.flush()
+    end
+
     while true do
         local raw_cols, raw_rows = get_terminal_size()
         local term_w, term_h = math.max(40, raw_cols - 1), raw_rows
@@ -2075,155 +2337,7 @@ local function main(args)
         end
 
         if needs_redraw then
-            local out = { "\27[?2026h\27[H" }
-
-            -- 1. Top Header Bar
-            local left_info = string.format("  %s⚡ LUMINA%s %s│%s %s%s%s %s(%d items)%s",
-                C.bold .. (C.header_accent or C.border_focus), C.reset, C.dim, C.reset,
-                C.bold .. (C.header_path or "\27[38;2;241;245;249m"), current_dir, C.reset,
-                C.dim, #current_entries, C.reset)
-            local badge_text = string.format("🎨 %s ", C.name or "Theme")
-            local left_len = visual_len(left_info)
-            local badge_len = visual_len(badge_text)
-
-            local header_str
-            if term_w > left_len + badge_len + 4 then
-                local gap = term_w - left_len - badge_len
-                local theme_badge = string.format("%s%s%s", C.syn_header or C.border_focus, badge_text, C.reset)
-                header_str = left_info .. string.rep(" ", gap) .. theme_badge .. "\27[K"
-            else
-                header_str = truncate(left_info, term_w) .. "\27[K"
-            end
-            table.insert(out, header_str .. "\n")
-
-            -- 2. Miller Columns Geometry
-            local usable_h = math.max(10, term_h - 3)
-            local col1_w = math.max(16, math.floor(term_w * 0.22))
-            local col2_w = math.max(22, math.floor(term_w * 0.32))
-            local col3_w = math.max(24, term_w - col1_w - col2_w)
-
-            local col1_x = 1
-            local col2_x = col1_x + col1_w
-            local col3_x = col2_x + col2_w
-            local start_y = 2
-
-            -- Column 1: Parent Directory
-            local parent_title = is_root_dir(current_dir) and "" or get_dir_display_name(parent_dir)
-            draw_pane(out, col1_x, start_y, col1_w, usable_h, parent_title, false)
-            local visible_rows = usable_h - 2
-            for i = 1, visible_rows do
-                local pe = parent_entries[i]
-                if pe then
-                    local is_cur_folder = (pe.path == current_dir)
-                    local icon, col = get_file_type_info(pe)
-                    local line_content = string.format(" %s %s", icon, pe.name)
-                    if is_cur_folder then
-                        table.insert(out, draw_row(col1_x, start_y + i, col1_w, C.parent_bg .. line_content .. C.reset))
-                    else
-                        table.insert(out, draw_row(col1_x, start_y + i, col1_w, col .. line_content .. C.reset))
-                    end
-                else
-                    table.insert(out, draw_row(col1_x, start_y + i, col1_w, ""))
-                end
-            end
-
-            -- Column 2: Current Directory (Active Cursor)
-            local cur_title = string.format("%s [%s]", get_dir_display_name(current_dir), sort_labels[sort_mode] or sort_mode)
-            draw_pane(out, col2_x, start_y, col2_w, usable_h, cur_title, true)
-
-            -- Scroll offset for current directory
-            local page_offset = 1
-            if sel_index > visible_rows then
-                page_offset = sel_index - visible_rows + 1
-            end
-
-            for i = 1, visible_rows do
-                local idx = page_offset + i - 1
-                local e = current_entries[idx]
-                if e then
-                    local is_sel = (idx == sel_index)
-                    local is_tagged = selected_paths[e.path]
-                    local icon, col = get_file_type_info(e)
-                    local tag_badge = is_tagged and "\27[1;32m[✓]\27[0m " or ""
-                    local line_content = string.format(" %s%s %-18s %s", tag_badge, icon, e.name, e.size_str)
-                    if is_sel then
-                        table.insert(out, draw_row(col2_x, start_y + i, col2_w, C.cursor_bg .. "▶" .. line_content .. C.reset))
-                    else
-                        table.insert(out, draw_row(col2_x, start_y + i, col2_w, col .. " " .. line_content .. C.reset))
-                    end
-                else
-                    table.insert(out, draw_row(col2_x, start_y + i, col2_w, ""))
-                end
-            end
-
-            -- Column 3: Live Preview Pane
-            local sel_entry = current_entries[sel_index]
-            local preview_lines
-            if preview_pending then
-                preview_lines = {
-                    C.dim .. "Loading preview..." .. C.reset,
-                    C.dim .. "Pause briefly to render the selected item." .. C.reset,
-                }
-            elseif sel_entry then
-                preview_lines = generate_preview(sel_entry, visible_rows, col3_w - 4, show_hidden)
-            else
-                preview_lines = { C.dim .. "(Empty Directory)" .. C.reset }
-            end
-
-            local max_scroll = math.max(0, #preview_lines - visible_rows)
-            preview_scroll_offset = math.max(0, math.min(preview_scroll_offset, max_scroll))
-
-            local preview_title = sel_entry and sel_entry.name or "Preview"
-            if #preview_lines > visible_rows then
-                local pct = math.floor((preview_scroll_offset / math.max(1, max_scroll)) * 100)
-                preview_title = string.format("%s (%d%%)", preview_title, pct)
-            end
-            draw_pane(out, col3_x, start_y, col3_w, usable_h, preview_title, false)
-
-            for i = 1, visible_rows do
-                local pline = preview_lines[preview_scroll_offset + i] or ""
-                table.insert(out, draw_row(col3_x, start_y + i, col3_w, pline))
-            end
-
-            -- 3. Bottom Status & Keybinding Bar
-            local footer_y = term_h - 1
-            local status_text = ""
-            local help_hint = ""
-            local sel_cnt = count_selected()
-            local sel_badge = (sel_cnt > 0) and string.format("\27[1;32m(%d tagged)\27[0m ", sel_cnt) or ""
-            local clip_cnt = count_clipboard()
-            local clip_badge = (clip_cnt > 0) and string.format("\27[1;33m[%s %d]\27[0m ",
-                clipboard.mode == "cut" and "CUT" or "YANK", clip_cnt) or ""
-            if is_searching then
-                status_text = string.format("%s/%s\27[7m \27[0m", C.status_accent or "\27[1;38;2;251;191;36m", search_query)
-                help_hint = "\27[90m[Enter] Confirm  [Esc] Cancel  [↑/↓] Select\27[0m"
-            elseif is_sorting then
-                status_text = string.format("%sSORT BY:%s [n] Name  [s] Size  [m] Time  [e] Ext  [r] Reverse",
-                    C.bold .. (C.status_accent or "\27[1;38;2;251;191;36m"), C.reset)
-                help_hint = "\27[90m[Esc] Cancel\27[0m"
-            elseif mark_mode then
-                status_text = string.format("%sSET BOOKMARK:%s Press any letter (a-z) to mark current folder",
-                    C.bold .. (C.status_accent or "\27[1;38;2;251;191;36m"), C.reset)
-                help_hint = "\27[90m[Esc] Cancel\27[0m"
-            elseif jump_mode then
-                status_text = string.format("%sJUMP TO BOOKMARK:%s Press bookmark letter (a-z)",
-                    C.bold .. (C.status_accent or "\27[1;38;2;251;191;36m"), C.reset)
-                help_hint = "\27[90m[Esc] Cancel\27[0m"
-            elseif #filter_query > 0 then
-                status_text = string.format("%sFilter: /%s\27[0m", C.status_accent or "\27[1;38;2;251;191;36m", filter_query)
-                help_hint = "[h/l] Nav  [Space/v] Tag  [s] Sort  [j/k] Move  [/] Filter  [f] Find  [Esc] Clear"
-            else
-                status_text = string.format("%s%s%s%s%s", clip_badge, sel_badge, C.dim, sel_entry and sel_entry.path or current_dir, C.reset)
-                local op_hint = (clip_cnt > 0) and "  [p] Paste" or ""
-                help_hint = string.format("[?] Help  [h/l] Nav  [Space] Tag  [y/d] Copy/Cut%s  [a] New  [D] Del  [q] Quit", op_hint)
-            end
-            local footer_line = string.format("\27[%d;1H\27[2K  %s \27[90m│\27[0m \27[90m%s\27[0m",
-                footer_y, status_text, help_hint)
-            table.insert(out, footer_line)
-            table.insert(out, "\27[?2026l")
-
-            io.write(table.concat(out))
-            io.flush()
+            render_full_screen()
             needs_redraw = false
         end
 
@@ -2630,9 +2744,17 @@ local function main(args)
                 clear_preview_cache()
                 preview_scroll_offset = 0
                 preview_pending = true
+                needs_redraw = true
             elseif sel_index ~= previous_selection then
                 preview_scroll_offset = 0
                 preview_pending = true
+                if (k == "DOWN" or k == "j" or k == "UP" or k == "k" or k == " " or k == "v")
+                    and not is_searching and not is_sorting and not mark_mode and not jump_mode and #filter_query == 0 then
+                    render_selection_differential(previous_selection, sel_index)
+                    needs_redraw = false
+                else
+                    needs_redraw = true
+                end
             end
         elseif preview_pending then
             -- Wait for one quiet input interval before doing potentially expensive preview work.
