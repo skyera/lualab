@@ -118,14 +118,14 @@ if is_windows then
         kernel32.SetConsoleMode(hIn, raw_mode)
 
         in_raw_mode = true
-        io.write("\27[?1049h\27[?25l")
+        io.write("\27[?1049h\27[?25l\27[?7l")
         io.flush()
         return true
     end
 
     disable_raw_mode = function()
         if in_raw_mode then
-            io.write("\27[?1049l\27[?25h\27[0m")
+            io.write("\27[?7h\27[?1049l\27[?25h\27[0m")
             io.flush()
             local hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
             local hOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
@@ -326,8 +326,10 @@ ffi.cdef(posix_termios_cdef[[
     local TIOCGWINSZ   = (ffi.os == "OSX" or ffi.os == "BSD") and 0x40087468 or 0x5413
     local STDIN_FILENO = 0
     local TCSANOW      = 0
+    local ISIG         = 1
     local ICANON       = 2
     local ECHO         = 8
+    local IEXTEN       = (ffi.os == "OSX" or ffi.os == "BSD") and 0x0400 or 0x8000
     local POLLIN       = 1
 
     local orig_termios = ffi.new("struct termios")
@@ -337,19 +339,19 @@ ffi.cdef(posix_termios_cdef[[
         if ffi.C.isatty(STDIN_FILENO) ~= 1 then return false end
         ffi.C.tcgetattr(STDIN_FILENO, orig_termios)
         ffi.C.tcgetattr(STDIN_FILENO, raw_termios)
-        raw_termios.c_lflag = bit.band(raw_termios.c_lflag, bit.bnot(bit.bor(ICANON, ECHO)))
+        raw_termios.c_lflag = bit.band(raw_termios.c_lflag, bit.bnot(bit.bor(ICANON, ECHO, ISIG, IEXTEN)))
         ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
         in_raw_mode = true
 
-        -- Switch to alternate screen buffer, hide cursor
-        io.write("\27[?1049h\27[?25l")
+        -- Switch to alternate screen buffer, hide cursor, disable auto-wrap
+        io.write("\27[?1049h\27[?25l\27[?7l")
         io.flush()
         return true
     end
 
     disable_raw_mode = function()
         if in_raw_mode then
-            io.write("\27[?1049l\27[?25h\27[0m")
+            io.write("\27[?7h\27[?1049l\27[?25h\27[0m")
             io.flush()
             ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
             in_raw_mode = false
@@ -2243,7 +2245,7 @@ local function main(args)
             if is_searching then
                 if k == "ENTER" then
                     is_searching = false
-                elseif k == "ESC" then
+                elseif k == "ESC" or k == "\3" then
                     is_searching = false
                     search_query = ""
                     filter_query = ""
@@ -2340,7 +2342,7 @@ local function main(args)
                         selected_paths[e.path] = e
                     end
                 end
-            elseif k == "q" or k == "ESC" then
+            elseif k == "q" or k == "ESC" or k == "\3" then
                 if #filter_query > 0 then
                     filter_query = ""
                     reload_current()
@@ -2679,6 +2681,8 @@ local M = {
     resolve_text_editor = resolve_text_editor,
     read_dir_entries    = read_dir_entries,
     sort_entries        = sort_entries,
+    enable_raw_mode     = enable_raw_mode,
+    disable_raw_mode    = disable_raw_mode,
     main                = main,
 }
 

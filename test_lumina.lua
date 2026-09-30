@@ -1242,10 +1242,27 @@ local title_preview = format_search_title(15, 120, "fd")
 assert_true(title_preview:find("%[fd%]") ~= nil, "Modal title contains [fd] badge")
 assert_true(title_preview:find("15/120") ~= nil, "Modal title contains match count")
 
+-- Test Suite 22: Terminal Autowrap & Safe Ctrl+C Restoration --
+print("\n-- Test Suite 22: Terminal Autowrap & Safe Ctrl+C Restoration --")
+local lf_suite22 = io.open("lumina.lua", "r")
+local l_code = lf_suite22:read("*all")
+lf_suite22:close()
+
+assert_true(l_code:find("%?7l") ~= nil, "lumina.lua disables line wrapping with \\27[?7l on raw mode entry")
+assert_true(l_code:find("%?7h") ~= nil, "lumina.lua restores line wrapping with \\27[?7h on raw mode exit")
+assert_true(l_code:find("ISIG") ~= nil, "lumina.lua defines ISIG mask for POSIX raw mode")
+assert_true(l_code:find("IEXTEN") ~= nil, "lumina.lua defines IEXTEN mask for POSIX raw mode")
+assert_true(l_code:find('k%s*==%s*"\\3"') ~= nil, "lumina.lua handles Ctrl+C (\\3) for graceful termination")
+
+local Lumina = require("lumina")
+assert_true(type(Lumina.enable_raw_mode) == "function", "Lumina exports enable_raw_mode function")
+assert_true(type(Lumina.disable_raw_mode) == "function", "Lumina exports disable_raw_mode function")
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)
 end
+
 
 
 
