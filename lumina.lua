@@ -932,6 +932,103 @@ local function spawn_subshell(target_dir)
     return ok
 end
 
+local function expand_command_macros(cmd, current_file, tagged_files, current_dir)
+    if not cmd then return "" end
+    local q_file = (current_file and current_file ~= "") and shell_quote(current_file) or ""
+    local q_dir = (current_dir and current_dir ~= "") and shell_quote(current_dir) or ""
+
+    local s_parts = {}
+    if tagged_files and #tagged_files > 0 then
+        for _, p in ipairs(tagged_files) do
+            local path_str = type(p) == "table" and (p.path or p.name) or tostring(p)
+            if path_str and path_str ~= "" then
+                table.insert(s_parts, shell_quote(path_str))
+            end
+        end
+    end
+    local q_selection = #s_parts > 0 and table.concat(s_parts, " ") or q_file
+
+    local res = {}
+    local i = 1
+    local len = #cmd
+    while i <= len do
+        local c = cmd:sub(i, i)
+        if c == "%" and i < len then
+            local nxt = cmd:sub(i + 1, i + 1)
+            if nxt == "f" then
+                table.insert(res, q_file)
+                i = i + 2
+            elseif nxt == "s" then
+                table.insert(res, q_selection)
+                i = i + 2
+            elseif nxt == "d" then
+                table.insert(res, q_dir)
+                i = i + 2
+            elseif nxt == "%" then
+                table.insert(res, "%")
+                i = i + 2
+            else
+                table.insert(res, c)
+                i = i + 1
+            end
+        else
+            table.insert(res, c)
+            i = i + 1
+        end
+    end
+    return table.concat(res)
+end
+
+local function execute_shell_command(expanded_cmd, target_dir, non_interactive)
+    disable_raw_mode()
+    io.write("\27[?25h")
+    io.write("\27[H\27[2J")
+    io.flush()
+    print(string.format("\27[1;36m[Lumina]\27[0m Executing shell command in \27[1m%s\27[0m:", target_dir))
+    print(string.format("\27[1;32m$\27[0m %s\n", expanded_cmd))
+
+    local full_cmd
+    if is_windows then
+        full_cmd = string.format('cd /d %s && %s', shell_quote(target_dir), expanded_cmd)
+    else
+        full_cmd = string.format('cd %s && %s', shell_quote(target_dir), expanded_cmd)
+    end
+
+    local ok, exit_type, exit_code = os.execute(full_cmd)
+
+    if not non_interactive then
+        print("\n\27[90m--------------------------------------------------\27[0m")
+        io.write("\27[1;33m[Lumina] Press any key to return...\27[0m ")
+        io.flush()
+
+        enable_raw_mode()
+        while read_key(20) do end
+        local max_wait = 200
+        while max_wait > 0 do
+            max_wait = max_wait - 1
+            local k = read_key(50)
+            if k then break end
+        end
+    else
+        enable_raw_mode()
+    end
+
+    io.write("\27[?25l")
+    io.write("\27[H\27[2J")
+    io.flush()
+
+    local code = 0
+    if type(ok) == "number" then
+        code = (ok == 0) and 0 or (bit.rshift(ok, 8) ~= 0 and bit.rshift(ok, 8) or ok)
+    elseif ok == true then
+        code = exit_code or 0
+    else
+        code = exit_code or 1
+    end
+
+    return ok, code
+end
+
 local function get_file_type_info(entry)
     if entry.is_dir then
         return "📁", C.dir_col
@@ -2142,6 +2239,115 @@ local function show_confirm_modal(title, message)
     end
 end
 
+local function show_command_modal(current_file, tagged_files, current_dir)
+    local text = ""
+    local term_w, term_h = get_terminal_size()
+    local box_w = math.max(50, math.min(term_w - 6, 76))
+    local box_h = 7
+    local start_x = math.floor((term_w - box_w) / 2)
+    local start_y = math.floor((term_h - box_h) / 2)
+    local bcol = C.border_focus
+
+    local function render()
+        local out = { "\27[?2026h" }
+        local title_str = " RUN SHELL COMMAND "
+        local top_fill = string.rep("─", math.max(0, box_w - 2 - visual_len(title_str)))
+        table.insert(out, string.format("\27[%d;%dH%s╭%s%s%s%s╮%s",
+            start_y, start_x, bcol, C.bold .. C.header_path, title_str, bcol, top_fill, C.reset))
+
+        -- Row 1: Command prompt & input
+        local p_str = " Command: "
+        local cur = "\27[7m \27[0m"
+        local input_display = truncate(text, box_w - 2 - visual_len(p_str) - 2)
+        local input_str = C.bold .. (C.status_accent or "\27[1;38;2;251;191;36m") .. input_display .. cur .. C.reset
+        local content_w = visual_len(p_str) + visual_len(input_display) + 1
+        local pad1 = string.rep(" ", math.max(0, box_w - 2 - content_w))
+        table.insert(out, string.format("\27[%d;%dH%s│%s%s%s%s│%s",
+            start_y + 1, start_x, bcol, C.reset, p_str .. input_str, pad1, bcol, C.reset))
+
+        -- Row 2: Live Macro Expansion Preview
+        local expanded = expand_command_macros(text, current_file, tagged_files, current_dir)
+        local prev_label = " Preview: "
+        local prev_text = (#text > 0) and expanded or "(type command with %f, %s, %d, %%)"
+        local prev_col = (#text > 0) and (C.symlink_col or "\27[38;2;6;182;212m") or C.dim
+        local prev_display = truncate(prev_text, box_w - 2 - visual_len(prev_label))
+        local pad2 = string.rep(" ", math.max(0, box_w - 2 - visual_len(prev_label) - visual_len(prev_display)))
+        table.insert(out, string.format("\27[%d;%dH%s│%s%s%s%s│%s",
+            start_y + 2, start_x, bcol, C.dim .. prev_label .. prev_col .. prev_display, pad2, bcol, C.reset))
+
+        -- Row 3: Macro tokens reference hint
+        local hint_tokens = " Tokens: %f: file  %s: selection  %d: dir  %%: %"
+        local hint_pad = string.rep(" ", math.max(0, box_w - 2 - visual_len(hint_tokens)))
+        table.insert(out, string.format("\27[%d;%dH%s│%s%s%s│%s",
+            start_y + 3, start_x, bcol, C.dim .. hint_tokens, hint_pad, bcol, C.reset))
+
+        -- Row 4: Target context info
+        local tagged_cnt = tagged_files and #tagged_files or 0
+        local ctx_info
+        if tagged_cnt > 0 then
+            ctx_info = string.format(" Target: %d tagged item(s)", tagged_cnt)
+        elseif current_file and current_file ~= "" then
+            local fname = current_file:match("([^/\\]+)$") or current_file
+            ctx_info = string.format(" Target: %s", truncate(fname, box_w - 14))
+        else
+            ctx_info = " Target: (none)"
+        end
+        local ctx_pad = string.rep(" ", math.max(0, box_w - 2 - visual_len(ctx_info)))
+        table.insert(out, string.format("\27[%d;%dH%s│%s%s%s│%s",
+            start_y + 4, start_x, bcol, C.dim .. ctx_info, ctx_pad, bcol, C.reset))
+
+        -- Row 5: Blank padding
+        local blank_pad = string.rep(" ", box_w - 2)
+        table.insert(out, string.format("\27[%d;%dH%s│%s%s│%s",
+            start_y + 5, start_x, bcol, blank_pad, bcol, C.reset))
+
+        -- Bottom border: Action shortcuts
+        local bot_hint = " [Enter] Execute  [Esc] Cancel "
+        local bot_fill = string.rep("─", math.max(0, box_w - 2 - visual_len(bot_hint)))
+        table.insert(out, string.format("\27[%d;%dH%s╰%s%s%s%s╯%s",
+            start_y + box_h - 1, start_x, bcol, C.dim, bot_hint, bcol, bot_fill, C.reset))
+
+        table.insert(out, "\27[?2026l")
+        io.write(table.concat(out))
+        io.flush()
+    end
+
+    render()
+    while true do
+        local k = read_key()
+        if k then
+            if k == "ESC" or k == "\3" then
+                return nil
+            elseif k == "ENTER" then
+                local trimmed = text:match("^%s*(.-)%s*$")
+                if trimmed and #trimmed > 0 then
+                    return trimmed
+                else
+                    return nil
+                end
+            elseif k == "BACKSPACE" then
+                if #text > 0 then
+                    text = text:sub(1, -2)
+                    render()
+                end
+            elseif k == "\21" then
+                if #text > 0 then
+                    text = ""
+                    render()
+                end
+            elseif k == "\23" then
+                if #text > 0 then
+                    text = text:gsub("%s*[^%s]+%s*$", "")
+                    render()
+                end
+            elseif #k == 1 and k:byte(1) >= 32 and k:byte(1) <= 126 then
+                text = text .. k
+                render()
+            end
+        end
+    end
+end
+
 local function show_help_modal()
     local term_w, term_h = get_terminal_size()
     local box_w = math.max(50, math.min(term_w - 6, 74))
@@ -2170,6 +2376,7 @@ local function show_help_modal()
         { key = "J, K",        desc = "Scroll preview pane down / up" },
         { key = "m<key>, '<key>", desc = "Set / Jump to directory bookmark" },
         { key = "S",           desc = "Spawn interactive shell in current dir" },
+        { key = ":, !",        desc = "Execute shell command (%f, %s, %d)" },
         { key = "f, Ctrl+P",   desc = "Recursive fuzzy file search" },
         { key = "/",           desc = "Filter entries in current directory" },
         { key = "s",           desc = "Sort menu (Name, Size, Time, Ext)" },
@@ -3499,6 +3706,32 @@ local function main(args)
                 preview_pending = true
                 reload_current()
                 needs_redraw = true
+            elseif k == ":" or k == "!" then
+                -- : or !: Quick Shell Command Runner with macro expansion
+                local cur_entry = current_entries[sel_index]
+                local cur_file = cur_entry and cur_entry.path or ""
+                local tagged_list = {}
+                if count_selected() > 0 then
+                    for p, _ in pairs(selected_paths) do
+                        table.insert(tagged_list, p)
+                    end
+                    table.sort(tagged_list)
+                end
+
+                local cmd_input = show_command_modal(cur_file, tagged_list, current_dir)
+                if cmd_input and #cmd_input > 0 then
+                    local expanded = expand_command_macros(cmd_input, cur_file, tagged_list, current_dir)
+                    local ok, code = execute_shell_command(expanded, current_dir)
+                    clear_preview_cache()
+                    preview_pending = true
+                    reload_current()
+                    if code == 0 then
+                        set_status_message(string.format("\27[1;32m⚡ Done (exit 0): %s\27[0m", truncate(cmd_input, 36)))
+                    else
+                        set_status_message(string.format("\27[1;31m⚡ Exit code %d: %s\27[0m", code, truncate(cmd_input, 36)))
+                    end
+                end
+                needs_redraw = true
             elseif k == "y" then
                 -- y: Yank (Copy) tagged items or current item
                 local targets = get_targets_for_op()
@@ -3675,6 +3908,9 @@ local M = {
     parse_tar_directory             = parse_tar_directory,
     generate_archive_preview        = generate_archive_preview,
     create_history_tracker          = create_history_tracker,
+    expand_command_macros           = expand_command_macros,
+    execute_shell_command           = execute_shell_command,
+    show_command_modal              = show_command_modal,
     main                            = main,
 }
 

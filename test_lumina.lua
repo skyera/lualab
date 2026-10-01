@@ -1762,6 +1762,98 @@ do
     assert_true(l_code30:find('key%s*=%s*"Ctrl%+I,%s*%]"') ~= nil, "show_help_modal documents Ctrl+I under NAVIGATION")
 end
 
+-- =========================================================================
+-- Test Suite 31: Quick Shell Command Runner (`:`, `!`) & Macro Expansion (`%f`, `%s`, `%d`, `%%`)
+-- =========================================================================
+do
+    print("\n-- Test Suite 31: Quick Shell Command Runner (`:`, `!`) & Macro Expansion (`%f`, `%s`, `%d`, `%%`) --")
+
+    -- 1. Helper exports
+    assert_true(type(Lumina.expand_command_macros) == "function", "Lumina exports expand_command_macros helper")
+    assert_true(type(Lumina.execute_shell_command) == "function", "Lumina exports execute_shell_command helper")
+    assert_true(type(Lumina.show_command_modal) == "function", "Lumina exports show_command_modal helper")
+
+    -- 2. Basic commands with no macros
+    assert_eq(Lumina.expand_command_macros("git status", "file.txt", {}, "/app"), "git status", "Preserves command with no macros")
+    assert_eq(Lumina.expand_command_macros("ls -la", nil, nil, nil), "ls -la", "Handles nil contexts with plain command")
+    assert_eq(Lumina.expand_command_macros("", "file.txt", {}, "/app"), "", "Handles empty command string")
+    assert_eq(Lumina.expand_command_macros(nil, "file.txt", {}, "/app"), "", "Handles nil command string")
+
+    -- 3. %f Macro expansion (current file)
+    local exp_f1 = Lumina.expand_command_macros("cat %f", "/tmp/notes.txt", {}, "/tmp")
+    assert_true(exp_f1:find("/tmp/notes.txt") ~= nil, "%f expands to file path")
+    assert_true(exp_f1:sub(1, 4) == "cat ", "%f preserves command prefix")
+
+    -- Handle spaces in filename
+    local exp_f2 = Lumina.expand_command_macros("wc -l %f", "/tmp/my file cool.txt", {}, "/tmp")
+    assert_true(exp_f2:find("my file cool") ~= nil, "%f handles filenames with spaces")
+
+    -- 4. %s Macro expansion (tagged files vs fallback)
+    -- Multi-file selection with string paths
+    local exp_s1 = Lumina.expand_command_macros("rm %s", "/tmp/main.lua", { "/tmp/a.txt", "/tmp/b.txt" }, "/tmp")
+    assert_true(exp_s1:find("/tmp/a.txt") ~= nil, "%s contains first tagged file")
+    assert_true(exp_s1:find("/tmp/b.txt") ~= nil, "%s contains second tagged file")
+
+    -- Tagged files as entry tables
+    local table_tagged = { { path = "/tmp/x.log", name = "x.log" }, { path = "/tmp/y.log", name = "y.log" } }
+    local exp_s2 = Lumina.expand_command_macros("tar -czf logs.tar.gz %s", "/tmp/main.lua", table_tagged, "/tmp")
+    assert_true(exp_s2:find("/tmp/x.log") ~= nil, "%s extracts path from table entries")
+    assert_true(exp_s2:find("/tmp/y.log") ~= nil, "%s extracts second path from table entries")
+
+    -- Fallback to current file when no files are tagged
+    local exp_s_fallback = Lumina.expand_command_macros("ls -l %s", "/tmp/target.c", {}, "/tmp")
+    assert_true(exp_s_fallback:find("/tmp/target.c") ~= nil, "%s falls back to current file when selection empty")
+
+    -- When neither tagged files nor current file exists
+    local exp_s_empty = Lumina.expand_command_macros("echo %s", "", {}, "/tmp")
+    assert_eq(exp_s_empty, "echo ", "%s is empty string when no targets exist")
+
+    -- 5. %d Macro expansion (current directory)
+    local exp_d = Lumina.expand_command_macros("cd %d && pwd", "/tmp/file.txt", {}, "/home/user/project")
+    assert_true(exp_d:find("/home/user/project") ~= nil, "%d expands to current directory")
+
+    -- 6. %% Escape handling and literal percent signs
+    local exp_esc1 = Lumina.expand_command_macros("echo 100%%", "file.txt", {}, "/tmp")
+    assert_eq(exp_esc1, "echo 100%", "%% escapes to single literal %")
+
+    local exp_esc2 = Lumina.expand_command_macros("printf '%%s: %f'", "/tmp/test.lua", {}, "/tmp")
+    assert_true(exp_esc2:find("%%s", 1, true) == nil, "%%s has double percent replaced")
+    assert_true(exp_esc2:find("%%s") ~= nil, "Result contains single %s format token")
+    assert_true(exp_esc2:find("/tmp/test.lua") ~= nil, "%f still expands alongside %%")
+
+    local exp_esc3 = Lumina.expand_command_macros("echo 50% off", "file.txt", {}, "/tmp")
+    assert_eq(exp_esc3, "echo 50% off", "Trailing non-token percent is preserved verbatim")
+
+    local exp_esc4 = Lumina.expand_command_macros("echo %x %z", "file.txt", {}, "/tmp")
+    assert_eq(exp_esc4, "echo %x %z", "Unknown percent token sequences are preserved verbatim")
+
+    -- 7. Multiple mixed macros in one command
+    local exp_mix = Lumina.expand_command_macros("cp %f %d/backup/ && echo %s", "/var/log/sys.log", {}, "/var/log")
+    assert_true(exp_mix:find("/var/log/sys.log") ~= nil, "Mixed macros expands %f")
+    assert_true(exp_mix:find("/var/log") ~= nil, "Mixed macros expands %d")
+    assert_true(exp_mix:find("/backup/") ~= nil, "Mixed macros preserves trailing path")
+
+    -- 8. Execution of shell command via execute_shell_command
+    local ok_run, code_run = Lumina.execute_shell_command("true", "/tmp", true)
+    assert_true(ok_run ~= nil and ok_run ~= false, "execute_shell_command executes successfully")
+    assert_eq(code_run, 0, "execute_shell_command returns 0 for successful command")
+
+    local ok_fail, code_fail = Lumina.execute_shell_command("sh -c 'exit 7'", "/tmp", true)
+    assert_eq(code_fail, 7, "execute_shell_command parses non-zero exit code correctly")
+
+    -- 9. Source integration checks in lumina.lua
+    local lf31 = io.open("lumina.lua", "r")
+    local l_code31 = lf31:read("*a")
+    lf31:close()
+
+    assert_true(l_code31:find("expand_command_macros") ~= nil, "lumina.lua defines expand_command_macros")
+    assert_true(l_code31:find("execute_shell_command") ~= nil, "lumina.lua defines execute_shell_command")
+    assert_true(l_code31:find("show_command_modal") ~= nil, "lumina.lua defines show_command_modal")
+    assert_true(l_code31:find('k%s*==%s*":"%s*or%s*k%s*==%s*"!"') ~= nil or l_code31:find('k%s*==%s*"!"%s*or%s*k%s*==%s*":"') ~= nil,
+        "lumina.lua binds : and ! to command runner")
+    assert_true(l_code31:find('key%s*=%s*":,%s*!"') ~= nil, "show_help_modal documents : and ! shortcuts")
+end
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)
