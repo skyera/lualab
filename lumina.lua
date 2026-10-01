@@ -58,7 +58,7 @@ local posix_stat
 local devnull = is_windows and "nul" or "/dev/null"
 local popen_rb = is_windows and "rb" or "r"
 
-local enable_raw_mode, disable_raw_mode, suspend_raw_mode, resume_raw_mode, get_terminal_size, read_key
+local enable_raw_mode, disable_raw_mode, suspend_raw_mode, resume_raw_mode, get_terminal_size, read_key, is_stdin_tty
 local read_dir_entries, resolve_canonical_path, get_parent_dir
 local in_raw_mode = false
 local kernel32
@@ -142,22 +142,36 @@ if is_windows then
         end
     end
 
+    is_stdin_tty = function()
+        local ok, res = pcall(function()
+            local hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+            if hIn == ffi.cast("void*", -1) or hIn == nil then return false end
+            local mode = ffi.new("uint32_t[1]")
+            return kernel32.GetConsoleMode(hIn, mode) ~= 0
+        end)
+        return ok and (res == true)
+    end
+
     suspend_raw_mode = function()
-        local hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
-        local hOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
-        kernel32.SetConsoleMode(hIn, orig_in_mode[0])
-        kernel32.SetConsoleMode(hOut, orig_out_mode[0])
-        pcall(function() kernel32.FlushConsoleInputBuffer(hIn) end)
-        io.write("\27[?25h\27[?7h")
-        io.flush()
+        if in_raw_mode then
+            local hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+            local hOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+            kernel32.SetConsoleMode(hIn, orig_in_mode[0])
+            kernel32.SetConsoleMode(hOut, orig_out_mode[0])
+            pcall(function() kernel32.FlushConsoleInputBuffer(hIn) end)
+            io.write("\27[?25h\27[?7h")
+            io.flush()
+        end
     end
 
     resume_raw_mode = function()
-        local hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
-        local raw_mode = bit.band(orig_in_mode[0], bit.bnot(0x0001 + 0x0002 + 0x0004))
-        kernel32.SetConsoleMode(hIn, raw_mode)
-        io.write("\27[?25l\27[?7l")
-        io.flush()
+        if in_raw_mode then
+            local hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+            local raw_mode = bit.band(orig_in_mode[0], bit.bnot(0x0001 + 0x0002 + 0x0004))
+            kernel32.SetConsoleMode(hIn, raw_mode)
+            io.write("\27[?25l\27[?7l")
+            io.flush()
+        end
     end
 
     get_terminal_size = function()
@@ -361,8 +375,15 @@ ffi.cdef(posix_termios_cdef[[
     local orig_termios = ffi.new("struct termios")
     local raw_termios  = ffi.new("struct termios")
 
+    is_stdin_tty = function()
+        local ok, res = pcall(function()
+            return ffi.C.isatty(STDIN_FILENO) == 1
+        end)
+        return ok and (res == true)
+    end
+
     enable_raw_mode = function()
-        if ffi.C.isatty(STDIN_FILENO) ~= 1 then return false end
+        if not is_stdin_tty() then return false end
         ffi.C.tcgetattr(STDIN_FILENO, orig_termios)
         ffi.C.tcgetattr(STDIN_FILENO, raw_termios)
         raw_termios.c_lflag = bit.band(raw_termios.c_lflag, bit.bnot(bit.bor(ICANON, ECHO, ISIG, IEXTEN)))
@@ -385,16 +406,20 @@ ffi.cdef(posix_termios_cdef[[
     end
 
     suspend_raw_mode = function()
-        ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
-        pcall(function() ffi.C.tcflush(STDIN_FILENO, 0) end)
-        io.write("\27[?25h\27[?7h")
-        io.flush()
+        if in_raw_mode then
+            ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
+            pcall(function() ffi.C.tcflush(STDIN_FILENO, 0) end)
+            io.write("\27[?25h\27[?7h")
+            io.flush()
+        end
     end
 
     resume_raw_mode = function()
-        ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
-        io.write("\27[?25l\27[?7l")
-        io.flush()
+        if in_raw_mode then
+            ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
+            io.write("\27[?25l\27[?7l")
+            io.flush()
+        end
     end
 
     get_terminal_size = function()
@@ -409,7 +434,7 @@ ffi.cdef(posix_termios_cdef[[
     local key_buf = ffi.new("char[32]")
 
     read_key = function(timeout_ms)
-        if ffi.C.isatty(STDIN_FILENO) ~= 1 then
+        if not is_stdin_tty() then
             local ch = io.read(1)
             if not ch then return "q" end
             if ch == "\n" or ch == "\r" then return "ENTER" end
@@ -1028,7 +1053,7 @@ local function execute_shell_command(expanded_cmd, target_dir, non_interactive)
 
     local ok, exit_type, exit_code = os.execute(full_cmd)
 
-    if not non_interactive and ffi.C.isatty(0) == 1 then
+    if not non_interactive and is_stdin_tty() then
         print("\n\27[90m--------------------------------------------------\27[0m")
         io.write("\27[1;33m[Lumina] Press Enter to return...\27[0m ")
         io.flush()
@@ -3947,6 +3972,7 @@ local M = {
     execute_shell_command           = execute_shell_command,
     suspend_raw_mode                = suspend_raw_mode,
     resume_raw_mode                 = resume_raw_mode,
+    is_stdin_tty                    = is_stdin_tty,
     show_command_modal              = show_command_modal,
     render_command_modal_frame      = render_command_modal_frame,
     main                            = main,

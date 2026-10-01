@@ -1879,6 +1879,16 @@ do
         "lumina.lua binds SPACE key for tagging in normal mode")
     assert_true(type(Lumina.suspend_raw_mode) == "function", "Lumina exports suspend_raw_mode")
     assert_true(type(Lumina.resume_raw_mode) == "function", "Lumina exports resume_raw_mode")
+
+    -- 12. Verify platform-agnostic is_stdin_tty and Windows safety
+    assert_true(type(Lumina.is_stdin_tty) == "function", "Lumina exports is_stdin_tty helper")
+    assert_true(type(Lumina.is_stdin_tty()) == "boolean", "is_stdin_tty returns a boolean")
+    assert_true(l_code31:find("ffi%.C%.isatty%(0%)") == nil,
+        "lumina.lua has no direct ffi.C.isatty(0) calls in execute_shell_command")
+    assert_true(l_code31:find("not non_interactive and is_stdin_tty%(%)") ~= nil,
+        "execute_shell_command uses is_stdin_tty()")
+    assert_true(l_code31:find("GetConsoleMode") ~= nil,
+        "lumina.lua defines Windows is_stdin_tty with GetConsoleMode")
 end
 
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
