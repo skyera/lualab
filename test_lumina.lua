@@ -1841,7 +1841,25 @@ do
     local ok_fail, code_fail = Lumina.execute_shell_command("sh -c 'exit 7'", "/tmp", true)
     assert_eq(code_fail, 7, "execute_shell_command parses non-zero exit code correctly")
 
-    -- 9. Source integration checks in lumina.lua
+    -- 9. Render command modal frame test (zero formatting errors across edge cases)
+    assert_true(type(Lumina.render_command_modal_frame) == "function", "Lumina exports render_command_modal_frame")
+    local frame1 = Lumina.render_command_modal_frame("", "main.lua", {}, "/home/zliu", 80, 24)
+    assert_true(frame1:find("RUN SHELL COMMAND") ~= nil, "Modal frame contains title")
+    assert_true(frame1:find("Preview:") ~= nil, "Modal frame contains preview label")
+    assert_true(frame1:find("Tokens: %%f") ~= nil, "Modal frame contains tokens hint")
+    assert_true(frame1:find("Target: main.lua") ~= nil, "Modal frame displays target file")
+    assert_true(frame1:find("%[Enter%] Execute") ~= nil, "Modal frame displays action shortcuts")
+
+    -- Modal frame with command text and tagged items
+    local frame2 = Lumina.render_command_modal_frame("git diff %s", "lumina.lua", { "a.lua", "b.lua" }, "/home/zliu", 120, 40)
+    assert_true(frame2:find("Target: 2 tagged item%(s%)") ~= nil, "Modal frame reports tagged items count")
+    assert_true(frame2:find("git diff") ~= nil, "Modal frame displays command and preview")
+
+    -- Modal frame with empty context
+    local frame3 = Lumina.render_command_modal_frame("ls", "", {}, "/home/zliu", 60, 20)
+    assert_true(frame3:find("Target: %(none%)") ~= nil, "Modal frame handles empty target gracefully")
+
+    -- 10. Source integration checks in lumina.lua
     local lf31 = io.open("lumina.lua", "r")
     local l_code31 = lf31:read("*a")
     lf31:close()
@@ -1849,6 +1867,7 @@ do
     assert_true(l_code31:find("expand_command_macros") ~= nil, "lumina.lua defines expand_command_macros")
     assert_true(l_code31:find("execute_shell_command") ~= nil, "lumina.lua defines execute_shell_command")
     assert_true(l_code31:find("show_command_modal") ~= nil, "lumina.lua defines show_command_modal")
+    assert_true(l_code31:find("render_command_modal_frame") ~= nil, "lumina.lua defines render_command_modal_frame")
     assert_true(l_code31:find('k%s*==%s*":"%s*or%s*k%s*==%s*"!"') ~= nil or l_code31:find('k%s*==%s*"!"%s*or%s*k%s*==%s*":"') ~= nil,
         "lumina.lua binds : and ! to command runner")
     assert_true(l_code31:find('key%s*=%s*":,%s*!"') ~= nil, "show_help_modal documents : and ! shortcuts")

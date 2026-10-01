@@ -2239,76 +2239,84 @@ local function show_confirm_modal(title, message)
     end
 end
 
-local function show_command_modal(current_file, tagged_files, current_dir)
-    local text = ""
-    local term_w, term_h = get_terminal_size()
+local function render_command_modal_frame(text, current_file, tagged_files, current_dir, term_w, term_h)
+    term_w = term_w or 100
+    term_h = term_h or 30
     local box_w = math.max(50, math.min(term_w - 6, 76))
     local box_h = 7
     local start_x = math.floor((term_w - box_w) / 2)
     local start_y = math.floor((term_h - box_h) / 2)
     local bcol = C.border_focus
 
+    local out = { "\27[?2026h" }
+    local title_str = " RUN SHELL COMMAND "
+    local top_fill = string.rep("─", math.max(0, box_w - 2 - visual_len(title_str)))
+    table.insert(out, string.format("\27[%d;%dH%s╭%s%s%s%s╮%s",
+        start_y, start_x, bcol, C.bold .. C.header_path, title_str, bcol, top_fill, C.reset))
+
+    -- Row 1: Command prompt & input
+    local p_str = " Command: "
+    local cur = "\27[7m \27[0m"
+    local input_display = truncate(text, box_w - 2 - visual_len(p_str) - 2)
+    local input_str = C.bold .. (C.status_accent or "\27[1;38;2;251;191;36m") .. input_display .. cur .. C.reset
+    local content_w = visual_len(p_str) + visual_len(input_display) + 1
+    local pad1 = string.rep(" ", math.max(0, box_w - 2 - content_w))
+    table.insert(out, string.format("\27[%d;%dH%s│%s%s%s%s│%s",
+        start_y + 1, start_x, bcol, C.reset, p_str .. input_str, pad1, bcol, C.reset))
+
+    -- Row 2: Live Macro Expansion Preview
+    local expanded = expand_command_macros(text, current_file, tagged_files, current_dir)
+    local prev_label = " Preview: "
+    local prev_text = (#text > 0) and expanded or "(type command with %f, %s, %d, %%)"
+    local prev_col = (#text > 0) and (C.symlink_col or "\27[38;2;6;182;212m") or C.dim
+    local prev_display = truncate(prev_text, box_w - 2 - visual_len(prev_label))
+    local pad2 = string.rep(" ", math.max(0, box_w - 2 - visual_len(prev_label) - visual_len(prev_display)))
+    table.insert(out, string.format("\27[%d;%dH%s│%s%s%s│%s",
+        start_y + 2, start_x, bcol, C.dim .. prev_label .. prev_col .. prev_display, pad2, bcol, C.reset))
+
+    -- Row 3: Macro tokens reference hint
+    local hint_tokens = " Tokens: %f: file  %s: selection  %d: dir  %%: %"
+    local hint_pad = string.rep(" ", math.max(0, box_w - 2 - visual_len(hint_tokens)))
+    table.insert(out, string.format("\27[%d;%dH%s│%s%s%s│%s",
+        start_y + 3, start_x, bcol, C.dim .. hint_tokens, hint_pad, bcol, C.reset))
+
+    -- Row 4: Target context info
+    local tagged_cnt = tagged_files and #tagged_files or 0
+    local ctx_info
+    if tagged_cnt > 0 then
+        ctx_info = string.format(" Target: %d tagged item(s)", tagged_cnt)
+    elseif current_file and current_file ~= "" then
+        local fname = current_file:match("([^/\\]+)$") or current_file
+        ctx_info = string.format(" Target: %s", truncate(fname, box_w - 14))
+    else
+        ctx_info = " Target: (none)"
+    end
+    local ctx_pad = string.rep(" ", math.max(0, box_w - 2 - visual_len(ctx_info)))
+    table.insert(out, string.format("\27[%d;%dH%s│%s%s%s│%s",
+        start_y + 4, start_x, bcol, C.dim .. ctx_info, ctx_pad, bcol, C.reset))
+
+    -- Row 5: Blank padding
+    local blank_pad = string.rep(" ", box_w - 2)
+    table.insert(out, string.format("\27[%d;%dH%s│%s%s│%s",
+        start_y + 5, start_x, bcol, blank_pad, bcol, C.reset))
+
+    -- Bottom border: Action shortcuts
+    local bot_hint = " [Enter] Execute  [Esc] Cancel "
+    local bot_fill = string.rep("─", math.max(0, box_w - 2 - visual_len(bot_hint)))
+    table.insert(out, string.format("\27[%d;%dH%s╰%s%s%s%s╯%s",
+        start_y + box_h - 1, start_x, bcol, C.dim, bot_hint, bcol, bot_fill, C.reset))
+
+    table.insert(out, "\27[?2026l")
+    return table.concat(out)
+end
+
+local function show_command_modal(current_file, tagged_files, current_dir)
+    local text = ""
+    local term_w, term_h = get_terminal_size()
+
     local function render()
-        local out = { "\27[?2026h" }
-        local title_str = " RUN SHELL COMMAND "
-        local top_fill = string.rep("─", math.max(0, box_w - 2 - visual_len(title_str)))
-        table.insert(out, string.format("\27[%d;%dH%s╭%s%s%s%s╮%s",
-            start_y, start_x, bcol, C.bold .. C.header_path, title_str, bcol, top_fill, C.reset))
-
-        -- Row 1: Command prompt & input
-        local p_str = " Command: "
-        local cur = "\27[7m \27[0m"
-        local input_display = truncate(text, box_w - 2 - visual_len(p_str) - 2)
-        local input_str = C.bold .. (C.status_accent or "\27[1;38;2;251;191;36m") .. input_display .. cur .. C.reset
-        local content_w = visual_len(p_str) + visual_len(input_display) + 1
-        local pad1 = string.rep(" ", math.max(0, box_w - 2 - content_w))
-        table.insert(out, string.format("\27[%d;%dH%s│%s%s%s%s│%s",
-            start_y + 1, start_x, bcol, C.reset, p_str .. input_str, pad1, bcol, C.reset))
-
-        -- Row 2: Live Macro Expansion Preview
-        local expanded = expand_command_macros(text, current_file, tagged_files, current_dir)
-        local prev_label = " Preview: "
-        local prev_text = (#text > 0) and expanded or "(type command with %f, %s, %d, %%)"
-        local prev_col = (#text > 0) and (C.symlink_col or "\27[38;2;6;182;212m") or C.dim
-        local prev_display = truncate(prev_text, box_w - 2 - visual_len(prev_label))
-        local pad2 = string.rep(" ", math.max(0, box_w - 2 - visual_len(prev_label) - visual_len(prev_display)))
-        table.insert(out, string.format("\27[%d;%dH%s│%s%s%s%s│%s",
-            start_y + 2, start_x, bcol, C.dim .. prev_label .. prev_col .. prev_display, pad2, bcol, C.reset))
-
-        -- Row 3: Macro tokens reference hint
-        local hint_tokens = " Tokens: %f: file  %s: selection  %d: dir  %%: %"
-        local hint_pad = string.rep(" ", math.max(0, box_w - 2 - visual_len(hint_tokens)))
-        table.insert(out, string.format("\27[%d;%dH%s│%s%s%s│%s",
-            start_y + 3, start_x, bcol, C.dim .. hint_tokens, hint_pad, bcol, C.reset))
-
-        -- Row 4: Target context info
-        local tagged_cnt = tagged_files and #tagged_files or 0
-        local ctx_info
-        if tagged_cnt > 0 then
-            ctx_info = string.format(" Target: %d tagged item(s)", tagged_cnt)
-        elseif current_file and current_file ~= "" then
-            local fname = current_file:match("([^/\\]+)$") or current_file
-            ctx_info = string.format(" Target: %s", truncate(fname, box_w - 14))
-        else
-            ctx_info = " Target: (none)"
-        end
-        local ctx_pad = string.rep(" ", math.max(0, box_w - 2 - visual_len(ctx_info)))
-        table.insert(out, string.format("\27[%d;%dH%s│%s%s%s│%s",
-            start_y + 4, start_x, bcol, C.dim .. ctx_info, ctx_pad, bcol, C.reset))
-
-        -- Row 5: Blank padding
-        local blank_pad = string.rep(" ", box_w - 2)
-        table.insert(out, string.format("\27[%d;%dH%s│%s%s│%s",
-            start_y + 5, start_x, bcol, blank_pad, bcol, C.reset))
-
-        -- Bottom border: Action shortcuts
-        local bot_hint = " [Enter] Execute  [Esc] Cancel "
-        local bot_fill = string.rep("─", math.max(0, box_w - 2 - visual_len(bot_hint)))
-        table.insert(out, string.format("\27[%d;%dH%s╰%s%s%s%s╯%s",
-            start_y + box_h - 1, start_x, bcol, C.dim, bot_hint, bcol, bot_fill, C.reset))
-
-        table.insert(out, "\27[?2026l")
-        io.write(table.concat(out))
+        local frame = render_command_modal_frame(text, current_file, tagged_files, current_dir, term_w, term_h)
+        io.write(frame)
         io.flush()
     end
 
@@ -3911,6 +3919,7 @@ local M = {
     expand_command_macros           = expand_command_macros,
     execute_shell_command           = execute_shell_command,
     show_command_modal              = show_command_modal,
+    render_command_modal_frame      = render_command_modal_frame,
     main                            = main,
 }
 
