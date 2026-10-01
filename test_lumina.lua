@@ -1351,6 +1351,58 @@ assert_true(l_code25:find("✓ Renamed to") ~= nil, "Rename operation (R) sets c
 assert_true(l_code25:find("✓ Deleted") ~= nil, "Delete operation (D) sets confirmation toast")
 assert_true(l_code25:find("🎨 Theme:") ~= nil, "Cycle theme (t/T) sets confirmation toast")
 
+-- Test Suite 26: Full-Width Zoom Preview Mode (Key 'z') --
+print("\n-- Test Suite 26: Full-Width Zoom Preview Mode (Key 'z') --")
+local lf_suite26 = io.open("lumina.lua", "r")
+local l_code26 = lf_suite26:read("*all")
+lf_suite26:close()
+
+-- 1. Export and Geometry Calculations
+assert_true(type(Lumina.calculate_miller_geometry) == "function", "Lumina exports calculate_miller_geometry helper")
+
+-- Normal 3-column Miller geometry
+local c1_w, c2_w, c3_w, c1_x, c2_x, c3_x = Lumina.calculate_miller_geometry(100, false)
+assert_eq(c1_w, 22, "Normal mode Col 1 width is 22% (22)")
+assert_eq(c2_w, 32, "Normal mode Col 2 width is 32% (32)")
+assert_eq(c3_w, 46, "Normal mode Col 3 width is remaining 46% (46)")
+assert_eq(c1_w + c2_w + c3_w, 100, "Normal mode column widths sum to terminal width (100)")
+assert_eq(c1_x, 1, "Normal mode Col 1 starts at 1")
+assert_eq(c2_x, 23, "Normal mode Col 2 starts at 23")
+assert_eq(c3_x, 55, "Normal mode Col 3 starts at 55")
+
+-- Zoomed preview mode geometry: 100% full width to Col 3
+local z1_w, z2_w, z3_w, z1_x, z2_x, z3_x = Lumina.calculate_miller_geometry(100, true)
+assert_eq(z1_w, 0, "Zoomed mode Col 1 width is 0")
+assert_eq(z2_w, 0, "Zoomed mode Col 2 width is 0")
+assert_eq(z3_w, 100, "Zoomed mode Col 3 takes 100% width (100)")
+assert_eq(z3_x, 1, "Zoomed mode Col 3 starts at x=1")
+
+local _, _, z3_80 = Lumina.calculate_miller_geometry(80, true)
+assert_eq(z3_80, 80, "Zoomed mode at 80 cols takes full 80 cols")
+
+local _, _, z3_140 = Lumina.calculate_miller_geometry(140, true)
+assert_eq(z3_140, 140, "Zoomed mode at 140 cols takes full 140 cols")
+
+-- 2. State & Keybindings Verification
+assert_true(l_code26:find("local is_preview_zoomed%s*=%s*false") ~= nil, "lumina.lua declares is_preview_zoomed state")
+assert_true(l_code26:find('elseif k%s*==%s*"z"') ~= nil, "lumina.lua handles 'z' key for preview zoom toggle")
+assert_true(l_code26:find("Preview Zoom: ON") ~= nil, "lumina.lua sets confirmation toast on preview zoom ON")
+assert_true(l_code26:find("Preview Zoom: OFF") ~= nil, "lumina.lua sets confirmation toast on preview zoom OFF")
+
+-- 3. Zoom Navigation Controls
+assert_true(l_code26:find("is_preview_zoomed and %(k == \"n\"") ~= nil, "lumina.lua supports 'n' for next file in zoom mode")
+assert_true(l_code26:find("is_preview_zoomed and %(k == \"p\"") ~= nil, "lumina.lua supports 'p' for prev file in zoom mode")
+assert_true(l_code26:find("if is_preview_zoomed then%s*preview_scroll_offset = preview_scroll_offset %+ 1") ~= nil,
+    "lumina.lua scrolls preview down with j/DOWN in zoom mode")
+assert_true(l_code26:find("preview_scroll_offset = math%.max%(0, preview_scroll_offset %- 1%)") ~= nil,
+    "lumina.lua scrolls preview up with k/UP in zoom mode")
+assert_true(l_code26:find("is_preview_zoomed and k ~= \"\\3\" then%s*is_preview_zoomed = false") ~= nil,
+    "lumina.lua exits zoom mode on q / ESC")
+
+-- 4. Help Documentation
+assert_true(l_code26:find('key%s*=%s*"z",%s*desc%s*=%s*"Toggle full%-width preview zoom"') ~= nil,
+    "show_help_modal documents 'z' zoom key under PREVIEW & TOOLS")
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)

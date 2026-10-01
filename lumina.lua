@@ -36,6 +36,7 @@
       * R                : Rename selected item
       * D                : Delete selected or tagged items (with confirmation)
       * s                : Sort mode menu (Name, Size, Time, Ext)
+      * z                : Toggle full-width preview zoom (100% width)
       * .                : Toggle hidden files (dotfiles)
       * r                : Refresh current directory
       * q / ESC          : Quit (or clear selection/filter)
@@ -1744,6 +1745,7 @@ local function show_help_modal()
         { key = "R",           desc = "Rename item" },
         { key = "D",           desc = "Delete tagged or current item" },
         { section = "PREVIEW & TOOLS" },
+        { key = "z",           desc = "Toggle full-width preview zoom" },
         { key = "J, K",        desc = "Scroll preview pane down / up" },
         { key = "m<key>, '<key>", desc = "Set / Jump to directory bookmark" },
         { key = "S",           desc = "Spawn interactive shell in current dir" },
@@ -1917,6 +1919,20 @@ local function draw_row(x, y, w, content)
     return string.format("\27[%d;%dH%s%s%s", y, x + 1, clr, pad, C.reset)
 end
 
+local function calculate_miller_geometry(term_w, is_zoomed)
+    if is_zoomed then
+        return 0, 0, term_w, 1, 1, 1
+    else
+        local col1_w = math.max(16, math.floor(term_w * 0.22))
+        local col2_w = math.max(22, math.floor(term_w * 0.32))
+        local col3_w = math.max(24, term_w - col1_w - col2_w)
+        local col1_x = 1
+        local col2_x = col1_x + col1_w
+        local col3_x = col2_x + col2_w
+        return col1_w, col2_w, col3_w, col1_x, col2_x, col3_x
+    end
+end
+
 -- =========================================================================
 -- 6. Main Interactive Application Loop
 -- =========================================================================
@@ -2067,6 +2083,7 @@ local function main(args)
     local is_sorting = false
     local g_prefix = false
     local preview_pending = true
+    local is_preview_zoomed = false
     local last_w, last_h = get_terminal_size()
 
     -- Initial screen clear
@@ -2113,10 +2130,21 @@ local function main(args)
         local out = { "\27[?2026h\27[H" }
 
         -- 1. Top Header Bar
-        local left_info = string.format("  %s⚡ LUMINA%s %s│%s %s%s%s %s(%d items)%s",
-            C.bold .. (C.header_accent or C.border_focus), C.reset, C.dim, C.reset,
-            C.bold .. (C.header_path or "\27[38;2;241;245;249m"), current_dir, C.reset,
-            C.dim, #current_entries, C.reset)
+        local left_info
+        if is_preview_zoomed then
+            local sel_entry = current_entries[sel_index]
+            local zoom_name = sel_entry and sel_entry.name or "Preview"
+            left_info = string.format("  %s⚡ LUMINA%s %s│%s %s🔍 [ZOOM]%s %s%s%s %s(%d/%d items)%s",
+                C.bold .. (C.header_accent or C.border_focus), C.reset, C.dim, C.reset,
+                "\27[1;93m", C.reset,
+                C.bold .. (C.header_path or "\27[38;2;241;245;249m"), zoom_name, C.reset,
+                C.dim, sel_index, #current_entries, C.reset)
+        else
+            left_info = string.format("  %s⚡ LUMINA%s %s│%s %s%s%s %s(%d items)%s",
+                C.bold .. (C.header_accent or C.border_focus), C.reset, C.dim, C.reset,
+                C.bold .. (C.header_path or "\27[38;2;241;245;249m"), current_dir, C.reset,
+                C.dim, #current_entries, C.reset)
+        end
         local badge_text = string.format("🎨 %s ", C.name or "Theme")
         local left_len = visual_len(left_info)
         local badge_len = visual_len(badge_text)
@@ -2133,62 +2161,58 @@ local function main(args)
 
         -- 2. Miller Columns Geometry
         local usable_h = math.max(10, term_h - 3)
-        local col1_w = math.max(16, math.floor(term_w * 0.22))
-        local col2_w = math.max(22, math.floor(term_w * 0.32))
-        local col3_w = math.max(24, term_w - col1_w - col2_w)
-
-        local col1_x = 1
-        local col2_x = col1_x + col1_w
-        local col3_x = col2_x + col2_w
-        local start_y = 2
-
-        -- Column 1: Parent Directory
-        local parent_title = is_root_dir(current_dir) and "" or get_dir_display_name(parent_dir)
-        draw_pane(out, col1_x, start_y, col1_w, usable_h, parent_title, false)
         local visible_rows = usable_h - 2
-        for i = 1, visible_rows do
-            local pe = parent_entries[i]
-            if pe then
-                local is_cur_folder = (pe.path == current_dir)
-                local icon, col = get_file_type_info(pe)
-                local line_content = string.format(" %s %s", icon, pe.name)
-                if is_cur_folder then
-                    table.insert(out, draw_row(col1_x, start_y + i, col1_w, C.parent_bg .. line_content .. C.reset))
+        local start_y = 2
+        local col1_w, col2_w, col3_w, col1_x, col2_x, col3_x = calculate_miller_geometry(term_w, is_preview_zoomed)
+
+        if not is_preview_zoomed then
+            -- Column 1: Parent Directory
+            local parent_title = is_root_dir(current_dir) and "" or get_dir_display_name(parent_dir)
+            draw_pane(out, col1_x, start_y, col1_w, usable_h, parent_title, false)
+            for i = 1, visible_rows do
+                local pe = parent_entries[i]
+                if pe then
+                    local is_cur_folder = (pe.path == current_dir)
+                    local icon, col = get_file_type_info(pe)
+                    local line_content = string.format(" %s %s", icon, pe.name)
+                    if is_cur_folder then
+                        table.insert(out, draw_row(col1_x, start_y + i, col1_w, C.parent_bg .. line_content .. C.reset))
+                    else
+                        table.insert(out, draw_row(col1_x, start_y + i, col1_w, col .. line_content .. C.reset))
+                    end
                 else
-                    table.insert(out, draw_row(col1_x, start_y + i, col1_w, col .. line_content .. C.reset))
+                    table.insert(out, draw_row(col1_x, start_y + i, col1_w, ""))
                 end
-            else
-                table.insert(out, draw_row(col1_x, start_y + i, col1_w, ""))
             end
-        end
 
-        -- Column 2: Current Directory (Active Cursor)
-        local cur_title = string.format("%s [%s]", get_dir_display_name(current_dir), sort_labels[sort_mode] or sort_mode)
-        draw_pane(out, col2_x, start_y, col2_w, usable_h, cur_title, true)
+            -- Column 2: Current Directory (Active Cursor)
+            local cur_title = string.format("%s [%s]", get_dir_display_name(current_dir), sort_labels[sort_mode] or sort_mode)
+            draw_pane(out, col2_x, start_y, col2_w, usable_h, cur_title, true)
 
-        -- Scroll offset for current directory
-        local page_offset = 1
-        if sel_index > visible_rows then
-            page_offset = sel_index - visible_rows + 1
-        end
-        prev_page_offset = page_offset
+            -- Scroll offset for current directory
+            local page_offset = 1
+            if sel_index > visible_rows then
+                page_offset = sel_index - visible_rows + 1
+            end
+            prev_page_offset = page_offset
 
-        for i = 1, visible_rows do
-            local idx = page_offset + i - 1
-            local e = current_entries[idx]
-            if e then
-                local is_sel = (idx == sel_index)
-                local is_tagged = selected_paths[e.path]
-                local icon, col = get_file_type_info(e)
-                local tag_badge = is_tagged and "\27[1;32m[✓]\27[0m " or ""
-                local line_content = string.format(" %s%s %-18s %s", tag_badge, icon, e.name, e.size_str)
-                if is_sel then
-                    table.insert(out, draw_row(col2_x, start_y + i, col2_w, C.cursor_bg .. "▶" .. line_content .. C.reset))
+            for i = 1, visible_rows do
+                local idx = page_offset + i - 1
+                local e = current_entries[idx]
+                if e then
+                    local is_sel = (idx == sel_index)
+                    local is_tagged = selected_paths[e.path]
+                    local icon, col = get_file_type_info(e)
+                    local tag_badge = is_tagged and "\27[1;32m[✓]\27[0m " or ""
+                    local line_content = string.format(" %s%s %-18s %s", tag_badge, icon, e.name, e.size_str)
+                    if is_sel then
+                        table.insert(out, draw_row(col2_x, start_y + i, col2_w, C.cursor_bg .. "▶" .. line_content .. C.reset))
+                    else
+                        table.insert(out, draw_row(col2_x, start_y + i, col2_w, col .. " " .. line_content .. C.reset))
+                    end
                 else
-                    table.insert(out, draw_row(col2_x, start_y + i, col2_w, col .. " " .. line_content .. C.reset))
+                    table.insert(out, draw_row(col2_x, start_y + i, col2_w, ""))
                 end
-            else
-                table.insert(out, draw_row(col2_x, start_y + i, col2_w, ""))
             end
         end
 
@@ -2213,11 +2237,21 @@ local function main(args)
         preview_scroll_offset = math.max(0, math.min(preview_scroll_offset, max_scroll))
 
         local preview_title = sel_entry and sel_entry.name or "Preview"
-        if #preview_lines > visible_rows then
+        if is_preview_zoomed then
+            local icon = sel_entry and get_file_type_info(sel_entry) or ""
+            local scroll_info = ""
+            if #preview_lines > visible_rows then
+                local pct = math.floor((preview_scroll_offset / math.max(1, max_scroll)) * 100)
+                scroll_info = string.format(" (Line %d/%d · %d%%)", preview_scroll_offset + 1, #preview_lines, pct)
+            else
+                scroll_info = string.format(" (%d lines)", #preview_lines)
+            end
+            preview_title = string.format("🔍 ZOOM: %s %s%s", icon, sel_entry and sel_entry.name or "Preview", scroll_info)
+        elseif #preview_lines > visible_rows then
             local pct = math.floor((preview_scroll_offset / math.max(1, max_scroll)) * 100)
             preview_title = string.format("%s (%d%%)", preview_title, pct)
         end
-        draw_pane(out, col3_x, start_y, col3_w, usable_h, preview_title, false)
+        draw_pane(out, col3_x, start_y, col3_w, usable_h, preview_title, is_preview_zoomed)
 
         for i = 1, visible_rows do
             local pline = preview_lines[preview_scroll_offset + i] or ""
@@ -2251,14 +2285,17 @@ local function main(args)
         elseif #filter_query > 0 then
             status_text = string.format("%sFilter: /%s\27[0m", C.status_accent or "\27[1;38;2;251;191;36m", filter_query)
             help_hint = "[h/l] Nav  [Space/v] Tag  [s] Sort  [j/k] Move  [/] Filter  [f] Find  [Esc] Clear"
+        elseif is_preview_zoomed then
+            status_text = string.format("%s🔍 ZOOM PREVIEW: %s%s", "\27[1;93m", sel_entry and sel_entry.name or "", C.reset)
+            help_hint = "[j/k/PgDn/PgUp] Scroll  [n/p] Next/Prev  [z/q/Esc] Unzoom"
         elseif status_message then
             status_text = status_message
             local op_hint = (clip_cnt > 0) and "  [p] Paste" or ""
-            help_hint = string.format("[?] Help  [h/l] Nav  [Space] Tag  [y/d] Copy/Cut%s  [a] New  [D] Del  [q] Quit", op_hint)
+            help_hint = string.format("[?] Help  [h/l] Nav  [z] Zoom  [Space] Tag  [y/d] Copy/Cut%s  [a] New  [D] Del  [q] Quit", op_hint)
         else
             status_text = string.format("%s%s%s%s%s", clip_badge, sel_badge, C.dim, sel_entry and sel_entry.path or current_dir, C.reset)
             local op_hint = (clip_cnt > 0) and "  [p] Paste" or ""
-            help_hint = string.format("[?] Help  [h/l] Nav  [Space] Tag  [y/d] Copy/Cut%s  [a] New  [D] Del  [q] Quit", op_hint)
+            help_hint = string.format("[?] Help  [h/l] Nav  [z] Zoom  [Space] Tag  [y/d] Copy/Cut%s  [a] New  [D] Del  [q] Quit", op_hint)
         end
         local footer_line = string.format("\27[%d;1H\27[2K  %s \27[90m│\27[0m \27[90m%s\27[0m",
             footer_y, status_text, help_hint)
@@ -2280,7 +2317,7 @@ local function main(args)
             page_offset = sel_index - visible_rows + 1
         end
 
-        if page_offset ~= prev_page_offset or raw_cols ~= last_w or raw_rows ~= last_h then
+        if is_preview_zoomed or page_offset ~= prev_page_offset or raw_cols ~= last_w or raw_rows ~= last_h then
             render_full_screen()
             return
         end
@@ -2508,8 +2545,24 @@ local function main(args)
                         selected_paths[e.path] = e
                     end
                 end
+            elseif k == "z" then
+                local sel = current_entries[sel_index]
+                if sel then
+                    is_preview_zoomed = not is_preview_zoomed
+                    if is_preview_zoomed then
+                        preview_scroll_offset = 0
+                        preview_pending = true
+                    end
+                    set_status_message(is_preview_zoomed and "🔍 Preview Zoom: ON (100% Width)" or "🔍 Preview Zoom: OFF (Miller Columns)")
+                    needs_redraw = true
+                else
+                    set_status_message("No item to preview")
+                end
             elseif k == "q" or k == "ESC" or k == "\3" then
-                if #filter_query > 0 then
+                if is_preview_zoomed and k ~= "\3" then
+                    is_preview_zoomed = false
+                    needs_redraw = true
+                elseif #filter_query > 0 then
                     filter_query = ""
                     reload_current()
                 elseif count_selected() > 0 and k == "ESC" then
@@ -2517,12 +2570,32 @@ local function main(args)
                 else
                     break
                 end
-            elseif k == "DOWN" or k == "j" then
+            elseif is_preview_zoomed and (k == "n" or k == "]" or k == "TAB") then
                 if sel_index < #current_entries then
+                    sel_index = sel_index + 1
+                    preview_scroll_offset = 0
+                    preview_pending = true
+                    needs_redraw = true
+                end
+            elseif is_preview_zoomed and (k == "p" or k == "[" or k == "SHIFT_TAB") then
+                if sel_index > 1 then
+                    sel_index = sel_index - 1
+                    preview_scroll_offset = 0
+                    preview_pending = true
+                    needs_redraw = true
+                end
+            elseif k == "DOWN" or k == "j" then
+                if is_preview_zoomed then
+                    preview_scroll_offset = preview_scroll_offset + 1
+                    needs_redraw = true
+                elseif sel_index < #current_entries then
                     sel_index = sel_index + 1
                 end
             elseif k == "UP" or k == "k" then
-                if sel_index > 1 then
+                if is_preview_zoomed then
+                    preview_scroll_offset = math.max(0, preview_scroll_offset - 1)
+                    needs_redraw = true
+                elseif sel_index > 1 then
                     sel_index = sel_index - 1
                 end
             elseif k == "J" then
@@ -2535,28 +2608,71 @@ local function main(args)
                 needs_redraw = true
             elseif k == "PAGE_DOWN" then
                 local _, term_h = get_terminal_size()
-                sel_index = math.min(#current_entries, sel_index + math.max(4, term_h - 6))
+                if is_preview_zoomed then
+                    preview_scroll_offset = preview_scroll_offset + math.max(4, term_h - 6)
+                    needs_redraw = true
+                else
+                    sel_index = math.min(#current_entries, sel_index + math.max(4, term_h - 6))
+                end
             elseif k == "PAGE_UP" then
                 local _, term_h = get_terminal_size()
-                sel_index = math.max(1, sel_index - math.max(4, term_h - 6))
+                if is_preview_zoomed then
+                    preview_scroll_offset = math.max(0, preview_scroll_offset - math.max(4, term_h - 6))
+                    needs_redraw = true
+                else
+                    sel_index = math.max(1, sel_index - math.max(4, term_h - 6))
+                end
             elseif k == "\4" or k == "CTRL_D" then
                 local _, term_h = get_terminal_size()
-                sel_index = math.min(#current_entries, sel_index + math.max(4, math.floor((term_h - 6) / 2)))
+                if is_preview_zoomed then
+                    preview_scroll_offset = preview_scroll_offset + math.max(4, math.floor((term_h - 6) / 2))
+                    needs_redraw = true
+                else
+                    sel_index = math.min(#current_entries, sel_index + math.max(4, math.floor((term_h - 6) / 2)))
+                end
             elseif k == "\21" or k == "CTRL_U" then
                 local _, term_h = get_terminal_size()
-                sel_index = math.max(1, sel_index - math.max(4, math.floor((term_h - 6) / 2)))
+                if is_preview_zoomed then
+                    preview_scroll_offset = math.max(0, preview_scroll_offset - math.max(4, math.floor((term_h - 6) / 2)))
+                    needs_redraw = true
+                else
+                    sel_index = math.max(1, sel_index - math.max(4, math.floor((term_h - 6) / 2)))
+                end
             elseif k == "\6" or k == "CTRL_F" then
                 local _, term_h = get_terminal_size()
-                sel_index = math.min(#current_entries, sel_index + math.max(4, term_h - 6))
+                if is_preview_zoomed then
+                    preview_scroll_offset = preview_scroll_offset + math.max(4, term_h - 6)
+                    needs_redraw = true
+                else
+                    sel_index = math.min(#current_entries, sel_index + math.max(4, term_h - 6))
+                end
             elseif k == "\2" or k == "CTRL_B" then
                 local _, term_h = get_terminal_size()
-                sel_index = math.max(1, sel_index - math.max(4, term_h - 6))
+                if is_preview_zoomed then
+                    preview_scroll_offset = math.max(0, preview_scroll_offset - math.max(4, term_h - 6))
+                    needs_redraw = true
+                else
+                    sel_index = math.max(1, sel_index - math.max(4, term_h - 6))
+                end
             elseif k == "HOME" then
-                sel_index = 1
+                if is_preview_zoomed then
+                    preview_scroll_offset = 0
+                    needs_redraw = true
+                else
+                    sel_index = 1
+                end
             elseif k == "END" or k == "G" then
-                sel_index = math.max(1, #current_entries)
+                if is_preview_zoomed then
+                    preview_scroll_offset = 999999
+                    needs_redraw = true
+                else
+                    sel_index = math.max(1, #current_entries)
+                end
             elseif k == "g" then
-                if g_prefix then
+                if is_preview_zoomed then
+                    preview_scroll_offset = 0
+                    needs_redraw = true
+                elseif g_prefix then
                     -- 'gg': jump to top
                     sel_index = 1
                     g_prefix = false
@@ -2592,9 +2708,13 @@ local function main(args)
                 preview_pending = true
                 reload_current()
             elseif k == "LEFT" or k == "h" or k == "BACKSPACE" then
-                g_prefix = false
-                -- Move to parent directory
-                if not is_root_dir(current_dir) then
+                if is_preview_zoomed then
+                    is_preview_zoomed = false
+                    needs_redraw = true
+                else
+                    g_prefix = false
+                    -- Move to parent directory
+                    if not is_root_dir(current_dir) then
                     local prev_dir = current_dir
                     current_dir = get_parent_dir(current_dir)
                     filter_query = ""
@@ -2613,6 +2733,7 @@ local function main(args)
                         end
                     end
                 end
+            end
             elseif k == "RIGHT" or k == "l" or k == "ENTER" then
                 -- Open selected directory; Enter also edits supported text files.
                 local sel = current_entries[sel_index]
@@ -2819,7 +2940,7 @@ local function main(args)
             elseif sel_index ~= previous_selection then
                 preview_scroll_offset = 0
                 preview_pending = true
-                if (k == "DOWN" or k == "j" or k == "UP" or k == "k" or k == " " or k == "v")
+                if not is_preview_zoomed and (k == "DOWN" or k == "j" or k == "UP" or k == "k" or k == " " or k == "v")
                     and not is_searching and not is_sorting and not mark_mode and not jump_mode and #filter_query == 0 then
                     render_selection_differential(previous_selection, sel_index)
                     needs_redraw = false
@@ -2858,6 +2979,7 @@ local M = {
     clear_preview_cache             = clear_preview_cache,
     preview_cache_get               = preview_cache_get,
     should_render_preview_instantly = should_render_preview_instantly,
+    calculate_miller_geometry       = calculate_miller_geometry,
     main                            = main,
 }
 
