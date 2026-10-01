@@ -2069,6 +2069,7 @@ local function show_fuzzy_finder(root_dir, show_hidden)
     while true do
         local k = read_key()
         if k then
+            if k == "SPACE" then k = " " end
             if k == "ESC" or k == "\3" then
                 return nil
             elseif k == "ENTER" then
@@ -2177,6 +2178,7 @@ local function show_input_modal(title, prompt_label, default_text)
     while true do
         local k = read_key()
         if k then
+            if k == "SPACE" then k = " " end
             if k == "ESC" or k == "\3" then
                 return nil
             elseif k == "ENTER" then
@@ -2324,6 +2326,7 @@ local function show_command_modal(current_file, tagged_files, current_dir)
     while true do
         local k = read_key()
         if k then
+            if k == "SPACE" then k = " " end
             if k == "ESC" or k == "\3" then
                 return nil
             elseif k == "ENTER" then
@@ -3206,6 +3209,7 @@ local function main(args)
             status_message = nil
             needs_redraw = true
             if is_searching then
+                if k == "SPACE" then k = " " end
                 if k == "ENTER" then
                     is_searching = false
                 elseif k == "ESC" or k == "\3" then
@@ -3239,6 +3243,7 @@ local function main(args)
                     reload_current()
                 end
             elseif preview_search_mode then
+                if k == "SPACE" then k = " " end
                 local _, term_h = get_terminal_size()
                 local usable_h = math.max(10, term_h - 3)
                 local visible_rows = usable_h - 2
@@ -3330,7 +3335,7 @@ local function main(args)
                 jump_mode = true
             elseif k == "s" and not g_prefix then
                 is_sorting = true
-            elseif k == " " or k == "v" then
+            elseif k == "SPACE" or k == " " or k == "v" then
                 -- Space / v: Toggle tagging for current entry and advance cursor
                 local cur_entry = current_entries[sel_index]
                 if cur_entry then
@@ -3866,7 +3871,7 @@ local function main(args)
             elseif sel_index ~= previous_selection then
                 preview_scroll_offset = 0
                 preview_pending = true
-                if not is_preview_zoomed and (k == "DOWN" or k == "j" or k == "UP" or k == "k" or k == " " or k == "v")
+                if not is_preview_zoomed and (k == "DOWN" or k == "j" or k == "UP" or k == "k" or k == "SPACE" or k == " " or k == "v")
                     and not is_searching and not preview_search_mode and not is_disk_usage_mode and not is_sorting and not mark_mode and not jump_mode and #filter_query == 0 then
                     render_selection_differential(previous_selection, sel_index)
                     needs_redraw = false

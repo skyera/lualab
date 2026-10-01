@@ -1871,6 +1871,12 @@ do
     assert_true(l_code31:find('k%s*==%s*":"%s*or%s*k%s*==%s*"!"') ~= nil or l_code31:find('k%s*==%s*"!"%s*or%s*k%s*==%s*":"') ~= nil,
         "lumina.lua binds : and ! to command runner")
     assert_true(l_code31:find('key%s*=%s*":,%s*!"') ~= nil, "show_help_modal documents : and ! shortcuts")
+
+    -- 11. Verify SPACE key normalization across text modals & normal tagging
+    assert_true(l_code31:find('if k%s*==%s*"SPACE"%s*then%s*k%s*=%s*" "%s*end') ~= nil,
+        "lumina.lua normalizes SPACE key in command modal")
+    assert_true(l_code31:find('k%s*==%s*"SPACE"%s*or%s*k%s*==%s*" "%s*or%s*k%s*==%s*"v"') ~= nil,
+        "lumina.lua binds SPACE key for tagging in normal mode")
 end
 
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
