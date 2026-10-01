@@ -58,7 +58,7 @@ local posix_stat
 local devnull = is_windows and "nul" or "/dev/null"
 local popen_rb = is_windows and "rb" or "r"
 
-local enable_raw_mode, disable_raw_mode, get_terminal_size, read_key
+local enable_raw_mode, disable_raw_mode, suspend_raw_mode, resume_raw_mode, get_terminal_size, read_key
 local read_dir_entries, resolve_canonical_path, get_parent_dir
 local in_raw_mode = false
 local kernel32
@@ -102,6 +102,7 @@ if is_windows then
         void* FindFirstFileA(const char* lpFileName, WIN32_FIND_DATAA* lpFindFileData);
         int   FindNextFileA(void* hFindFile, WIN32_FIND_DATAA* lpFindFileData);
         int   FindClose(void* hFindFile);
+        int FlushConsoleInputBuffer(HANDLE hConsoleInput);
         char* _fullpath(char *absPath, const char *relPath, size_t maxLength);
     ]]
 
@@ -139,6 +140,24 @@ if is_windows then
             kernel32.SetConsoleMode(hOut, orig_out_mode[0])
             in_raw_mode = false
         end
+    end
+
+    suspend_raw_mode = function()
+        local hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+        local hOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        kernel32.SetConsoleMode(hIn, orig_in_mode[0])
+        kernel32.SetConsoleMode(hOut, orig_out_mode[0])
+        pcall(function() kernel32.FlushConsoleInputBuffer(hIn) end)
+        io.write("\27[?25h\27[?7h")
+        io.flush()
+    end
+
+    resume_raw_mode = function()
+        local hIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+        local raw_mode = bit.band(orig_in_mode[0], bit.bnot(0x0001 + 0x0002 + 0x0004))
+        kernel32.SetConsoleMode(hIn, raw_mode)
+        io.write("\27[?25l\27[?7l")
+        io.flush()
     end
 
     get_terminal_size = function()
@@ -238,6 +257,7 @@ ffi.cdef(posix_termios_cdef[[
 
         int tcgetattr(int fd, struct termios *termios_p);
         int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
+        int tcflush(int fd, int queue_selector);
 
         struct pollfd {
             int   fd;
@@ -362,6 +382,19 @@ ffi.cdef(posix_termios_cdef[[
             ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
             in_raw_mode = false
         end
+    end
+
+    suspend_raw_mode = function()
+        ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
+        pcall(function() ffi.C.tcflush(STDIN_FILENO, 0) end)
+        io.write("\27[?25h\27[?7h")
+        io.flush()
+    end
+
+    resume_raw_mode = function()
+        ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
+        io.write("\27[?25l\27[?7l")
+        io.flush()
     end
 
     get_terminal_size = function()
@@ -980,8 +1013,7 @@ local function expand_command_macros(cmd, current_file, tagged_files, current_di
 end
 
 local function execute_shell_command(expanded_cmd, target_dir, non_interactive)
-    disable_raw_mode()
-    io.write("\27[?25h")
+    suspend_raw_mode()
     io.write("\27[H\27[2J")
     io.flush()
     print(string.format("\27[1;36m[Lumina]\27[0m Executing shell command in \27[1m%s\27[0m:", target_dir))
@@ -996,24 +1028,14 @@ local function execute_shell_command(expanded_cmd, target_dir, non_interactive)
 
     local ok, exit_type, exit_code = os.execute(full_cmd)
 
-    if not non_interactive then
+    if not non_interactive and ffi.C.isatty(0) == 1 then
         print("\n\27[90m--------------------------------------------------\27[0m")
-        io.write("\27[1;33m[Lumina] Press any key to return...\27[0m ")
+        io.write("\27[1;33m[Lumina] Press Enter to return...\27[0m ")
         io.flush()
-
-        enable_raw_mode()
-        while read_key(20) do end
-        local max_wait = 200
-        while max_wait > 0 do
-            max_wait = max_wait - 1
-            local k = read_key(50)
-            if k then break end
-        end
-    else
-        enable_raw_mode()
+        io.read()
     end
 
-    io.write("\27[?25l")
+    resume_raw_mode()
     io.write("\27[H\27[2J")
     io.flush()
 
@@ -3923,6 +3945,8 @@ local M = {
     create_history_tracker          = create_history_tracker,
     expand_command_macros           = expand_command_macros,
     execute_shell_command           = execute_shell_command,
+    suspend_raw_mode                = suspend_raw_mode,
+    resume_raw_mode                 = resume_raw_mode,
     show_command_modal              = show_command_modal,
     render_command_modal_frame      = render_command_modal_frame,
     main                            = main,

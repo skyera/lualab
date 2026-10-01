@@ -1877,6 +1877,8 @@ do
         "lumina.lua normalizes SPACE key in command modal")
     assert_true(l_code31:find('k%s*==%s*"SPACE"%s*or%s*k%s*==%s*" "%s*or%s*k%s*==%s*"v"') ~= nil,
         "lumina.lua binds SPACE key for tagging in normal mode")
+    assert_true(type(Lumina.suspend_raw_mode) == "function", "Lumina exports suspend_raw_mode")
+    assert_true(type(Lumina.resume_raw_mode) == "function", "Lumina exports resume_raw_mode")
 end
 
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
