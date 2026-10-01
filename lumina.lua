@@ -37,6 +37,9 @@
       * D                : Delete selected or tagged items (with confirmation)
       * s                : Sort mode menu (Name, Size, Time, Ext)
       * z                : Toggle full-width preview zoom (100% width)
+      * / (in zoom)      : Search text and highlight matches inside zoomed preview
+      * n / N            : Jump to next / previous search match in zoomed preview
+      * U                : Toggle visual disk usage mode (hierarchical space usage bars)
       * .                : Toggle hidden files (dotfiles)
       * r                : Refresh current directory
       * q / ESC          : Quit (or clear selection/filter)
@@ -661,6 +664,93 @@ local function format_bytes(bytes)
     end
 end
 
+local function strip_ansi(str)
+    return tostring(str):gsub("\27%[[%d;]*[a-zA-Z]", ""):gsub("[\r\n]", "")
+end
+
+local function highlight_search(line, query, is_active)
+    if not query or #query == 0 then return line end
+    local clean = strip_ansi(line)
+    local q_lower = query:lower()
+    local c_lower = clean:lower()
+    local s_idx = c_lower:find(q_lower, 1, true)
+    if not s_idx then return line end
+
+    -- Tokenize line into ANSI escapes vs text characters
+    local tokens = {}
+    local char_to_token = {}
+    local p = 1
+    local len = #line
+    while p <= len do
+        local esc = line:sub(p):match("^\27%[[%d;]*[a-zA-Z]")
+        if esc then
+            table.insert(tokens, { is_esc = true, text = esc })
+            p = p + #esc
+        else
+            local ch = line:sub(p, p)
+            table.insert(tokens, { is_esc = false, text = ch })
+            table.insert(char_to_token, #tokens)
+            p = p + 1
+        end
+    end
+
+    -- Find all occurrences in clean text
+    local matches = {}
+    local curr = 1
+    while curr <= #clean do
+        local ms, me = c_lower:find(q_lower, curr, true)
+        if not ms then break end
+        table.insert(matches, { ms = ms, me = me })
+        curr = me + 1
+    end
+
+    local hl_on = is_active and "\27[1;30;48;2;251;191;36m" or "\27[1;37;48;2;202;138;4m"
+    local hl_off = "\27[49m\27[0m"
+
+    local is_hl = {}
+    for _, m in ipairs(matches) do
+        for ci = m.ms, m.me do
+            local ti = char_to_token[ci]
+            if ti then is_hl[ti] = true end
+        end
+    end
+
+    local out = {}
+    local currently_highlighting = false
+    for idx, tok in ipairs(tokens) do
+        if tok.is_esc then
+            table.insert(out, tok.text)
+        else
+            if is_hl[idx] and not currently_highlighting then
+                table.insert(out, hl_on)
+                currently_highlighting = true
+            elseif not is_hl[idx] and currently_highlighting then
+                table.insert(out, hl_off)
+                currently_highlighting = false
+            end
+            table.insert(out, tok.text)
+        end
+    end
+    if currently_highlighting then
+        table.insert(out, hl_off)
+    end
+    return table.concat(out)
+end
+
+local function update_preview_matches(preview_lines, query)
+    local matches = {}
+    if not query or #query == 0 or not preview_lines then return matches end
+    local q_lower = query:lower()
+    for idx, line in ipairs(preview_lines) do
+        local clean = strip_ansi(line):lower()
+        if clean:find(q_lower, 1, true) then
+            table.insert(matches, idx)
+        end
+    end
+    return matches
+end
+
+
 -- =========================================================================
 -- Fuzzy Search Algorithm
 -- Computes case-insensitive fuzzy matching with word-boundary, acronym, and
@@ -1007,6 +1097,46 @@ else
         if not parent or parent == "" then return "/" end
         return parent
     end
+end
+
+local function calculate_dir_size(path, max_depth, visited)
+    max_depth = max_depth or 8
+    visited = visited or {}
+    if max_depth <= 0 then return 0 end
+    local canon = resolve_canonical_path and resolve_canonical_path(path) or path
+    if visited[canon] then return 0 end
+    visited[canon] = true
+
+    local total = 0
+    local entries = read_dir_entries(path, true)
+    for _, e in ipairs(entries) do
+        if e.is_dir then
+            total = total + calculate_dir_size(e.path, max_depth - 1, visited)
+        else
+            total = total + (e.size or 0)
+        end
+    end
+    return total
+end
+
+local function make_usage_bar(pct, bar_w)
+    bar_w = bar_w or 10
+    pct = math.max(0, math.min(100, pct or 0))
+    local filled = math.floor((pct / 100) * bar_w + 0.5)
+    local empty = math.max(0, bar_w - filled)
+    local color = "\27[38;2;34;197;94m" -- green
+    if pct >= 80 then
+        color = "\27[38;2;239;68;68m" -- red
+    elseif pct >= 50 then
+        color = "\27[38;2;245;158;11m" -- amber/yellow
+    end
+    return string.format("%s[%s%s]%s %3d%%",
+        color,
+        string.rep("■", filled),
+        string.rep("□", empty),
+        "\27[0m",
+        pct
+    )
 end
 
 local function sort_entries(entries, mode)
@@ -1746,6 +1876,9 @@ local function show_help_modal()
         { key = "D",           desc = "Delete tagged or current item" },
         { section = "PREVIEW & TOOLS" },
         { key = "z",           desc = "Toggle full-width preview zoom" },
+        { key = "/ (in zoom)", desc = "Search text in zoomed preview" },
+        { key = "n, N",        desc = "Next / Prev search match in zoom" },
+        { key = "U",           desc = "Toggle visual disk usage mode (bars)" },
         { key = "J, K",        desc = "Scroll preview pane down / up" },
         { key = "m<key>, '<key>", desc = "Set / Jump to directory bookmark" },
         { key = "S",           desc = "Spawn interactive shell in current dir" },
@@ -2084,11 +2217,42 @@ local function main(args)
     local g_prefix = false
     local preview_pending = true
     local is_preview_zoomed = false
+    local is_disk_usage_mode = false
+    local dir_size_cache = {}
+    local total_disk_usage = 0
+    local preview_search_mode = false
+    local preview_search_query = ""
+    local preview_matches = {}
+    local preview_match_cursor = 1
+    local current_preview_lines = {}
     local last_w, last_h = get_terminal_size()
 
     -- Initial screen clear
     io.write("\27[H\27[2J")
     io.flush()
+
+    local function populate_disk_usage(entries)
+        local total = 0
+        for _, e in ipairs(entries) do
+            if e.is_dir then
+                if not dir_size_cache[e.path] then
+                    dir_size_cache[e.path] = calculate_dir_size(e.path, 8)
+                end
+                e.disk_size = dir_size_cache[e.path]
+            else
+                e.disk_size = e.size or 0
+            end
+            total = total + (e.disk_size or 0)
+        end
+        total_disk_usage = total
+        table.sort(entries, function(a, b)
+            if (a.disk_size or 0) ~= (b.disk_size or 0) then
+                return (a.disk_size or 0) > (b.disk_size or 0)
+            end
+            return a.name:lower() < b.name:lower()
+        end)
+        return total
+    end
 
     local function reload_current()
         current_entries = read_dir_entries(current_dir, show_hidden)
@@ -2115,6 +2279,9 @@ local function main(args)
         else
             current_entries = sort_entries(current_entries, sort_mode)
         end
+        if is_disk_usage_mode then
+            populate_disk_usage(current_entries)
+        end
         parent_dir = get_parent_dir(current_dir)
         parent_entries = is_root_dir(current_dir) and {} or read_dir_entries(parent_dir, show_hidden)
         sel_index = math.max(1, math.min(sel_index, math.max(1, #current_entries)))
@@ -2139,6 +2306,12 @@ local function main(args)
                 "\27[1;93m", C.reset,
                 C.bold .. (C.header_path or "\27[38;2;241;245;249m"), zoom_name, C.reset,
                 C.dim, sel_index, #current_entries, C.reset)
+        elseif is_disk_usage_mode then
+            left_info = string.format("  %s⚡ LUMINA%s %s│%s %s📊 [DISK USAGE: %s]%s %s%s%s %s(%d items)%s",
+                C.bold .. (C.header_accent or C.border_focus), C.reset, C.dim, C.reset,
+                "\27[1;36m", format_bytes(total_disk_usage), C.reset,
+                C.bold .. (C.header_path or "\27[38;2;241;245;249m"), current_dir, C.reset,
+                C.dim, #current_entries, C.reset)
         else
             left_info = string.format("  %s⚡ LUMINA%s %s│%s %s%s%s %s(%d items)%s",
                 C.bold .. (C.header_accent or C.border_focus), C.reset, C.dim, C.reset,
@@ -2186,7 +2359,12 @@ local function main(args)
             end
 
             -- Column 2: Current Directory (Active Cursor)
-            local cur_title = string.format("%s [%s]", get_dir_display_name(current_dir), sort_labels[sort_mode] or sort_mode)
+            local cur_title
+            if is_disk_usage_mode then
+                cur_title = string.format("%s [📊 USAGE: %s]", get_dir_display_name(current_dir), format_bytes(total_disk_usage))
+            else
+                cur_title = string.format("%s [%s]", get_dir_display_name(current_dir), sort_labels[sort_mode] or sort_mode)
+            end
             draw_pane(out, col2_x, start_y, col2_w, usable_h, cur_title, true)
 
             -- Scroll offset for current directory
@@ -2204,7 +2382,20 @@ local function main(args)
                     local is_tagged = selected_paths[e.path]
                     local icon, col = get_file_type_info(e)
                     local tag_badge = is_tagged and "\27[1;32m[✓]\27[0m " or ""
-                    local line_content = string.format(" %s%s %-18s %s", tag_badge, icon, e.name, e.size_str)
+                    local line_content
+                    if is_disk_usage_mode then
+                        local max_sz = math.max(1, current_entries[1] and (current_entries[1].disk_size or current_entries[1].size or 0) or 1)
+                        local item_sz = e.disk_size or e.size or 0
+                        local pct = math.min(100, math.floor((item_sz / max_sz) * 100))
+                        local bar_w = math.max(6, math.min(10, math.floor((col2_w - 20) * 0.4)))
+                        local bar = make_usage_bar(pct, bar_w)
+                        local sz_str = format_bytes(item_sz)
+                        local name_w = math.max(6, col2_w - visual_len(bar) - #sz_str - 8)
+                        local trunc_name = truncate(e.name, name_w)
+                        line_content = string.format(" %s%s %s %6s %s", tag_badge, icon, bar, sz_str, trunc_name)
+                    else
+                        line_content = string.format(" %s%s %-18s %s", tag_badge, icon, e.name, e.size_str)
+                    end
                     if is_sel then
                         table.insert(out, draw_row(col2_x, start_y + i, col2_w, C.cursor_bg .. "▶" .. line_content .. C.reset))
                     else
@@ -2232,6 +2423,13 @@ local function main(args)
             preview_pending = false
             preview_lines = { C.dim .. "(Empty Directory)" .. C.reset }
         end
+        current_preview_lines = preview_lines
+
+        if #preview_search_query > 0 then
+            preview_matches = update_preview_matches(preview_lines, preview_search_query)
+        else
+            preview_matches = {}
+        end
 
         local max_scroll = math.max(0, #preview_lines - visible_rows)
         preview_scroll_offset = math.max(0, math.min(preview_scroll_offset, max_scroll))
@@ -2246,7 +2444,12 @@ local function main(args)
             else
                 scroll_info = string.format(" (%d lines)", #preview_lines)
             end
-            preview_title = string.format("🔍 ZOOM: %s %s%s", icon, sel_entry and sel_entry.name or "Preview", scroll_info)
+            if #preview_search_query > 0 then
+                local match_badge = string.format(" [%d/%d matches: '%s']", #preview_matches > 0 and preview_match_cursor or 0, #preview_matches, preview_search_query)
+                preview_title = string.format("🔍 ZOOM%s: %s %s%s", match_badge, icon, sel_entry and sel_entry.name or "Preview", scroll_info)
+            else
+                preview_title = string.format("🔍 ZOOM: %s %s%s", icon, sel_entry and sel_entry.name or "Preview", scroll_info)
+            end
         elseif #preview_lines > visible_rows then
             local pct = math.floor((preview_scroll_offset / math.max(1, max_scroll)) * 100)
             preview_title = string.format("%s (%d%%)", preview_title, pct)
@@ -2254,7 +2457,12 @@ local function main(args)
         draw_pane(out, col3_x, start_y, col3_w, usable_h, preview_title, is_preview_zoomed)
 
         for i = 1, visible_rows do
-            local pline = preview_lines[preview_scroll_offset + i] or ""
+            local actual_line_idx = preview_scroll_offset + i
+            local pline = preview_lines[actual_line_idx] or ""
+            if is_preview_zoomed and #preview_search_query > 0 and #pline > 0 then
+                local is_curr_match = (preview_matches[preview_match_cursor] == actual_line_idx)
+                pline = highlight_search(pline, preview_search_query, is_curr_match)
+            end
             table.insert(out, draw_row(col3_x, start_y + i, col3_w, pline))
         end
 
@@ -2270,6 +2478,9 @@ local function main(args)
         if is_searching then
             status_text = string.format("%s/%s\27[7m \27[0m", C.status_accent or "\27[1;38;2;251;191;36m", search_query)
             help_hint = "\27[90m[Enter] Confirm  [Esc] Cancel  [↑/↓] Select\27[0m"
+        elseif preview_search_mode then
+            status_text = string.format("%s🔍 Search in preview: /%s\27[7m \27[0m", "\27[1;33m", preview_search_query)
+            help_hint = "\27[90m[Enter] Jump  [Esc] Cancel  [Backspace] Delete\27[0m"
         elseif is_sorting then
             status_text = string.format("%sSORT BY:%s [n] Name  [s] Size  [m] Time  [e] Ext  [r] Reverse",
                 C.bold .. (C.status_accent or "\27[1;38;2;251;191;36m"), C.reset)
@@ -2285,17 +2496,23 @@ local function main(args)
         elseif #filter_query > 0 then
             status_text = string.format("%sFilter: /%s\27[0m", C.status_accent or "\27[1;38;2;251;191;36m", filter_query)
             help_hint = "[h/l] Nav  [Space/v] Tag  [s] Sort  [j/k] Move  [/] Filter  [f] Find  [Esc] Clear"
+        elseif is_preview_zoomed and #preview_search_query > 0 then
+            status_text = string.format("🔍 Match %d of %d for '%s'", #preview_matches > 0 and preview_match_cursor or 0, #preview_matches, preview_search_query)
+            help_hint = "[n] Next  [N] Prev  [/] New Search  [Esc] Clear Search  [z] Unzoom"
         elseif is_preview_zoomed then
             status_text = string.format("%s🔍 ZOOM PREVIEW: %s%s", "\27[1;93m", sel_entry and sel_entry.name or "", C.reset)
-            help_hint = "[j/k/PgDn/PgUp] Scroll  [n/p] Next/Prev  [z/q/Esc] Unzoom"
+            help_hint = "[j/k/PgDn/PgUp] Scroll  [/] Search  [n/p] Next/Prev  [z/q/Esc] Unzoom"
+        elseif is_disk_usage_mode then
+            status_text = string.format("📊 DISK USAGE: %s total (%d items)", format_bytes(total_disk_usage), #current_entries)
+            help_hint = "[U] Exit Usage Mode  [h/l] Nav  [Enter] Open  [s] Sort"
         elseif status_message then
             status_text = status_message
             local op_hint = (clip_cnt > 0) and "  [p] Paste" or ""
-            help_hint = string.format("[?] Help  [h/l] Nav  [z] Zoom  [Space] Tag  [y/d] Copy/Cut%s  [a] New  [D] Del  [q] Quit", op_hint)
+            help_hint = string.format("[?] Help  [h/l] Nav  [z] Zoom  [U] Usage  [Space] Tag  [y/d] Copy/Cut%s  [a] New  [D] Del  [q] Quit", op_hint)
         else
             status_text = string.format("%s%s%s%s%s", clip_badge, sel_badge, C.dim, sel_entry and sel_entry.path or current_dir, C.reset)
             local op_hint = (clip_cnt > 0) and "  [p] Paste" or ""
-            help_hint = string.format("[?] Help  [h/l] Nav  [z] Zoom  [Space] Tag  [y/d] Copy/Cut%s  [a] New  [D] Del  [q] Quit", op_hint)
+            help_hint = string.format("[?] Help  [h/l] Nav  [z] Zoom  [U] Usage  [Space] Tag  [y/d] Copy/Cut%s  [a] New  [D] Del  [q] Quit", op_hint)
         end
         local footer_line = string.format("\27[%d;1H\27[2K  %s \27[90m│\27[0m \27[90m%s\27[0m",
             footer_y, status_text, help_hint)
@@ -2317,7 +2534,7 @@ local function main(args)
             page_offset = sel_index - visible_rows + 1
         end
 
-        if is_preview_zoomed or page_offset ~= prev_page_offset or raw_cols ~= last_w or raw_rows ~= last_h then
+        if is_disk_usage_mode or is_preview_zoomed or page_offset ~= prev_page_offset or raw_cols ~= last_w or raw_rows ~= last_h then
             render_full_screen()
             return
         end
@@ -2472,6 +2689,46 @@ local function main(args)
                     sel_index = 1
                     reload_current()
                 end
+            elseif preview_search_mode then
+                local _, term_h = get_terminal_size()
+                local usable_h = math.max(10, term_h - 3)
+                local visible_rows = usable_h - 2
+                if k == "ENTER" then
+                    preview_search_mode = false
+                    if #preview_matches > 0 then
+                        preview_match_cursor = 1
+                        local target_line = preview_matches[1]
+                        preview_scroll_offset = math.max(0, target_line - math.max(2, math.floor(visible_rows / 4)))
+                        set_status_message(string.format("🔍 Match 1 of %d for '%s' ([n] next, [N] prev)", #preview_matches, preview_search_query))
+                    else
+                        set_status_message(string.format("🔍 No matches for '%s'", preview_search_query))
+                    end
+                elseif k == "ESC" or k == "\3" then
+                    preview_search_mode = false
+                    preview_search_query = ""
+                    preview_matches = {}
+                    set_status_message("🔍 Preview search cancelled")
+                elseif k == "BACKSPACE" then
+                    if #preview_search_query > 0 then
+                        preview_search_query = preview_search_query:sub(1, -2)
+                        preview_matches = update_preview_matches(current_preview_lines, preview_search_query)
+                        preview_match_cursor = 1
+                        if #preview_matches > 0 then
+                            local target_line = preview_matches[1]
+                            preview_scroll_offset = math.max(0, target_line - math.max(2, math.floor(visible_rows / 4)))
+                        end
+                    else
+                        preview_search_mode = false
+                    end
+                elseif #k == 1 and k:byte(1) >= 32 and k:byte(1) <= 126 then
+                    preview_search_query = preview_search_query .. k
+                    preview_matches = update_preview_matches(current_preview_lines, preview_search_query)
+                    preview_match_cursor = 1
+                    if #preview_matches > 0 then
+                        local target_line = preview_matches[1]
+                        preview_scroll_offset = math.max(0, target_line - math.max(2, math.floor(visible_rows / 4)))
+                    end
+                end
             elseif is_sorting then
                 is_sorting = false
                 if k == "n" then
@@ -2552,15 +2809,49 @@ local function main(args)
                     if is_preview_zoomed then
                         preview_scroll_offset = 0
                         preview_pending = true
+                    else
+                        preview_search_mode = false
+                        preview_search_query = ""
+                        preview_matches = {}
                     end
                     set_status_message(is_preview_zoomed and "🔍 Preview Zoom: ON (100% Width)" or "🔍 Preview Zoom: OFF (Miller Columns)")
                     needs_redraw = true
                 else
                     set_status_message("No item to preview")
                 end
+            elseif is_preview_zoomed and k == "/" then
+                preview_search_mode = true
+                preview_search_query = ""
+                preview_matches = {}
+                preview_match_cursor = 1
+                needs_redraw = true
+            elseif is_preview_zoomed and #preview_search_query > 0 and (k == "n" or k == "N") then
+                if #preview_matches > 0 then
+                    local _, term_h = get_terminal_size()
+                    local usable_h = math.max(10, term_h - 3)
+                    local visible_rows = usable_h - 2
+                    if k == "n" then
+                        preview_match_cursor = (preview_match_cursor % #preview_matches) + 1
+                    else
+                        preview_match_cursor = (preview_match_cursor - 2 + #preview_matches) % #preview_matches + 1
+                    end
+                    local target_line = preview_matches[preview_match_cursor]
+                    preview_scroll_offset = math.max(0, target_line - math.max(2, math.floor(visible_rows / 4)))
+                    set_status_message(string.format("🔍 Match %d of %d for '%s'", preview_match_cursor, #preview_matches, preview_search_query))
+                    needs_redraw = true
+                else
+                    set_status_message(string.format("🔍 No matches for '%s'", preview_search_query))
+                end
             elseif k == "q" or k == "ESC" or k == "\3" then
-                if is_preview_zoomed and k ~= "\3" then
+                if is_preview_zoomed and #preview_search_query > 0 and k == "ESC" then
+                    preview_search_query = ""
+                    preview_matches = {}
+                    set_status_message("🔍 Search cleared")
+                    needs_redraw = true
+                elseif is_preview_zoomed and k ~= "\3" then
                     is_preview_zoomed = false
+                    preview_search_query = ""
+                    preview_matches = {}
                     needs_redraw = true
                 elseif #filter_query > 0 then
                     filter_query = ""
@@ -2773,6 +3064,17 @@ local function main(args)
             elseif k == "r" then
                 -- Refresh
                 reload_current()
+            elseif k == "U" then
+                is_disk_usage_mode = not is_disk_usage_mode
+                if is_disk_usage_mode then
+                    populate_disk_usage(current_entries)
+                    set_status_message("📊 Disk Usage Mode: ON (sorted by largest disk usage)")
+                else
+                    reload_current()
+                    set_status_message("📊 Disk Usage Mode: OFF")
+                end
+                sel_index = 1
+                needs_redraw = true
             elseif k == "/" then
                 -- In-TUI Vim-style fuzzy search filter
                 is_searching = true
@@ -2941,7 +3243,7 @@ local function main(args)
                 preview_scroll_offset = 0
                 preview_pending = true
                 if not is_preview_zoomed and (k == "DOWN" or k == "j" or k == "UP" or k == "k" or k == " " or k == "v")
-                    and not is_searching and not is_sorting and not mark_mode and not jump_mode and #filter_query == 0 then
+                    and not is_searching and not preview_search_mode and not is_disk_usage_mode and not is_sorting and not mark_mode and not jump_mode and #filter_query == 0 then
                     render_selection_differential(previous_selection, sel_index)
                     needs_redraw = false
                 else
@@ -2980,6 +3282,11 @@ local M = {
     preview_cache_get               = preview_cache_get,
     should_render_preview_instantly = should_render_preview_instantly,
     calculate_miller_geometry       = calculate_miller_geometry,
+    calculate_dir_size              = calculate_dir_size,
+    make_usage_bar                  = make_usage_bar,
+    strip_ansi                      = strip_ansi,
+    highlight_search                = highlight_search,
+    update_preview_matches          = update_preview_matches,
     main                            = main,
 }
 

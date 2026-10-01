@@ -1352,56 +1352,209 @@ assert_true(l_code25:find("✓ Deleted") ~= nil, "Delete operation (D) sets conf
 assert_true(l_code25:find("🎨 Theme:") ~= nil, "Cycle theme (t/T) sets confirmation toast")
 
 -- Test Suite 26: Full-Width Zoom Preview Mode (Key 'z') --
-print("\n-- Test Suite 26: Full-Width Zoom Preview Mode (Key 'z') --")
-local lf_suite26 = io.open("lumina.lua", "r")
-local l_code26 = lf_suite26:read("*all")
-lf_suite26:close()
+do
+    print("\n-- Test Suite 26: Full-Width Zoom Preview Mode (Key 'z') --")
+    local lf_suite26 = io.open("lumina.lua", "r")
+    local l_code26 = lf_suite26:read("*all")
+    lf_suite26:close()
 
--- 1. Export and Geometry Calculations
-assert_true(type(Lumina.calculate_miller_geometry) == "function", "Lumina exports calculate_miller_geometry helper")
+    -- 1. Export and Geometry Calculations
+    assert_true(type(Lumina.calculate_miller_geometry) == "function", "Lumina exports calculate_miller_geometry helper")
 
--- Normal 3-column Miller geometry
-local c1_w, c2_w, c3_w, c1_x, c2_x, c3_x = Lumina.calculate_miller_geometry(100, false)
-assert_eq(c1_w, 22, "Normal mode Col 1 width is 22% (22)")
-assert_eq(c2_w, 32, "Normal mode Col 2 width is 32% (32)")
-assert_eq(c3_w, 46, "Normal mode Col 3 width is remaining 46% (46)")
-assert_eq(c1_w + c2_w + c3_w, 100, "Normal mode column widths sum to terminal width (100)")
-assert_eq(c1_x, 1, "Normal mode Col 1 starts at 1")
-assert_eq(c2_x, 23, "Normal mode Col 2 starts at 23")
-assert_eq(c3_x, 55, "Normal mode Col 3 starts at 55")
+    -- Normal 3-column Miller geometry
+    local c1_w, c2_w, c3_w, c1_x, c2_x, c3_x = Lumina.calculate_miller_geometry(100, false)
+    assert_eq(c1_w, 22, "Normal mode Col 1 width is 22% (22)")
+    assert_eq(c2_w, 32, "Normal mode Col 2 width is 32% (32)")
+    assert_eq(c3_w, 46, "Normal mode Col 3 width is remaining 46% (46)")
+    assert_eq(c1_w + c2_w + c3_w, 100, "Normal mode column widths sum to terminal width (100)")
+    assert_eq(c1_x, 1, "Normal mode Col 1 starts at 1")
+    assert_eq(c2_x, 23, "Normal mode Col 2 starts at 23")
+    assert_eq(c3_x, 55, "Normal mode Col 3 starts at 55")
 
--- Zoomed preview mode geometry: 100% full width to Col 3
-local z1_w, z2_w, z3_w, z1_x, z2_x, z3_x = Lumina.calculate_miller_geometry(100, true)
-assert_eq(z1_w, 0, "Zoomed mode Col 1 width is 0")
-assert_eq(z2_w, 0, "Zoomed mode Col 2 width is 0")
-assert_eq(z3_w, 100, "Zoomed mode Col 3 takes 100% width (100)")
-assert_eq(z3_x, 1, "Zoomed mode Col 3 starts at x=1")
+    -- Zoomed preview mode geometry: 100% full width to Col 3
+    local z1_w, z2_w, z3_w, z1_x, z2_x, z3_x = Lumina.calculate_miller_geometry(100, true)
+    assert_eq(z1_w, 0, "Zoomed mode Col 1 width is 0")
+    assert_eq(z2_w, 0, "Zoomed mode Col 2 width is 0")
+    assert_eq(z3_w, 100, "Zoomed mode Col 3 takes 100% width (100)")
+    assert_eq(z3_x, 1, "Zoomed mode Col 3 starts at x=1")
 
-local _, _, z3_80 = Lumina.calculate_miller_geometry(80, true)
-assert_eq(z3_80, 80, "Zoomed mode at 80 cols takes full 80 cols")
+    local _, _, z3_80 = Lumina.calculate_miller_geometry(80, true)
+    assert_eq(z3_80, 80, "Zoomed mode at 80 cols takes full 80 cols")
 
-local _, _, z3_140 = Lumina.calculate_miller_geometry(140, true)
-assert_eq(z3_140, 140, "Zoomed mode at 140 cols takes full 140 cols")
+    local _, _, z3_140 = Lumina.calculate_miller_geometry(140, true)
+    assert_eq(z3_140, 140, "Zoomed mode at 140 cols takes full 140 cols")
 
--- 2. State & Keybindings Verification
-assert_true(l_code26:find("local is_preview_zoomed%s*=%s*false") ~= nil, "lumina.lua declares is_preview_zoomed state")
-assert_true(l_code26:find('elseif k%s*==%s*"z"') ~= nil, "lumina.lua handles 'z' key for preview zoom toggle")
-assert_true(l_code26:find("Preview Zoom: ON") ~= nil, "lumina.lua sets confirmation toast on preview zoom ON")
-assert_true(l_code26:find("Preview Zoom: OFF") ~= nil, "lumina.lua sets confirmation toast on preview zoom OFF")
+    -- 2. State & Keybindings Verification
+    assert_true(l_code26:find("local is_preview_zoomed%s*=%s*false") ~= nil, "lumina.lua declares is_preview_zoomed state")
+    assert_true(l_code26:find('elseif k%s*==%s*"z"') ~= nil, "lumina.lua handles 'z' key for preview zoom toggle")
+    assert_true(l_code26:find("Preview Zoom: ON") ~= nil, "lumina.lua sets confirmation toast on preview zoom ON")
+    assert_true(l_code26:find("Preview Zoom: OFF") ~= nil, "lumina.lua sets confirmation toast on preview zoom OFF")
 
--- 3. Zoom Navigation Controls
-assert_true(l_code26:find("is_preview_zoomed and %(k == \"n\"") ~= nil, "lumina.lua supports 'n' for next file in zoom mode")
-assert_true(l_code26:find("is_preview_zoomed and %(k == \"p\"") ~= nil, "lumina.lua supports 'p' for prev file in zoom mode")
-assert_true(l_code26:find("if is_preview_zoomed then%s*preview_scroll_offset = preview_scroll_offset %+ 1") ~= nil,
-    "lumina.lua scrolls preview down with j/DOWN in zoom mode")
-assert_true(l_code26:find("preview_scroll_offset = math%.max%(0, preview_scroll_offset %- 1%)") ~= nil,
-    "lumina.lua scrolls preview up with k/UP in zoom mode")
-assert_true(l_code26:find("is_preview_zoomed and k ~= \"\\3\" then%s*is_preview_zoomed = false") ~= nil,
-    "lumina.lua exits zoom mode on q / ESC")
+    -- 3. Zoom Navigation Controls
+    assert_true(l_code26:find("is_preview_zoomed and %(k == \"n\"") ~= nil, "lumina.lua supports 'n' for next file in zoom mode")
+    assert_true(l_code26:find("is_preview_zoomed and %(k == \"p\"") ~= nil, "lumina.lua supports 'p' for prev file in zoom mode")
+    assert_true(l_code26:find("if is_preview_zoomed then%s*preview_scroll_offset = preview_scroll_offset %+ 1") ~= nil,
+        "lumina.lua scrolls preview down with j/DOWN in zoom mode")
+    assert_true(l_code26:find("preview_scroll_offset = math%.max%(0, preview_scroll_offset %- 1%)") ~= nil,
+        "lumina.lua scrolls preview up with k/UP in zoom mode")
+    assert_true(l_code26:find("is_preview_zoomed and k ~= \"\\3\" then%s*is_preview_zoomed = false") ~= nil,
+        "lumina.lua exits zoom mode on q / ESC")
 
--- 4. Help Documentation
-assert_true(l_code26:find('key%s*=%s*"z",%s*desc%s*=%s*"Toggle full%-width preview zoom"') ~= nil,
-    "show_help_modal documents 'z' zoom key under PREVIEW & TOOLS")
+    -- 4. Help Documentation
+    assert_true(l_code26:find('key%s*=%s*"z",%s*desc%s*=%s*"Toggle full%-width preview zoom"') ~= nil,
+        "show_help_modal documents 'z' zoom key under PREVIEW & TOOLS")
+end
+
+-- Test Suite 27: In-Preview Search & Match Highlighting (`/`, `n`, `N`) --
+do
+    print("\n-- Test Suite 27: In-Preview Search & Match Highlighting (`/`, `n`, `N`) --")
+    local lf_suite27 = io.open("lumina.lua", "r")
+    local l_code27 = lf_suite27:read("*all")
+    lf_suite27:close()
+
+    -- 1. Helper function exports
+    assert_true(type(Lumina.strip_ansi) == "function", "Lumina exports strip_ansi helper")
+    assert_true(type(Lumina.highlight_search) == "function", "Lumina exports highlight_search helper")
+    assert_true(type(Lumina.update_preview_matches) == "function", "Lumina exports update_preview_matches helper")
+
+    -- 2. strip_ansi functional tests
+    assert_eq(Lumina.strip_ansi("\27[38;2;255;0;0mHello\27[0m World\n"), "Hello World", "strip_ansi strips ANSI escapes and newlines")
+    assert_eq(Lumina.strip_ansi("Pure ASCII Text"), "Pure ASCII Text", "strip_ansi preserves plain ASCII text")
+    assert_eq(Lumina.strip_ansi("📁 Documents / 🚀 Rocket"), "📁 Documents / 🚀 Rocket", "strip_ansi preserves UTF-8 emoji and multi-byte characters")
+
+    -- 3. highlight_search functional tests
+    local sample_line = "local function calculate_total(items)"
+    assert_eq(Lumina.highlight_search(sample_line, ""), sample_line, "highlight_search with empty query returns original string")
+    assert_eq(Lumina.highlight_search(sample_line, "nonexistent"), sample_line, "highlight_search with no match returns original string")
+
+    local hl_res = Lumina.highlight_search(sample_line, "function", false)
+    assert_true(hl_res:find("function") ~= nil, "highlight_search contains matched word")
+    assert_true(hl_res:find("\27%[") ~= nil, "highlight_search inserts ANSI highlight codes")
+    assert_eq(Lumina.strip_ansi(hl_res), sample_line, "strip_ansi on highlight_search result matches original clean text")
+
+    local hl_active = Lumina.highlight_search(sample_line, "calculate", true)
+    local hl_inactive = Lumina.highlight_search(sample_line, "calculate", false)
+    assert_true(hl_active ~= hl_inactive, "Active match has distinct highlight styling from inactive match")
+
+    -- Case-insensitivity
+    local hl_case = Lumina.highlight_search("LUMINA file manager and Lumina preview", "lumina", false)
+    assert_eq(Lumina.strip_ansi(hl_case), "LUMINA file manager and Lumina preview", "Case-insensitive highlighting retains original casing")
+
+    -- Preserves existing syntax highlighting ANSI codes
+    local color_line = "\27[34mlocal\27[0m \27[32mname\27[0m = \27[31m\"lumina\"\27[0m"
+    local hl_syntax = Lumina.highlight_search(color_line, "name", true)
+    assert_eq(Lumina.strip_ansi(hl_syntax), "local name = \"lumina\"", "highlight_search preserves underlying syntax highlighted text")
+
+    -- 4. update_preview_matches functional tests
+    local sample_lines = {
+        "local ffi = require('ffi')",
+        "local function format_bytes(bytes)",
+        "    if bytes < 1024 then",
+        "        return string.format('%d B', bytes)",
+        "    end",
+        "end"
+    }
+    local matches_bytes = Lumina.update_preview_matches(sample_lines, "bytes")
+    assert_eq(#matches_bytes, 3, "update_preview_matches finds 3 matching lines for 'bytes'")
+    assert_eq(matches_bytes[1], 2, "First match is on line 2")
+    assert_eq(matches_bytes[2], 3, "Second match is on line 3")
+    assert_eq(matches_bytes[3], 4, "Third match is on line 4")
+
+    local matches_none = Lumina.update_preview_matches(sample_lines, "notfound")
+    assert_eq(#matches_none, 0, "update_preview_matches returns 0 matches for absent pattern")
+
+    local matches_empty = Lumina.update_preview_matches(sample_lines, "")
+    assert_eq(#matches_empty, 0, "update_preview_matches returns 0 matches for empty pattern")
+
+    -- 5. State and Keybindings verification
+    assert_true(l_code27:find("preview_search_mode%s*=%s*false") ~= nil, "lumina.lua declares preview_search_mode state")
+    assert_true(l_code27:find("preview_search_query%s*=%s*\"\"") ~= nil, "lumina.lua declares preview_search_query state")
+    assert_true(l_code27:find("is_preview_zoomed and k == \"/\"") ~= nil, "Zoom mode / activates preview_search_mode")
+    assert_true(l_code27:find("elseif preview_search_mode then") ~= nil, "lumina.lua key loop handles preview_search_mode typing")
+    assert_true(l_code27:find("is_preview_zoomed and #preview_search_query > 0 and %(k == \"n\" or k == \"N\"%)") ~= nil,
+        "Zoom mode n/N navigates search matches")
+    assert_true(l_code27:find("is_preview_zoomed and #preview_search_query > 0 and k == \"ESC\"") ~= nil,
+        "ESC in zoom search clears query")
+    assert_true(l_code27:find('key%s*=%s*"/ %(in zoom%)"') ~= nil, "show_help_modal documents / in zoom")
+    assert_true(l_code27:find('key%s*=%s*"n, N"') ~= nil, "show_help_modal documents n, N keys")
+end
+
+-- Test Suite 28: Visual Disk Usage Mode (`U`) & Usage Bars --
+do
+    print("\n-- Test Suite 28: Visual Disk Usage Mode (`U`) & Usage Bars --")
+    local lf_suite28 = io.open("lumina.lua", "r")
+    local l_code28 = lf_suite28:read("*all")
+    lf_suite28:close()
+
+    -- 1. Helper function exports
+    assert_true(type(Lumina.make_usage_bar) == "function", "Lumina exports make_usage_bar helper")
+    assert_true(type(Lumina.calculate_dir_size) == "function", "Lumina exports calculate_dir_size helper")
+
+    -- 2. make_usage_bar functional tests
+    local bar_0 = Lumina.make_usage_bar(0, 10)
+    assert_true(bar_0:find("0%%") ~= nil, "make_usage_bar 0% displays 0%")
+    assert_true(bar_0:find(string.rep("□", 10)) ~= nil, "make_usage_bar 0% has 10 empty blocks")
+
+    local bar_50 = Lumina.make_usage_bar(50, 10)
+    assert_true(bar_50:find("50%%") ~= nil, "make_usage_bar 50% displays 50%")
+    assert_true(bar_50:find(string.rep("■", 5)) ~= nil, "make_usage_bar 50% has 5 filled blocks")
+    assert_true(bar_50:find(string.rep("□", 5)) ~= nil, "make_usage_bar 50% has 5 empty blocks")
+
+    local bar_100 = Lumina.make_usage_bar(100, 10)
+    assert_true(bar_100:find("100%%") ~= nil, "make_usage_bar 100% displays 100%")
+    assert_true(bar_100:find(string.rep("■", 10)) ~= nil, "make_usage_bar 100% has 10 filled blocks")
+
+    -- Colors check: green (<50%), amber (50-79%), red (>=80%)
+    local bar_low = Lumina.make_usage_bar(25, 10)
+    local bar_med = Lumina.make_usage_bar(65, 10)
+    local bar_high = Lumina.make_usage_bar(90, 10)
+    assert_true(bar_low:find("\27%[38;2;34;197;94m") ~= nil, "Low usage (<50%) uses green ANSI color")
+    assert_true(bar_med:find("\27%[38;2;245;158;11m") ~= nil, "Medium usage (50-79%) uses amber ANSI color")
+    assert_true(bar_high:find("\27%[38;2;239;68;68m") ~= nil, "High usage (>=80%) uses red ANSI color")
+
+    -- Boundary clamping
+    local bar_neg = Lumina.make_usage_bar(-10, 10)
+    assert_true(bar_neg:find("0%%") ~= nil, "Negative percentage clamped to 0%")
+    local bar_over = Lumina.make_usage_bar(150, 10)
+    assert_true(bar_over:find("100%%") ~= nil, "Over 100% clamped to 100%")
+
+    -- 3. calculate_dir_size functional tests with temporary test directory
+    local tmp_dir = "tmp_usage_test_" .. tostring(os.time())
+    os.execute(string.format("mkdir -p %s/sub1 %s/sub2", tmp_dir, tmp_dir))
+
+    local f1 = io.open(tmp_dir .. "/sub1/f1.txt", "wb")
+    f1:write(string.rep("A", 1024)) -- 1024 bytes
+    f1:close()
+
+    local f2 = io.open(tmp_dir .. "/sub2/f2.txt", "wb")
+    f2:write(string.rep("B", 2048)) -- 2048 bytes
+    f2:close()
+
+    local f3 = io.open(tmp_dir .. "/root.txt", "wb")
+    f3:write(string.rep("C", 512)) -- 512 bytes
+    f3:close()
+
+    local calc_size = Lumina.calculate_dir_size(tmp_dir, 8)
+    assert_true(calc_size >= 1024 + 2048 + 512, "calculate_dir_size sums all nested files correctly (>= 3584 bytes)")
+
+    -- Cycle / recursion guard test: max_depth = 0 returns 0
+    assert_eq(Lumina.calculate_dir_size(tmp_dir, 0), 0, "calculate_dir_size returns 0 when max_depth is 0")
+
+    -- Clean up temporary test files
+    os.execute(string.format("rm -rf %s", tmp_dir))
+
+    -- 4. State & Keybinding tests in lumina.lua
+    assert_true(l_code28:find("is_disk_usage_mode%s*=%s*false") ~= nil, "lumina.lua declares is_disk_usage_mode state")
+    assert_true(l_code28:find("dir_size_cache") ~= nil, "lumina.lua declares dir_size_cache table")
+    assert_true(l_code28:find("populate_disk_usage") ~= nil, "lumina.lua defines populate_disk_usage function")
+    assert_true(l_code28:find("elseif k == \"U\" then") ~= nil, "lumina.lua handles 'U' key to toggle disk usage mode")
+    assert_true(l_code28:find("Disk Usage Mode: ON") ~= nil, "Toggling U sets confirmation toast on")
+    assert_true(l_code28:find("Disk Usage Mode: OFF") ~= nil, "Toggling U sets confirmation toast off")
+    assert_true(l_code28:find("is_disk_usage_mode or is_preview_zoomed") ~= nil,
+        "Differential refresh falls back to full screen in disk usage mode")
+    assert_true(l_code28:find("make_usage_bar%(pct, bar_w%)") ~= nil, "Column 2 renders make_usage_bar in disk usage mode")
+    assert_true(l_code28:find('key%s*=%s*"U"') ~= nil, "show_help_modal documents U key under PREVIEW & TOOLS")
+end
 
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
