@@ -1556,6 +1556,114 @@ do
     assert_true(l_code28:find('key%s*=%s*"U"') ~= nil, "show_help_modal documents U key under PREVIEW & TOOLS")
 end
 
+-- Test Suite 29: Archive Content Inspection & Tree Preview --
+print("\n-- Test Suite 29: Archive Content Inspection & Tree Preview --")
+do
+    local Lumina = require("lumina")
+
+    -- 1. Helper and detection tests
+    assert_true(Lumina.is_archive_file ~= nil, "Lumina exports is_archive_file helper")
+    assert_true(Lumina.parse_zip_central_directory ~= nil, "Lumina exports parse_zip_central_directory helper")
+    assert_true(Lumina.generate_archive_preview ~= nil, "Lumina exports generate_archive_preview helper")
+
+    -- Test is_archive_file on various extensions
+    assert_true(Lumina.is_archive_file({ name = "release.zip", ext = "zip", is_dir = false }), "Identifies .zip as archive")
+    assert_true(Lumina.is_archive_file({ name = "bundle.tar.gz", ext = "gz", is_dir = false }), "Identifies .tar.gz as archive")
+    assert_true(Lumina.is_archive_file({ name = "dist.tar.xz", ext = "xz", is_dir = false }), "Identifies .tar.xz as archive")
+    assert_true(Lumina.is_archive_file({ name = "backup.tgz", ext = "tgz", is_dir = false }), "Identifies .tgz as archive")
+    assert_true(Lumina.is_archive_file({ name = "data.tar", ext = "tar", is_dir = false }), "Identifies .tar as archive")
+    assert_true(Lumina.is_archive_file({ name = "app.apk", ext = "apk", is_dir = false }), "Identifies .apk as archive")
+    assert_true(Lumina.is_archive_file({ name = "lib.jar", ext = "jar", is_dir = false }), "Identifies .jar as archive")
+    assert_true(Lumina.is_archive_file({ name = "archive.7z", ext = "7z", is_dir = false }), "Identifies .7z as archive")
+
+    assert_false(Lumina.is_archive_file({ name = "lumina.lua", ext = "lua", is_dir = false }), "Does not identify .lua as archive")
+    assert_false(Lumina.is_archive_file({ name = "main.c", ext = "c", is_dir = false }), "Does not identify .c as archive")
+    assert_false(Lumina.is_archive_file({ name = "photo.png", ext = "png", is_dir = false }), "Does not identify .png as archive")
+    assert_false(Lumina.is_archive_file({ name = "archive.zip", ext = "zip", is_dir = true }), "Directory named .zip is not an archive file")
+
+    -- 2. Mock Zip archive creation and testing
+    local tmp_zip = "/tmp/test_lumina_suite29.zip"
+    local py_cmd = string.format([[python3 -c "import zipfile
+with zipfile.ZipFile('%s', 'w') as zf:
+    zf.writestr('README.md', 'Hello World\n')
+    zf.writestr('src/main.lua', 'print(\"main\")\n')
+    zf.writestr('docs/', '')
+"]], tmp_zip)
+    os.execute(py_cmd)
+
+    local zip_info = Lumina.parse_zip_central_directory(tmp_zip)
+    assert_true(zip_info ~= nil, "parse_zip_central_directory parses valid zip file")
+    assert_eq(zip_info and zip_info.count, 3, "parse_zip_central_directory finds exactly 3 entries")
+    assert_true(zip_info and zip_info.total_uncompressed >= 23, "parse_zip_central_directory sums uncompressed size correctly")
+
+    -- Verify entries
+    local found_readme = false
+    local found_main = false
+    local found_docs = false
+    if zip_info and zip_info.entries then
+        for _, e in ipairs(zip_info.entries) do
+            if e.name == "README.md" then found_readme = true end
+            if e.name == "src/main.lua" then found_main = true end
+            if e.name == "docs/" and e.is_dir then found_docs = true end
+        end
+    end
+    assert_true(found_readme, "Found README.md in zip entries")
+    assert_true(found_main, "Found src/main.lua in zip entries")
+    assert_true(found_docs, "Found docs/ directory in zip entries")
+
+    -- 3. generate_archive_preview on zip file
+    local preview_lines = Lumina.generate_archive_preview(tmp_zip, "zip", 20, 60)
+    assert_true(#preview_lines >= 4, "generate_archive_preview returns formatted preview lines")
+    assert_true(preview_lines[1]:find("📦 Archive:") ~= nil, "Header contains '📦 Archive:'")
+    assert_true(preview_lines[1]:find("3 items") ~= nil, "Header reports correct item count (3 items)")
+    local clean_all = Lumina.strip_ansi(table.concat(preview_lines, "\n"))
+    assert_true(clean_all:find("README.md") ~= nil, "Preview list includes README.md")
+
+    -- Truncation test when max_lines is small
+    local trunc_lines = Lumina.generate_archive_preview(tmp_zip, "zip", 3, 60)
+    local has_more = false
+    for _, l in ipairs(trunc_lines) do
+        if l:find("and %d+ more items") then has_more = true break end
+    end
+    assert_true(has_more, "generate_archive_preview truncates list and shows '... and N more items'")
+
+    os.execute("rm -f " .. tmp_zip)
+
+    -- 4. Mock Tar.gz archive creation and testing
+    local tmp_tar = "/tmp/test_lumina_suite29.tar.gz"
+    local py_tar_cmd = string.format([[python3 -c "import tarfile, io
+with tarfile.open('%s', 'w:gz') as tf:
+    ti = tarfile.TarInfo(name='app/config.json')
+    data = b'{\"port\": 8080}'
+    ti.size = len(data)
+    tf.addfile(ti, io.BytesIO(data))
+"]], tmp_tar)
+    os.execute(py_tar_cmd)
+
+    local tar_preview = Lumina.generate_archive_preview(tmp_tar, "gz", 20, 60)
+    assert_true(#tar_preview >= 3, "generate_archive_preview generates preview for .tar.gz")
+    assert_true(tar_preview[1]:find("📦 Archive:") ~= nil, "Tar preview header contains '📦 Archive:'")
+    local tar_clean = Lumina.strip_ansi(table.concat(tar_preview, "\n"))
+    assert_true(tar_clean:find("app/config.json") ~= nil, "Tar preview lists app/config.json")
+
+    os.execute("rm -f " .. tmp_tar)
+
+    -- 5. Nonexistent/corrupted file fallback
+    local bad_preview = Lumina.generate_archive_preview("/nonexistent/file.zip", "zip", 20, 60)
+    assert_true(#bad_preview >= 3, "Returns fallback lines for nonexistent archive")
+    assert_true(bad_preview[3]:find("Cannot inspect archive contents") ~= nil, "Shows clear error message on invalid archive")
+
+    -- 6. Integration checks in lumina.lua source code
+    local lf29 = io.open("lumina.lua", "r")
+    local l_code29 = lf29:read("*a")
+    lf29:close()
+
+    assert_true(l_code29:find("is_archive_file%(entry%)") ~= nil, "lumina.lua checks is_archive_file in preview router")
+    assert_true(l_code29:find("generate_archive_preview%(entry%.path") ~= nil, "lumina.lua invokes generate_archive_preview")
+    assert_true(l_code29:find("is_archive_file%(entry%) and entry%.size and entry%.size < 1048576") ~= nil,
+        "lumina.lua enables instant preview rendering for small archive files")
+end
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)

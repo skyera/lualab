@@ -831,7 +831,10 @@ end
 -- 3. File System & Directory Inspection via FFI
 -- =========================================================================
 local IMAGE_EXTS = { png = true, jpg = true, jpeg = true, gif = true, webp = true, bmp = true, ppm = true }
-local ARCHIVE_EXTS = { zip = true, tar = true, gz = true, bz2 = true, xz = true, ["7z"] = true, rar = true }
+local ARCHIVE_EXTS = {
+    zip = true, tar = true, gz = true, bz2 = true, xz = true, ["7z"] = true, rar = true,
+    tgz = true, tbz2 = true, txz = true, zst = true, jar = true, apk = true, war = true,
+}
 local CODE_EXTS = {
     lua = true, c = true, h = true, cpp = true, py = true, js = true, ts = true,
     rs = true, go = true, sh = true, json = true, yaml = true, yml = true, toml = true,
@@ -869,9 +872,18 @@ local function resolve_text_editor()
     return is_windows and "notepad" or (is_command_available("vim") and "vim" or "vi")
 end
 
+local function is_archive_file(entry)
+    if not entry or entry.is_dir then return false end
+    local name = (entry.name or ""):lower()
+    local ext = (entry.ext or ""):lower()
+    if ARCHIVE_EXTS[ext] then return true end
+    if name:match("%.tar%.[a-z0-9]+$") then return true end
+    return false
+end
+
 local function is_text_file(entry)
     if not entry or entry.is_dir then return false end
-    if IMAGE_EXTS[entry.ext] or ARCHIVE_EXTS[entry.ext] then return false end
+    if IMAGE_EXTS[entry.ext] or is_archive_file(entry) then return false end
     if CODE_EXTS[entry.ext] or TEXT_EXTS[entry.ext] then return true end
     if entry.size == 0 then return true end
     if entry.size > 0 and entry.size < 1024 * 1024 * 10 then
@@ -925,7 +937,7 @@ local function get_file_type_info(entry)
         return "🔗", C.symlink_col
     elseif IMAGE_EXTS[entry.ext] then
         return "🖼 ", C.image_col
-    elseif ARCHIVE_EXTS[entry.ext] then
+    elseif is_archive_file(entry) then
         return "📦", C.archive_col
     elseif CODE_EXTS[entry.ext] then
         return "📜", C.code_col
@@ -1429,6 +1441,278 @@ local function generate_hex_preview(filepath, max_lines)
         offset = offset + #chunk
     end
     f:close()
+    return lines
+end
+
+local function parse_zip_central_directory(filepath)
+    local f = io.open(filepath, "rb")
+    if not f then return nil end
+    local size = f:seek("end")
+    if not size or size < 22 then
+        f:close()
+        return nil
+    end
+
+    local read_len = math.min(size, 65536)
+    f:seek("set", size - read_len)
+    local tail = f:read(read_len)
+    if not tail then
+        f:close()
+        return nil
+    end
+
+    -- Search backwards for End of Central Directory signature: PK\5\6
+    local eocd_sig = "\80\75\5\6"
+    local pos = 1
+    local eocd_pos = nil
+    while true do
+        local p = tail:find(eocd_sig, pos, true)
+        if not p then break end
+        eocd_pos = p
+        pos = p + 1
+    end
+
+    if not eocd_pos or eocd_pos + 21 > #tail then
+        f:close()
+        return nil
+    end
+
+    local count = tail:byte(eocd_pos + 10) + tail:byte(eocd_pos + 11) * 256
+    local cd_offset = tail:byte(eocd_pos + 16) + tail:byte(eocd_pos + 17) * 256 +
+                      tail:byte(eocd_pos + 18) * 65536 + tail:byte(eocd_pos + 19) * 16777216
+
+    if cd_offset >= size then
+        f:close()
+        return nil
+    end
+
+    f:seek("set", cd_offset)
+    local entries = {}
+    local total_uncompressed = 0
+
+    for i = 1, count do
+        local hdr = f:read(46)
+        if not hdr or #hdr < 46 or hdr:sub(1, 4) ~= "\80\75\1\2" then break end
+        local comp_sz = hdr:byte(21) + hdr:byte(22) * 256 + hdr:byte(23) * 65536 + hdr:byte(24) * 16777216
+        local uncomp_sz = hdr:byte(25) + hdr:byte(26) * 256 + hdr:byte(27) * 65536 + hdr:byte(28) * 16777216
+        local fn_len = hdr:byte(29) + hdr:byte(30) * 256
+        local extra_len = hdr:byte(31) + hdr:byte(32) * 256
+        local comm_len = hdr:byte(33) + hdr:byte(34) * 256
+
+        local fn = f:read(fn_len) or ""
+        f:seek("cur", extra_len + comm_len)
+
+        local is_dir = fn:sub(-1) == "/"
+        total_uncompressed = total_uncompressed + uncomp_sz
+        table.insert(entries, {
+            name = fn,
+            size = uncomp_sz,
+            comp_size = comp_sz,
+            is_dir = is_dir,
+        })
+    end
+    f:close()
+
+    return {
+        entries = entries,
+        total_uncompressed = total_uncompressed,
+        count = #entries,
+    }
+end
+
+local function parse_tar_directory(filepath)
+    local cmd = string.format("tar -tvf %s 2>%s || tar -tf %s 2>%s",
+        shell_quote(filepath), devnull, shell_quote(filepath), devnull)
+    local pipe = io.popen(cmd, "r")
+    if not pipe then return nil end
+
+    local entries = {}
+    local total_uncompressed = 0
+
+    for line in pipe:lines() do
+        line = line:gsub("\r$", "")
+        if #line > 0 then
+            -- tar -tvf format: mode, owner, size, date, time, path
+            local mode, owner, sz, d, t, path = line:match("^(%S+)%s+(%S+)%s+(%d+)%s+(%S+)%s+(%S+)%s+(.+)$")
+            if path and sz then
+                local sz_num = tonumber(sz) or 0
+                local is_dir = (mode:sub(1, 1) == "d") or (path:sub(-1) == "/")
+                total_uncompressed = total_uncompressed + sz_num
+                table.insert(entries, {
+                    name = path,
+                    size = sz_num,
+                    mode = mode,
+                    is_dir = is_dir,
+                })
+            else
+                local is_dir = line:sub(-1) == "/"
+                table.insert(entries, {
+                    name = line,
+                    size = 0,
+                    is_dir = is_dir,
+                })
+            end
+        end
+    end
+    pipe:close()
+
+    if #entries == 0 then return nil end
+    return {
+        entries = entries,
+        total_uncompressed = total_uncompressed,
+        count = #entries,
+    }
+end
+
+local function parse_7z_directory(filepath)
+    if not is_command_available("7z") then return nil end
+    local cmd = string.format("7z l -ba %s 2>%s", shell_quote(filepath), devnull)
+    local pipe = io.popen(cmd, "r")
+    if not pipe then return nil end
+
+    local entries = {}
+    local total_uncompressed = 0
+    for line in pipe:lines() do
+        line = line:gsub("\r$", "")
+        local d, t, attr, sz, comp_sz, path = line:match("^(%S+)%s+(%S+)%s+(%S+)%s+(%d+)%s*(%d*)%s+(.+)$")
+        if path then
+            local sz_num = tonumber(sz) or 0
+            local is_dir = (attr:find("D") ~= nil) or (path:sub(-1) == "/")
+            total_uncompressed = total_uncompressed + sz_num
+            table.insert(entries, {
+                name = path,
+                size = sz_num,
+                is_dir = is_dir,
+            })
+        end
+    end
+    pipe:close()
+    if #entries == 0 then return nil end
+    return {
+        entries = entries,
+        total_uncompressed = total_uncompressed,
+        count = #entries,
+    }
+end
+
+local function parse_gzip_info(filepath)
+    if not is_command_available("gzip") then return nil end
+    local cmd = string.format("gzip -l %s 2>%s", shell_quote(filepath), devnull)
+    local pipe = io.popen(cmd, "r")
+    if not pipe then return nil end
+    local header = pipe:read("*l")
+    local data = pipe:read("*l")
+    pipe:close()
+    if not data then return nil end
+    local comp_sz, uncomp_sz, ratio, uncomp_name = data:match("^%s*(%d+)%s+(%d+)%s+(%S+)%s+(.+)$")
+    if uncomp_name then
+        local uncomp_num = tonumber(uncomp_sz) or 0
+        local comp_num = tonumber(comp_sz) or 0
+        return {
+            entries = {
+                {
+                    name = uncomp_name,
+                    size = uncomp_num,
+                    comp_size = comp_num,
+                    is_dir = false,
+                }
+            },
+            total_uncompressed = uncomp_num,
+            count = 1,
+            ratio = ratio,
+        }
+    end
+    return nil
+end
+
+local function generate_archive_preview(filepath, ext, max_lines, max_cols)
+    local filename = filepath:match("([^/\\]+)$") or filepath
+    local lower_name = filename:lower()
+    local lower_ext = (ext or ""):lower()
+
+    local archive_info = nil
+
+    if lower_ext == "zip" or lower_ext == "jar" or lower_ext == "apk" or lower_ext == "war" then
+        archive_info = parse_zip_central_directory(filepath)
+        if not archive_info and is_command_available("unzip") then
+            local pipe = io.popen(string.format("unzip -l -q %s 2>%s", shell_quote(filepath), devnull), "r")
+            if pipe then
+                local entries = {}
+                local total_sz = 0
+                for line in pipe:lines() do
+                    local sz, d, t, path = line:match("^%s*(%d+)%s+(%S+)%s+(%S+)%s+(.+)$")
+                    if path and not path:match("^%-%-%-%-") then
+                        local sz_num = tonumber(sz) or 0
+                        local is_dir = path:sub(-1) == "/"
+                        total_sz = total_sz + sz_num
+                        table.insert(entries, { name = path, size = sz_num, is_dir = is_dir })
+                    end
+                end
+                pipe:close()
+                if #entries > 0 then
+                    archive_info = { entries = entries, total_uncompressed = total_sz, count = #entries }
+                end
+            end
+        end
+    end
+
+    if not archive_info and (lower_ext == "tar" or lower_name:match("%.tar%.[a-z0-9]+$") or
+       lower_ext == "tgz" or lower_ext == "tbz2" or lower_ext == "txz" or lower_ext == "tar.gz") then
+        archive_info = parse_tar_directory(filepath)
+    end
+
+    if not archive_info and (lower_ext == "7z" or lower_ext == "rar") then
+        archive_info = parse_7z_directory(filepath)
+    end
+
+    if not archive_info and (lower_ext == "gz" or lower_ext == "bz2" or lower_ext == "xz" or lower_ext == "zst") then
+        archive_info = parse_tar_directory(filepath)
+        if not archive_info and lower_ext == "gz" then
+            archive_info = parse_gzip_info(filepath)
+        end
+    end
+
+    -- Universal fallback
+    if not archive_info then
+        archive_info = parse_tar_directory(filepath)
+    end
+
+    local lines = {}
+    if not archive_info or #archive_info.entries == 0 then
+        table.insert(lines, string.format("%s📦 Archive: %s%s", C.syn_header, filename, C.reset))
+        table.insert(lines, C.dim .. string.rep("─", 36) .. C.reset)
+        table.insert(lines, C.dim .. "(Cannot inspect archive contents or archive is empty)" .. C.reset)
+        return lines
+    end
+
+    local count_str = string.format("%d %s", archive_info.count, archive_info.count == 1 and "item" or "items")
+    local size_str = archive_info.total_uncompressed > 0 and (", " .. format_bytes(archive_info.total_uncompressed)) or ""
+    table.insert(lines, string.format("%s📦 Archive: %s (%s%s)%s", C.syn_header, filename, count_str, size_str, C.reset))
+    table.insert(lines, C.dim .. string.rep("─", math.min(max_cols or 36, 44)) .. C.reset)
+
+    local entries = archive_info.entries
+    local max_visible = math.max(1, max_lines - 2)
+    local avail_cols = math.max(20, (max_cols or 40) - 14)
+
+    for i = 1, math.min(#entries, max_visible) do
+        local e = entries[i]
+        local icon, col
+        if e.is_dir then
+            icon, col = "📁", C.dir_col
+        else
+            local item_ext = e.name:match("%.([^.]+)$")
+            item_ext = item_ext and item_ext:lower() or ""
+            icon, col = get_file_type_info({ is_dir = false, ext = item_ext, name = e.name })
+        end
+        local sz_display = e.size > 0 and format_bytes(e.size) or (e.is_dir and "--" or "0 B")
+        table.insert(lines, string.format(" %s %s%-24s%s %s%7s%s",
+            icon, col, truncate(e.name, avail_cols), C.reset, C.dim, sz_display, C.reset))
+    end
+
+    if #entries > max_visible then
+        table.insert(lines, string.format(" %s... and %d more items%s", C.dim, #entries - max_visible, C.reset))
+    end
+
     return lines
 end
 
@@ -1984,6 +2268,7 @@ local function should_render_preview_instantly(entry, max_lines, max_cols, show_
     if preview_cache_get(key) ~= nil then return true end
     if entry.is_dir then return true end
     if is_text_file(entry) and entry.size and entry.size < 65536 then return true end
+    if is_archive_file(entry) and entry.size and entry.size < 1048576 then return true end
     return false
 end
 
@@ -1999,6 +2284,8 @@ local function generate_preview(entry, max_lines, max_cols, show_hidden)
         lines = generate_dir_preview(entry.path, buffer_lines, show_hidden)
     elseif IMAGE_EXTS[entry.ext] then
         lines = generate_image_preview(entry.path, max_cols, max_lines)
+    elseif is_archive_file(entry) then
+        lines = generate_archive_preview(entry.path, entry.ext, buffer_lines, max_cols)
     elseif CODE_EXTS[entry.ext] or entry.ext == "txt" then
         lines = generate_text_preview(entry.path, entry.ext, buffer_lines, max_cols)
     elseif entry.size > 0 and entry.size < 1024 * 1024 * 5 then
@@ -3287,6 +3574,10 @@ local M = {
     strip_ansi                      = strip_ansi,
     highlight_search                = highlight_search,
     update_preview_matches          = update_preview_matches,
+    is_archive_file                 = is_archive_file,
+    parse_zip_central_directory     = parse_zip_central_directory,
+    parse_tar_directory             = parse_tar_directory,
+    generate_archive_preview        = generate_archive_preview,
     main                            = main,
 }
 
