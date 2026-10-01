@@ -757,6 +757,13 @@ assert_eq(s4[3].name, "alpha.lua", "mtime: newest file is alpha.lua (mtime 3000)
 assert_eq(s4[4].name, "beta.c", "mtime: middle file is beta.c (mtime 2000)")
 assert_eq(s4[5].name, "zeta.txt", "mtime: oldest file is zeta.txt (mtime 1000)")
 
+-- 4b. Sort by mtime_asc (oldest first - reverse time): zeta.txt (1000), beta.c (2000), alpha.lua (3000)
+local s4b = lumina.sort_entries(clone_dummy(), "mtime_asc")
+assert_true(s4b[1].is_dir and s4b[2].is_dir, "mtime_asc: directories remain on top")
+assert_eq(s4b[3].name, "zeta.txt", "mtime_asc: oldest file is zeta.txt (mtime 1000)")
+assert_eq(s4b[4].name, "beta.c", "mtime_asc: middle file is beta.c (mtime 2000)")
+assert_eq(s4b[5].name, "alpha.lua", "mtime_asc: newest file is alpha.lua (mtime 3000)")
+
 -- 5. Sort by ext: c (beta.c), lua (alpha.lua), txt (zeta.txt)
 local s5 = lumina.sort_entries(clone_dummy(), "ext")
 assert_true(s5[1].is_dir and s5[2].is_dir, "ext: directories remain on top")
@@ -764,23 +771,45 @@ assert_eq(s5[3].name, "beta.c", "ext: first ext is .c (beta.c)")
 assert_eq(s5[4].name, "alpha.lua", "ext: second ext is .lua (alpha.lua)")
 assert_eq(s5[5].name, "zeta.txt", "ext: third ext is .txt (zeta.txt)")
 
+-- 5b. Sort by ext_desc: txt (zeta.txt), lua (alpha.lua), c (beta.c)
+local s5b = lumina.sort_entries(clone_dummy(), "ext_desc")
+assert_true(s5b[1].is_dir and s5b[2].is_dir, "ext_desc: directories remain on top")
+assert_eq(s5b[3].name, "zeta.txt", "ext_desc: first ext is .txt (zeta.txt)")
+assert_eq(s5b[4].name, "alpha.lua", "ext_desc: second ext is .lua (alpha.lua)")
+assert_eq(s5b[5].name, "beta.c", "ext_desc: third ext is .c (beta.c)")
+
+-- 5c. Sort by size_asc (smallest first): beta.c (100), zeta.txt (500), alpha.lua (2000)
+local s5c = lumina.sort_entries(clone_dummy(), "size_asc")
+assert_true(s5c[1].is_dir and s5c[2].is_dir, "size_asc: directories remain on top")
+assert_eq(s5c[3].name, "beta.c", "size_asc: smallest file is beta.c (100 bytes)")
+assert_eq(s5c[4].name, "zeta.txt", "size_asc: middle file is zeta.txt (500 bytes)")
+assert_eq(s5c[5].name, "alpha.lua", "size_asc: largest file is alpha.lua (2000 bytes)")
+
 -- 6. Interactive sort state machine simulation
 local sim_mode = "name_asc"
 local sim_sorting = false
 local function sim_sort_event(k)
     if sim_sorting then
         sim_sorting = false
-        if k == "n" then
+        local sk = type(k) == "string" and k:lower() or ""
+        if sk == "n" then
             sim_mode = (sim_mode == "name_asc") and "name_desc" or "name_asc"
-        elseif k == "s" then
-            sim_mode = "size"
-        elseif k == "m" or k == "t" then
-            sim_mode = "mtime"
-        elseif k == "e" then
-            sim_mode = "ext"
-        elseif k == "r" then
+        elseif sk == "s" then
+            sim_mode = (sim_mode == "size_desc" or sim_mode == "size") and "size_asc" or "size_desc"
+        elseif sk == "m" or sk == "t" then
+            sim_mode = (sim_mode == "mtime_desc" or sim_mode == "mtime") and "mtime_asc" or "mtime_desc"
+        elseif sk == "e" then
+            sim_mode = (sim_mode == "ext_asc" or sim_mode == "ext") and "ext_desc" or "ext_asc"
+        elseif sk == "r" then
             if sim_mode == "name_asc" then sim_mode = "name_desc"
-            elseif sim_mode == "name_desc" then sim_mode = "name_asc" end
+            elseif sim_mode == "name_desc" then sim_mode = "name_asc"
+            elseif sim_mode == "mtime_desc" or sim_mode == "mtime" then sim_mode = "mtime_asc"
+            elseif sim_mode == "mtime_asc" then sim_mode = "mtime_desc"
+            elseif sim_mode == "size_desc" or sim_mode == "size" then sim_mode = "size_asc"
+            elseif sim_mode == "size_asc" then sim_mode = "size_desc"
+            elseif sim_mode == "ext_asc" or sim_mode == "ext" then sim_mode = "ext_desc"
+            elseif sim_mode == "ext_desc" then sim_mode = "ext_asc"
+            else sim_mode = "name_desc" end
         end
     elseif k == "s" then
         sim_sorting = true
@@ -792,15 +821,40 @@ sim_sort_event("s")
 assert_true(sim_sorting, "Pressing 's' activates sort prompt")
 sim_sort_event("s")
 assert_false(sim_sorting, "Sort prompt closed after option selection")
-assert_eq(sim_mode, "size", "Sort mode changed to 'size'")
+assert_eq(sim_mode, "size_desc", "Sort mode changed to 'size_desc'")
 
+-- Toggle size via s
+sim_sort_event("s")
+sim_sort_event("s")
+assert_eq(sim_mode, "size_asc", "Re-selecting 's' toggles to 'size_asc'")
+
+-- Select mtime via m
 sim_sort_event("s")
 sim_sort_event("m")
-assert_eq(sim_mode, "mtime", "Sort mode changed to 'mtime'")
+assert_eq(sim_mode, "mtime_desc", "Sort mode changed to 'mtime_desc'")
+
+-- Reverse mtime via r (the bug reported by user!)
+sim_sort_event("s")
+sim_sort_event("r")
+assert_eq(sim_mode, "mtime_asc", "Selecting 'r' when on mtime reverses to 'mtime_asc'")
+
+-- Reverse mtime again via r
+sim_sort_event("s")
+sim_sort_event("r")
+assert_eq(sim_mode, "mtime_desc", "Selecting 'r' again toggles back to 'mtime_desc'")
+
+-- Toggle mtime directly via m
+sim_sort_event("s")
+sim_sort_event("m")
+assert_eq(sim_mode, "mtime_asc", "Re-selecting 'm' directly toggles to 'mtime_asc'")
 
 sim_sort_event("s")
 sim_sort_event("e")
-assert_eq(sim_mode, "ext", "Sort mode changed to 'ext'")
+assert_eq(sim_mode, "ext_asc", "Sort mode changed to 'ext_asc'")
+
+sim_sort_event("s")
+sim_sort_event("r")
+assert_eq(sim_mode, "ext_desc", "Selecting 'r' on ext toggles to 'ext_desc'")
 
 sim_sort_event("s")
 sim_sort_event("n")

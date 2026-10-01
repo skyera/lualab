@@ -1305,17 +1305,34 @@ local function sort_entries(entries, mode)
         end
         if mode == "name_desc" then
             return a.name:lower() > b.name:lower()
-        elseif mode == "size" then
+        elseif mode == "size_asc" then
+            if a.size ~= b.size then
+                return a.size < b.size
+            end
+            return a.name:lower() < b.name:lower()
+        elseif mode == "size" or mode == "size_desc" then
             if a.size ~= b.size then
                 return a.size > b.size
             end
             return a.name:lower() < b.name:lower()
-        elseif mode == "mtime" then
+        elseif mode == "mtime_asc" then
+            if (a.mtime or 0) ~= (b.mtime or 0) then
+                return (a.mtime or 0) < (b.mtime or 0)
+            end
+            return a.name:lower() < b.name:lower()
+        elseif mode == "mtime" or mode == "mtime_desc" then
             if (a.mtime or 0) ~= (b.mtime or 0) then
                 return (a.mtime or 0) > (b.mtime or 0)
             end
             return a.name:lower() < b.name:lower()
-        elseif mode == "ext" then
+        elseif mode == "ext_desc" then
+            local a_ext = (a.ext or ""):lower()
+            local b_ext = (b.ext or ""):lower()
+            if a_ext ~= b_ext then
+                return a_ext > b_ext
+            end
+            return a.name:lower() < b.name:lower()
+        elseif mode == "ext" or mode == "ext_asc" then
             local a_ext = (a.ext or ""):lower()
             local b_ext = (b.ext or ""):lower()
             if a_ext ~= b_ext then
@@ -2719,11 +2736,17 @@ local function main(args)
     local filter_query = ""
     local sort_mode = "name_asc"
     local sort_labels = {
-        name_asc  = "Name ↑",
-        name_desc = "Name ↓",
-        size      = "Size ↓",
-        mtime     = "Time ↓",
-        ext       = "Ext ↑",
+        name_asc   = "Name ↑",
+        name_desc  = "Name ↓",
+        size       = "Size ↓",
+        size_desc  = "Size ↓",
+        size_asc   = "Size ↑",
+        mtime      = "Time ↓",
+        mtime_desc = "Time ↓",
+        mtime_asc  = "Time ↑",
+        ext        = "Ext ↑",
+        ext_asc    = "Ext ↑",
+        ext_desc   = "Ext ↓",
     }
     local start_dir = current_dir
     local dir_history = create_history_tracker(current_dir, 64)
@@ -3332,23 +3355,36 @@ local function main(args)
                 end
             elseif is_sorting then
                 is_sorting = false
-                if k == "n" then
+                local sk = type(k) == "string" and k:lower() or ""
+                if sk == "n" then
                     sort_mode = (sort_mode == "name_asc") and "name_desc" or "name_asc"
                     reload_current()
-                elseif k == "s" then
-                    sort_mode = "size"
+                    set_status_message(string.format("Sort: %s", sort_labels[sort_mode] or sort_mode))
+                elseif sk == "s" then
+                    sort_mode = (sort_mode == "size_desc" or sort_mode == "size") and "size_asc" or "size_desc"
                     reload_current()
-                elseif k == "m" or k == "t" then
-                    sort_mode = "mtime"
+                    set_status_message(string.format("Sort: %s", sort_labels[sort_mode] or sort_mode))
+                elseif sk == "m" or sk == "t" then
+                    sort_mode = (sort_mode == "mtime_desc" or sort_mode == "mtime") and "mtime_asc" or "mtime_desc"
                     reload_current()
-                elseif k == "e" then
-                    sort_mode = "ext"
+                    set_status_message(string.format("Sort: %s", sort_labels[sort_mode] or sort_mode))
+                elseif sk == "e" then
+                    sort_mode = (sort_mode == "ext_asc" or sort_mode == "ext") and "ext_desc" or "ext_asc"
                     reload_current()
-                elseif k == "r" then
+                    set_status_message(string.format("Sort: %s", sort_labels[sort_mode] or sort_mode))
+                elseif sk == "r" then
                     if sort_mode == "name_asc" then sort_mode = "name_desc"
                     elseif sort_mode == "name_desc" then sort_mode = "name_asc"
+                    elseif sort_mode == "mtime_desc" or sort_mode == "mtime" then sort_mode = "mtime_asc"
+                    elseif sort_mode == "mtime_asc" then sort_mode = "mtime_desc"
+                    elseif sort_mode == "size_desc" or sort_mode == "size" then sort_mode = "size_asc"
+                    elseif sort_mode == "size_asc" then sort_mode = "size_desc"
+                    elseif sort_mode == "ext_asc" or sort_mode == "ext" then sort_mode = "ext_desc"
+                    elseif sort_mode == "ext_desc" then sort_mode = "ext_asc"
+                    else sort_mode = "name_desc"
                     end
                     reload_current()
+                    set_status_message(string.format("Sort: %s (Reversed)", sort_labels[sort_mode] or sort_mode))
                 end
             elseif mark_mode then
                 mark_mode = false
