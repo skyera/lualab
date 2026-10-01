@@ -22,6 +22,8 @@
       * Enter            : Open directory, edit text, or view images
       * j / ↓            : Move cursor down
       * k / ↑            : Move cursor up
+      * Ctrl+O / [       : Jump backward in directory history
+      * Ctrl+I / Tab / ] : Jump forward in directory history
       * H / gh           : Jump to start directory (where Lumina was launched)
       * ~                : Jump to user's home directory ($HOME)
       * /                : Instant fuzzy in-directory filter
@@ -2147,6 +2149,8 @@ local function show_help_modal()
         { section = "NAVIGATION" },
         { key = "h, l, Enter", desc = "Enter / Leave directory or open file" },
         { key = "j, k, ↑, ↓",  desc = "Move cursor down / up" },
+        { key = "Ctrl+O, [",   desc = "Jump backward in directory history" },
+        { key = "Ctrl+I, ]",   desc = "Jump forward in directory history" },
         { key = "gg, G",       desc = "Jump to top / bottom of list" },
         { key = "H, gh",       desc = "Return to startup directory" },
         { key = "~",           desc = "Jump to user home directory" },
@@ -2353,6 +2357,48 @@ local function calculate_miller_geometry(term_w, is_zoomed)
     end
 end
 
+local function create_history_tracker(initial_dir, max_size)
+    max_size = max_size or 64
+    local stack = { initial_dir or "." }
+    local idx = 1
+    return {
+        get_stack = function() return stack end,
+        get_index = function() return idx end,
+        current = function() return stack[idx] end,
+        can_go_back = function() return idx > 1 end,
+        can_go_forward = function() return idx < #stack end,
+        push = function(dir)
+            if not dir or #dir == 0 then return end
+            dir = resolve_canonical_path(dir)
+            if #stack > 0 and stack[idx] == dir then return end
+            if idx < #stack then
+                for i = #stack, idx + 1, -1 do
+                    table.remove(stack, i)
+                end
+            end
+            table.insert(stack, dir)
+            if #stack > max_size then
+                table.remove(stack, 1)
+            end
+            idx = #stack
+        end,
+        back = function()
+            if idx > 1 then
+                idx = idx - 1
+                return stack[idx]
+            end
+            return nil
+        end,
+        forward = function()
+            if idx < #stack then
+                idx = idx + 1
+                return stack[idx]
+            end
+            return nil
+        end,
+    }
+end
+
 -- =========================================================================
 -- 6. Main Interactive Application Loop
 -- =========================================================================
@@ -2415,6 +2461,7 @@ local function main(args)
         ext       = "Ext ↑",
     }
     local start_dir = current_dir
+    local dir_history = create_history_tracker(current_dir, 64)
     local selected_paths = {}
     local preview_scroll_offset = 0
     local bookmarks = {}
@@ -3055,6 +3102,7 @@ local function main(args)
                         clear_preview_cache()
                         preview_scroll_offset = 0
                         preview_pending = true
+                        dir_history.push(current_dir)
                         reload_current()
                         set_status_message(string.format("\27[1;36m★ Jumped to bookmark '%s'\27[0m", mark_key))
                     else
@@ -3265,6 +3313,7 @@ local function main(args)
                 sel_index = 1
                 clear_preview_cache()
                 preview_pending = true
+                dir_history.push(current_dir)
                 reload_current()
             elseif k == "H" then
                 -- 'H': Jump straight to Start Directory
@@ -3274,6 +3323,7 @@ local function main(args)
                 sel_index = 1
                 clear_preview_cache()
                 preview_pending = true
+                dir_history.push(current_dir)
                 reload_current()
             elseif k == "~" then
                 -- '~': Jump straight to User's Home Directory
@@ -3284,6 +3334,7 @@ local function main(args)
                 sel_index = 1
                 clear_preview_cache()
                 preview_pending = true
+                dir_history.push(current_dir)
                 reload_current()
             elseif k == "LEFT" or k == "h" or k == "BACKSPACE" then
                 if is_preview_zoomed then
@@ -3298,6 +3349,7 @@ local function main(args)
                     filter_query = ""
                     clear_preview_cache()
                     preview_pending = true
+                    dir_history.push(current_dir)
                     current_entries = read_dir_entries(current_dir, show_hidden)
                     parent_dir = get_parent_dir(current_dir)
                     parent_entries = is_root_dir(current_dir) and {} or read_dir_entries(parent_dir, show_hidden)
@@ -3321,6 +3373,7 @@ local function main(args)
                     sel_index = 1
                     clear_preview_cache()
                     preview_pending = true
+                    dir_history.push(current_dir)
                     reload_current()
                 elseif k == "ENTER" and IMAGE_EXTS[sel and sel.ext] then
                     sel_index = show_image_fullscreen(current_entries, sel_index) or sel_index
@@ -3330,6 +3383,48 @@ local function main(args)
                     clear_preview_cache()
                     preview_pending = true
                     reload_current()
+                    needs_redraw = true
+                end
+            elseif k == "\15" or k == "CTRL_O" or (not is_preview_zoomed and k == "[") then
+                -- Jump backward in directory history
+                local target = dir_history.back()
+                if target then
+                    local prev = current_dir
+                    current_dir = target
+                    filter_query = ""
+                    clear_preview_cache()
+                    preview_scroll_offset = 0
+                    preview_pending = true
+                    reload_current()
+                    sel_index = 1
+                    local prev_name = prev:match("([^/\\]+)$") or prev
+                    for idx, e in ipairs(current_entries) do
+                        if e.path == prev or e.name == prev_name then
+                            sel_index = idx
+                            break
+                        end
+                    end
+                    set_status_message(string.format("\27[1;36m⟲ Back: %s [%d/%d]\27[0m", get_dir_display_name(target), dir_history.get_index(), #dir_history.get_stack()))
+                    needs_redraw = true
+                else
+                    set_status_message("\27[1;33m⚠️ Already at oldest directory in history\27[0m")
+                    needs_redraw = true
+                end
+            elseif k == "\9" or k == "TAB" or k == "CTRL_I" or (not is_preview_zoomed and k == "]") then
+                -- Jump forward in directory history
+                local target = dir_history.forward()
+                if target then
+                    current_dir = target
+                    filter_query = ""
+                    clear_preview_cache()
+                    preview_scroll_offset = 0
+                    preview_pending = true
+                    reload_current()
+                    sel_index = 1
+                    set_status_message(string.format("\27[1;36m⟳ Forward: %s [%d/%d]\27[0m", get_dir_display_name(target), dir_history.get_index(), #dir_history.get_stack()))
+                    needs_redraw = true
+                else
+                    set_status_message("\27[1;33m⚠️ Already at newest directory in history\27[0m")
                     needs_redraw = true
                 end
             elseif k == "t" then
@@ -3391,6 +3486,7 @@ local function main(args)
                     end
                     clear_preview_cache()
                     preview_pending = true
+                    dir_history.push(current_dir)
                     reload_current()
                     needs_redraw = true
                 else
@@ -3578,6 +3674,7 @@ local M = {
     parse_zip_central_directory     = parse_zip_central_directory,
     parse_tar_directory             = parse_tar_directory,
     generate_archive_preview        = generate_archive_preview,
+    create_history_tracker          = create_history_tracker,
     main                            = main,
 }
 

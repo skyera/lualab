@@ -1664,6 +1664,104 @@ with tarfile.open('%s', 'w:gz') as tf:
         "lumina.lua enables instant preview rendering for small archive files")
 end
 
+-- Test Suite 30: Directory Jump History (Ctrl+O & Ctrl+I / [ & ]) --
+print("\n-- Test Suite 30: Directory Jump History (Ctrl+O & Ctrl+I / [ & ]) --")
+do
+    local Lumina = require("lumina")
+
+    -- 1. Helper existence
+    assert_true(Lumina.create_history_tracker ~= nil, "Lumina exports create_history_tracker helper")
+
+    -- 2. Initialization tests
+    local tracker = Lumina.create_history_tracker("/home/zliu/test/lualab", 64)
+    assert_eq(tracker.get_index(), 1, "Initial history index is 1")
+    assert_eq(#tracker.get_stack(), 1, "Initial history stack size is 1")
+    assert_eq(tracker.current(), "/home/zliu/test/lualab", "Initial current dir matches start dir")
+    assert_false(tracker.can_go_back(), "Cannot go back on initial start")
+    assert_false(tracker.can_go_forward(), "Cannot go forward on initial start")
+    assert_eq(tracker.back(), nil, "back() returns nil when already at root")
+    assert_eq(tracker.forward(), nil, "forward() returns nil when already at head")
+
+    -- 3. Push and Navigation tests
+    tracker.push("/home/zliu/test/lualab/src")
+    assert_eq(tracker.get_index(), 2, "Index advances to 2 after push")
+    assert_eq(#tracker.get_stack(), 2, "Stack size is 2 after push")
+    assert_eq(tracker.current(), "/home/zliu/test/lualab/src", "current() reflects newly pushed dir")
+    assert_true(tracker.can_go_back(), "can_go_back() is true at index 2")
+    assert_false(tracker.can_go_forward(), "can_go_forward() is false at head")
+
+    -- Redundant push is ignored
+    tracker.push("/home/zliu/test/lualab/src")
+    assert_eq(#tracker.get_stack(), 2, "Pushing same current dir is ignored")
+
+    -- Push third directory
+    tracker.push("/home/zliu/test/lualab/src/engine")
+    assert_eq(tracker.get_index(), 3, "Index advances to 3")
+    assert_eq(#tracker.get_stack(), 3, "Stack size is 3")
+
+    -- 4. Jump back tests
+    local prev1 = tracker.back()
+    assert_eq(prev1, "/home/zliu/test/lualab/src", "First back() returns second directory")
+    assert_eq(tracker.get_index(), 2, "Index decrements to 2")
+    assert_true(tracker.can_go_back(), "Can still go back at index 2")
+    assert_true(tracker.can_go_forward(), "Can go forward after jumping back")
+
+    local prev2 = tracker.back()
+    assert_eq(prev2, "/home/zliu/test/lualab", "Second back() returns root directory")
+    assert_eq(tracker.get_index(), 1, "Index decrements to 1")
+    assert_false(tracker.can_go_back(), "Cannot go back past index 1")
+    assert_true(tracker.can_go_forward(), "Can go forward from index 1")
+
+    assert_eq(tracker.back(), nil, "Extra back() returns nil and preserves index 1")
+    assert_eq(tracker.get_index(), 1, "Index remains 1")
+
+    -- 5. Jump forward tests
+    local next1 = tracker.forward()
+    assert_eq(next1, "/home/zliu/test/lualab/src", "First forward() returns second directory")
+    assert_eq(tracker.get_index(), 2, "Index increments to 2")
+
+    local next2 = tracker.forward()
+    assert_eq(next2, "/home/zliu/test/lualab/src/engine", "Second forward() returns third directory")
+    assert_eq(tracker.get_index(), 3, "Index increments to 3")
+    assert_false(tracker.can_go_forward(), "Cannot go forward past head")
+    assert_eq(tracker.forward(), nil, "Extra forward() returns nil")
+
+    -- 6. Forward history truncation on branching navigation
+    tracker.back() -- now at index 2 (/home/zliu/test/lualab/src)
+    assert_eq(tracker.get_index(), 2, "Back to index 2")
+    tracker.push("/home/zliu/test/lualab/docs") -- navigate to new branch
+    assert_eq(tracker.get_index(), 3, "Index is 3 after branching push")
+    assert_eq(#tracker.get_stack(), 3, "Stack size is 3 after forward truncation")
+    assert_eq(tracker.current(), "/home/zliu/test/lualab/docs", "Current is new branch")
+    assert_false(tracker.can_go_forward(), "Forward history was cleanly truncated")
+
+    -- 7. Max capacity capping
+    local small_tracker = Lumina.create_history_tracker("/dir0", 3)
+    small_tracker.push("/dir1")
+    small_tracker.push("/dir2")
+    small_tracker.push("/dir3") -- pushes beyond max_size 3
+    assert_eq(#small_tracker.get_stack(), 3, "Stack size clamped to max_size 3")
+    assert_eq(small_tracker.get_stack()[1], "/dir1", "Oldest /dir0 evicted from stack")
+    assert_eq(small_tracker.current(), "/dir3", "Current is /dir3")
+
+    -- 8. Integration checks in lumina.lua source code
+    local lf30 = io.open("lumina.lua", "r")
+    local l_code30 = lf30:read("*a")
+    lf30:close()
+
+    assert_true(l_code30:find("create_history_tracker") ~= nil, "lumina.lua defines create_history_tracker")
+    assert_true(l_code30:find("dir_history%s*=%s*create_history_tracker") ~= nil, "lumina.lua instantiates dir_history")
+    assert_true(l_code30:find("dir_history%.push%(current_dir%)") ~= nil, "lumina.lua pushes to dir_history on navigation")
+    assert_true(l_code30:find("dir_history%.back") ~= nil, "lumina.lua calls dir_history.back")
+    assert_true(l_code30:find("dir_history%.forward") ~= nil, "lumina.lua calls dir_history.forward")
+    assert_true(l_code30:find('k%s*==%s*"\\15"') ~= nil or l_code30:find('k%s*==%s*"CTRL_O"') ~= nil,
+        "lumina.lua handles Ctrl+O for history jump back")
+    assert_true(l_code30:find('k%s*==%s*"\\9"') ~= nil or l_code30:find('k%s*==%s*"TAB"') ~= nil,
+        "lumina.lua handles Ctrl+I/Tab for history jump forward")
+    assert_true(l_code30:find('key%s*=%s*"Ctrl%+O,%s*%["') ~= nil, "show_help_modal documents Ctrl+O under NAVIGATION")
+    assert_true(l_code30:find('key%s*=%s*"Ctrl%+I,%s*%]"') ~= nil, "show_help_modal documents Ctrl+I under NAVIGATION")
+end
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)
