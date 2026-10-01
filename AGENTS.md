@@ -22,6 +22,10 @@ For every change, consider how to prove correctness before concluding:
 *   **Live Verification**: Execute the actual command or utility in the environment to confirm the fix works in practice.
 *   **Edge Cases & Regressions**: Test boundary inputs, invalid parameters, error handling, and ensure existing behavior is preserved.
 *   **Verification is Mandatory**: Never assume a fix works without running verification commands and inspecting output.
+*   **TUI Render & Viewport Coverage**: Never leave UI/modal rendering functions uncalled in tests. Test suites must execute all view and modal renderers directly (or via headless harness) across boundary conditions (empty data, long strings, special characters, and terminal size boundaries) to catch format-string mismatches (`bad argument to 'format'`) and clipping bugs before release.
+*   **Keystroke Simulation Testing**: Never test text input using only pre-composed strings. Test interactive input loops by feeding actual token sequences emitted by the key reader (including symbolic tokens like `"SPACE"`, `"BACKSPACE"`, `"ENTER"`, `"ESC"`).
+*   **Subprocess & External Command Validation**: Any feature invoking shell commands or external tools must be verified end-to-end to ensure standard output/error is visible to the user and terminal state (raw mode, screen buffer) transitions correctly.
+*   **Headless Pipeline Sanity Checks**: For interactive terminal utilities, run a non-interactive pipeline test (e.g. `printf ":\x1b" | luajit app.lua`) or mock driver to verify that invocation, key dispatch, and clean exit complete without runtime crashes.
 
 ## Request & Issue Workflow
 
@@ -54,6 +58,21 @@ For any TUI application or terminal utility in the repository, the agent MUST ad
    *   **Boundary Transitions**: Seamlessly handle first-item, last-item, and scroll-boundary crossings. Falling back from differential updates to full viewport scrolling must be robust and error-free.
    *   **Closure Scoping & Forward Declarations**: Always forward-declare all rendering functions (`render_full_screen`, `render_selection_differential`, etc.) at the top of TUI closures so boundary transitions and cross-calls never encounter uninitialized nil references.
    *   **Graceful Terminal Restoration**: Always register signal traps (`SIGINT`, `SIGTERM`, `EXIT`) and protected exit paths to guarantee alternate buffer exit (`\27[?1049l`), cursor restore (`\27[?25h`), and terminal raw mode reset.
+
+3. **Component Render Decoupling & Format Safety**:
+   *   **Pure Frame Generators**: Decouple visual rendering from interactive event loops. Expose or structure views as pure frame render functions (`render_<view>_frame(...) -> string`) that can be executed and asserted headlessly without an interactive TTY.
+   *   **Format String Invariants**: In format strings (`string.format`), ensure placeholder counts strictly match argument counts. Never construct multi-line templates with variable numbers of arguments without parameter parity checks or programmatic line joining.
+
+4. **Text Input & Keystroke Normalization**:
+   *   **Symbolic Token Translation**: Key readers often return symbolic strings (e.g., `"SPACE"`, `"ENTER"`, `"UP"`). Text-entry loops must never assume all printable characters satisfy `#k == 1`. Always normalize symbolic tokens (e.g., map `"SPACE"` to `" "`) before length or printable checks.
+   *   **Cursor & Buffer Bounds**: Support multi-byte characters, backspace at index 0, and clamped cursor positions when editing text buffers.
+
+5. **Subprocess Execution & Screen Buffer Discipline**:
+   *   **In-Place Execution vs. Terminal Handoff**:
+       *   Use `suspend_raw_mode()` (restoring canonical mode and echo, while keeping the active screen buffer intact) for inline commands where output must be seen by the user before returning.
+       *   Reserve `disable_raw_mode()` (restoring primary buffer `\27[?1049l`) for full program termination or full-screen external tool handoffs (e.g., launching `$EDITOR`).
+   *   **Buffer Flash & Overwrite Prevention**: Never flip screen buffers (`\27[?1049h` / `\27[?1049l`) around an inline subprocess, as switching buffers instantly hides command stdout/stderr.
+   *   **Input Drainage Before Confirmation**: Always flush the terminal input buffer (`tcflush` or OS equivalent) before prompting `Press Enter to continue...`, preventing queued or burst keystrokes from unintentionally skipping command output.
 
 ## Commit Workflow
 
