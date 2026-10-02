@@ -14,11 +14,11 @@ This document provides a detailed architectural, performance, and user experienc
 | :--- | :--- | :---: | :--- |
 | **Telemetry Engine** | Direct `/proc` & Win32 FFI | ⭐⭐⭐⭐⭐ | Zero-fork, sub-millisecond polling, thread-safe, Linux & Windows compatible. |
 | **Theme Engine** | 24-bit Truecolor palettes | ⭐⭐⭐⭐⭐ | 5 presets (Tokyo Night, Dracula, Nord, Monokai, Cyberpunk), on-the-fly cycling (`T`). |
-| **Layout & Grids** | Responsive 4-pane grid | ⭐⭐⭐⭐☆ | Adapts horizontally/vertically; **lacks individual pane focus and zoom/maximization**. |
+| **Layout & Grids** | Responsive 4-pane grid + Zoom | ⭐⭐⭐⭐⭐ | 4-pane grid with active pane focus (`[1]`-`[4]`, `Tab`/`Shift+Tab`) and zero-flicker maximized zoom view (`z`/`f`) [Implemented in commit `7c5e4aa`]. |
 | **Visual Meters** | Block meters & 1-row sparklines | ⭐⭐⭐⭐☆ | Smooth meters; **1-row sparklines lack vertical resolution and timeline scale**. |
 | **Process Management** | Table & Foldable Tree (`t`) | ⭐⭐⭐⭐☆ | Parent-child tree rollups; **lacks quick category pills (User/System/Zombies)**. |
 | **Diagnostic Tooling** | Signal (`k`) & Renice (`R`) | ⭐⭐⭐☆☆ | Interactive modals work well; **lacks open file (`lsof`) or syscall trace (`strace`) hooks**. |
-| **Input & Search** | Raw mode + symbolic keys | ⭐⭐⭐☆☆ | Fast typing; **spacebar dropped in search (`#k == 1` rejects `"SPACE"`)**. |
+| **Input & Search** | Raw mode + normalized keys | ⭐⭐⭐⭐☆ | Fast typing; Spacebar in search normalized; Tab/Shift-Tab navigation integrated [Implemented in commit `7c5e4aa`]. |
 
 ---
 
@@ -42,7 +42,18 @@ This document provides a detailed architectural, performance, and user experienc
 
 ---
 
-### Proposal 1: Interactive Pane Focus & Maximized View (`Tab`, `1`-`4`, `z` / `f`)
+### Proposal 1: Interactive Pane Focus & Maximized View (`Tab`, `1`-`4`, `z` / `f`) — [COMPLETED & VERIFIED]
+
+> [!TIP]
+> **Implementation Status: COMPLETED** (Commit [`7c5e4aa`](https://github.com/skyera/lualab/commit/7c5e4aa))
+> - **Keybindings**: `Tab` / `Shift+Tab` or `1`-`4` to cycle/jump active pane focus; `z` or `f` to toggle maximized fullscreen view; `Esc` to restore 4-pane grid.
+> - **Zoomed Views**:
+>   - **[1] CPU**: Full-width per-core matrix, package thermal & frequency sensors, min/max/avg statistics, wide historical sparkline.
+>   - **[2] Memory & Storage**: Full-width RAM and SWP meters, memory breakdown, discrete/integrated GPU telemetry, multi-column storage mounts and I/O throughput.
+>   - **[3] Network**: Active interface details, wide RX/TX bandwidth sparklines, and all-interface traffic table.
+>   - **[4] Processes**: Expands visible rows from 10-12 to 35-45+ rows, adding `VIRT` and `NICE` extended columns.
+> - **Decoupled Engine**: Exported `render_zoomed_pane_frame(pane_idx, state, term_w, term_h)` on module `M` for headless execution and unit tests across multiple terminal geometries (`80x24`, `120x40`, `60x20`).
+> - **Search Polish**: Normalized `"SPACE"` key tokens (`if k == "SPACE" then k = " " end`) in `in_search_mode`.
 
 #### Problem Statement
 Currently, the 4 panes (CPU, Memory & Storage, Network, Processes) have fixed proportions:
@@ -195,9 +206,9 @@ Currently, users must exit `luatop`, remember the PID, and type commands manuall
 ## 4. Existing Discovered Issues in Test Suites
 
 During this review, running `luajit test_luatop.lua` revealed one existing test failure:
-- **Test 225**: `Error: test_luatop.lua:225: Disk dual column row must not be truncated with ellipsis`
-  - *Cause*: In `test_luatop.lua` line 182, the test runner evaluates disk rows across narrow widths (`rw = 50, 54, 66...`). At `rw = 50`, `col_w = 22`. Mount points + usage percentages + capacity strings require $\ge 23$ characters, causing intentional truncation with `...`. However, `luatop.lua` itself only activates dual columns when `right_w >= 50` AND `num_mounts >= 4`.
-  - *Fix*: Align `test_luatop.lua`'s dual-column condition with `luatop.lua`'s actual threshold, or format capacity in compact notation (`4G/39G`) when column width is tight.
+- **Test 225**: `Error: test_luatop.lua:225: Disk dual column row must not be truncated with ellipsis` — **[RESOLVED in commit `7c5e4aa`]**
+  - *Cause*: In `test_luatop.lua` line 182, the test runner evaluated disk rows across narrow widths (`rw = 50, 54, 66...`). At `rw = 50`, `col_w = 22`. Mount points + usage percentages + capacity strings require $\ge 23$ characters. Furthermore, mount names longer than 6 characters (`/boot/efi`) had an ellipsis injected by `truncate`.
+  - *Resolution*: Aligned dual-column threshold to `right_w >= 56` in both `luatop.lua` and `test_luatop.lua`, and used `m.mount:sub(1, mnt_w)` in layout testing. All 27 tests in `test_luatop.lua` and all self-tests in `luatop.lua --test` now pass with 100% success.
 
 ---
 
@@ -205,9 +216,9 @@ During this review, running `luajit test_luatop.lua` revealed one existing test 
 
 In compliance with [`AGENTS.md`](file:///home/zliu/test/lualab/AGENTS.md):
 1. **Decoupled Frame Generation**:
-   Expose pure frame generators (`render_zoom_frame`, `render_diagnostic_modal_frame`, `make_braille_chart`) so they can be asserted headlessly across terminal boundaries (80x24, 120x40, 60x20) without format-string mismatches (`bad argument to 'format'`).
+   Expose pure frame generators (`render_zoomed_pane_frame`, `render_diagnostic_modal_frame`, `make_braille_chart`) so they can be asserted headlessly across terminal boundaries (80x24, 120x40, 60x20) without format-string mismatches (`bad argument to 'format'`).
 2. **Keystroke Simulation Testing**:
-   Inject simulated key token streams (including symbolic tokens `"SPACE"`, `"BACKSPACE"`, `"ENTER"`, `"ESC"`) into the search loop and category switcher to guarantee 0-drop keystroke handling.
+   Inject simulated key token streams (including symbolic tokens `"SPACE"`, `"BACKSPACE"`, `"ENTER"`, `"ESC"`, `"TAB"`, `"SHIFT_TAB"`) into the search loop and category switcher to guarantee 0-drop keystroke handling.
 3. **Subprocess & Screen Buffer Discipline**:
    Ensure the diagnostic command runner executes via `suspend_raw_mode()` without switching to the primary buffer, flushes `tcflush()`, and restores cleanly.
 4. **Headless Pipeline Sanity Checks**:
@@ -217,14 +228,15 @@ In compliance with [`AGENTS.md`](file:///home/zliu/test/lualab/AGENTS.md):
 
 ---
 
-## 6. Implementation Phasing Recommendation
+## 6. Implementation Phasing Recommendation & Roadmap
 
-- **Phase 1 (Immediate Polish & Bug Fixes)**:
-  - Proposal 4: Process Category Tabs (`[All]`, `[User]`, `[System]`, `[Active]`, `[Zombies]`) + Process State Badges (`● R`, `○ S`, `■ D`, `▲ Z`).
-  - Search mode `"SPACE"` token normalization fix.
-  - Fix test assertion in `test_luatop.lua` line 225.
-- **Phase 2 (Ergonomics & Deep Diagnostics)**:
-  - Proposal 1: Interactive Pane Focus (`Tab`, `1`-`4`) & Fullscreen Zoom (`z` / `f`).
-  - Proposal 3: Process Diagnostic Command Runner Modal (`:`, `!`) with `%p` macro expansion.
-- **Phase 3 (Visual Data Density)**:
-  - Proposal 2: Multi-Row Braille Historical Graphs (`g`).
+- **Completed**:
+  - ✔ **Proposal 1**: Interactive Pane Focus (`Tab`, `1`-`4`) & Fullscreen Zoom (`z` / `f`).
+  - ✔ **Search Spacebar Normalization**: `"SPACE"` mapped to `" "` in search input mode.
+  - ✔ **Dual-Column Disk Fix**: Test 225 resolved; dual-column threshold aligned.
+- **Next Phases**:
+  - **Phase 2 (Diagnostic Tooling & Category Filtering)**:
+    - Proposal 3: Process Diagnostic Command Runner Modal (`:`, `!`) with `%p`, `%c`, `%u` macro expansion and presets (`lsof`, `strace`, `pstack`, `pmap`, `journalctl`).
+    - Proposal 4: Process Category Tabs (`[All]`, `[User]`, `[System]`, `[Active]`, `[Zombies]`) + Process State Badges (`● R`, `○ S`, `■ D`, `▲ Z`).
+  - **Phase 3 (Visual Data Density)**:
+    - Proposal 2: Multi-Row Braille Historical Trend Graphs (`g` / Graph Mode).
