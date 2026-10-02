@@ -54,6 +54,7 @@ make
   ./LuaJIT/src/luajit ffi_system_info.lua   # Rich POSIX system diagnostics, hardware specs & memory benchmark (--compact, --json, --bench)
   ./LuaJIT/src/luajit ffi_advanced_demo.lua
   ./LuaJIT/src/luajit ffi_sqlite_demo.lua   # In-memory SQLite3 FFI engine & benchmark
+  luajit ffi_asteroids.lua                 # Linux terminal Asteroids (A/D rotate, W thrust, Space fire; --snapshot, --test)
   ./LuaJIT/src/luajit ffi_game_snake.lua    # Real-time terminal Snake game via POSIX FFI
   ./LuaJIT/src/luajit ffi_image_terminal_demo.lua  # Fast C image generation & terminal truecolor viewer
   luajit ffi_thumbnailer.lua [dir] [--max WxH] [--cols N]    # Interactive TUI thumbnail browser (PgUp/PgDn, lazy-load, cache)

@@ -22,6 +22,7 @@ local test_suites = {
     { file = "test_ffi_demoscene_studio.lua", description = "LuaJIT FFI 1990s Demoscene Effects Studio Suite" },
     { file = "test_ffi_wolf3d_raycaster.lua", description = "LuaJIT FFI 1990s Wolfenstein 3D Raycasting Engine Suite" },
     { file = "test_ffi_game_2048.lua", description = "LuaJIT FFI 2048 Sliding Puzzle & Expectimax AI Suite" },
+    { file = "test_ffi_asteroids.lua", description = "LuaJIT FFI Terminal Asteroids Suite" },
     { file = "test_ffi_breakout.lua", description = "LuaJIT FFI Breakout Terminal Arcade Suite" },
     { file = "test_ffi_racer.lua", description = "LuaJIT FFI Turbo Circuit Top-Down ASCII Racing Suite" },
     { file = "test_ffi_image_defect_detector.lua", description = "LuaJIT FFI Optical Defect Inspection & Image Diff Suite" },
