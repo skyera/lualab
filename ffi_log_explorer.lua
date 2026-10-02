@@ -203,6 +203,9 @@ local function read_chunk(path,offset,previous,anchor)
 end
 local function severity(text)
  local upper=text:upper()
+ local explicit=upper:match('^%s*%[?([A-Z]+)%]?[%s:]') or upper:match('"LEVEL"%s*:%s*"([A-Z]+)"') or upper:match('"SEVERITY"%s*:%s*"([A-Z]+)"')
+ local levels={FATAL='ERROR',ERROR='ERROR',WARN='WARN',WARNING='WARN',DEBUG='DEBUG',TRACE='DEBUG',INFO='INFO'}
+ if levels[explicit] then return levels[explicit] end
  for _,level in ipairs({'FATAL','ERROR','WARN','WARNING','DEBUG','TRACE','INFO'}) do
   if upper:find('%f[%a]'..level..'%f[%A]') then
    return (level=='FATAL' and 'ERROR') or (level=='WARNING' and 'WARN') or (level=='TRACE' and 'DEBUG') or level
