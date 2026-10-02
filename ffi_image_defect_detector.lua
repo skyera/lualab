@@ -62,6 +62,31 @@ ffi.cdef[[
     } DefectBlob;
 ]]
 
+-- Preserve every key in a read, including fragmented VT sequences.
+local function make_key_decoder()
+    local pending = ""
+    return function(bytes, flush_escape)
+        pending = pending .. (bytes or "")
+        local keys = {}
+        while #pending > 0 do
+            if pending:sub(1, 1) == "\27" then
+                if (pending == "\27" or pending == "\27[") and not flush_escape then break end
+                local seq = pending:match("^\27%[[0-9;]*[A-Za-z~]")
+                if seq then
+                    local key = ({["\27[A"]="UP", ["\27[B"]="DOWN", ["\27[C"]="RIGHT", ["\27[D"]="LEFT"})[seq]
+                    if key then keys[#keys+1] = key end
+                    pending = pending:sub(#seq+1)
+                else keys[#keys+1] = "ESC"; pending = pending:sub(2) end
+            else
+                local ch = pending:sub(1, 1)
+                keys[#keys+1] = ({[" "]="SPACE", ["\t"]="TAB", ["\3"]="CTRL_C", ["\r"]="ENTER", ["\n"]="ENTER"})[ch] or ch:lower()
+                pending = pending:sub(2)
+            end
+        end
+        return keys
+    end
+end
+
 local get_terminal_size
 local enable_raw_mode
 local disable_raw_mode
@@ -69,6 +94,7 @@ local read_key_nonblocking
 local is_stdin_tty
 local sleep_ms
 local get_time_ms
+local install_signals, restore_signals
 
 if is_windows then
     ffi.cdef[[
@@ -87,6 +113,7 @@ if is_windows then
         int      __stdcall GetConsoleMode(void* hConsoleHandle, uint32_t* lpMode);
         int      __stdcall SetConsoleMode(void* hConsoleHandle, uint32_t dwMode);
         int      __stdcall SetConsoleOutputCP(uint32_t wCodePageID);
+        uint32_t __stdcall GetConsoleOutputCP(void);
         void     __stdcall Sleep(uint32_t dwMilliseconds);
 
         int _kbhit(void);
@@ -98,19 +125,12 @@ if is_windows then
     local orig_in_mode = ffi.new("uint32_t[1]")
     local in_raw_mode = false
 
-    pcall(function()
-        local hOut = ffi.C.GetStdHandle(STD_OUTPUT_HANDLE)
-        ffi.C.SetConsoleOutputCP(65001)
-        local out_mode = ffi.new("uint32_t[1]")
-        if ffi.C.GetConsoleMode(hOut, out_mode) ~= 0 then
-            ffi.C.SetConsoleMode(hOut, bit.bor(out_mode[0], 0x0004))
-        end
-    end)
-
+    local orig_out_mode = ffi.new("uint32_t[1]")
+    local old_codepage
     is_stdin_tty = function()
         local hIn = ffi.C.GetStdHandle(STD_INPUT_HANDLE)
         local mode = ffi.new("uint32_t[1]")
-        return ffi.C.GetConsoleMode(hIn, mode) ~= 0
+        return ffi.C.GetConsoleMode(hIn, mode) ~= 0 and ffi.C.GetConsoleMode(ffi.C.GetStdHandle(STD_OUTPUT_HANDLE), mode) ~= 0
     end
 
     get_terminal_size = function()
@@ -128,19 +148,26 @@ if is_windows then
         local hIn = ffi.C.GetStdHandle(STD_INPUT_HANDLE)
         if ffi.C.GetConsoleMode(hIn, orig_in_mode) == 0 then return false end
         local mask = bit.bnot(bit.bor(0x0002, 0x0004, 0x0001))
+        local hOut = ffi.C.GetStdHandle(STD_OUTPUT_HANDLE)
+        if ffi.C.GetConsoleMode(hOut, orig_out_mode) == 0 then return false end
+        old_codepage = ffi.C.GetConsoleOutputCP()
+        ffi.C.SetConsoleOutputCP(65001)
+        ffi.C.SetConsoleMode(hOut, bit.bor(orig_out_mode[0], 0x0004))
         ffi.C.SetConsoleMode(hIn, bit.band(orig_in_mode[0], mask))
         in_raw_mode = true
-        io.write("\27[?25l")
+        io.write("\27[?1049h\27[?25l\27[?7l\27[2J\27[H")
         io.flush()
         return true
     end
 
     disable_raw_mode = function()
         if in_raw_mode then
-            io.write("\27[?25h\27[0m")
+            io.write("\27[?7h\27[?1049l\27[?25h\27[0m")
             io.flush()
             local hIn = ffi.C.GetStdHandle(STD_INPUT_HANDLE)
             ffi.C.SetConsoleMode(hIn, orig_in_mode[0])
+            ffi.C.SetConsoleMode(ffi.C.GetStdHandle(STD_OUTPUT_HANDLE), orig_out_mode[0])
+            ffi.C.SetConsoleOutputCP(old_codepage)
             in_raw_mode = false
         end
     end
@@ -157,6 +184,8 @@ if is_windows then
                 end
             elseif ch == 27 then return "ESC"
             elseif ch == 13 or ch == 10 then return "ENTER"
+            elseif ch == 9 then return "TAB"
+            elseif ch == 3 then return "CTRL_C"
             elseif ch == 32 then return "SPACE"
             else return string.char(ch):lower() end
         end
@@ -218,6 +247,8 @@ ffi.cdef(posix_termios_cdef[[
         int isatty(int fd);
         int clock_gettime(int clk_id, timespec_t *tp);
         int usleep(unsigned int usec);
+        typedef void (*defect_signal_handler)(int);
+        defect_signal_handler signal(int sig, defect_signal_handler handler);
 ]])
 
 
@@ -250,57 +281,62 @@ ffi.cdef(posix_termios_cdef[[
         if in_raw_mode then return true end
         if ffi.C.isatty(STDIN_FILENO) ~= 1 then return false end
         if ffi.C.tcgetattr(STDIN_FILENO, orig_termios) ~= 0 then return false end
-        ffi.C.tcgetattr(STDIN_FILENO, raw_termios)
+        ffi.copy(raw_termios, orig_termios, ffi.sizeof(raw_termios))
 
         raw_termios.c_lflag = bit.band(raw_termios.c_lflag, bit.bnot(bit.bor(ICANON, ECHO, ISIG)))
-        raw_termios.c_cc[5] = 0 -- VMIN = 0
-        raw_termios.c_cc[6] = 0 -- VTIME = 0
+        raw_termios.c_cc[5] = 0 -- Linux VTIME
+        raw_termios.c_cc[6] = 0 -- Linux VMIN
+        raw_termios.c_iflag = bit.band(raw_termios.c_iflag, bit.bnot(1280))
 
-        ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
+        if ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios) ~= 0 then return false end
         in_raw_mode = true
-        io.write("\27[?25l")
+        io.write("\27[?1049h\27[?25l\27[?7l\27[2J\27[H")
         io.flush()
         return true
     end
 
     disable_raw_mode = function()
         if in_raw_mode then
-            io.write("\27[?25h\27[0m")
+            io.write("\27[?7h\27[?1049l\27[?25h\27[0m")
             io.flush()
             ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
             in_raw_mode = false
         end
     end
 
-    local key_buf = ffi.new("char[16]")
+    local key_buf = ffi.new("uint8_t[256]")
+    local key_queue, decode = {}, make_key_decoder()
+    local escape_since
+    local pfd = ffi.new("struct pollfd[1]")
+    pfd[0].fd, pfd[0].events = STDIN_FILENO, POLLIN
     read_key_nonblocking = function()
-        local pfd = ffi.new("struct pollfd[1]")
-        pfd[0].fd = STDIN_FILENO
-        pfd[0].events = POLLIN
-
-        local ret = ffi.C.poll(pfd, 1, 0)
-        if ret > 0 and bit.band(pfd[0].revents, POLLIN) ~= 0 then
-            local n = ffi.C.read(STDIN_FILENO, key_buf, 15)
-            if n > 0 then
-                local b0 = key_buf[0]
-                if b0 == 27 then
-                    if n == 1 then return "ESC"
-                    elseif n >= 3 and key_buf[1] == 91 then
-                        local c2 = key_buf[2]
-                        if c2 == 65 then return "UP"
-                        elseif c2 == 66 then return "DOWN"
-                        elseif c2 == 67 then return "RIGHT"
-                        elseif c2 == 68 then return "LEFT"
-                        end
-                    end
-                    return "ESC"
-                elseif b0 == 10 or b0 == 13 then return "ENTER"
-                elseif b0 == 32 then return "SPACE"
-                elseif b0 == 3 then return "CTRL_C"
-                else return string.char(b0):lower() end
-            end
+        if #key_queue > 0 then return table.remove(key_queue, 1) end
+        local bytes
+        pfd[0].revents = 0
+        if ffi.C.poll(pfd, 1, 0) > 0 then
+            if bit.band(pfd[0].revents, POLLIN) ~= 0 then
+                local n = ffi.C.read(STDIN_FILENO, key_buf, 256)
+                if n <= 0 then return "EOF" end
+                bytes = ffi.string(key_buf, n)
+                escape_since = get_time_ms()
+            elseif bit.band(pfd[0].revents, 24) ~= 0 then return "EOF" end
         end
+        local flush = escape_since and get_time_ms() - escape_since > 40
+        key_queue = decode(bytes, flush)
+        if #key_queue > 0 then return table.remove(key_queue, 1) end
         return nil
+    end
+    local signal_cb, previous_int, previous_term
+    install_signals = function(stop)
+        signal_cb = ffi.cast("defect_signal_handler", stop)
+        previous_int = ffi.C.signal(2, signal_cb)
+        previous_term = ffi.C.signal(15, signal_cb)
+    end
+    restore_signals = function()
+        if signal_cb then
+            ffi.C.signal(2, previous_int); ffi.C.signal(15, previous_term)
+            signal_cb:free(); signal_cb = nil
+        end
     end
 
     local ts = ffi.new("timespec_t")
@@ -1041,117 +1077,177 @@ local function emit_pixel_pair(top_r, top_g, top_b, bot_r, bot_g, bot_b)
         top_r, top_g, top_b, bot_r, bot_g, bot_b)
 end
 
--- Render an image scaled down to target terminal width & height in characters
-function TerminalUI.render_image_to_lines(img, target_w, target_h)
+-- Image rows contain exactly target_w cells; ASCII mode emits no ANSI escapes.
+function TerminalUI.render_image_to_lines(img, target_w, target_h, use_ascii)
     local lines = {}
-    local x_scale = img.width / target_w
-    local y_scale = img.height / (target_h * 2)
-
-    for term_y = 0, target_h - 1 do
+    local ramp = " .:-=+*#%@"
+    for y = 0, target_h - 1 do
         local parts = {}
-        local src_y_top = math.min(img.height - 1, math.floor(term_y * 2 * y_scale))
-        local src_y_bot = math.min(img.height - 1, math.floor((term_y * 2 + 1) * y_scale))
-
-        for term_x = 0, target_w - 1 do
-            local src_x = math.min(img.width - 1, math.floor(term_x * x_scale))
-            local tr, tg, tb = img:get_pixel(src_x, src_y_top)
-            local br, bg, bb = img:get_pixel(src_x, src_y_bot)
-            table.insert(parts, emit_pixel_pair(tr, tg, tb, br, bg, bb))
+        local sy = math.min(img.height-1, math.floor(y / target_h * img.height))
+        local by = math.min(img.height-1, math.floor((y+0.5) / target_h * img.height))
+        for x = 0, target_w - 1 do
+            local sx = math.min(img.width-1, math.floor(x / target_w * img.width))
+            local r,g,b = img:get_pixel(sx, sy)
+            if use_ascii then
+                local level = math.min(10, math.floor((r*0.299+g*0.587+b*0.114)/256*10)+1)
+                parts[#parts+1] = ramp:sub(level,level)
+            else
+                local br,bg,bb = img:get_pixel(sx,by)
+                parts[#parts+1] = emit_pixel_pair(r,g,b,br,bg,bb)
+            end
         end
-        table.insert(parts, "\27[0m")
-        table.insert(lines, table.concat(parts))
+        if not use_ascii then parts[#parts+1] = "\27[0m" end
+        lines[#lines+1] = table.concat(parts)
     end
     return lines
 end
 
--- Assemble 4-Panel Dashboard: Reference, Sample, Heatmap, Annotated Overlay
-function TerminalUI.render_dashboard(golden_img, sample_img, diff_res, annotated_img, blobs, elapsed_ms, use_ascii)
-    local lines = {}
-    local function emit(fmt, ...) table.insert(lines, string.format(fmt, ...)) end
-
-    local term_w, term_h = get_terminal_size()
-    local c_reset  = use_ascii and "" or "\27[0m"
-    local c_title  = use_ascii and "" or "\27[1;38;2;237;194;46m"
-    local c_accent = use_ascii and "" or "\27[1;36m"
-    local c_red    = use_ascii and "" or "\27[1;31m"
-    local c_green  = use_ascii and "" or "\27[1;32m"
-    local c_yellow = use_ascii and "" or "\27[1;33m"
-    local c_gray   = use_ascii and "" or "\27[90m"
-
-    -- Banner
-    emit("\n  %s╔══════════════════════════════════════════════════════════════════════════════╗%s", c_title, c_reset)
-    emit("  %s║            OPTICAL DEFECT INSPECTOR  •  LUAJIT FFI DIFF ENGINE               ║%s", c_title, c_reset)
-    emit("  %s╚══════════════════════════════════════════════════════════════════════════════╝%s\n", c_title, c_reset)
-
-    -- Status KPI Bar
-    local verdict = (#blobs == 0) and (c_green .. "[✔ PASS / ACCEPTED]" .. c_reset) or (c_red .. "[✖ DEFECTIVE / REJECTED]" .. c_reset)
-    local defect_pct = (diff_res.defect_pixel_count / (golden_img.width * golden_img.height)) * 100.0
-
-    emit("  STATUS: %s    DEFECTS FOUND: %s%d%s    AFFECTED PIXELS: %d (%.2f%%)",
-        verdict, c_yellow, #blobs, c_reset, diff_res.defect_pixel_count, defect_pct)
-    emit("  TOLERANCE: ΔE ≥ 28    IMAGE SIZE: %dx%d    SCAN TIME: %s%.2f ms%s\n",
-        golden_img.width, golden_img.height, c_green, elapsed_ms or 0, c_reset)
-
-    -- Calculate quadrant preview dimensions to fit terminal neatly
-    -- Two columns of images side-by-side
-    local max_pane_w = math.min(48, math.floor((term_w - 10) / 2))
-    local pane_w = math.max(32, max_pane_w)
-    local pane_h = math.floor(pane_w * (golden_img.height / golden_img.width) * 0.5)
-    pane_h = math.max(10, math.min(16, pane_h))
-
-    local p1_lines = TerminalUI.render_image_to_lines(golden_img, pane_w, pane_h)
-    local p2_lines = TerminalUI.render_image_to_lines(sample_img, pane_w, pane_h)
-    local p3_lines = TerminalUI.render_image_to_lines(diff_res.diff_img, pane_w, pane_h)
-    local p4_lines = TerminalUI.render_image_to_lines(annotated_img, pane_w, pane_h)
-
-    local title_p1 = "┌─ [1] GOLDEN REFERENCE " .. string.rep("─", math.max(0, pane_w - 24)) .. "┐"
-    local title_p2 = "┌─ [2] INSPECTION SAMPLE " .. string.rep("─", math.max(0, pane_w - 24)) .. "┐"
-    local title_p3 = "┌─ [3] TRUECOLOR ΔE HEATMAP " .. string.rep("─", math.max(0, pane_w - 27)) .. "┐"
-    local title_p4 = "┌─ [4] DEFECT BOUNDING BOXES " .. string.rep("─", math.max(0, pane_w - 28)) .. "┐"
-
-    local b_bot = "└" .. string.rep("─", pane_w) .. "┘"
-
-    -- Row 1: Reference vs Sample
-    emit("  %s%s%s   %s%s%s", c_accent, title_p1, c_reset, c_accent, title_p2, c_reset)
-    for row = 1, pane_h do
-        emit("  │%s%s│   │%s%s│", p1_lines[row], c_reset, p2_lines[row], c_reset)
-    end
-    emit("  %s   %s\n", b_bot, b_bot)
-
-    -- Row 2: Diff Heatmap vs Annotated Overlay
-    emit("  %s%s%s   %s%s%s", c_accent, title_p3, c_reset, c_accent, title_p4, c_reset)
-    for row = 1, pane_h do
-        emit("  │%s%s│   │%s%s│", p3_lines[row], c_reset, p4_lines[row], c_reset)
-    end
-    emit("  %s   %s\n", b_bot, b_bot)
-
-    -- Defect Log Table
-    emit("  %s═════════════════════════════ DETECTED DEFECTS LOG ═════════════════════════════%s", c_title, c_reset)
-    emit("   %sID   SEVERITY   BBOX (X, Y, W, H)    AREA      PEAK ΔE   CLASSIFICATION%s", c_accent, c_reset)
-    emit("  ───────────────────────────────────────────────────────────────────────────────")
-
-    if #blobs == 0 then
-        emit("   %sNo defects detected. Template matches inspection sample within tolerance.%s", c_green, c_reset)
-    else
-        for _, b in ipairs(blobs) do
-            local sev_str = b.severity
-            if sev_str == "CRITICAL" then sev_str = c_red .. "CRITICAL" .. c_reset
-            elseif sev_str == "MODERATE" then sev_str = c_yellow .. "MODERATE" .. c_reset
-            else sev_str = c_gray .. "MINOR   " .. c_reset end
-
-            local bbox_str = string.format("(%3d,%3d,%3d,%3d)", b.x_min, b.y_min, b.width, b.height)
-            emit("   #%-2d %s  %-20s %4d px   %6.1f    %-16s",
-                b.id, sev_str, bbox_str, b.area, b.max_delta, b.classification)
+local function safe_text(s)
+    return tostring(s or ""):gsub("[%z\1-\31\127]", " ")
+end
+-- Clip complete UTF-8 characters, preserving internally generated SGR codes.
+local function fit_row(s, width)
+    local out, cells, i = {}, 0, 1
+    while i <= #s and cells < width do
+        local sgr = s:sub(i):match("^\27%[[0-9;]*m")
+        if sgr then out[#out+1]=sgr; i=i+#sgr
+        else
+            local byte=s:byte(i)
+            local n=byte<128 and 1 or (byte<224 and 2 or (byte<240 and 3 or 4))
+            out[#out+1]=s:sub(i,i+n-1); i=i+n; cells=cells+1
         end
     end
-    emit("  ───────────────────────────────────────────────────────────────────────────────")
-    emit("  %s[Controls]%s  %sG%s: Generate New Dynamic PCB Sample  |  %s+/-%s: Adjust ΔE Tolerance (%d)",
-        c_gray, c_reset, c_accent, c_reset, c_accent, c_reset, diff_res.tolerance or 28)
-    emit("              %sS%s: Save PPM Images  |  %sR%s: Clean Baseline (0 Defects)  |  %sQ / ESC%s: Quit\n",
-        c_accent, c_reset, c_accent, c_reset, c_accent, c_reset)
-
-    return table.concat(lines, "\n")
+    return table.concat(out)..(s:find("\27",1,true) and "\27[0m" or "")..string.rep(" ", math.max(0,width-cells))
 end
+
+-- Letterbox previews using half-block cell geometry (two source pixels per row).
+function TerminalUI.render_preview(img, width, height, use_ascii)
+    local scale=math.min(width/img.width,height*2/img.height)
+    local draw_w=math.max(1,math.min(width,math.floor(img.width*scale)))
+    local draw_h=math.max(1,math.min(height,math.floor(img.height*scale/2)))
+    local image=TerminalUI.render_image_to_lines(img,draw_w,draw_h,use_ascii)
+    local left=math.floor((width-draw_w)/2)
+    local top=math.floor((height-draw_h)/2)
+    local lines={}
+    for y=1,height do
+        if y>top and y<=top+draw_h then
+            lines[y]=string.rep(" ",left)..image[y-top]..string.rep(" ",width-draw_w-left)
+        else lines[y]=string.rep(" ",width) end
+    end
+    return lines
+end
+
+function TerminalUI.selected_overlay(img, blob)
+    if not blob then return img end
+    local copy=img:clone()
+    local x,y=math.max(0,blob.x_min-2),math.max(0,blob.y_min-2)
+    copy:draw_rect_outline(x,y,math.min(copy.width-x,blob.width+4),
+        math.min(copy.height-y,blob.height+4),70,225,255,2)
+    return copy
+end
+
+-- Pure viewport renderer: dimensions and state are supplied by the caller.
+function TerminalUI.render_dashboard_frame(state, cols, rows)
+    local width=math.max(1,cols-1)
+    rows=math.max(1,rows)
+    local lines={}
+    local ascii=state.use_ascii
+    local reset=ascii and "" or "\27[0m"
+    local cyan=ascii and "" or "\27[38;2;80;205;220m"
+    local muted=ascii and "" or "\27[38;2;100;125;145m"
+    local red=ascii and "" or "\27[1;31m"
+    local green=ascii and "" or "\27[1;32m"
+    local amber=ascii and "" or "\27[33m"
+    local edge=ascii and "|" or "│"
+    local rule=ascii and "-" or "─"
+    local function add(s) if #lines<rows then lines[#lines+1]=fit_row(s,width) end end
+    if width<38 or rows<16 then
+        add("Resize terminal: minimum 39 x 16")
+        add("Q / Esc quit")
+    else
+        local inside=width-4
+        local function row(s)
+            add(muted..edge..reset.." "..fit_row(s,inside).." "..muted..edge..reset)
+        end
+        local function divider(left,right)
+            add(muted..left..string.rep(rule,width-2)..right..reset)
+        end
+        local diff,blobs=state.diff_res,state.blobs
+        local count=#blobs
+        local selected=math.max(1,math.min(count,state.selected or 1))
+        local blob=blobs[selected]
+        local top_left,top_right=ascii and "+" or "┌",ascii and "+" or "┐"
+        add(cyan..top_left..rule.." OPTICAL DEFECT INSPECTOR "..
+            string.rep(rule,width-29)..top_right..reset)
+        row((count==0 and green.."PASS" or red.."DEFECTIVE")..reset..
+            string.format("    %d defects    %.2f%% affected    Scan %.2f ms",count,
+                diff.defect_pixel_count/(state.golden_img.width*state.golden_img.height)*100,state.elapsed_ms or 0))
+        row(string.format("Tolerance: %g   Min area: %g   Image: %dx%d",diff.tolerance or 28,
+            state.min_area or 5,state.golden_img.width,state.golden_img.height))
+        divider(ascii and "+" or "├",ascii and "+" or "┤")
+        local view=state.view or 2
+        local names={"Sample","Overlay","Heatmap"}
+        local image=({state.sample_img,state.annotated_img,diff.diff_img})[view]
+        if view==2 then image=TerminalUI.selected_overlay(image,blob) end
+        local pane_h=math.max(1,math.min(16,math.floor((rows-14)*0.6)))
+        local single=width<70
+        local pane_w=single and inside or math.floor((inside-3)/2)
+        local right=TerminalUI.render_preview(image,pane_w,pane_h,ascii)
+        local left=not single and TerminalUI.render_preview(state.golden_img,pane_w,pane_h,ascii)
+        local tabs={}
+        for i,name in ipairs(names) do tabs[#tabs+1]=i==view and ("["..name.."]") or name end
+        row(cyan..(single and table.concat(tabs," ") or
+            (fit_row("GOLDEN REFERENCE",pane_w)..reset.." "..muted..edge..reset.." "..cyan..table.concat(tabs," ")))..reset)
+        for y=1,pane_h do row(single and right[y] or
+            (left[y].." "..muted..edge..reset.." "..right[y])) end
+        divider(ascii and "+" or "├",ascii and "+" or "┤")
+        local available=rows-13-pane_h
+        local first=math.max(1,selected-available+1)
+        row(cyan..string.format("DETECTED DEFECTS LOG    %d total    %d-%d",count,
+            count==0 and 0 or first,math.min(count,first+available-1))..reset)
+        row(muted.." ID   Severity    Area     Position    Classification"..reset)
+        for index=first,first+available-1 do
+            local b=blobs[index]
+            if b then
+                local sev=b.severity=="CRITICAL" and red or (b.severity=="MODERATE" and amber or muted)
+                local marker=index==selected and ">" or " "
+                local text=string.format("%s%3d %s%-9s%s %5d px  %3d,%3d   %s",marker,b.id,
+                    sev,safe_text(b.severity),reset,b.area,b.x_min,b.y_min,safe_text(b.classification))
+                if index==selected and not ascii then text="\27[48;2;22;43;58m"..text:gsub("\27%[0m","\27[0m\27[48;2;22;43;58m") end
+                row(text..reset)
+            else row(index==first and count==0 and green.."No defects detected."..reset or "") end
+        end
+        divider(ascii and "+" or "├",ascii and "+" or "┤")
+        row(blob and string.format("Selected #%d | BBox %d,%d %dx%d | Peak %.1f",blob.id,
+            blob.x_min,blob.y_min,blob.width,blob.height,blob.max_delta or 0) or "Reference and sample match within tolerance")
+        row(cyan..safe_text(state.status or "Ready")..reset)
+        row(inside<50 and "Tab View  +/- Tune  S Save  Q Quit" or
+            inside<65 and "+/- Tune  Tab View  Up/Down Select  S Save  Q Quit" or
+            "Space Generate  +/- Tune  Tab View  Up/Down Select  S Save  R Clean  Q Quit")
+        divider(ascii and "+" or "└",ascii and "+" or "┘")
+    end
+    while #lines<rows do add("") end
+    return lines
+end
+
+function TerminalUI.render_dashboard(golden_img, sample_img, diff_res, annotated_img, blobs, elapsed_ms, use_ascii)
+    local cols,rows=get_terminal_size()
+    return table.concat(TerminalUI.render_dashboard_frame({golden_img=golden_img,sample_img=sample_img,
+        diff_res=diff_res,annotated_img=annotated_img,blobs=blobs,elapsed_ms=elapsed_ms,use_ascii=use_ascii},cols,rows),"\n")
+end
+
+function TerminalUI.render_changed_rows(lines, previous, clear)
+    local out={"\27[?2026h"}
+    if clear then out[#out+1]="\27[2J" end
+    for y,line in ipairs(lines) do
+        if not previous or previous[y]~=line then
+            out[#out+1]=string.format("\27[%d;1H%s\27[0m\27[K",y,line)
+        end
+    end
+    out[#out+1]="\27[?2026l"
+    return table.concat(out)
+end
+TerminalUI.make_key_decoder = make_key_decoder
 
 -- =========================================================================
 -- 6. CLI Handler, Benchmark & Self-Tests
@@ -1171,6 +1267,9 @@ Options:
   --json                 Output structured JSON defect report to stdout.
   --save-ppm             Save golden, sample, and annotated result PPM images to disk.
   --ascii                Use ASCII fallback instead of ANSI truecolor codes.
+
+Controls: Space/G generate, +/- tolerance, Tab preview, Up/Down defect,
+          S save images, R clean baseline, Q/Esc quit.
   --snapshot             Print non-interactive dashboard snapshot and exit immediately.
   --test                 Run the comprehensive internal regression & unit test suite.
 
@@ -1399,65 +1498,61 @@ local function main()
         return
     end
 
-    -- Interactive TUI Loop with Dynamic Generation Key ('G')
-    enable_raw_mode()
-    io.write("[2J[H")
-    io.flush()
-
-    local running = true
-    local needs_redraw = true
-
-    local ok, err = pcall(function()
+    local running, needs_redraw = true, true
+    local view, selected, status = 2, 1, "Ready"
+    local previous, old_cols, old_rows
+    if install_signals then install_signals(function() running=false end) end
+    local ok, err = xpcall(function()
+        assert(enable_raw_mode(), "Failed to initialize terminal input")
         while running do
+            local cols,rows=get_terminal_size()
+            local resized=old_cols and (cols~=old_cols or rows~=old_rows)
+            if resized then previous=nil; needs_redraw=true end
             if needs_redraw then
-                local dashboard = TerminalUI.render_dashboard(golden_img, sample_img, diff_res, annotated_img, blobs, elapsed_ms, use_ascii)
-                io.write("[H" .. dashboard)
-                io.flush()
-                needs_redraw = false
+                selected=math.max(1,math.min(#blobs,selected))
+                local frame=TerminalUI.render_dashboard_frame({golden_img=golden_img,sample_img=sample_img,
+                    diff_res=diff_res,annotated_img=annotated_img,blobs=blobs,elapsed_ms=elapsed_ms,
+                    use_ascii=use_ascii,min_area=detector.min_blob_area,view=view,selected=selected,status=status},cols,rows)
+                io.write(TerminalUI.render_changed_rows(frame,previous,resized)); io.flush()
+                previous=frame; needs_redraw=false
             end
-
-            local key = read_key_nonblocking()
+            old_cols,old_rows=cols,rows
+            local key=read_key_nonblocking()
             if key then
-                if key == "CTRL_C" or key == "q" or key == "ESC" then
-                    running = false
-                elseif key == "g" or key == "SPACE" then
-                    -- Generate new dynamic sample with fresh randomized defects
-                    sample_img = PCBGenerator.inject_defects(golden_img, { randomize = true })
-                    run_inspection()
-                    needs_redraw = true
-                elseif key == "r" then
-                    -- Reset to clean pristine golden sample (0 defects)
-                    sample_img = golden_img:clone()
-                    run_inspection()
-                    needs_redraw = true
-                elseif key == "+" or key == "=" then
-                    detector.tolerance = math.min(200, detector.tolerance + 2)
-                    run_inspection()
-                    needs_redraw = true
-                elseif key == "-" or key == "_" then
-                    detector.tolerance = math.max(5, detector.tolerance - 2)
-                    run_inspection()
-                    needs_redraw = true
-                elseif key == "s" then
-                    golden_img:save_ppm("pcb_golden_reference.ppm")
-                    sample_img:save_ppm("pcb_sample_defective.ppm")
-                    annotated_img:save_ppm("pcb_annotated_result.ppm")
-                    needs_redraw = true
+                if key=="CTRL_C" or key=="q" or key=="ESC" or key=="EOF" then running=false
+                elseif key=="g" or key=="SPACE" then
+                    sample_img=PCBGenerator.inject_defects(golden_img,{randomize=true})
+                    run_inspection(); selected=1; status="Generated new sample"; needs_redraw=true
+                elseif key=="r" then
+                    sample_img=golden_img:clone(); run_inspection(); selected=1
+                    status="Clean baseline"; needs_redraw=true
+                elseif key=="+" or key=="=" or key=="-" or key=="_" then
+                    detector.tolerance=math.max(5,math.min(200,detector.tolerance+((key=="+" or key=="=") and 2 or -2)))
+                    run_inspection(); status="Tolerance updated"; needs_redraw=true
+                elseif key=="TAB" then view=view%3+1; needs_redraw=true
+                elseif key=="UP" then selected=math.max(1,selected-1); needs_redraw=true
+                elseif key=="DOWN" then selected=math.min(#blobs,selected+1); needs_redraw=true
+                elseif key=="s" then
+                    local saved, save_err=true,nil
+                    for _,entry in ipairs({{golden_img,"pcb_golden_reference.ppm"},
+                        {sample_img,"pcb_sample_defective.ppm"},{annotated_img,"pcb_annotated_result.ppm"}}) do
+                        local success, why=entry[1]:save_ppm(entry[2])
+                        if not success then saved=false; save_err=why; break end
+                    end
+                    status=saved and "Saved 3 PPM images" or ("Save failed: "..tostring(save_err))
+                    needs_redraw=true
                 end
-            end
-
-            sleep_ms(15)
+            else sleep_ms(15) end
         end
-    end)
-
+    end, debug.traceback)
     disable_raw_mode()
-    io.write("\n\27[0mExited Optical Defect Inspector.\n")
-    io.flush()
+    if restore_signals then restore_signals() end
+    if not ok then error(err,0) end
 
-    if not ok and err then
-        io.stderr:write("Error: " .. tostring(err) .. "\n")
-    end
 end
+
+-- Avoid JIT re-entry when POSIX signal callbacks run.
+require("jit").off(main, true)
 
 -- Export module or execute main
 if pcall(debug.getlocal, 4, 1) then

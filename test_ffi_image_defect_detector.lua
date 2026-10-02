@@ -5,6 +5,7 @@
 ]]
 
 local ffi = require("ffi")
+local interpreter = arg[-1] or "luajit"
 
 print("=== Running Unit Tests for ffi_image_defect_detector.lua ===")
 
@@ -40,11 +41,12 @@ local passed = 0
 local total_cli = #tests
 
 for i, t in ipairs(tests) do
-    local p = io.popen(t.cmd .. " 2>&1")
+    local command = t.cmd:gsub("%./LuaJIT/src/luajit", function() return interpreter end)
+    local p = assert(io.popen(command .. " 2>&1"))
     local out = p:read("*a")
-    p:close()
+    local success = p:close()
 
-    if out:find(t.expect, 1, true) then
+    if success and out:find(t.expect, 1, true) then
         print(string.format("  \27[32m✔ PASS [%d/%d]\27[0m: %s", i, total_cli, t.name))
         passed = passed + 1
     else
@@ -91,6 +93,66 @@ assert_test("Single injected defect detected", #blobs1 == 1)
 assert_test("Injected defect area is 64 pixels", blobs1[1].area == 64)
 assert_test("Injected defect bbox x_min == 10", blobs1[1].x_min == 10)
 assert_test("Injected defect bbox y_min == 10", blobs1[1].y_min == 10)
+
+-- Execute the real frame generators for every view and viewport boundary.
+local ui = mod.TerminalUI
+local state = {golden_img=ref, sample_img=smp, diff_res=res1,
+    annotated_img=det:render_annotated_overlay(smp,blobs1), blobs=blobs1,
+    min_area=3, elapsed_ms=1.5, status="Saved / special % characters"}
+res1.tolerance=30
+local function cells(s)
+    s=s:gsub("\27%[[0-9;]*m", "")
+    local _,n=s:gsub("[^\128-\191]", "")
+    return n
+end
+local bounds_ok=true
+for _,dims in ipairs({{2,1},{20,5},{39,12},{60,16},{80,24},{100,30},{180,60}}) do
+    for view=1,3 do
+        for _,ascii in ipairs({true,false}) do
+            state.view,state.use_ascii=view,ascii
+            local lines=ui.render_dashboard_frame(state,dims[1],dims[2])
+            bounds_ok=bounds_ok and #lines==dims[2]
+            for _,line in ipairs(lines) do
+                bounds_ok=bounds_ok and cells(line)<=dims[1]-1 and not line:find("[\r\n]")
+                if ascii then bounds_ok=bounds_ok and not line:find("\27",1,true) end
+            end
+        end
+    end
+end
+assert_test("Every view fits small and large viewport boundaries",bounds_ok)
+state.use_ascii=true
+state.blobs={}
+assert_test("Empty defect renderer executes",table.concat(ui.render_dashboard_frame(state,80,24),"\n"):find("No defects detected",1,true)~=nil)
+state.blobs={}
+for i=1,100 do state.blobs[i]={id=i,severity="CRITICAL",area=64,x_min=1,y_min=2,width=8,height=8,classification=string.rep("long%",40).."\27[2J"} end
+state.selected=100
+local many=ui.render_dashboard_frame(state,80,24)
+assert_test("Large defect list renders selected last item",table.concat(many,"\n"):find(">100",1,true)~=nil)
+local original=Image.new(40,20,255,255,255)
+local preview=ui.render_preview(original,30,10,true)
+assert_test("Proportional preview has centered letterboxing",preview[1]==string.rep(" ",30) and preview[2]:find("@",1,true)~=nil and #preview[2]==30)
+local selected_img=ui.selected_overlay(original,{x_min=10,y_min=5,width=8,height=8})
+local r,g,b=selected_img:get_pixel(8,3)
+local or_,og,ob=original:get_pixel(8,3)
+assert_test("Selected overlay uses cyan without mutating source",r==70 and g==225 and b==255 and or_==255 and og==255 and ob==255)
+state.blobs=blobs1
+state.selected=1
+state.view=2
+state.use_ascii=false
+local colored=table.concat(ui.render_dashboard_frame(state,80,24),"\n")
+assert_test("Selected row and severity have color accents",colored:find("\27[48;2;22;43;58m",1,true)~=nil and colored:find("\27[1;31m",1,true)~=nil)
+state.use_ascii=true
+local framed=ui.render_dashboard_frame(state,80,24)
+assert_test("Framed layout has intact corners and selected details",framed[1]:sub(1,1)=="+" and framed[1]:sub(-1)=="+" and framed[24]:sub(-1)=="+" and table.concat(framed,"\n"):find("Selected #1",1,true)~=nil)
+local narrow=ui.render_dashboard_frame(state,41,16)
+assert_test("Narrow footer retains Quit",table.concat(narrow,"\n"):find("Q Quit",1,true)~=nil)
+local delta=ui.render_changed_rows({"same","new"},{"same","old"})
+assert_test("Differential update touches only changed row",delta:find("\27[2;1H",1,true) and not delta:find("\27[1;1H",1,true) and not delta:find("\27[2J",1,true))
+local decode=ui.make_key_decoder()
+local first=decode("+q \t\27[")
+local second=decode("B")
+assert_test("Burst and fragmented keys are preserved",table.concat(first,",")=="+,q,SPACE,TAB" and second[1]=="DOWN")
+assert_test("Standalone Escape is decoded",decode("\27",true)[1]=="ESC")
 
 print(string.format("\nTest Summary: %d / %d tests passed.", passed, total_cli))
 if passed == total_cli then
