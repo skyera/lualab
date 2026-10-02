@@ -430,7 +430,7 @@ function M.decoder()
   while #pending>0 do
    local ch=pending:sub(1,1)
    if ch=='\27' then
-    if (pending=='\27' or pending=='\27[') and not flush then break end
+    if (pending=='\27' or pending:match('^\27%[[0-9;]*$')) and not flush then break end
     local seq=pending:match('^\27%[[0-9;]*[A-Za-z~]')
     if seq then
      local k=({['\27[A']='UP',['\27[B']='DOWN',['\27[C']='RIGHT',['\27[D']='LEFT',['\27[5~']='PAGE_UP',['\27[6~']='PAGE_DOWN',['\27[H']='HOME',['\27[F']='END'})[seq]
