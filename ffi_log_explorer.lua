@@ -217,7 +217,8 @@ function Model.new(paths,max_lines)
  local self=setmetatable({sources={},entries={},next_id=1,max_lines=max_lines or 10000,
   query='',severity='ALL',source=0,bookmarks_only=false,follow=true,selected=1,scroll=0,
   bookmarks={},editing=false,status='Ready'},Model)
- for _,path in ipairs(paths) do self.sources[#self.sources+1]={path=path,name=path:match('[^/\\]+$') or path,offset=0,pending='',line=0,generation=0} end
+ for _,path in ipairs(paths) do self:open_file(path) end
+ self.source=0;self.status='Ready'
  return self
 end
 function Model:add(source,text)
@@ -296,7 +297,7 @@ function Model:open_file(path)
  local absolute=M.absolute_path(path)
  path=absolute or path
  local found
- for i,source in ipairs(self.sources) do if source.path==path then found=i end end
+ for i,source in ipairs(self.sources) do if source.path==path or (windows and source.path:lower()==path:lower()) then found=i end end
  if not found then
   self.sources[#self.sources+1]={path=path,name=path:match('[^/\\]+$') or path,offset=0,pending='',line=0,generation=0}
   found=#self.sources
