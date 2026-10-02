@@ -453,6 +453,175 @@ TestRunner.describe("8. Interactive Pane Focus & Maximized Zoom View (Proposal 1
     end)
 end)
 
+-- 9. Process Category Tabs & State Badges (Proposal 4)
+TestRunner.describe("9. Process Category Tabs & State Badges (Proposal 4)", function()
+    TestRunner.it("should format all process state badges with strictly 5 visible display columns", function()
+        local states = { "R", "S", "D", "Z", "T", "t", "I", "W", "X", "?" }
+        for _, st in ipairs(states) do
+            local b_unsel, sym, ch, name = btop.get_state_badge(st, false)
+            local b_sel = btop.get_state_badge(st, true)
+            assert_eq(btop.visual_len(b_unsel), 5, "Unselected badge width for state " .. st)
+            assert_eq(btop.visual_len(b_sel), 5, "Selected badge width for state " .. st)
+            assert_true(#sym > 0, "Symbol must be non-empty for state " .. st)
+            assert_true(#ch > 0, "Character must be non-empty for state " .. st)
+            assert_true(type(name) == "string", "Name must be string for state " .. st)
+        end
+    end)
+
+    TestRunner.it("should assign correct symbols and color semantics to states", function()
+        local _, r_sym, r_ch, r_name, r_col = btop.get_state_badge("R")
+        assert_eq(r_sym, "●", "Running symbol")
+        assert_eq(r_ch, "R", "Running char")
+        assert_eq(r_name, "Running", "Running name")
+
+        local _, s_sym, s_ch, s_name = btop.get_state_badge("S")
+        assert_eq(s_sym, "○", "Sleeping symbol")
+        assert_eq(s_ch, "S", "Sleeping char")
+
+        local _, d_sym, d_ch, d_name = btop.get_state_badge("D")
+        assert_eq(d_sym, "■", "Disk sleep symbol")
+        assert_eq(d_ch, "D", "Disk sleep char")
+
+        local _, z_sym, z_ch, z_name = btop.get_state_badge("Z")
+        assert_eq(z_sym, "▲", "Zombie symbol")
+        assert_eq(z_ch, "Z", "Zombie char")
+
+        local _, t_sym, t_ch = btop.get_state_badge("T")
+        assert_eq(t_sym, "❚", "Stopped symbol")
+
+        local _, i_sym, i_ch = btop.get_state_badge("I")
+        assert_eq(i_sym, "·", "Idle symbol")
+    end)
+
+    TestRunner.it("should match process categories accurately under Linux and Windows process models", function()
+        local win_system_proc = { pid = 4, comm = "System", username = "SYSTEM", uid = 0, state = "S", cpu_pct = 0.0, threads = 120 }
+        local win_service_proc = { pid = 844, comm = "svchost.exe", username = "SYSTEM", uid = 0, state = "S", cpu_pct = 0.0, threads = 8 }
+        local win_user_app = { pid = 1234, comm = "chrome.exe", username = "zliu", uid = 1000, state = "R", cpu_pct = 12.0, threads = 32 }
+        local win_user_idle = { pid = 1235, comm = "notepad.exe", username = "zliu", uid = 1000, state = "S", cpu_pct = 0.0, threads = 2 }
+        local win_zombie = { pid = 9999, comm = "exited.exe", username = "zliu", uid = 1000, state = "Z", cpu_pct = 0.0, threads = 0 }
+
+        -- Windows User tests
+        assert_true(btop.matches_process_category(win_user_app, "all", "zliu"), "All matches user app")
+        assert_true(btop.matches_process_category(win_user_app, "user", "zliu"), "User category matches user app")
+        assert_true(not btop.matches_process_category(win_system_proc, "user", "zliu"), "User category rejects SYSTEM")
+        assert_true(btop.matches_process_category(win_system_proc, "system", "zliu"), "System category matches SYSTEM")
+        assert_true(btop.matches_process_category(win_service_proc, "system", "zliu"), "System category matches svchost")
+        assert_true(not btop.matches_process_category(win_user_app, "system", "zliu"), "System category rejects user app")
+        assert_true(btop.matches_process_category(win_user_app, "active", "zliu"), "Active category matches running app")
+        assert_true(not btop.matches_process_category(win_user_idle, "active", "zliu"), "Active category rejects idle app")
+        assert_true(btop.matches_process_category(win_zombie, "zombies", "zliu"), "Zombies category matches zombie")
+        assert_true(not btop.matches_process_category(win_user_app, "zombies", "zliu"), "Zombies category rejects non-zombie")
+
+        -- Linux User tests
+        local linux_daemon = { pid = 789, comm = "systemd", username = "root", uid = 0, state = "S", cpu_pct = 0.0 }
+        local linux_kthread = { pid = 2, comm = "[kthreadd]", username = "root", uid = 0, ppid = 2, state = "S", cpu_pct = 0.0 }
+        local linux_user = { pid = 1050, comm = "luatop", username = "zliu", uid = 1000, state = "R", cpu_pct = 4.2 }
+        local linux_io = { pid = 1051, comm = "dd", username = "zliu", uid = 1000, state = "D", cpu_pct = 0.0, io_total_rate = 1048576 }
+
+        assert_true(btop.matches_process_category(linux_user, "user", "zliu"), "Linux user match")
+        assert_true(not btop.matches_process_category(linux_daemon, "user", "zliu"), "Linux system proc rejected from user")
+        assert_true(btop.matches_process_category(linux_daemon, "system", "zliu"), "Linux system match")
+        assert_true(btop.matches_process_category(linux_io, "active", "zliu"), "Linux active match via I/O")
+    end)
+
+    TestRunner.it("should aggregate category counts accurately across process tables", function()
+        local procs = {
+            { pid = 1, comm = "init", username = "root", uid = 0, state = "S", cpu_pct = 0.0, io_total_rate = 0 },
+            { pid = 2, comm = "service", username = "daemon", uid = 1, state = "S", cpu_pct = 0.0, io_total_rate = 0 },
+            { pid = 100, comm = "app1", username = "bob", uid = 1001, state = "R", cpu_pct = 25.0, io_total_rate = 0 },
+            { pid = 101, comm = "app2", username = "bob", uid = 1001, state = "S", cpu_pct = 0.0, io_total_rate = 0 },
+            { pid = 102, comm = "app3", username = "bob", uid = 1001, state = "Z", cpu_pct = 0.0, io_total_rate = 0 },
+        }
+        local counts = btop.count_process_categories(procs, "bob")
+        assert_eq(counts.all, 5, "Total count")
+        assert_eq(counts.user, 3, "User count")
+        assert_eq(counts.system, 2, "System count")
+        assert_eq(counts.active, 1, "Active count")
+        assert_eq(counts.zombies, 1, "Zombies count")
+    end)
+
+    TestRunner.it("should render responsive category filter pills across narrow and wide viewports", function()
+        local cats = btop.PROCESS_CATEGORIES
+        local counts = { all = 250, user = 150, system = 100, active = 5, zombies = 0 }
+
+        -- Wide (120 cols)
+        local pills_120 = btop.render_category_pills(cats, 2, counts, 120)
+        assert_true(pills_120:find("▶%[User: 150%]◀") ~= nil, "Active user pill highlighted in 120 cols")
+        assert_true(pills_120:find("%(Press %[ / %] to switch%)") ~= nil, "Contains full hint in 120 cols")
+        assert_true(btop.visual_len(pills_120) <= 120, "Pills width fits within 120 cols")
+
+        -- Standard (80 cols)
+        local pills_80 = btop.render_category_pills(cats, 1, counts, 80)
+        assert_true(pills_80:find("▶%[All: 250%]◀") ~= nil, "Active all pill highlighted in 80 cols")
+        assert_true(btop.visual_len(pills_80) <= 80, "Pills width fits within 80 cols")
+
+        -- Narrow (60 cols)
+        local pills_60 = btop.render_category_pills(cats, 4, counts, 60)
+        assert_true(pills_60:find("▶%[Act: 5%]◀") ~= nil, "Active compact pill highlighted in 60 cols")
+        assert_true(btop.visual_len(pills_60) <= 60, "Pills width fits within 60 cols")
+    end)
+
+    TestRunner.it("should hit-test mouse click coordinates accurately for all category tabs", function()
+        local cats = btop.PROCESS_CATEGORIES
+        local counts = { all = 200, user = 100, system = 90, active = 10, zombies = 0 }
+
+        -- Click on Tab 1 ([All: 200])
+        local hit1 = btop.get_category_tab_at_x(5, cats, counts, 1)
+        assert_eq(hit1, 1, "Click at x=5 hits Tab 1 (All)")
+
+        -- Click on Tab 2 ([User: 100])
+        local hit2 = btop.get_category_tab_at_x(18, cats, counts, 1)
+        assert_eq(hit2, 2, "Click at x=18 hits Tab 2 (User)")
+
+        -- Click out of bounds
+        local hit_oob = btop.get_category_tab_at_x(250, cats, counts, 1)
+        assert_eq(hit_oob, nil, "Click at x=250 is out of bounds")
+    end)
+
+    TestRunner.it("should render zoomed process pane with category pills and state badges across viewport boundaries", function()
+        local mock_state = {
+            procs = {
+                { pid = 1, comm = "systemd", username = "root", uid = 0, state = "S", cpu_pct = 0.0, mem_pct = 0.1, res_kb = 10240, vsize_kb = 20480, threads = 1, nice = 0, cpu_time_sec = 10.5 },
+                { pid = 100, comm = "luatop", username = "zliu", uid = 1000, state = "R", cpu_pct = 25.5, mem_pct = 1.2, res_kb = 45000, vsize_kb = 90000, threads = 4, nice = 0, cpu_time_sec = 2.4 },
+                { pid = 101, comm = "dd", username = "zliu", uid = 1000, state = "D", cpu_pct = 0.0, mem_pct = 0.1, res_kb = 2048, vsize_kb = 4096, threads = 1, nice = 0, cpu_time_sec = 0.1, io_read_rate = 1048576, io_write_rate = 2097152 },
+                { pid = 102, comm = "defunct", username = "zliu", uid = 1000, state = "Z", cpu_pct = 0.0, mem_pct = 0.0, res_kb = 0, vsize_kb = 0, threads = 0, nice = 0, cpu_time_sec = 0.0 },
+            },
+            raw_total_procs = 4,
+            selected_category_idx = 1,
+            category_counts = { all = 4, user = 3, system = 1, active = 2, zombies = 1 },
+            sel_proc = 2,
+            sort_mode = "cpu",
+            sort_reverse = false,
+            in_tree_mode = false,
+            filter_query = "",
+        }
+
+        for _, geom in ipairs({ { w = 80, h = 24 }, { w = 120, h = 40 }, { w = 60, h = 20 } }) do
+            local frame = btop.render_zoomed_pane_frame(4, mock_state, geom.w, geom.h)
+            assert_true(type(frame) == "string" and #frame > 0, "Zoomed frame renders at " .. geom.w .. "x" .. geom.h)
+            assert_true(frame:find("%[4%] Processes %(MAXIMIZED", 1, false) ~= nil, "Contains maximized header")
+            assert_true(frame:find("All: 4", 1, true) ~= nil, "Contains category pill")
+            assert_true(frame:find("●", 1, true) ~= nil, "Contains Running state badge symbol")
+            assert_true(frame:find("○", 1, true) ~= nil, "Contains Sleeping state badge symbol")
+        end
+    end)
+
+    TestRunner.it("should simulate [ and ] keystroke sequence for category cycling", function()
+        local current_cat = 1
+        local num_cats = #btop.PROCESS_CATEGORIES
+        local key_stream = { "]", "]", "[", "]" }
+
+        for _, k in ipairs(key_stream) do
+            if k == "]" then
+                current_cat = (current_cat % num_cats) + 1
+            elseif k == "[" then
+                current_cat = (current_cat == 1) and num_cats or (current_cat - 1)
+            end
+        end
+        assert_eq(current_cat, 3, "Category cycled to 3 ([System]) via key sequence")
+    end)
+end)
+
 -- Summary
 print("\n--------------------------------------------------")
 local total = TestRunner.passed + TestRunner.failed

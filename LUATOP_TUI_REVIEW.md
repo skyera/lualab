@@ -232,11 +232,11 @@ In compliance with [`AGENTS.md`](file:///home/zliu/test/lualab/AGENTS.md):
 
 - **Completed**:
   - ✔ **Proposal 1**: Interactive Pane Focus (`Tab`, `1`-`4`) & Fullscreen Zoom (`z` / `f`).
+  - ✔ **Proposal 4**: Process Category Tabs / Filter Pills (`[All]`, `[User]`, `[System]`, `[Active]`, `[Zombies]`) + Process State Badges (`● R`, `○ S`, `■ D`, `▲ Z`) with Win32 FFI Session parity and mouse hit-testing (`[` / `]`).
   - ✔ **Search Spacebar Normalization**: `"SPACE"` mapped to `" "` in search input mode.
   - ✔ **Dual-Column Disk Fix**: Test 225 resolved; dual-column threshold aligned.
 - **Next Phases**:
-  - **Phase 2 (Diagnostic Tooling & Category Filtering)**:
+  - **Phase 2 (Diagnostic Tooling & Advanced Inspection)**:
     - Proposal 3: Process Diagnostic Command Runner Modal (`:`, `!`) with `%p`, `%c`, `%u` macro expansion and presets (`lsof`, `strace`, `pstack`, `pmap`, `journalctl`).
-    - Proposal 4: Process Category Tabs (`[All]`, `[User]`, `[System]`, `[Active]`, `[Zombies]`) + Process State Badges (`● R`, `○ S`, `■ D`, `▲ Z`).
   - **Phase 3 (Visual Data Density)**:
     - Proposal 2: Multi-Row Braille Historical Trend Graphs (`g` / Graph Mode).

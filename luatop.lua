@@ -116,6 +116,7 @@ if is_windows then
         HANDLE OpenProcess(uint32_t dwDesiredAccess, int bInheritHandle, uint32_t dwProcessId);
         int TerminateProcess(HANDLE hProcess, uint32_t uExitCode);
         int GetProcessTimes(HANDLE hProcess, FILETIME *lpCreationTime, FILETIME *lpExitTime, FILETIME *lpKernelTime, FILETIME *lpUserTime);
+        int ProcessIdToSessionId(uint32_t dwProcessId, uint32_t *pSessionId);
 
         typedef struct _PROCESS_MEMORY_COUNTERS {
             uint32_t cb;
@@ -833,6 +834,200 @@ local function make_sparkline(history_tbl, max_chars, color_code)
     return string.format("%s%s%s", color_code, table.concat(chars), C.reset)
 end
 
+-- Process State Badges (● R, ○ S, ■ D, ▲ Z, ❚ T, · I)
+local STATE_BADGES = {
+    R = { sym = "●", char = "R", name = "Running" },
+    S = { sym = "○", char = "S", name = "Sleeping" },
+    D = { sym = "■", char = "D", name = "Disk Sleep" },
+    Z = { sym = "▲", char = "Z", name = "Zombie" },
+    T = { sym = "❚", char = "T", name = "Stopped" },
+    t = { sym = "❚", char = "t", name = "Tracing Stop" },
+    I = { sym = "·", char = "I", name = "Idle" },
+}
+
+local function get_state_badge(state_char, is_sel, theme)
+    local t = theme or C
+    local st = tostring(state_char or "S"):sub(1, 1)
+    local def = STATE_BADGES[st] or { sym = "?", char = st, name = "Unknown" }
+
+    local col = t.dim
+    if st == "R" then
+        col = t.cpu_low or "\27[38;2;158;206;106m"
+    elseif st == "D" then
+        col = t.cpu_mid or "\27[38;2;224;175;104m"
+    elseif st == "Z" then
+        col = t.cpu_high or "\27[1;38;2;247;118;142m"
+    elseif st == "T" or st == "t" then
+        col = t.net_rx or "\27[38;2;125;207;255m"
+    elseif st == "S" or st == "I" then
+        col = t.dim or "\27[2m"
+    end
+
+    local reset_code = is_sel and (t.sel_bg or "") or (t.reset or "\27[0m")
+    -- Format: symbol (1 col) + space (1 col) + char (1 col) + 2 spaces = exactly 5 columns
+    local badge_str = string.format("%s%s%s %s  ", col, def.sym, reset_code, def.char)
+    return badge_str, def.sym, def.char, def.name, col
+end
+
+-- Process Category Tabs / Filter Pills
+local PROCESS_CATEGORIES = {
+    { id = "all",     label = "All" },
+    { id = "user",    label = "User" },
+    { id = "system",  label = "System" },
+    { id = "active",  label = "Active" },
+    { id = "zombies", label = "Zombies" },
+}
+
+local function get_current_system_user()
+    if is_windows then
+        return (os.getenv("USERNAME") or "User"):lower()
+    else
+        return (os.getenv("USER") or os.getenv("LOGNAME") or "root"):lower()
+    end
+end
+
+local function matches_process_category(pr, cat_id, current_user)
+    if not pr then return false end
+    if not cat_id or cat_id == "all" then return true end
+
+    local my_user = (current_user or get_current_system_user()):lower()
+    local pr_user = (pr.username or ""):lower()
+
+    if cat_id == "user" then
+        if my_user ~= "root" then
+            return (pr_user == my_user)
+        else
+            -- If running as root, user processes are non-kernel threads
+            return (pr.uid == 0 or pr_user == "root")
+                and (not pr.ppid or pr.ppid ~= 2)
+                and ((pr.vsize_kb or 0) > 0)
+                and (not pr.comm or pr.comm:sub(1, 1) ~= "[")
+        end
+    elseif cat_id == "system" then
+        if my_user ~= "root" then
+            return (pr_user ~= my_user) or (pr.uid and pr.uid < 1000) or (pr_user == "system")
+        else
+            -- If running as root, system processes are kernel threads or init
+            return (pr.ppid and pr.ppid == 2)
+                or ((pr.vsize_kb or 0) == 0)
+                or (pr.comm and pr.comm:sub(1, 1) == "[")
+                or (pr.pid and pr.pid == 1)
+        end
+    elseif cat_id == "active" then
+        local is_running = (pr.state == "R")
+        local has_cpu = (pr.cpu_pct and pr.cpu_pct > 0.05)
+        local has_io = ((pr.io_total_rate or 0) > 0) or ((pr.io_read_rate or 0) > 0) or ((pr.io_write_rate or 0) > 0)
+        return is_running or has_cpu or has_io
+    elseif cat_id == "zombies" then
+        return (pr.state == "Z" or pr.state == "z")
+    end
+
+    return true
+end
+
+local function count_process_categories(procs, current_user)
+    local my_user = current_user or get_current_system_user()
+    local counts = {
+        all = #procs,
+        user = 0,
+        system = 0,
+        active = 0,
+        zombies = 0,
+    }
+
+    for _, pr in ipairs(procs) do
+        if matches_process_category(pr, "user", my_user) then
+            counts.user = counts.user + 1
+        end
+        if matches_process_category(pr, "system", my_user) then
+            counts.system = counts.system + 1
+        end
+        if matches_process_category(pr, "active", my_user) then
+            counts.active = counts.active + 1
+        end
+        if matches_process_category(pr, "zombies", my_user) then
+            counts.zombies = counts.zombies + 1
+        end
+    end
+
+    return counts
+end
+
+local function render_category_pills(categories, active_cat_idx, counts, max_w, theme)
+    local t = theme or C
+    local is_compact = max_w and (max_w < 68)
+    local out = {}
+    table.insert(out, " ")
+
+    for idx, cat in ipairs(categories) do
+        local count = counts[cat.id] or 0
+        local is_active = (idx == active_cat_idx)
+        local label = cat.label
+        if is_compact then
+            if cat.id == "user" then label = "Usr"
+            elseif cat.id == "system" then label = "Sys"
+            elseif cat.id == "active" then label = "Act"
+            elseif cat.id == "zombies" then label = "Zom" end
+        end
+        local pill_text = string.format("%s: %d", label, count)
+
+        if is_active then
+            local active_style = t.border_focus or "\27[1;36m"
+            table.insert(out, string.format(" %s▶[%s]◀%s", active_style, pill_text, t.reset))
+        else
+            if cat.id == "zombies" and count > 0 then
+                local alert_col = t.cpu_high or "\27[1;31m"
+                table.insert(out, string.format(" %s[%s]%s", alert_col, pill_text, t.reset))
+            else
+                local dim_col = t.dim or "\27[2m"
+                table.insert(out, string.format(" %s[%s]%s", dim_col, pill_text, t.reset))
+            end
+        end
+    end
+
+    local pills_str = table.concat(out)
+    local cur_vlen = visual_len(pills_str)
+    local hint = "(Press [ / ] to switch)"
+    local hint_len = visual_len(hint)
+
+    if max_w and (cur_vlen + hint_len + 4) <= max_w then
+        local pad = string.rep(" ", max_w - cur_vlen - hint_len - 2)
+        pills_str = pills_str .. pad .. (t.dim or "\27[2m") .. hint .. (t.reset or "\27[0m")
+    elseif max_w and (cur_vlen + 12) <= max_w then
+        local short_hint = "([ / ])"
+        local pad = string.rep(" ", max_w - cur_vlen - visual_len(short_hint) - 2)
+        pills_str = pills_str .. pad .. (t.dim or "\27[2m") .. short_hint .. (t.reset or "\27[0m")
+    end
+
+    return pills_str
+end
+
+local function get_category_tab_at_x(click_x, categories, counts, active_idx, max_w)
+    local is_compact = max_w and (max_w < 68)
+    local cur_x = 2
+    for idx, cat in ipairs(categories) do
+        local count = counts[cat.id] or 0
+        local label = cat.label
+        if is_compact then
+            if cat.id == "user" then label = "Usr"
+            elseif cat.id == "system" then label = "Sys"
+            elseif cat.id == "active" then label = "Act"
+            elseif cat.id == "zombies" then label = "Zom" end
+        end
+        local pill_w = visual_len(string.format("[%s: %d]", label, count))
+        if idx == active_idx then
+            pill_w = pill_w + 2 -- account for ▶ and ◀
+        end
+        local start_x = cur_x + 1
+        local end_x = start_x + pill_w
+        if click_x >= start_x and click_x <= end_x then
+            return idx
+        end
+        cur_x = end_x + 1
+    end
+    return nil
+end
+
 -- =========================================================================
 -- 4. Cross-Platform Telemetry Engine (Hardware, /proc, FFI)
 -- =========================================================================
@@ -847,8 +1042,8 @@ local function resolve_username(uid)
     if uid_cache[uid] then return uid_cache[uid] end
 
     if is_windows then
-        uid_cache[uid] = "SYSTEM"
-        return "SYSTEM"
+        uid_cache[uid] = (uid == 0) and "SYSTEM" or (os.getenv("USERNAME") or "User")
+        return uid_cache[uid]
     else
         local pw = ffi.C.getpwuid(uid)
         local name = (pw ~= nil and pw.pw_name ~= nil) and ffi.string(pw.pw_name) or tostring(uid)
@@ -1263,6 +1458,7 @@ if is_windows then
     end
 
     local prev_win_proc_times = {}
+    local win_proc_user_cache = {}
 
     read_process_table = function(mem_total_kb, now_clock)
         local snap = kernel32.CreateToolhelp32Snapshot(0x02, 0)
@@ -1277,6 +1473,10 @@ if is_windows then
         kernel32.GetSystemTimeAsFileTime(now_ft)
         local now_t = filetime_to_num(now_ft)
 
+        local win_current_user = os.getenv("USERNAME") or "User"
+        local sess_buf = ffi.new("uint32_t[1]")
+        local active_pids = {}
+
         local procs = {}
         local ok = kernel32.Process32First(snap, pe)
 
@@ -1289,6 +1489,8 @@ if is_windows then
             local threads = tonumber(pe.cntThreads) or 1
             local elapsed_sec = 0
             local cpu_time_sec = 0
+
+            active_pids[pid] = true
 
             if pid ~= 0 then
                 local h = kernel32.OpenProcess(0x1000, 0, pid)
@@ -1317,6 +1519,38 @@ if is_windows then
                 end
             end
 
+            -- Determine user & UID
+            local username = win_proc_user_cache[pid]
+            local uid = 0
+            if not username then
+                if pid == 0 or pid == 4 then
+                    username = "SYSTEM"
+                    uid = 0
+                else
+                    local sess_ok = kernel32.ProcessIdToSessionId(pid, sess_buf)
+                    if sess_ok ~= 0 and sess_buf[0] > 0 then
+                        username = win_current_user
+                        uid = 1000
+                    else
+                        username = "SYSTEM"
+                        uid = 0
+                    end
+                end
+                win_proc_user_cache[pid] = username
+            else
+                uid = (username == "SYSTEM") and 0 or 1000
+            end
+
+            -- State determination: Z if 0 threads, R if consuming CPU, S if sleeping/waiting
+            local proc_state = "S"
+            if threads == 0 then
+                proc_state = "Z"
+            elseif cpu_pct > 0.05 then
+                proc_state = "R"
+            else
+                proc_state = "S"
+            end
+
             local mem_pct = (mem_total_kb > 0) and ((res_kb / mem_total_kb) * 100.0) or 0
             table.insert(procs, {
                 pid = pid,
@@ -1325,15 +1559,15 @@ if is_windows then
                 cpu_time_sec = cpu_time_sec,
                 comm = exe,
                 cmdline = exe,
-                state = "R",
+                state = proc_state,
                 nice = 0,
                 cpu_pct = cpu_pct,
                 mem_pct = mem_pct,
                 res_kb = res_kb,
                 vsize_kb = res_kb,
                 threads = threads,
-                uid = 0,
-                username = "SYSTEM",
+                uid = uid,
+                username = username,
                 io_read_bytes = 0,
                 io_write_bytes = 0,
                 io_read_rate = 0,
@@ -1344,6 +1578,15 @@ if is_windows then
             ok = kernel32.Process32Next(snap, pe)
         end
         kernel32.CloseHandle(snap)
+
+        -- Clean up dead PIDs from caches
+        for p in pairs(win_proc_user_cache) do
+            if not active_pids[p] then
+                win_proc_user_cache[p] = nil
+                prev_win_proc_times[p] = nil
+            end
+        end
+
         return procs
     end
 
@@ -2842,21 +3085,33 @@ local function render_zoomed_pane(out, pane_idx, state, term_w, term_h)
     elseif pane_idx == 4 then
         -- 4. Zoomed Process Pane
         local procs = state.procs or (read_process_table and read_process_table(16384000, os.clock()) or {})
+        local raw_total_procs = state.raw_total_procs or #procs
         local sel_proc = state.sel_proc or 1
         local sort_mode = state.sort_mode or "cpu"
         local sort_reverse = state.sort_reverse or false
         local in_tree_mode = state.in_tree_mode or false
         local filter_query = state.filter_query or ""
+        local selected_category_idx = state.selected_category_idx or 1
+        local category_counts = state.category_counts or count_process_categories(procs)
 
         local dir_sym = sort_reverse and "▲" or "▼"
         local sort_tag = string.format("[Sort: %s%s]", sort_mode:upper(), dir_sym)
         local tree_tag = in_tree_mode and "[Tree: ON]" or "[Tree: OFF]"
         local filter_tag = #filter_query > 0 and string.format("[Filter: /%s]", filter_query) or ""
-        local title = string.format("[4] Processes (MAXIMIZED - Press [z] or [Esc] to Restore): %d %s %s %s", #procs, sort_tag, tree_tag, filter_tag)
+        local active_cat = PROCESS_CATEGORIES[selected_category_idx] or PROCESS_CATEGORIES[1]
+        local count_tag = (active_cat.id ~= "all" or #filter_query > 0)
+            and string.format("%d/%d", #procs, raw_total_procs)
+            or string.format("%d", raw_total_procs)
+        local title = string.format("[4] Processes (MAXIMIZED - Press [z] or [Esc] to Restore): %s %s %s %s", count_tag, sort_tag, tree_tag, filter_tag)
 
         draw_pane(out, 1, 2, zw, zh, title, true)
 
-        local table_header_y = 3
+        -- Row 3: Category Filter Tabs
+        local pills_str = render_category_pills(PROCESS_CATEGORIES, selected_category_idx, category_counts, zw, C)
+        table.insert(out, draw_box_row(1, 3, zw, pills_str))
+
+        -- Row 4: Column Headers
+        local table_header_y = 4
         local function col_hdr(name, mode_key, width)
             local is_active = (sort_mode == mode_key)
             local text = name
@@ -2868,14 +3123,22 @@ local function render_zoomed_pane(out, pane_idx, state, term_w, term_h)
             end
         end
 
+        local show_ext_cols = (zw >= 80)
+        local h_virt_str = ""
+        local h_nice_str = ""
+        if show_ext_cols then
+            local h_virt = (sort_mode == "vsize" or sort_mode == "virt") and col_hdr("VIRT", "vsize", 9) or string.format("%-9s", "VIRT")
+            local h_nice = (sort_mode == "nice") and col_hdr("NICE", "nice", 5) or string.format("%-5s", "NICE")
+            h_virt_str = string.format(" %s", h_virt)
+            h_nice_str = string.format(" %s", h_nice)
+        end
+
         local h_pid     = col_hdr("PID", "pid", 7)
         local h_user    = col_hdr("USER", "user", 8)
         local h_cpu     = col_hdr("%CPU", "cpu", 7)
         local h_mem     = col_hdr("%MEM", "mem", 7)
         local h_res     = (sort_mode == "mem") and col_hdr("RES", "mem", 9) or string.format("%-9s", "RES")
-        local h_virt    = (sort_mode == "vsize" or sort_mode == "virt") and col_hdr("VIRT", "vsize", 9) or string.format("%-9s", "VIRT")
         local h_th      = col_hdr("TH", "threads", 4)
-        local h_nice    = (sort_mode == "nice") and col_hdr("NICE", "nice", 5) or string.format("%-5s", "NICE")
         local h_stat    = string.format("%-5s", "STAT")
         local h_time    = col_hdr("TIME+", "time", 9)
         local h_cmd     = in_tree_mode and (C.title_col .. "PROCESS TREE [Space: Fold]" .. C.table_hdr) or col_hdr("COMMAND", "name", 15)
@@ -2888,11 +3151,11 @@ local function render_zoomed_pane(out, pane_idx, state, term_w, term_h)
             io_hdr_str = string.format(" %s %s", h_ior, h_iow)
         end
 
-        local th_str = string.format("  %s%s %s %s %s %s %s %s %s %s %s%s %s%s",
-            C.table_hdr, h_pid, h_user, h_cpu, h_mem, h_res, h_virt, h_th, h_nice, h_stat, h_time, io_hdr_str, h_cmd, C.reset)
+        local th_str = string.format("  %s%s %s %s %s %s%s %s%s %s %s%s %s%s",
+            C.table_hdr, h_pid, h_user, h_cpu, h_mem, h_res, h_virt_str, h_th, h_nice_str, h_stat, h_time, io_hdr_str, h_cmd, C.reset)
         table.insert(out, draw_box_row(1, table_header_y, zw, th_str))
 
-        local visible_rows = zh - 3
+        local visible_rows = math.max(1, zh - 4)
         local page_offset = 1
         if sel_proc > visible_rows then
             page_offset = sel_proc - visible_rows + 1
@@ -2925,10 +3188,17 @@ local function render_zoomed_pane(out, pane_idx, state, term_w, term_h)
                 end
 
                 local time_str = format_time_plus(pr.cpu_time_sec or 0)
-                local virt_str = format_bytes(pr.vsize_kb or 0)
-                local nice_val = pr.nice or 0
-                local row_content = string.format("%-7d %-8s %s%5.1f%%%s %5.1f%% %-9s %-9s %-4d %-5d %-5s %s%s %s",
-                    pr.pid or 0, user_str, cpu_col, cpu_val, C.reset, pr.mem_pct or 0, format_bytes(res_val), virt_str, pr.threads or 1, nice_val, pr.state or "S", time_str, io_val_str, cmd_display)
+                local virt_col_str = ""
+                local nice_col_str = ""
+                if show_ext_cols then
+                    local virt_str = format_bytes(pr.vsize_kb or 0)
+                    local nice_val = pr.nice or 0
+                    virt_col_str = string.format(" %-9s", virt_str)
+                    nice_col_str = string.format(" %-5d", nice_val)
+                end
+                local badge_str = get_state_badge(pr.state, is_sel, C)
+                local row_content = string.format("%-7d %-8s %s%5.1f%%%s %5.1f%% %-9s%s %-4d%s %s %s%s %s",
+                    pr.pid or 0, user_str, cpu_col, cpu_val, (is_sel and C.sel_bg or C.reset), pr.mem_pct or 0, format_bytes(res_val), virt_col_str, pr.threads or 1, nice_col_str, badge_str, time_str, io_val_str, cmd_display)
 
                 if is_sel then
                     table.insert(out, draw_box_row(1, table_header_y + i, zw, C.sel_bg .. "▶ " .. row_content .. C.reset))
@@ -3042,6 +3312,11 @@ Keybindings:
     local last_proc_y = last_top_h + 5
     local focused_pane = 4 -- 1: CPU, 2: Memory & Storage, 3: Network, 4: Processes
     local zoomed_pane = nil -- nil: 4-pane grid; 1..4: zoomed pane
+    local selected_category_idx = 1
+    local category_counts = { all = 0, user = 0, system = 0, active = 0, zombies = 0 }
+    local last_pills_y = 0
+    local last_has_pills = false
+    local raw_total_procs = 0
     local cpu_history = {}
     local mem_history = {}
     local gpu_history = {}
@@ -3102,11 +3377,21 @@ Keybindings:
                             status_flash_msg = "Restored 4-Pane Grid"
                             status_flash_expiry = os.clock() + 1.5
                         elseif zoomed_pane == 4 then
-                            local table_header_y = 3
+                            local pills_y = 3
+                            local table_header_y = 4
                             local visible_rows = last_visible_rows
                             local show_io = (term_w >= 105)
 
-                            if k.y == table_header_y then
+                            if k.y == pills_y then
+                                local clicked_cat = get_category_tab_at_x(k.x, PROCESS_CATEGORIES, category_counts, selected_category_idx)
+                                if clicked_cat then
+                                    selected_category_idx = clicked_cat
+                                    sel_proc = 1
+                                    local cat = PROCESS_CATEGORIES[selected_category_idx]
+                                    status_flash_msg = string.format("Category: [%s] (%d processes)", cat.label, category_counts[cat.id] or 0)
+                                    status_flash_expiry = os.clock() + 1.5
+                                end
+                            elseif k.y == table_header_y then
                                 local new_mode = nil
                                 if k.x >= 3 and k.x <= 9 then new_mode = "pid"
                                 elseif k.x >= 11 and k.x <= 18 then new_mode = "user"
@@ -3163,7 +3448,8 @@ Keybindings:
                     else
                         local net_h = 3
                         local proc_y = last_proc_y
-                        local table_header_y = proc_y + 1
+                        local pills_y = proc_y + 1
+                        local table_header_y = last_has_pills and (proc_y + 2) or (proc_y + 1)
                         local visible_rows = last_visible_rows
                         local show_io = (term_w >= 115)
 
@@ -3176,7 +3462,16 @@ Keybindings:
                             focused_pane = 4
                         end
 
-                        if k.y == table_header_y then
+                        if last_has_pills and k.y == pills_y then
+                            local clicked_cat = get_category_tab_at_x(k.x, PROCESS_CATEGORIES, category_counts, selected_category_idx)
+                            if clicked_cat then
+                                selected_category_idx = clicked_cat
+                                sel_proc = 1
+                                local cat = PROCESS_CATEGORIES[selected_category_idx]
+                                status_flash_msg = string.format("Category: [%s] (%d processes)", cat.label, category_counts[cat.id] or 0)
+                                status_flash_expiry = os.clock() + 1.5
+                            end
+                        elseif k.y == table_header_y then
                             -- Clicked column header
                             local new_mode = nil
                             if k.x >= 3 and k.x <= 9 then new_mode = "pid"
@@ -3355,6 +3650,18 @@ Keybindings:
                         status_flash_msg = string.format("Maximized [%d] %s (Press [z] or [Esc] to Restore)", zoomed_pane, pane_names[zoomed_pane] or "")
                     end
                     status_flash_expiry = os.clock() + 2.0
+                elseif k == "[" then
+                    selected_category_idx = (selected_category_idx == 1) and #PROCESS_CATEGORIES or (selected_category_idx - 1)
+                    sel_proc = 1
+                    local cat = PROCESS_CATEGORIES[selected_category_idx]
+                    status_flash_msg = string.format("Category: [%s] (%d processes)", cat.label, category_counts[cat.id] or 0)
+                    status_flash_expiry = os.clock() + 1.5
+                elseif k == "]" then
+                    selected_category_idx = (selected_category_idx % #PROCESS_CATEGORIES) + 1
+                    sel_proc = 1
+                    local cat = PROCESS_CATEGORIES[selected_category_idx]
+                    status_flash_msg = string.format("Category: [%s] (%d processes)", cat.label, category_counts[cat.id] or 0)
+                    status_flash_expiry = os.clock() + 1.5
                 elseif k == "DOWN" or k == "j" then
                     sel_proc = sel_proc + 1
                 elseif k == "UP" or k == "k" then
@@ -3476,10 +3783,21 @@ Keybindings:
             table.insert(tx_history, net.tx_rate)
             if #tx_history > max_history then table.remove(tx_history, 1) end
 
-            -- Detect zombie processes
-            local zombie_count = 0
-            for _, pr in ipairs(procs) do
-                if pr.state == "Z" then zombie_count = zombie_count + 1 end
+            -- Category metrics & counts across all discovered processes
+            raw_total_procs = #procs
+            category_counts = count_process_categories(procs)
+            local zombie_count = category_counts.zombies
+
+            -- Filter processes by active category tab
+            local active_cat = PROCESS_CATEGORIES[selected_category_idx] or PROCESS_CATEGORIES[1]
+            if active_cat.id ~= "all" then
+                local cat_procs = {}
+                for _, pr in ipairs(procs) do
+                    if matches_process_category(pr, active_cat.id) then
+                        table.insert(cat_procs, pr)
+                    end
+                end
+                procs = cat_procs
             end
 
             -- Filter processes via smart filter engine
@@ -3574,7 +3892,7 @@ Keybindings:
                 last_top_h = 0
                 last_left_w = term_w
                 last_proc_y = 2
-                last_visible_rows = (zoomed_pane == 4) and math.max(1, term_h - 5) or 1
+                last_visible_rows = (zoomed_pane == 4) and math.max(1, term_h - 6) or 1
                 local state = {
                     cores = cores,
                     overall_cpu = overall_cpu,
@@ -3593,6 +3911,9 @@ Keybindings:
                     rx_history = rx_history,
                     tx_history = tx_history,
                     procs = procs,
+                    raw_total_procs = raw_total_procs,
+                    selected_category_idx = selected_category_idx,
+                    category_counts = category_counts,
                     sel_proc = sel_proc,
                     sort_mode = sort_mode,
                     sort_reverse = sort_reverse,
@@ -3637,7 +3958,9 @@ Keybindings:
                 local bot_h = term_h - top_h - net_h - 2
                 last_top_h = top_h
                 last_proc_y = top_h + 2 + net_h
-                last_visible_rows = math.max(1, bot_h - 3)
+                last_has_pills = (bot_h >= 7)
+                last_pills_y = last_proc_y + 1
+                last_visible_rows = last_has_pills and math.max(1, bot_h - 4) or math.max(1, bot_h - 3)
 
                 -- 1. CPU Pane (Top Left)
                 local act1 = (focused_pane == 1) and " (Active)" or ""
@@ -3879,12 +4202,23 @@ Keybindings:
             local sort_tag = string.format("[Sort: %s%s]", sort_mode:upper(), dir_sym)
             local tree_tag = in_tree_mode and "[Tree: ON]" or "[Tree: OFF]"
             local filter_tag = #filter_query > 0 and string.format("[Filter: /%s]", filter_query) or ""
-            local proc_title = string.format("[4] Processes%s: %d %s %s %s", act4, #procs, sort_tag, tree_tag, filter_tag)
+            local active_cat = PROCESS_CATEGORIES[selected_category_idx] or PROCESS_CATEGORIES[1]
+            local count_tag = (active_cat.id ~= "all" or #filter_query > 0)
+                and string.format("%d/%d", #procs, raw_total_procs)
+                or string.format("%d", raw_total_procs)
+            local cat_pill_tag = (not last_has_pills and active_cat.id ~= "all") and string.format("[Cat: %s] ", active_cat.label) or ""
+            local proc_title = string.format("[4] Processes%s: %s %s%s %s %s", act4, count_tag, cat_pill_tag, sort_tag, tree_tag, filter_tag)
 
             draw_pane(out, 1, proc_y, term_w, bot_h, proc_title, (focused_pane == 4))
 
-            -- Columns: PID (7), USER (8), %CPU (7), %MEM (7), RES (9), TH (4), STAT (5), COMMAND (rest)
             local table_header_y = proc_y + 1
+            if last_has_pills then
+                local pills_str = render_category_pills(PROCESS_CATEGORIES, selected_category_idx, category_counts, term_w, C)
+                table.insert(out, draw_box_row(1, proc_y + 1, term_w, pills_str))
+                table_header_y = proc_y + 2
+            end
+
+            -- Columns: PID (7), USER (8), %CPU (7), %MEM (7), RES (9), TH (4), STAT (5), COMMAND (rest)
             local function col_hdr(name, mode_key, width)
                 local is_active = (sort_mode == mode_key)
                 local text = name
@@ -3920,7 +4254,7 @@ Keybindings:
                 C.table_hdr, h_pid, h_user, h_cpu, h_mem, h_res, h_th, h_stat, h_time, io_hdr_str, h_cmd, C.reset)
             table.insert(out, draw_box_row(1, table_header_y, term_w, th_str))
 
-            local visible_rows = bot_h - 3
+            local visible_rows = last_visible_rows
             local page_offset = 1
             if sel_proc > visible_rows then
                 page_offset = sel_proc - visible_rows + 1
@@ -3953,8 +4287,9 @@ Keybindings:
                     end
 
                     local time_str = format_time_plus(pr.cpu_time_sec or 0)
-                    local row_content = string.format("%-7d %-8s %s%5.1f%%%s %5.1f%% %-9s %-4d %-5s %s%s %s",
-                        pr.pid, user_str, cpu_col, cpu_val, C.reset, pr.mem_pct, format_bytes(res_val), pr.threads or 1, pr.state, time_str, io_val_str, cmd_display)
+                    local badge_str = get_state_badge(pr.state, is_sel, C)
+                    local row_content = string.format("%-7d %-8s %s%5.1f%%%s %5.1f%% %-9s %-4d %s %s%s %s",
+                        pr.pid, user_str, cpu_col, cpu_val, (is_sel and C.sel_bg or C.reset), pr.mem_pct, format_bytes(res_val), pr.threads or 1, badge_str, time_str, io_val_str, cmd_display)
 
                     if is_sel then
                         table.insert(out, draw_box_row(1, table_header_y + i, term_w, C.sel_bg .. "▶ " .. row_content .. C.reset))
@@ -3979,7 +4314,9 @@ Keybindings:
                 table.insert(out, draw_box_row(mx, my + 1, mw, string.format(" %sCommand:%s   %s", C.bold, C.reset, pr.cmdline)))
                 table.insert(out, draw_box_row(mx, my + 2, mw, string.format(" %sBinary:%s    %s", C.bold, C.reset, pr.comm)))
                 table.insert(out, draw_box_row(mx, my + 3, mw, string.format(" %sUser:%s      %-8s (UID: %d)", C.bold, C.reset, pr.username, pr.uid or 0)))
-                table.insert(out, draw_box_row(mx, my + 4, mw, string.format(" %sState:%s     %-7s   %sThreads:%s  %d", C.bold, C.reset, pr.state, C.bold, C.reset, pr.threads or 1)))
+                local _, b_sym, b_char, b_name, b_col = get_state_badge(pr.state, false, C)
+                local state_desc = string.format("%s%s %s (%s)%s", b_col, b_sym, b_char, b_name, C.reset)
+                table.insert(out, draw_box_row(mx, my + 4, mw, string.format(" %sState:%s     %-24s %sThreads:%s  %d", C.bold, C.reset, state_desc, C.bold, C.reset, pr.threads or 1)))
                 table.insert(out, draw_box_row(mx, my + 5, mw, string.format(" %sPPID:%s      %-7d   %sNice:%s     %d", C.bold, C.reset, pr.ppid or 0, C.bold, C.reset, pr.nice or 0)))
                 table.insert(out, draw_box_row(mx, my + 6, mw, string.format(" %sTIME+ (CPU):%s %-10s %sElapsed:%s   %s", C.bold, C.reset, format_time_plus(pr.cpu_time_sec or 0), C.bold, C.reset, format_elapsed(pr.elapsed_sec or 0))))
                 table.insert(out, draw_box_row(mx, my + 7, mw, string.format(" %sCPU%%:%s     %-6.1f%%   %sMemory%%:%s %-6.1f%%", C.bold, C.reset, pr.cpu_pct, C.bold, C.reset, pr.mem_pct)))
@@ -4037,7 +4374,7 @@ Keybindings:
                 table.insert(out, draw_box_row(mx, my + 7, mw, string.format("  %s[←/→, +/-] Adjust   [Enter] Apply   [Esc] Cancel%s", C.dim, C.reset)))
             elseif show_help then
                 local mw = math.min(74, term_w - 4)
-                local mh = 19
+                local mh = 20
                 local mx = math.floor((term_w - mw) / 2)
                 local my = math.floor((term_h - mh) / 2)
                 draw_modal_box(out, mx, my, mw, mh, "Help & Keybindings")
@@ -4051,14 +4388,15 @@ Keybindings:
                 table.insert(out, draw_box_row(mx, my + 7, mw, "   PgUp/PgDn      Jump 15 rows   Home/End Jump to ends"))
                 table.insert(out, draw_box_row(mx, my + 8, mw, string.format(" %sProcess Controls:%s", C.title_col, C.reset)))
                 table.insert(out, draw_box_row(mx, my + 9, mw, "   /              Filter: text, u:<user>, s:<state>, cpu>X, m>XM"))
-                table.insert(out, draw_box_row(mx, my + 10, mw, "   t, F5          Toggle Process Tree view   Space Fold/Pause"))
-                table.insert(out, draw_box_row(mx, my + 11, mw, "   Enter, i       Inspect process details modal"))
-                table.insert(out, draw_box_row(mx, my + 12, mw, "   k, R           Open signal dispatcher, Renice modal"))
-                table.insert(out, draw_box_row(mx, my + 13, mw, string.format(" %sDisplay & Sorting:%s", C.title_col, C.reset)))
-                table.insert(out, draw_box_row(mx, my + 14, mw, "   c, m, p, n     Sort by CPU, Memory, PID, or Name"))
-                table.insert(out, draw_box_row(mx, my + 15, mw, "   u, s, d, e, r  Sort by User, Threads, I/O, TIME+, Reverse"))
-                table.insert(out, draw_box_row(mx, my + 16, mw, "   C, T           CPU view mode, Cycle color themes"))
-                table.insert(out, draw_box_row(mx, my + 17, mw, string.format("  %s[Esc / Enter / ?] Close Help Dialog%s", C.dim, C.reset)))
+                table.insert(out, draw_box_row(mx, my + 10, mw, "   [, ]           Cycle category tabs ([All], [User], [System], ...)"))
+                table.insert(out, draw_box_row(mx, my + 11, mw, "   t, F5          Toggle Process Tree view   Space Fold/Pause"))
+                table.insert(out, draw_box_row(mx, my + 12, mw, "   Enter, i       Inspect process details modal"))
+                table.insert(out, draw_box_row(mx, my + 13, mw, "   k, R           Open signal dispatcher, Renice modal"))
+                table.insert(out, draw_box_row(mx, my + 14, mw, string.format(" %sDisplay & Sorting:%s", C.title_col, C.reset)))
+                table.insert(out, draw_box_row(mx, my + 15, mw, "   c, m, p, n     Sort by CPU, Memory, PID, or Name"))
+                table.insert(out, draw_box_row(mx, my + 16, mw, "   u, s, d, e, r  Sort by User, Threads, I/O, TIME+, Reverse"))
+                table.insert(out, draw_box_row(mx, my + 17, mw, "   C, T           CPU view mode, Cycle color themes"))
+                table.insert(out, draw_box_row(mx, my + 18, mw, string.format("  %s[Esc / Enter / ?] Close Help Dialog%s", C.dim, C.reset)))
             end
 
             -- 6. Footer Line & Search / Status
@@ -4078,10 +4416,10 @@ Keybindings:
                 local help_str
                 if term_w >= 115 then
                     help_str = in_tree_mode
-                        and string.format("%s  %s  [/] Filter  [Space] Fold  [Enter] Inspect  [k] Kill  [R] Renice  [c/m/p/n/u/s/d] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit", focus_hint, zoom_hint)
-                        or string.format("%s  %s  [/] Filter  [t] Tree  [Enter] Inspect  [k] Kill  [R] Renice  [c/m/p/n/u/s/d] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit", focus_hint, zoom_hint)
+                        and string.format("%s  %s  [/] Filter  [[]/[]] Category  [Space] Fold  [Enter] Inspect  [k] Kill  [R] Renice  [c/m/p/n/u/s/d] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit", focus_hint, zoom_hint)
+                        or string.format("%s  %s  [/] Filter  [[]/[]] Category  [t] Tree  [Enter] Inspect  [k] Kill  [R] Renice  [c/m/p/n/u/s/d] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit", focus_hint, zoom_hint)
                 elseif term_w >= 85 then
-                    help_str = string.format("%s  %s  [/] Filter  [t] Tree  [Enter] Inspect  [c/m/p] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit", focus_hint, zoom_hint)
+                    help_str = string.format("%s  %s  [/] Filter  [[]/[]] Category  [t] Tree  [Enter] Inspect  [c/m/p] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit", focus_hint, zoom_hint)
                 else
                     help_str = string.format("%s  %s  [/] Filter  [?] Help  [q] Quit", focus_hint, zoom_hint)
                 end
@@ -4334,6 +4672,38 @@ local function run_self_test()
     end
     print("  ✔ Proposal 1: Verified maximized zoomed pane frame generation for Panes 1-4")
 
+    -- State Badges & Category Engine test (Proposal 4)
+    local test_states = { "R", "S", "D", "Z", "T", "t", "I", "?" }
+    for _, st in ipairs(test_states) do
+        local b_unsel, sym, ch = get_state_badge(st, false)
+        local b_sel = get_state_badge(st, true)
+        assert(visual_len(b_unsel) == 5, "Unselected state badge must be 5 visual columns for " .. st)
+        assert(visual_len(b_sel) == 5, "Selected state badge must be 5 visual columns for " .. st)
+        assert(#sym > 0 and #ch > 0, "State badge must have symbol and character for " .. st)
+    end
+
+    local mock_procs = {
+        { pid = 1, comm = "systemd", username = "root", uid = 0, state = "S", cpu_pct = 0.0, io_total_rate = 0 },
+        { pid = 2, comm = "kthreadd", username = "root", uid = 0, ppid = 2, state = "S", cpu_pct = 0.0, io_total_rate = 0 },
+        { pid = 500, comm = "my_app", username = "alice", uid = 1000, state = "R", cpu_pct = 15.0, io_total_rate = 0 },
+        { pid = 501, comm = "my_io", username = "alice", uid = 1000, state = "S", cpu_pct = 0.0, io_total_rate = 5000 },
+        { pid = 999, comm = "defunct", username = "alice", uid = 1000, state = "Z", cpu_pct = 0.0, io_total_rate = 0 },
+    }
+    local cat_counts = count_process_categories(mock_procs, "alice")
+    assert(cat_counts.all == 5, "Category all count")
+    assert(cat_counts.user == 3, "Category user count (alice procs)")
+    assert(cat_counts.system == 2, "Category system count (root procs)")
+    assert(cat_counts.active == 2, "Category active count (my_app running + my_io I/O)")
+    assert(cat_counts.zombies == 1, "Category zombies count")
+
+    local pills_rendered = render_category_pills(PROCESS_CATEGORIES, 2, cat_counts, 80)
+    assert(pills_rendered:find("▶%[User: 3%]◀") ~= nil, "Active user pill highlighted")
+    assert(pills_rendered:find("%[Zombies: 1%]") ~= nil, "Zombies count present")
+
+    local tab_hit_1 = get_category_tab_at_x(5, PROCESS_CATEGORIES, cat_counts, 1)
+    assert(tab_hit_1 == 1, "Hit test category 1 (All)")
+    print("  ✔ Proposal 4: Verified state badges, category filters, counts, and pill hit-testing")
+
     print("\n\27[1;32mALL SELF-TEST CHECKS PASSED SUCCESSFULLY!\27[0m")
     return true
 end
@@ -4370,6 +4740,12 @@ local M = {
     truncate                 = truncate,
     make_meter_bar           = make_meter_bar,
     render_zoomed_pane_frame = render_zoomed_pane_frame,
+    get_state_badge          = get_state_badge,
+    PROCESS_CATEGORIES       = PROCESS_CATEGORIES,
+    matches_process_category = matches_process_category,
+    count_process_categories = count_process_categories,
+    render_category_pills    = render_category_pills,
+    get_category_tab_at_x    = get_category_tab_at_x,
     main                     = main,
     run_self_test            = run_self_test,
 }
