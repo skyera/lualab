@@ -54,6 +54,8 @@ make
   ./LuaJIT/src/luajit ffi_system_info.lua   # Rich POSIX system diagnostics, hardware specs & memory benchmark (--compact, --json, --bench)
   ./LuaJIT/src/luajit ffi_advanced_demo.lua
   ./LuaJIT/src/luajit ffi_sqlite_demo.lua   # In-memory SQLite3 FFI engine & benchmark
+  luajit ffi_log_explorer.lua             # Browse current directory; Enter opens logs, Backspace goes up
+  luajit ffi_log_explorer.lua app.log worker.log # Windows/Linux: follow, filter, severity, bookmarks
   luajit ffi_asteroids.lua                 # Linux terminal Asteroids (A/D rotate, W thrust, Space fire; --snapshot, --test)
   ./LuaJIT/src/luajit ffi_game_snake.lua    # Real-time terminal Snake game via POSIX FFI
   ./LuaJIT/src/luajit ffi_image_terminal_demo.lua  # Fast C image generation & terminal truecolor viewer
@@ -98,3 +100,13 @@ make
 * [Lua Quick Start Guide](https://github.com/PacktPublishing/Lua-Quick-Start-Guide)
 * [Awesome Lua](https://github.com/LewisJEllis/awesome-lua)
 * [lua-users.org](http://lua-users.org/)
+
+### Deploy the log explorer
+
+```bash
+luajit deploy.lua --app logexplorer
+logexplorer                 # Browse the current directory
+logexplorer app.log         # Follow a log file
+```
+
+The default install location is `~/bin` on Linux and `C:\app\bin` on Windows.

@@ -1,8 +1,8 @@
 #!/usr/bin/env luajit
 --[[
     deploy.lua
-    Installs lualab tools (pix.lua, lumina.lua, yt.lua, weblite.lua, luatop.lua, codefind.lua) plus thin launchers, so they can be
-    started by simply typing `pix`, `lumina`, `yt`, `weblite` / `wl`, `luatop` / `ltop`, or `codefind`:
+    Installs lualab tools (pix.lua, lumina.lua, yt.lua, weblite.lua, luatop.lua, codefind.lua, ffi_log_explorer.lua) plus thin launchers, so they can be
+    started by simply typing `pix`, `lumina`, `yt`, `weblite` / `wl`, `luatop` / `ltop`, or `codefind` / `logexplorer`:
 
       Linux / macOS : ~/bin/<app>.lua  + ~/bin/<app>      (POSIX sh, made executable)
       Windows       : C:\app\bin\<app>.lua + <app>.cmd    (cmd.exe / PowerShell)
@@ -10,7 +10,7 @@
 
     Usage:
       luajit deploy.lua                     Install all tools for the current OS
-      luajit deploy.lua --app <name|all>    Select specific tool: pix, lumina, yt, weblite, luatop, or codefind (default: all)
+      luajit deploy.lua --app <name|all>    Select specific tool: pix, lumina, yt, weblite, luatop, codefind, or logexplorer (default: all)
       luajit deploy.lua --dir <path>        Install into a custom directory
       luajit deploy.lua --os windows        Generate the Windows layout (e.g. from Linux/CI)
       luajit deploy.lua --check             Report only, write nothing
@@ -63,6 +63,13 @@ local APPS = {
         env_var = "LUATOP_LUAJIT",
         aliases = { "ltop" },
     },
+    logexplorer = {
+        id = "logexplorer",
+        name = "logexplorer",
+        script = "ffi_log_explorer.lua",
+        desc = "Live Terminal Log Explorer",
+        env_var = "LOGEXPLORER_LUAJIT",
+    },
     codefind = {
         id = "codefind",
         name = "codefind",
@@ -82,9 +89,9 @@ local opts = {
 local function print_usage()
     print("lualab deploy — Cross-Platform Tools Deployer (LuaJIT FFI)")
     print("Usage:")
-    print("  luajit deploy.lua [--app all|pix|lumina|yt|weblite|luatop|codefind] [--dir <path>] [--os linux|windows] [--check]")
+    print("  luajit deploy.lua [--app all|pix|lumina|yt|weblite|luatop|codefind|logexplorer] [--dir <path>] [--os linux|windows] [--check]")
     print("")
-    print("  --app <name>    App to deploy: all (default), pix, lumina, yt, weblite (wl), luatop (ltop), or codefind")
+    print("  --app <name>    App to deploy: all (default), pix, lumina, yt, weblite (wl), luatop (ltop), codefind, or logexplorer")
     print("  --dir <path>    Target directory (default: C:\\app\\bin on Windows, ~/bin elsewhere)")
     print("  --os <name>     Force the target layout: linux (POSIX) or windows")
     print("  --check         Show what would be installed without writing anything")
@@ -125,7 +132,7 @@ do
 end
 
 if opts.app ~= "all" and not APPS[opts.app] and opts.app ~= "wl" and opts.app ~= "ltop" then
-    io.stderr:write("deploy: unknown --app '" .. tostring(opts.app) .. "' (use all, pix, lumina, yt, weblite, luatop, or codefind)\n")
+    io.stderr:write("deploy: unknown --app '" .. tostring(opts.app) .. "' (use all, pix, lumina, yt, weblite, luatop, codefind, or logexplorer)\n")
     os.exit(2)
 end
 
@@ -359,6 +366,7 @@ if opts.app == "all" then
     table.insert(apps_to_deploy, APPS.weblite)
     table.insert(apps_to_deploy, APPS.luatop)
     table.insert(apps_to_deploy, APPS.codefind)
+    table.insert(apps_to_deploy, APPS.logexplorer)
 elseif opts.app == "weblite" or opts.app == "wl" then
     table.insert(apps_to_deploy, APPS.weblite)
 elseif opts.app == "luatop" or opts.app == "ltop" then
