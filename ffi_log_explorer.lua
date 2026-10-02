@@ -667,17 +667,22 @@ local function run(model,ascii)
  -- Lua signal callbacks cannot re-enter compiled FFI calls. Restore the caller's JIT state on exit.
  local jit=require('jit');local jit_enabled=jit.status();jit.off()
  local term=terminal();local previous,oldcols,oldrows
+ local dirty=true
  local ok,err=xpcall(function()
   term:enter()
   while not term.stopped do
-   model:refresh()
+   local changed=model:refresh()
    local cols,rows=term:size();local resized=oldcols and (oldcols~=cols or oldrows~=rows)
    if resized then previous=nil end
-   model:clamp(#model:visible(),math.max(1,rows-8))
-   local frame=M.render(model,cols,rows,ascii)
-   io.write(M.diff(frame,previous,resized));io.flush()
-   previous,oldcols,oldrows=frame,cols,rows
+   if dirty or changed or resized then
+    model:clamp(#model:visible(),math.max(1,rows-8))
+    local frame=M.render(model,cols,rows,ascii)
+    io.write(M.diff(frame,previous,resized));io.flush()
+    previous=frame;dirty=false
+   end
+   oldcols,oldrows=cols,rows
    local keys=term:keys();local running=true
+   if #keys>0 then dirty=true end
    for _,key in ipairs(keys) do if not model:key(key,math.max(1,rows-8)) then running=false;break end end
    if not running then break end
   end
