@@ -213,6 +213,7 @@ if is_windows then
             if ch == "\27" then return "ESC"
             elseif ch == "\n" or ch == "\r" then return "ENTER"
             elseif ch == " " then return "SPACE"
+            elseif ch == "\t" then return "TAB"
             else return ch end
         end
 
@@ -230,11 +231,13 @@ if is_windows then
                     elseif ch2 == 81 then return "PAGE_DOWN"
                     elseif ch2 == 71 then return "HOME"
                     elseif ch2 == 79 then return "END"
+                    elseif ch2 == 15 then return "SHIFT_TAB"
                     end
                 elseif ch == 27 then return "ESC"
                 elseif ch == 13 or ch == 10 then return "ENTER"
                 elseif ch == 8 then return "BACKSPACE"
                 elseif ch == 32 then return "SPACE"
+                elseif ch == 9 then return "TAB"
                 else return string.char(ch) end
             end
             kernel32.Sleep(10)
@@ -501,6 +504,7 @@ ffi.cdef(posix_termios_cdef[[
                         if c2 == 66 then return "DOWN" end
                         if c2 == 67 then return "RIGHT" end
                         if c2 == 68 then return "LEFT" end
+                        if c2 == 90 then return "SHIFT_TAB" end
                         if c2 == 53 and n >= 4 and key_buf[3] == 126 then return "PAGE_UP" end
                         if c2 == 54 and n >= 4 and key_buf[3] == 126 then return "PAGE_DOWN" end
                         if c2 == 72 then return "HOME" end
@@ -515,6 +519,8 @@ ffi.cdef(posix_termios_cdef[[
                     return "BACKSPACE"
                 elseif c0 == 32 then
                     return "SPACE"
+                elseif c0 == 9 then
+                    return "TAB"
                 else
                     return string.char(c0)
                 end
@@ -2555,6 +2561,394 @@ local SIGNALS = {
 }
 
 -- =========================================================================
+-- 7.5 Maximized Zoom View Engine (Proposal 1)
+-- =========================================================================
+local function render_zoomed_pane(out, pane_idx, state, term_w, term_h)
+    state = state or {}
+    local zh = term_h - 2
+    local zw = term_w
+    if pane_idx == 1 then
+        -- 1. Zoomed CPU Pane
+        local cores = state.cores or (read_cpu_stats and read_cpu_stats() or {})
+        local overall_cpu = state.overall_cpu or 0.0
+        local cpu_history = state.cpu_history or { overall_cpu }
+        local c_temp, c_freq = state.temp_c, state.freq_ghz
+        if c_temp == nil and c_freq == nil and read_cpu_sensors then
+            c_temp, c_freq = read_cpu_sensors()
+        end
+        local sensor_parts = {}
+        if c_temp then table.insert(sensor_parts, string.format("%.0f°C", c_temp)) end
+        if c_freq then table.insert(sensor_parts, string.format("%.2fGHz", c_freq)) end
+        local sensor_str = #sensor_parts > 0 and (" [" .. table.concat(sensor_parts, " ") .. "]") or ""
+
+        local spark_w = math.min(30, math.max(8, math.floor(zw * 0.22)))
+        local cpu_spark = make_sparkline(cpu_history, spark_w, C.cpu_low)
+        local title = string.format("[1] CPU (MAXIMIZED - Press [z] or [Esc] to Restore): %.1f%%%s", overall_cpu, sensor_str)
+        draw_pane(out, 1, 2, zw, zh, title, true, "Usage: " .. cpu_spark)
+
+        -- Row 3: Overall Banner & Hardware Model
+        local bar_w = math.max(8, math.min(30, math.floor(zw * 0.25)))
+        local ov_bar = make_meter_bar(overall_cpu, bar_w)
+        local cpu_mod = state.cpu_model_clean or (read_cpu_model and read_cpu_model() or "CPU")
+        table.insert(out, draw_box_row(1, 3, zw, string.format("  %sOverall Usage:%s %s %5.1f%%%s │ %sModel:%s %s%s%s",
+            C.bold, C.reset, ov_bar, overall_cpu, C.reset,
+            C.bold, C.reset, C.title_col, truncate(cpu_mod, math.max(12, zw - 60)), C.reset)))
+
+        -- Row 4: Core Statistics & Distribution
+        local min_pct, max_pct = 100, 0
+        local busy_cores = 0
+        local total_pct = 0
+        for _, c in ipairs(cores) do
+            min_pct = math.min(min_pct, c.pct or 0)
+            max_pct = math.max(max_pct, c.pct or 0)
+            total_pct = total_pct + (c.pct or 0)
+            if (c.pct or 0) >= 1 then busy_cores = busy_cores + 1 end
+        end
+        local avg_pct = #cores > 0 and (total_pct / #cores) or 0
+        table.insert(out, draw_box_row(1, 4, zw, string.format("  %sCores:%s %d   %sBusy:%s %d/%d   %sAvg/core:%s %5.1f%%   %sMin:%s %5.1f%%   %sMax:%s %5.1f%%",
+            C.dim, C.reset, #cores,
+            C.dim, C.reset, busy_cores, #cores,
+            C.dim, C.reset, avg_pct,
+            C.dim, C.reset, min_pct,
+            C.dim, C.reset, max_pct)))
+
+        -- Row 5: Separator
+        table.insert(out, draw_box_row(1, 5, zw, C.dim .. string.rep("─", math.max(0, zw - 4)) .. C.reset))
+
+        -- Rows 6 to zh: Per-core Matrix
+        local avail_rows = math.max(1, zh - 5)
+        local num_cols = 1
+        if zw >= 150 and #cores >= 24 then
+            num_cols = 6
+        elseif zw >= 120 and #cores >= 16 then
+            num_cols = 4
+        elseif zw >= 80 and #cores >= 6 then
+            num_cols = 3
+        elseif zw >= 50 and #cores >= 2 then
+            num_cols = 2
+        end
+        while num_cols < 6 and math.ceil(#cores / num_cols) > avail_rows do
+            num_cols = num_cols + 1
+        end
+
+        local col_sub_w = math.floor((zw - 4 - num_cols) / num_cols)
+
+        for i = 1, avail_rows do
+            local line_parts = {}
+            local has_content = false
+            for col = 1, num_cols do
+                local c_idx = (i - 1) * num_cols + col
+                local c = cores[c_idx]
+                if c then
+                    has_content = true
+                    local lbl = (col_sub_w >= 14) and string.format("C%-2d", c_idx - 1) or string.format("%2d", c_idx - 1)
+                    local fixed_w = visual_len(lbl) + 1 + 5
+                    local c_bar_w = math.max(3, col_sub_w - fixed_w)
+                    local mbar = make_meter_bar(c.pct or 0, c_bar_w)
+                    local sep = (col > 1) and " " or ""
+                    table.insert(line_parts, string.format("%s%s%s%s %s%4.0f%%%s", sep, C.dim, lbl, C.reset, mbar, c.pct or 0, C.reset))
+                end
+            end
+            if has_content then
+                table.insert(out, draw_box_row(1, 5 + i, zw, table.concat(line_parts)))
+            else
+                table.insert(out, draw_box_row(1, 5 + i, zw, ""))
+            end
+        end
+
+    elseif pane_idx == 2 then
+        -- 2. Zoomed Memory & Storage Pane
+        local mem = state.mem or (read_memory_stats and read_memory_stats() or { used_kb = 0, total_kb = 1, used_pct = 0, free_kb = 0, avail_kb = 0, cached_kb = 0, swap_used_kb = 0, swap_total_kb = 0, swap_pct = 0 })
+        local spark_w = math.min(30, math.max(8, math.floor(zw * 0.22)))
+        local mem_history = state.mem_history or { mem.used_pct or 0 }
+        local mem_spark = make_sparkline(mem_history, spark_w, C.mem_used)
+        local title = "[2] Memory & Storage (MAXIMIZED - Press [z] or [Esc] to Restore)"
+        draw_pane(out, 1, 2, zw, zh, title, true, "Trend: " .. mem_spark)
+
+        -- Row 3: Physical Memory RAM Bar
+        local mem_cap_str = format_bytes(mem.used_kb or 0) .. " / " .. format_bytes(mem.total_kb or 1)
+        local mem_pct_str = string.format("%5.1f%%", mem.used_pct or 0)
+        local mem_fixed_w = 4 + 1 + visual_len(mem_pct_str) + 2 + visual_len(mem_cap_str)
+        local mem_bar_w = math.max(6, (zw - 4) - mem_fixed_w)
+        local mem_bar = make_meter_bar(mem.used_pct or 0, mem_bar_w, C.mem_used)
+        table.insert(out, draw_box_row(1, 3, zw, string.format("  %sRAM %s%s %s%5.1f%%%s  %s%s%s",
+            C.bold, C.reset, mem_bar, C.reset, mem.used_pct or 0, C.reset, C.dim, mem_cap_str, C.reset)))
+
+        -- Row 4: Detailed RAM Breakdown
+        local free_str = format_bytes(mem.free_kb or math.max(0, (mem.total_kb or 1) - (mem.used_kb or 0)))
+        local avail_str = format_bytes(mem.avail_kb or 0)
+        local cached_str = format_bytes(mem.cached_kb or 0)
+        local buffers_str = format_bytes(mem.buffers_kb or 0)
+        table.insert(out, draw_box_row(1, 4, zw, string.format("    %sFree:%s %s  │  %sAvailable:%s %s  │  %sCached:%s %s  │  %sBuffers:%s %s",
+            C.dim, C.reset, free_str, C.dim, C.reset, avail_str, C.dim, C.reset, cached_str, C.dim, C.reset, buffers_str)))
+
+        -- Row 5: Swap Memory SWP Bar
+        local swp_cap_str = format_bytes(mem.swap_used_kb or 0) .. " / " .. format_bytes(mem.swap_total_kb or 0)
+        local swp_pct_str = string.format("%5.1f%%", mem.swap_pct or 0)
+        local swp_fixed_w = 4 + 1 + visual_len(swp_pct_str) + 2 + visual_len(swp_cap_str)
+        local swp_bar_w = math.max(6, (zw - 4) - swp_fixed_w)
+        local swap_bar = make_meter_bar(mem.swap_pct or 0, swp_bar_w, C.mem_swap)
+        table.insert(out, draw_box_row(1, 5, zw, string.format("  %sSWP %s%s %s%5.1f%%%s  %s%s%s",
+            C.bold, C.reset, swap_bar, C.reset, mem.swap_pct or 0, C.reset, C.dim, swp_cap_str, C.reset)))
+
+        local row_y = 6
+        -- GPU Telemetry (if present)
+        local gpus = state.gpus or (read_gpu_stats and read_gpu_stats() or {})
+        if #gpus > 0 then
+            table.insert(out, draw_box_row(1, row_y, zw, string.format("  %sGPU Accelerators:%s", C.title_col, C.reset)))
+            row_y = row_y + 1
+            for _, g in ipairs(gpus) do
+                if row_y >= zh then break end
+                local g_temp = g.temp_c and string.format("  \27[1;38;2;251;191;36m%d°C\27[0m", g.temp_c) or ""
+                local g_core = g.util_pct and string.format(" │ Core: \27[1;97m%d%%\27[0m", g.util_pct) or ""
+                local g_freq = g.freq_ghz and string.format(" │ Freq: \27[1;97m%.2f GHz\27[0m", g.freq_ghz) or ""
+                local g_name = g.name:gsub("^NVIDIA%s+", ""):gsub("^AMD%s+", "")
+                table.insert(out, draw_box_row(1, row_y, zw, string.format("    %sGPU %s%s%s%s%s%s",
+                    C.bold, C.reset, C.title_col, g_name, C.reset, g_temp, g_core, g_freq)))
+                row_y = row_y + 1
+
+                if not g.is_integrated and g.mem_total_kb and g.mem_total_kb > 0 and row_y < zh then
+                    local vram_cap_str = format_bytes(g.mem_used_kb) .. " / " .. format_bytes(g.mem_total_kb)
+                    local vram_pct = g.mem_used_pct or 0
+                    local vram_fixed_w = 7 + 1 + 6 + 2 + visual_len(vram_cap_str)
+                    local vram_bar_w = math.max(6, (zw - 6) - vram_fixed_w)
+                    local vbar = make_meter_bar(vram_pct, vram_bar_w, C.mem_used)
+                    table.insert(out, draw_box_row(1, row_y, zw, string.format("      %sVRAM%s %s %5.1f%%  %s%s%s",
+                        C.bold, C.reset, vbar, vram_pct, C.dim, vram_cap_str, C.reset)))
+                    row_y = row_y + 1
+                end
+            end
+        end
+
+        -- Storage Section
+        if row_y < zh then
+            table.insert(out, draw_box_row(1, row_y, zw, string.format("  %sStorage Filesystems & Disks:%s", C.title_col, C.reset)))
+            row_y = row_y + 1
+        end
+
+        local storage = state.storage or (read_storage_stats and read_storage_stats(os.clock()) or { mounts = {}, read_speed = 0, write_speed = 0 })
+        local num_mounts = #(storage.mounts or {})
+        local use_dual = (num_mounts >= 2 and zw >= 70)
+
+        if use_dual then
+            local col_w = math.floor((zw - 4 - 3) / 2)
+            local function format_col(m)
+                if not m then return string.rep(" ", col_w) end
+                local u_kb = math.floor(m.used_bytes / 1024)
+                local t_kb = math.floor(m.total_bytes / 1024)
+                local cap_str = format_bytes(u_kb) .. "/" .. format_bytes(t_kb)
+                local pct_str = string.format("%3.0f%%", m.used_pct or 0)
+                local mnt = truncate(m.mount, 10)
+                local mnt_pad = mnt .. string.rep(" ", math.max(0, 10 - visual_len(mnt)))
+                local fixed_w = 10 + 1 + 1 + visual_len(pct_str) + 1 + visual_len(cap_str)
+                local bar_w = math.max(2, col_w - fixed_w)
+                local bar = make_meter_bar(m.used_pct, bar_w)
+                local col_txt = string.format("%s%s%s %s %s%s%s %s%s%s",
+                    C.bold, mnt_pad, C.reset, bar, C.title_col, pct_str, C.reset, C.dim, cap_str, C.reset)
+                local vlen = visual_len(col_txt)
+                if vlen < col_w then col_txt = col_txt .. string.rep(" ", col_w - vlen)
+                elseif vlen > col_w then col_txt = truncate(col_txt, col_w) end
+                return col_txt
+            end
+
+            local m_idx = 1
+            while m_idx <= num_mounts and row_y < zh do
+                local m1 = storage.mounts[m_idx]
+                local m2 = storage.mounts[m_idx + 1]
+                m_idx = m_idx + 2
+                table.insert(out, draw_box_row(1, row_y, zw, "  " .. format_col(m1) .. " " .. C.dim .. "│" .. C.reset .. " " .. format_col(m2)))
+                row_y = row_y + 1
+            end
+        else
+            for _, m in ipairs(storage.mounts or {}) do
+                if row_y >= zh then break end
+                local u_kb = math.floor(m.used_bytes / 1024)
+                local t_kb = math.floor(m.total_bytes / 1024)
+                local cap_str = format_bytes(u_kb) .. " / " .. format_bytes(t_kb)
+                local pct_str = string.format("%5.1f%%", m.used_pct or 0)
+                local mnt = truncate(m.mount, 12)
+                local mnt_str = mnt .. string.rep(" ", math.max(0, 12 - visual_len(mnt)))
+                local fixed_w = 12 + 1 + 1 + visual_len(pct_str) + 2 + visual_len(cap_str)
+                local bar_w = math.max(4, (zw - 6) - fixed_w)
+                local dbar = make_meter_bar(m.used_pct, bar_w)
+                table.insert(out, draw_box_row(1, row_y, zw, string.format("    %s%s%s %s %s%s%s  %s%s%s",
+                    C.bold, mnt_str, C.reset, dbar, C.title_col, pct_str, C.reset, C.dim, cap_str, C.reset)))
+                row_y = row_y + 1
+            end
+        end
+
+        if row_y < zh then
+            local io_str = string.format("  %sDisk Throughput: %sRead %s%s │ %sWrite %s%s",
+                C.dim, C.disk_read, format_rate(storage.read_speed or 0), C.reset,
+                C.disk_write, format_rate(storage.write_speed or 0), C.reset)
+            table.insert(out, draw_box_row(1, row_y, zw, io_str))
+            row_y = row_y + 1
+        end
+
+        while row_y < zh do
+            table.insert(out, draw_box_row(1, row_y, zw, ""))
+            row_y = row_y + 1
+        end
+
+    elseif pane_idx == 3 then
+        -- 3. Zoomed Network Pane
+        local net = state.net or (read_network_stats and read_network_stats(os.clock()) or { active_iface = "lo", rx_rate = 0, tx_rate = 0, rx_total = 0, tx_total = 0, ifaces = {} })
+        local title = string.format("[3] Network (MAXIMIZED - Press [z] or [Esc] to Restore) [Active: %s]", net.active_iface or "net")
+        draw_pane(out, 1, 2, zw, zh, title, true)
+
+        -- Row 3: Active Interface Banner
+        table.insert(out, draw_box_row(1, 3, zw, string.format("  %sActive Interface:%s %s%s%s   │  %sTotal Download:%s %s   │  %sTotal Upload:%s %s",
+            C.bold, C.reset, C.title_col, net.active_iface or "net", C.reset,
+            C.bold, C.reset, format_bytes(math.floor((net.rx_total or 0) / 1024)),
+            C.bold, C.reset, format_bytes(math.floor((net.tx_total or 0) / 1024)))))
+
+        -- Row 4: Download Timeline & Sparkline
+        local spark_w = math.max(15, zw - 45)
+        local rx_history = state.rx_history or { net.rx_rate or 0 }
+        local rx_spark = make_sparkline(rx_history, spark_w, C.net_rx)
+        table.insert(out, draw_box_row(1, 4, zw, string.format("  %sRX (Download):%s %-12s %s  %sTotal:%s %s",
+            C.bold, C.reset, format_rate(net.rx_rate or 0), rx_spark, C.dim, C.reset, format_bytes(math.floor((net.rx_total or 0) / 1024)))))
+
+        -- Row 5: Upload Timeline & Sparkline
+        local tx_history = state.tx_history or { net.tx_rate or 0 }
+        local tx_spark = make_sparkline(tx_history, spark_w, C.net_tx)
+        table.insert(out, draw_box_row(1, 5, zw, string.format("  %sTX (Upload):  %s %-12s %s  %sTotal:%s %s",
+            C.bold, C.reset, format_rate(net.tx_rate or 0), tx_spark, C.dim, C.reset, format_bytes(math.floor((net.tx_total or 0) / 1024)))))
+
+        -- Row 6: All Interfaces Header
+        table.insert(out, draw_box_row(1, 6, zw, string.format("  %sAll Detected Network Interfaces:%s", C.title_col, C.reset)))
+        table.insert(out, draw_box_row(1, 7, zw, string.format("    %s%-12s %-15s %-15s %-15s %-15s%s",
+            C.table_hdr, "INTERFACE", "RX RATE", "RX TOTAL", "TX RATE", "TX TOTAL", C.reset)))
+
+        local row_y = 8
+        local ifaces = net.ifaces or {}
+        for _, iface in ipairs(ifaces) do
+            if row_y >= zh then break end
+            local is_act = (iface.name == net.active_iface)
+            local prefix = is_act and " ▶" or "  "
+            local name_col = is_act and C.title_col or C.reset
+            table.insert(out, draw_box_row(1, row_y, zw, string.format("  %s%s%-12s%s %-15s %-15s %-15s %-15s",
+                prefix, name_col, iface.name, C.reset,
+                format_rate(iface.rx_rate or 0), format_bytes(math.floor((iface.rx_total or 0) / 1024)),
+                format_rate(iface.tx_rate or 0), format_bytes(math.floor((iface.tx_total or 0) / 1024)))))
+            row_y = row_y + 1
+        end
+
+        while row_y < zh do
+            table.insert(out, draw_box_row(1, row_y, zw, ""))
+            row_y = row_y + 1
+        end
+
+    elseif pane_idx == 4 then
+        -- 4. Zoomed Process Pane
+        local procs = state.procs or (read_process_table and read_process_table(16384000, os.clock()) or {})
+        local sel_proc = state.sel_proc or 1
+        local sort_mode = state.sort_mode or "cpu"
+        local sort_reverse = state.sort_reverse or false
+        local in_tree_mode = state.in_tree_mode or false
+        local filter_query = state.filter_query or ""
+
+        local dir_sym = sort_reverse and "▲" or "▼"
+        local sort_tag = string.format("[Sort: %s%s]", sort_mode:upper(), dir_sym)
+        local tree_tag = in_tree_mode and "[Tree: ON]" or "[Tree: OFF]"
+        local filter_tag = #filter_query > 0 and string.format("[Filter: /%s]", filter_query) or ""
+        local title = string.format("[4] Processes (MAXIMIZED - Press [z] or [Esc] to Restore): %d %s %s %s", #procs, sort_tag, tree_tag, filter_tag)
+
+        draw_pane(out, 1, 2, zw, zh, title, true)
+
+        local table_header_y = 3
+        local function col_hdr(name, mode_key, width)
+            local is_active = (sort_mode == mode_key)
+            local text = name
+            if is_active then text = text .. (sort_reverse and "▲" or "▼") end
+            if is_active then
+                return string.format("%s%-" .. width .. "s%s", C.border_focus, text, C.table_hdr)
+            else
+                return string.format("%-" .. width .. "s", text)
+            end
+        end
+
+        local h_pid     = col_hdr("PID", "pid", 7)
+        local h_user    = col_hdr("USER", "user", 8)
+        local h_cpu     = col_hdr("%CPU", "cpu", 7)
+        local h_mem     = col_hdr("%MEM", "mem", 7)
+        local h_res     = (sort_mode == "mem") and col_hdr("RES", "mem", 9) or string.format("%-9s", "RES")
+        local h_virt    = (sort_mode == "vsize" or sort_mode == "virt") and col_hdr("VIRT", "vsize", 9) or string.format("%-9s", "VIRT")
+        local h_th      = col_hdr("TH", "threads", 4)
+        local h_nice    = (sort_mode == "nice") and col_hdr("NICE", "nice", 5) or string.format("%-5s", "NICE")
+        local h_stat    = string.format("%-5s", "STAT")
+        local h_time    = col_hdr("TIME+", "time", 9)
+        local h_cmd     = in_tree_mode and (C.title_col .. "PROCESS TREE [Space: Fold]" .. C.table_hdr) or col_hdr("COMMAND", "name", 15)
+
+        local show_io_cols = (zw >= 105)
+        local io_hdr_str = ""
+        if show_io_cols then
+            local h_ior = col_hdr("DISK R", "ior", 9)
+            local h_iow = col_hdr("DISK W", "iow", 9)
+            io_hdr_str = string.format(" %s %s", h_ior, h_iow)
+        end
+
+        local th_str = string.format("  %s%s %s %s %s %s %s %s %s %s %s%s %s%s",
+            C.table_hdr, h_pid, h_user, h_cpu, h_mem, h_res, h_virt, h_th, h_nice, h_stat, h_time, io_hdr_str, h_cmd, C.reset)
+        table.insert(out, draw_box_row(1, table_header_y, zw, th_str))
+
+        local visible_rows = zh - 3
+        local page_offset = 1
+        if sel_proc > visible_rows then
+            page_offset = sel_proc - visible_rows + 1
+        end
+
+        for i = 1, visible_rows do
+            local p_idx = page_offset + i - 1
+            local pr = procs[p_idx]
+            if pr then
+                local is_sel = (p_idx == sel_proc)
+                local cpu_val = (in_tree_mode and pr.is_collapsed and pr.total_sub_cpu and pr.total_sub_cpu > pr.cpu_pct) and pr.total_sub_cpu or (pr.cpu_pct or 0)
+                local res_val = (in_tree_mode and pr.is_collapsed and pr.total_sub_res and pr.total_sub_res > pr.res_kb) and pr.total_sub_res or (pr.res_kb or 0)
+                local cpu_col = cpu_val > 50 and C.cpu_high or (cpu_val > 15 and C.cpu_mid or C.reset)
+                local user_str = truncate(pr.username or "user", 8)
+
+                local cmd_display
+                if in_tree_mode then
+                    local fold_badge = ""
+                    if pr.has_children then
+                        fold_badge = pr.is_collapsed and string.format("\27[1;33m[+%d]\27[0m ", pr.child_count or 0) or "\27[36m[-]\27[0m "
+                    end
+                    cmd_display = C.tree_branch .. (pr.tree_prefix or "") .. C.reset .. fold_badge .. (pr.comm or "")
+                else
+                    cmd_display = pr.cmdline or pr.comm or ""
+                end
+
+                local io_val_str = ""
+                if show_io_cols then
+                    io_val_str = string.format(" %-9s %-9s", format_rate(pr.io_read_rate or 0), format_rate(pr.io_write_rate or 0))
+                end
+
+                local time_str = format_time_plus(pr.cpu_time_sec or 0)
+                local virt_str = format_bytes(pr.vsize_kb or 0)
+                local nice_val = pr.nice or 0
+                local row_content = string.format("%-7d %-8s %s%5.1f%%%s %5.1f%% %-9s %-9s %-4d %-5d %-5s %s%s %s",
+                    pr.pid or 0, user_str, cpu_col, cpu_val, C.reset, pr.mem_pct or 0, format_bytes(res_val), virt_str, pr.threads or 1, nice_val, pr.state or "S", time_str, io_val_str, cmd_display)
+
+                if is_sel then
+                    table.insert(out, draw_box_row(1, table_header_y + i, zw, C.sel_bg .. "▶ " .. row_content .. C.reset))
+                else
+                    table.insert(out, draw_box_row(1, table_header_y + i, zw, "  " .. row_content))
+                end
+            else
+                table.insert(out, draw_box_row(1, table_header_y + i, zw, ""))
+            end
+        end
+    end
+end
+
+local function render_zoomed_pane_frame(pane_idx, state, term_w, term_h)
+    local out = {}
+    render_zoomed_pane(out, pane_idx, state, term_w, term_h)
+    return table.concat(out)
+end
+
+-- =========================================================================
 -- 8. Main Interactive Application Loop
 -- =========================================================================
 local function main(args)
@@ -2644,6 +3038,10 @@ Keybindings:
     local last_w, last_h = get_terminal_size()
     local last_top_h = math.min(12, math.max(8, math.floor(last_h * 0.32)))
     local last_visible_rows = math.max(1, last_h - last_top_h - 3 - 5)
+    local last_left_w = math.floor(last_w * 0.50)
+    local last_proc_y = last_top_h + 5
+    local focused_pane = 4 -- 1: CPU, 2: Memory & Storage, 3: Network, 4: Processes
+    local zoomed_pane = nil -- nil: 4-pane grid; 1..4: zoomed pane
     local cpu_history = {}
     local mem_history = {}
     local gpu_history = {}
@@ -2697,12 +3095,86 @@ Keybindings:
                         show_help = false
                         show_inspector = false
                         show_signal_modal = false
+                    elseif zoomed_pane then
+                        if k.y == 2 then
+                            -- Clicked title bar of zoomed pane: unzoom
+                            zoomed_pane = nil
+                            status_flash_msg = "Restored 4-Pane Grid"
+                            status_flash_expiry = os.clock() + 1.5
+                        elseif zoomed_pane == 4 then
+                            local table_header_y = 3
+                            local visible_rows = last_visible_rows
+                            local show_io = (term_w >= 105)
+
+                            if k.y == table_header_y then
+                                local new_mode = nil
+                                if k.x >= 3 and k.x <= 9 then new_mode = "pid"
+                                elseif k.x >= 11 and k.x <= 18 then new_mode = "user"
+                                elseif k.x >= 20 and k.x <= 26 then new_mode = "cpu"
+                                elseif k.x >= 28 and k.x <= 34 then new_mode = "mem"
+                                elseif k.x >= 36 and k.x <= 44 then new_mode = "mem"
+                                elseif k.x >= 46 and k.x <= 54 then new_mode = "vsize"
+                                elseif k.x >= 56 and k.x <= 59 then new_mode = "threads"
+                                elseif k.x >= 61 and k.x <= 65 then new_mode = "nice"
+                                elseif k.x >= 73 and k.x <= 81 then new_mode = "time"
+                                elseif show_io and k.x >= 83 and k.x <= 91 then new_mode = "ior"
+                                elseif show_io and k.x >= 93 and k.x <= 101 then new_mode = "iow"
+                                elseif (show_io and k.x >= 103) or (not show_io and k.x >= 83) then
+                                    new_mode = "name"
+                                end
+
+                                if new_mode then
+                                    if sort_mode == new_mode then
+                                        sort_reverse = not sort_reverse
+                                    else
+                                        sort_mode = new_mode
+                                        sort_reverse = false
+                                    end
+                                    status_flash_msg = string.format("Sort: %s (%s)", sort_mode:upper(), sort_reverse and "ASC" or "DESC")
+                                    status_flash_expiry = os.clock() + 2.0
+                                end
+                            elseif k.y > table_header_y and k.y <= table_header_y + visible_rows then
+                                local page_offset = 1
+                                if sel_proc > visible_rows then
+                                    page_offset = sel_proc - visible_rows + 1
+                                end
+                                local target_idx = page_offset + (k.y - table_header_y - 1)
+                                if target_idx >= 1 and target_idx <= #procs then
+                                    if target_idx == sel_proc then
+                                        if in_tree_mode and procs[sel_proc] and procs[sel_proc].has_children then
+                                            local p = procs[sel_proc]
+                                            if collapsed_pids[p.pid] then
+                                                collapsed_pids[p.pid] = nil
+                                                status_flash_msg = string.format("Expanded %s (PID %d)", p.comm, p.pid)
+                                            else
+                                                collapsed_pids[p.pid] = true
+                                                status_flash_msg = string.format("Folded %s (%d sub-processes)", p.comm, p.child_count or 0)
+                                            end
+                                            status_flash_expiry = os.clock() + 2.0
+                                        else
+                                            show_inspector = true
+                                        end
+                                    else
+                                        sel_proc = target_idx
+                                    end
+                                end
+                            end
+                        end
                     else
                         local net_h = 3
-                        local proc_y = last_top_h + 2 + net_h
+                        local proc_y = last_proc_y
                         local table_header_y = proc_y + 1
                         local visible_rows = last_visible_rows
                         local show_io = (term_w >= 115)
+
+                        -- Determine clicked pane
+                        if k.y >= 2 and k.y <= last_top_h + 1 then
+                            focused_pane = (k.x <= last_left_w) and 1 or 2
+                        elseif k.y >= last_top_h + 2 and k.y <= last_top_h + 1 + net_h then
+                            focused_pane = 3
+                        elseif k.y >= proc_y and k.y <= term_h - 1 then
+                            focused_pane = 4
+                        end
 
                         if k.y == table_header_y then
                             -- Clicked column header
@@ -2817,6 +3289,7 @@ Keybindings:
                     end
                 end
             elseif in_search_mode then
+                if k == "SPACE" then k = " " end
                 if k == "ENTER" or k == "ESC" then
                     in_search_mode = false
                 elseif k == "BACKSPACE" then
@@ -2840,7 +3313,48 @@ Keybindings:
                         break
                     end
                 elseif k == "ESC" then
-                    if #filter_query > 0 then filter_query = "" end
+                    if zoomed_pane then
+                        zoomed_pane = nil
+                        status_flash_msg = "Restored 4-Pane Grid"
+                        status_flash_expiry = os.clock() + 1.5
+                    elseif #filter_query > 0 then
+                        filter_query = ""
+                    end
+                elseif k == "TAB" or k == "\t" then
+                    focused_pane = (focused_pane % 4) + 1
+                    if zoomed_pane then
+                        zoomed_pane = focused_pane
+                    end
+                    local pane_names = { "CPU", "Memory & Storage", "Network", "Processes" }
+                    status_flash_msg = string.format("Focused [%d] %s", focused_pane, pane_names[focused_pane] or "")
+                    status_flash_expiry = os.clock() + 1.5
+                elseif k == "SHIFT_TAB" then
+                    focused_pane = (focused_pane == 1) and 4 or (focused_pane - 1)
+                    if zoomed_pane then
+                        zoomed_pane = focused_pane
+                    end
+                    local pane_names = { "CPU", "Memory & Storage", "Network", "Processes" }
+                    status_flash_msg = string.format("Focused [%d] %s", focused_pane, pane_names[focused_pane] or "")
+                    status_flash_expiry = os.clock() + 1.5
+                elseif k == "1" or k == "2" or k == "3" or k == "4" then
+                    local p_num = tonumber(k)
+                    focused_pane = p_num
+                    if zoomed_pane then
+                        zoomed_pane = p_num
+                    end
+                    local pane_names = { "CPU", "Memory & Storage", "Network", "Processes" }
+                    status_flash_msg = string.format("Focused [%d] %s", focused_pane, pane_names[focused_pane] or "")
+                    status_flash_expiry = os.clock() + 1.5
+                elseif k == "z" or k == "f" then
+                    if zoomed_pane then
+                        zoomed_pane = nil
+                        status_flash_msg = "Restored 4-Pane Grid"
+                    else
+                        zoomed_pane = focused_pane
+                        local pane_names = { "CPU", "Memory & Storage", "Network", "Processes" }
+                        status_flash_msg = string.format("Maximized [%d] %s (Press [z] or [Esc] to Restore)", zoomed_pane, pane_names[zoomed_pane] or "")
+                    end
+                    status_flash_expiry = os.clock() + 2.0
                 elseif k == "DOWN" or k == "j" then
                     sel_proc = sel_proc + 1
                 elseif k == "UP" or k == "k" then
@@ -2853,7 +3367,7 @@ Keybindings:
                     sel_proc = 1
                 elseif k == "END" or k == "G" then
                     sel_proc = 999999
-                elseif k == "SPACE" or k == "TAB" then
+                elseif k == "SPACE" then
                     if in_tree_mode and procs[sel_proc] and procs[sel_proc].has_children then
                         local p = procs[sel_proc]
                         if collapsed_pids[p.pid] then
@@ -3056,66 +3570,99 @@ Keybindings:
             end
             table.insert(out, string.format("\27[1;1H%s\27[K", truncate(header_content, term_w)))
 
-            local left_w = math.floor(term_w * 0.50)
-            local right_w = term_w - left_w
-
-            local num_mounts = #storage.mounts
-            local use_dual_col = (num_mounts >= 4 and right_w >= 50)
-            local storage_rows = use_dual_col and math.ceil(num_mounts / 2) or num_mounts
-            local gpu_rows = 0
-            for _, g in ipairs(gpus) do
-                gpu_rows = gpu_rows + 1
-                if not g.is_integrated and g.mem_total_kb and g.mem_total_kb > 0 then
-                    gpu_rows = gpu_rows + 1
-                end
-            end
-            local right_content_bottom = 6 + gpu_rows + storage_rows
-            local core_rows = math.max(1, math.ceil(#cores / 2))
-            if left_w < 36 then
-                core_rows = #cores
-            elseif left_w >= 90 and #cores > 3 * (right_content_bottom - 2) then
-                core_rows = math.ceil(#cores / 4)
-            elseif left_w >= 60 and #cores > 2 * (right_content_bottom - 2) then
-                core_rows = math.ceil(#cores / 3)
-            end
-            local min_process_h = 8
-            local max_top_h = math.max(6, term_h - 3 - 2 - min_process_h)
-            local detail_fits = (2 + core_rows) <= max_top_h
-            local show_cpu_summary = cpu_view_mode == "summary"
-                or (cpu_view_mode == "auto" and not detail_fits)
-            local cpu_summary_rows = 4
-            local required_top_h = math.max(6, right_content_bottom,
-                show_cpu_summary and (2 + cpu_summary_rows) or (2 + core_rows))
-            local top_h = math.min(required_top_h, max_top_h)
-            local net_h = 3
-            local bot_h = term_h - top_h - net_h - 2
-            last_top_h = top_h
-            last_visible_rows = math.max(1, bot_h - 3)
-
-            -- 1. CPU Pane (Top Left)
-            local cpu_spark_w = math.min(14, math.max(6, math.floor(left_w * 0.18)))
-            local cpu_spark = make_sparkline(cpu_history, cpu_spark_w, C.cpu_low)
-            local cpu_title = string.format("CPU: %.1f%%", overall_cpu)
-            local c_temp, c_freq = read_cpu_sensors()
-            local sensor_str = ""
-            if c_temp or c_freq then
-                local parts = {}
-                if c_temp then table.insert(parts, string.format("%.0f°C", c_temp)) end
-                if c_freq then table.insert(parts, string.format("%.2fGHz", c_freq)) end
-                sensor_str = " [" .. table.concat(parts, " ") .. "]"
-            end
-            if left_w >= 54 and #cpu_model_clean > 0 then
-                cpu_title = string.format("CPU: %.1f%%%s [%s]", overall_cpu, sensor_str, truncate(cpu_model_clean, left_w - 32))
-            elseif left_w >= 40 and #cpu_model_short > 0 then
-                cpu_title = string.format("CPU: %.1f%%%s [%s]", overall_cpu, sensor_str, truncate(cpu_model_short, left_w - 26))
+            if zoomed_pane then
+                last_top_h = 0
+                last_left_w = term_w
+                last_proc_y = 2
+                last_visible_rows = (zoomed_pane == 4) and math.max(1, term_h - 5) or 1
+                local state = {
+                    cores = cores,
+                    overall_cpu = overall_cpu,
+                    cpu_history = cpu_history,
+                    temp_c = temp_c,
+                    freq_ghz = freq_ghz,
+                    cpu_model_clean = cpu_model_clean,
+                    cpu_model_short = cpu_model_short,
+                    cpu_view_mode = cpu_view_mode,
+                    mem = mem,
+                    mem_history = mem_history,
+                    storage = storage,
+                    gpus = gpus,
+                    gpu_history = gpu_history,
+                    net = net,
+                    rx_history = rx_history,
+                    tx_history = tx_history,
+                    procs = procs,
+                    sel_proc = sel_proc,
+                    sort_mode = sort_mode,
+                    sort_reverse = sort_reverse,
+                    in_tree_mode = in_tree_mode,
+                    filter_query = filter_query,
+                }
+                render_zoomed_pane(out, zoomed_pane, state, term_w, term_h)
             else
-                cpu_title = string.format("CPU: %.1f%%%s", overall_cpu, sensor_str)
-            end
-            local cpu_header_right = "Usage: " .. cpu_spark
-            if show_cpu_summary then
-                cpu_title = string.format("CPU Summary: %.1f%%%s", overall_cpu, sensor_str)
-            end
-            draw_pane(out, 1, 2, left_w, top_h, cpu_title, false, cpu_header_right)
+                local left_w = math.floor(term_w * 0.50)
+                local right_w = term_w - left_w
+                last_left_w = left_w
+
+                local num_mounts = #storage.mounts
+                local use_dual_col = (num_mounts >= 4 and right_w >= 56)
+                local storage_rows = use_dual_col and math.ceil(num_mounts / 2) or num_mounts
+                local gpu_rows = 0
+                for _, g in ipairs(gpus) do
+                    gpu_rows = gpu_rows + 1
+                    if not g.is_integrated and g.mem_total_kb and g.mem_total_kb > 0 then
+                        gpu_rows = gpu_rows + 1
+                    end
+                end
+                local right_content_bottom = 6 + gpu_rows + storage_rows
+                local core_rows = math.max(1, math.ceil(#cores / 2))
+                if left_w < 36 then
+                    core_rows = #cores
+                elseif left_w >= 90 and #cores > 3 * (right_content_bottom - 2) then
+                    core_rows = math.ceil(#cores / 4)
+                elseif left_w >= 60 and #cores > 2 * (right_content_bottom - 2) then
+                    core_rows = math.ceil(#cores / 3)
+                end
+                local min_process_h = 8
+                local max_top_h = math.max(6, term_h - 3 - 2 - min_process_h)
+                local detail_fits = (2 + core_rows) <= max_top_h
+                local show_cpu_summary = cpu_view_mode == "summary"
+                    or (cpu_view_mode == "auto" and not detail_fits)
+                local cpu_summary_rows = 4
+                local required_top_h = math.max(6, right_content_bottom,
+                    show_cpu_summary and (2 + cpu_summary_rows) or (2 + core_rows))
+                local top_h = math.min(required_top_h, max_top_h)
+                local net_h = 3
+                local bot_h = term_h - top_h - net_h - 2
+                last_top_h = top_h
+                last_proc_y = top_h + 2 + net_h
+                last_visible_rows = math.max(1, bot_h - 3)
+
+                -- 1. CPU Pane (Top Left)
+                local act1 = (focused_pane == 1) and " (Active)" or ""
+                local cpu_spark_w = math.min(14, math.max(6, math.floor(left_w * 0.18)))
+                local cpu_spark = make_sparkline(cpu_history, cpu_spark_w, C.cpu_low)
+                local cpu_title
+                local c_temp, c_freq = read_cpu_sensors()
+                local sensor_str = ""
+                if c_temp or c_freq then
+                    local parts = {}
+                    if c_temp then table.insert(parts, string.format("%.0f°C", c_temp)) end
+                    if c_freq then table.insert(parts, string.format("%.2fGHz", c_freq)) end
+                    sensor_str = " [" .. table.concat(parts, " ") .. "]"
+                end
+                if show_cpu_summary then
+                    cpu_title = string.format("[1] CPU Summary%s: %.1f%%%s", act1, overall_cpu, sensor_str)
+                elseif left_w >= 54 and #cpu_model_clean > 0 then
+                    cpu_title = string.format("[1] CPU%s: %.1f%%%s [%s]", act1, overall_cpu, sensor_str, truncate(cpu_model_clean, left_w - 36))
+                elseif left_w >= 40 and #cpu_model_short > 0 then
+                    cpu_title = string.format("[1] CPU%s: %.1f%%%s [%s]", act1, overall_cpu, sensor_str, truncate(cpu_model_short, left_w - 30))
+                else
+                    cpu_title = string.format("[1] CPU%s: %.1f%%%s", act1, overall_cpu, sensor_str)
+                end
+                local cpu_header_right = "Usage: " .. cpu_spark
+                draw_pane(out, 1, 2, left_w, top_h, cpu_title, (focused_pane == 1), cpu_header_right)
 
             if show_cpu_summary then
                 local min_pct, max_pct = 100, 0
@@ -3164,11 +3711,12 @@ Keybindings:
             end
 
             -- 2. Memory, GPU & Storage Pane (Top Right)
-            local pane_title = (#gpus > 0) and "Memory, GPU & Storage" or "Memory & Storage"
-            if #gpus > 0 and right_w < 50 then pane_title = "Memory & GPU" end
-            local spark_w = math.max(4, right_w - (visual_len(pane_title) + 14))
+            local act2 = (focused_pane == 2) and " (Active)" or ""
+            local pane_title = (#gpus > 0) and ("Memory, GPU & Storage" .. act2) or ("Memory & Storage" .. act2)
+            if #gpus > 0 and right_w < 50 then pane_title = "Memory & GPU" .. act2 end
+            local spark_w = math.max(4, right_w - (visual_len(pane_title) + 18))
             local mem_spark = make_sparkline(mem_history, spark_w, C.mem_used)
-            draw_pane(out, left_w + 1, 2, right_w, top_h, pane_title, false, "Trend: " .. mem_spark)
+            draw_pane(out, left_w + 1, 2, right_w, top_h, "[2] " .. pane_title, (focused_pane == 2), "Trend: " .. mem_spark)
 
             local mem_cap_str = format_bytes(mem.used_kb) .. "/" .. format_bytes(mem.total_kb)
             local mem_pct_str = string.format("%5.1f%%", mem.used_pct)
@@ -3312,9 +3860,10 @@ Keybindings:
             end
 
             -- 3. Network I/O Pane (Middle)
+            local act3 = (focused_pane == 3) and " (Active)" or ""
             local net_y = top_h + 2
-            local net_title = string.format("Network (%s)", net.active_iface)
-            draw_pane(out, 1, net_y, term_w, net_h, net_title, false)
+            local net_title = string.format("[3] Network%s (%s)", act3, net.active_iface)
+            draw_pane(out, 1, net_y, term_w, net_h, net_title, (focused_pane == 3))
 
             local rx_spark = make_sparkline(rx_history, 15, C.net_rx)
             local tx_spark = make_sparkline(tx_history, 15, C.net_tx)
@@ -3324,14 +3873,15 @@ Keybindings:
             table.insert(out, draw_box_row(1, net_y + 1, term_w, net_line))
 
             -- 4. Processes Table / Tree Pane (Bottom)
+            local act4 = (focused_pane == 4) and " (Active)" or ""
             local proc_y = net_y + net_h
             local dir_sym = sort_reverse and "▲" or "▼"
             local sort_tag = string.format("[Sort: %s%s]", sort_mode:upper(), dir_sym)
             local tree_tag = in_tree_mode and "[Tree: ON]" or "[Tree: OFF]"
             local filter_tag = #filter_query > 0 and string.format("[Filter: /%s]", filter_query) or ""
-            local proc_title = string.format("Processes: %d %s %s %s", #procs, sort_tag, tree_tag, filter_tag)
+            local proc_title = string.format("[4] Processes%s: %d %s %s %s", act4, #procs, sort_tag, tree_tag, filter_tag)
 
-            draw_pane(out, 1, proc_y, term_w, bot_h, proc_title, true)
+            draw_pane(out, 1, proc_y, term_w, bot_h, proc_title, (focused_pane == 4))
 
             -- Columns: PID (7), USER (8), %CPU (7), %MEM (7), RES (9), TH (4), STAT (5), COMMAND (rest)
             local table_header_y = proc_y + 1
@@ -3356,7 +3906,7 @@ Keybindings:
             local h_th      = col_hdr("TH", "threads", 4)
             local h_stat    = string.format("%-5s", "STAT")
             local h_time    = col_hdr("TIME+", "time", 9)
-            local h_cmd     = in_tree_mode and (C.title_col .. "PROCESS TREE [Space/Tab: Fold]" .. C.table_hdr) or col_hdr("COMMAND", "name", 15)
+            local h_cmd     = in_tree_mode and (C.title_col .. "PROCESS TREE [Space: Fold]" .. C.table_hdr) or col_hdr("COMMAND", "name", 15)
 
             local show_io_cols = (term_w >= 115)
             local io_hdr_str = ""
@@ -3414,6 +3964,7 @@ Keybindings:
                 else
                     table.insert(out, draw_box_row(1, table_header_y + i, term_w, ""))
                 end
+            end
             end
 
             -- 5. Modal Overlays (Inspector, Signal Modal, Help)
@@ -3485,27 +4036,29 @@ Keybindings:
                 table.insert(out, draw_box_row(mx, my + 5, mw, string.format("  Level: %s%s%s", C.bold, label, C.reset)))
                 table.insert(out, draw_box_row(mx, my + 7, mw, string.format("  %s[←/→, +/-] Adjust   [Enter] Apply   [Esc] Cancel%s", C.dim, C.reset)))
             elseif show_help then
-                local mw = math.min(72, term_w - 4)
-                local mh = 17
+                local mw = math.min(74, term_w - 4)
+                local mh = 19
                 local mx = math.floor((term_w - mw) / 2)
                 local my = math.floor((term_h - mh) / 2)
                 draw_modal_box(out, mx, my, mw, mh, "Help & Keybindings")
 
-                table.insert(out, draw_box_row(mx, my + 1, mw, string.format(" %sNavigation:%s", C.title_col, C.reset)))
-                table.insert(out, draw_box_row(mx, my + 2, mw, "   ↑/↓, k/j       Select process / scroll rows"))
-                table.insert(out, draw_box_row(mx, my + 3, mw, "   PgUp/PgDn      Jump 15 rows   Home/End Jump to ends"))
-                table.insert(out, draw_box_row(mx, my + 4, mw, string.format(" %sProcess Controls:%s", C.title_col, C.reset)))
-                table.insert(out, draw_box_row(mx, my + 5, mw, "   /              Filter: text, u:<user>, s:<state>, cpu>X, m>XM, time>X"))
-                table.insert(out, draw_box_row(mx, my + 6, mw, "   t, F5          Toggle Process Tree view"))
-                table.insert(out, draw_box_row(mx, my + 7, mw, "   Enter, i       Inspect process details modal"))
-                table.insert(out, draw_box_row(mx, my + 8, mw, "   k, R           Open signal dispatcher, Renice modal"))
-                table.insert(out, draw_box_row(mx, my + 9, mw, string.format(" %sDisplay & Sorting:%s", C.title_col, C.reset)))
-                table.insert(out, draw_box_row(mx, my + 10, mw, "   c, m, p, n     Sort by CPU, Memory, PID, or Name"))
-                table.insert(out, draw_box_row(mx, my + 11, mw, "   u, s, d, e     Sort by User, Threads, Disk I/O, TIME+"))
-                table.insert(out, draw_box_row(mx, my + 12, mw, "   r              Reverse current sort order"))
-                table.insert(out, draw_box_row(mx, my + 13, mw, "   C              CPU auto/summary/detail view"))
-                table.insert(out, draw_box_row(mx, my + 14, mw, "   T              Cycle color themes   Space Pause"))
-                table.insert(out, draw_box_row(mx, my + 15, mw, string.format("  %s[Esc / Enter / ?] Close Help Dialog%s", C.dim, C.reset)))
+                table.insert(out, draw_box_row(mx, my + 1, mw, string.format(" %sPane & Layout Controls:%s", C.title_col, C.reset)))
+                table.insert(out, draw_box_row(mx, my + 2, mw, "   Tab, Shift+Tab Cycle active pane focus ([1]-[4])"))
+                table.insert(out, draw_box_row(mx, my + 3, mw, "   1, 2, 3, 4     Jump directly to CPU, Mem, Net, Procs"))
+                table.insert(out, draw_box_row(mx, my + 4, mw, "   z, f           Toggle zoom / maximize focused pane"))
+                table.insert(out, draw_box_row(mx, my + 5, mw, string.format(" %sNavigation & Selection:%s", C.title_col, C.reset)))
+                table.insert(out, draw_box_row(mx, my + 6, mw, "   ↑/↓, k/j       Select process / scroll rows"))
+                table.insert(out, draw_box_row(mx, my + 7, mw, "   PgUp/PgDn      Jump 15 rows   Home/End Jump to ends"))
+                table.insert(out, draw_box_row(mx, my + 8, mw, string.format(" %sProcess Controls:%s", C.title_col, C.reset)))
+                table.insert(out, draw_box_row(mx, my + 9, mw, "   /              Filter: text, u:<user>, s:<state>, cpu>X, m>XM"))
+                table.insert(out, draw_box_row(mx, my + 10, mw, "   t, F5          Toggle Process Tree view   Space Fold/Pause"))
+                table.insert(out, draw_box_row(mx, my + 11, mw, "   Enter, i       Inspect process details modal"))
+                table.insert(out, draw_box_row(mx, my + 12, mw, "   k, R           Open signal dispatcher, Renice modal"))
+                table.insert(out, draw_box_row(mx, my + 13, mw, string.format(" %sDisplay & Sorting:%s", C.title_col, C.reset)))
+                table.insert(out, draw_box_row(mx, my + 14, mw, "   c, m, p, n     Sort by CPU, Memory, PID, or Name"))
+                table.insert(out, draw_box_row(mx, my + 15, mw, "   u, s, d, e, r  Sort by User, Threads, I/O, TIME+, Reverse"))
+                table.insert(out, draw_box_row(mx, my + 16, mw, "   C, T           CPU view mode, Cycle color themes"))
+                table.insert(out, draw_box_row(mx, my + 17, mw, string.format("  %s[Esc / Enter / ?] Close Help Dialog%s", C.dim, C.reset)))
             end
 
             -- 6. Footer Line & Search / Status
@@ -3520,15 +4073,17 @@ Keybindings:
                 footer_line = string.format("\27[%d;1H\27[2K%s", footer_y, truncate(raw_footer, term_w - 1))
             else
                 local f_status = #filter_query > 0 and string.format("\27[1;38;2;251;191;36mFilter: /%s\27[0m  ", filter_query) or ""
+                local zoom_hint = zoomed_pane and "[z/Esc] Restore Grid" or "[z] Zoom"
+                local focus_hint = zoomed_pane and "[Tab] Cycle Pane" or string.format("[Tab] Pane %d", focused_pane)
                 local help_str
                 if term_w >= 115 then
                     help_str = in_tree_mode
-                        and "[/] Filter  [Space] Fold  [Enter] Inspect  [k] Kill  [R] Renice  [c/m/p/n/u/s/d] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit"
-                        or "[/] Filter  [t] Tree  [Enter] Inspect  [k] Kill  [R] Renice  [c/m/p/n/u/s/d] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit"
+                        and string.format("%s  %s  [/] Filter  [Space] Fold  [Enter] Inspect  [k] Kill  [R] Renice  [c/m/p/n/u/s/d] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit", focus_hint, zoom_hint)
+                        or string.format("%s  %s  [/] Filter  [t] Tree  [Enter] Inspect  [k] Kill  [R] Renice  [c/m/p/n/u/s/d] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit", focus_hint, zoom_hint)
                 elseif term_w >= 85 then
-                    help_str = "[/] Filter  [t] Tree  [Enter] Inspect  [c/m/p] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit"
+                    help_str = string.format("%s  %s  [/] Filter  [t] Tree  [Enter] Inspect  [c/m/p] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit", focus_hint, zoom_hint)
                 else
-                    help_str = "[/] Filter  [t] Tree  [C] CPU  [T] Theme  [?] Help  [q] Quit"
+                    help_str = string.format("%s  %s  [/] Filter  [?] Help  [q] Quit", focus_hint, zoom_hint)
                 end
                 local raw_footer = string.format("  %s%s%s", f_status, C.dim, help_str)
                 footer_line = string.format("\27[%d;1H\27[2K%s", footer_y, truncate(raw_footer, term_w - 1))
@@ -3771,10 +4326,13 @@ local function run_self_test()
         print(string.format("  ✔ Process Renice Engine: Priority subsystem verified (Current PID nice: %d)", cur_prio))
     end
 
-    -- Search footer formatting regression test
-    local test_footer = string.format("\27[%d;1H\27[2K  \27[1;38;2;254;231;21mSearch: \27[0m\27[4m%s\27[0m\27[5m_\27[0m  \27[90m(Enter confirm, Esc cancel)\27[0m", 30, "u:root")
-    assert(test_footer:find("u:root", 1, true) ~= nil, "Search footer must format correctly with footer_y and filter_query")
-    print("  ✔ Search UI: Verified in-place search footer format integrity")
+    -- Maximized Zoomed Panes test (Proposal 1)
+    for p_idx = 1, 4 do
+        local frame_80 = render_zoomed_pane_frame(p_idx, nil, 80, 24)
+        assert(type(frame_80) == "string" and #frame_80 > 0, "Zoomed frame must render for pane " .. p_idx)
+        assert(frame_80:find("MAXIMIZED", 1, true) ~= nil, "Zoomed frame must include MAXIMIZED banner for pane " .. p_idx)
+    end
+    print("  ✔ Proposal 1: Verified maximized zoomed pane frame generation for Panes 1-4")
 
     print("\n\27[1;32mALL SELF-TEST CHECKS PASSED SUCCESSFULLY!\27[0m")
     return true
@@ -3784,35 +4342,36 @@ end
 -- 10. Module Export & CLI Entry Point
 -- =========================================================================
 local M = {
-    version               = "2.2.0",
-    read_os_info          = read_os_info,
-    read_cpu_model        = read_cpu_model,
-    read_cpu_stats        = read_cpu_stats,
-    read_cpu_sensors      = read_cpu_sensors,
-    test_cpu_performance  = test_cpu_performance,
-    test_disk_performance = test_disk_performance,
-    read_memory_stats     = read_memory_stats,
-    read_network_stats    = read_network_stats,
-    read_storage_stats    = read_storage_stats,
-    read_gpu_stats        = read_gpu_stats,
-    read_process_table    = read_process_table,
-    build_process_tree    = build_process_tree,
-    match_smart_filter    = match_smart_filter,
-    renice_process        = renice_process,
-    resolve_username      = resolve_username,
-    set_theme             = set_theme,
-    cycle_theme           = cycle_theme,
-    get_themes            = function() return THEMES end,
-    format_bytes          = format_bytes,
-    format_rate           = format_rate,
-    format_elapsed        = format_elapsed,
-    format_cpu_time       = format_cpu_time,
-    format_time_plus      = format_time_plus,
-    visual_len            = visual_len,
-    truncate              = truncate,
-    make_meter_bar        = make_meter_bar,
-    main                  = main,
-    run_self_test         = run_self_test,
+    version                  = "2.2.0",
+    read_os_info             = read_os_info,
+    read_cpu_model           = read_cpu_model,
+    read_cpu_stats           = read_cpu_stats,
+    read_cpu_sensors         = read_cpu_sensors,
+    test_cpu_performance     = test_cpu_performance,
+    test_disk_performance    = test_disk_performance,
+    read_memory_stats        = read_memory_stats,
+    read_network_stats       = read_network_stats,
+    read_storage_stats       = read_storage_stats,
+    read_gpu_stats           = read_gpu_stats,
+    read_process_table       = read_process_table,
+    build_process_tree       = build_process_tree,
+    match_smart_filter       = match_smart_filter,
+    renice_process           = renice_process,
+    resolve_username         = resolve_username,
+    set_theme                = set_theme,
+    cycle_theme              = cycle_theme,
+    get_themes               = function() return THEMES end,
+    format_bytes             = format_bytes,
+    format_rate              = format_rate,
+    format_elapsed           = format_elapsed,
+    format_cpu_time          = format_cpu_time,
+    format_time_plus         = format_time_plus,
+    visual_len               = visual_len,
+    truncate                 = truncate,
+    make_meter_bar           = make_meter_bar,
+    render_zoomed_pane_frame = render_zoomed_pane_frame,
+    main                     = main,
+    run_self_test            = run_self_test,
 }
 
 local is_entry_point = false

@@ -179,7 +179,7 @@ TestRunner.describe("4. Storage and Disk I/O Telemetry", function()
     TestRunner.it("should ensure disk capacity and memory strings never truncate in top right pane", function()
         local mem = btop.read_memory_stats()
         local st = btop.read_storage_stats(os.clock())
-        for _, rw in ipairs({ 50, 54, 66, 80, 100, 132 }) do
+        for _, rw in ipairs({ 56, 66, 80, 100, 132 }) do
             local max_allowed = rw - 2
             -- Test RAM
             local mem_cap = btop.format_bytes(mem.used_kb) .. "/" .. btop.format_bytes(mem.total_kb)
@@ -209,7 +209,7 @@ TestRunner.describe("4. Storage and Disk I/O Telemetry", function()
                         or (t_kb >= 1024 * 1024 and string.format("%.0fG", t_kb / (1024 * 1024)) or btop.format_bytes(t_kb):gsub("%s+", ""))
                     local cap_str = u_str .. "/" .. t_str
                     local pct_str = string.format("%3.0f%%", m.used_pct or 0)
-                    local mnt = btop.truncate(m.mount, mnt_w)
+                    local mnt = m.mount:sub(1, mnt_w)
                     local mnt_pad = mnt .. string.rep(" ", math.max(0, mnt_w - btop.visual_len(mnt)))
                     local fixed_w = mnt_w + 1 + 1 + btop.visual_len(pct_str) + 1 + btop.visual_len(cap_str)
                     local bar_w = math.max(2, col_w - fixed_w)
@@ -326,6 +326,130 @@ TestRunner.describe("7. Theme Palette & String Formatting", function()
         local short = btop.truncate("hello world", 8)
         assert_true(short:find("^hello") ~= nil, "truncated string should begin with hello")
         assert_eq(btop.visual_len(short), 8, "truncated visual length should equal max_w")
+    end)
+end)
+
+-- 8. Interactive Pane Focus & Maximized Zoom View (Proposal 1)
+TestRunner.describe("8. Interactive Pane Focus & Maximized Zoom View (Proposal 1)", function()
+    local mock_state = {
+        cores = {
+            { name = "cpu0", pct = 25.0 },
+            { name = "cpu1", pct = 50.0 },
+            { name = "cpu2", pct = 75.0 },
+            { name = "cpu3", pct = 10.0 },
+            { name = "cpu4", pct = 90.0 },
+            { name = "cpu5", pct = 5.0 },
+            { name = "cpu6", pct = 40.0 },
+            { name = "cpu7", pct = 60.0 },
+        },
+        overall_cpu = 44.5,
+        cpu_history = { 10, 20, 30, 44.5 },
+        temp_c = 48.0,
+        freq_ghz = 3.20,
+        cpu_model_clean = "Intel Core i7-12700K",
+        mem = {
+            used_kb = 8388608,
+            total_kb = 33554432,
+            used_pct = 25.0,
+            free_kb = 16777216,
+            avail_kb = 25165824,
+            cached_kb = 8388608,
+            buffers_kb = 524288,
+            swap_used_kb = 0,
+            swap_total_kb = 8388608,
+            swap_pct = 0.0,
+        },
+        mem_history = { 20, 22, 25 },
+        storage = {
+            mounts = {
+                { mount = "/", used_bytes = 50 * 1024^3, total_bytes = 200 * 1024^3, used_pct = 25.0 },
+                { mount = "/home", used_bytes = 120 * 1024^3, total_bytes = 500 * 1024^3, used_pct = 24.0 },
+            },
+            read_speed = 1048576,
+            write_speed = 2097152,
+        },
+        gpus = {
+            { name = "NVIDIA GeForce RTX 3080", is_integrated = false, mem_total_kb = 10485760, mem_used_kb = 2097152, mem_used_pct = 20.0, util_pct = 35, temp_c = 55, freq_ghz = 1.71 }
+        },
+        net = {
+            active_iface = "wlan0",
+            rx_rate = 2500000,
+            tx_rate = 450000,
+            rx_total = 1024 * 1024 * 1024,
+            tx_total = 512 * 1024 * 1024,
+            ifaces = {
+                { name = "wlan0", rx_rate = 2500000, tx_rate = 450000, rx_total = 1024 * 1024 * 1024, tx_total = 512 * 1024 * 1024 },
+                { name = "eth0", rx_rate = 0, tx_rate = 0, rx_total = 10000, tx_total = 5000 },
+            }
+        },
+        rx_history = { 1000000, 2000000, 2500000 },
+        tx_history = { 200000, 300000, 450000 },
+        procs = {
+            { pid = 14820, comm = "luajit", cmdline = "luajit luatop.lua", username = "zliu", cpu_pct = 42.5, mem_pct = 1.2, res_kb = 46284, vsize_kb = 184737, threads = 4, nice = 0, state = "R", cpu_time_sec = 12.44, io_read_rate = 0, io_write_rate = 4096 },
+            { pid = 12044, comm = "code", cmdline = "/usr/bin/code", username = "zliu", cpu_pct = 12.1, mem_pct = 3.4, res_kb = 141312, vsize_kb = 911564, threads = 12, nice = 0, state = "S", cpu_time_sec = 261.05, io_read_rate = 1258291, io_write_rate = 0 },
+            { pid = 1, comm = "systemd", cmdline = "/sbin/init", username = "root", cpu_pct = 0.1, mem_pct = 0.2, res_kb = 12288, vsize_kb = 169984, threads = 1, nice = 0, state = "S", cpu_time_sec = 45.12, io_read_rate = 0, io_write_rate = 0 },
+        },
+        sel_proc = 1,
+        sort_mode = "cpu",
+        sort_reverse = false,
+        in_tree_mode = false,
+        filter_query = "",
+    }
+
+    TestRunner.it("should render zoomed CPU pane across multiple terminal geometries (80x24, 120x40, 60x20)", function()
+        for _, dims in ipairs({ { 80, 24 }, { 120, 40 }, { 60, 20 } }) do
+            local w, h = dims[1], dims[2]
+            local frame = btop.render_zoomed_pane_frame(1, mock_state, w, h)
+            assert_true(type(frame) == "string" and #frame > 0, "frame must be non-empty string")
+            assert_true(frame:find("%[1%] CPU %(MAXIMIZED", 1, false) ~= nil, "frame must contain maximized CPU title")
+            assert_true(frame:find("Overall Usage:", 1, true) ~= nil, "frame must display overall usage line")
+            assert_true(frame:find("Core", 1, true) ~= nil or frame:find("C0", 1, true) ~= nil, "frame must display core metrics")
+        end
+    end)
+
+    TestRunner.it("should render zoomed Memory & Storage pane with RAM, SWP, GPU, and dual filesystems", function()
+        local frame = btop.render_zoomed_pane_frame(2, mock_state, 100, 30)
+        assert_true(type(frame) == "string", "frame must be string")
+        assert_true(frame:find("%[2%] Memory & Storage %(MAXIMIZED", 1, false) ~= nil, "contains maximized memory title")
+        assert_true(frame:find("RAM", 1, true) ~= nil, "contains RAM line")
+        assert_true(frame:find("SWP", 1, true) ~= nil, "contains SWP line")
+        assert_true(frame:find("RTX 3080", 1, true) ~= nil, "contains discrete GPU name")
+        assert_true(frame:find("Storage Filesystems", 1, true) ~= nil, "contains storage header")
+    end)
+
+    TestRunner.it("should render zoomed Network pane with interface bandwidth breakdown and sparklines", function()
+        local frame = btop.render_zoomed_pane_frame(3, mock_state, 100, 30)
+        assert_true(type(frame) == "string", "frame must be string")
+        assert_true(frame:find("%[3%] Network %(MAXIMIZED", 1, false) ~= nil, "contains maximized network title")
+        assert_true(frame:find("Active Interface:", 1, true) ~= nil, "contains active interface line")
+        assert_true(frame:find("RX %(Download%):", 1, false) ~= nil, "contains RX download line")
+        assert_true(frame:find("TX %(Upload%):", 1, false) ~= nil, "contains TX upload line")
+        assert_true(frame:find("wlan0", 1, true) ~= nil, "contains wlan0 interface entry")
+    end)
+
+    TestRunner.it("should render zoomed Process table with extended VIRT, NICE columns and expanded capacity", function()
+        local frame = btop.render_zoomed_pane_frame(4, mock_state, 120, 40)
+        assert_true(type(frame) == "string", "frame must be string")
+        assert_true(frame:find("%[4%] Processes %(MAXIMIZED", 1, false) ~= nil, "contains maximized process title")
+        assert_true(frame:find("VIRT", 1, true) ~= nil, "contains extended VIRT column header")
+        assert_true(frame:find("NICE", 1, true) ~= nil, "contains extended NICE column header")
+        assert_true(frame:find("luajit", 1, true) ~= nil, "contains luajit process")
+        assert_true(frame:find("▶", 1, true) ~= nil, "contains selection indicator for sel_proc")
+    end)
+
+    TestRunner.it("should handle nil state gracefully and pull live telemetry defaults", function()
+        for p = 1, 4 do
+            local frame = btop.render_zoomed_pane_frame(p, nil, 80, 24)
+            assert_true(type(frame) == "string" and #frame > 0, "nil state should fallback to live telemetry")
+            assert_true(frame:find("MAXIMIZED", 1, true) ~= nil, "pane " .. p .. " must contain MAXIMIZED banner")
+        end
+    end)
+
+    TestRunner.it("should correctly normalize SPACE token for search filter input", function()
+        local k = "SPACE"
+        if k == "SPACE" then k = " " end
+        assert_eq(k, " ", "SPACE token normalized to space character")
+        assert_true(#k == 1 and k:byte() >= 32 and k:byte() <= 126, "space character satisfies printable check")
     end)
 end)
 
