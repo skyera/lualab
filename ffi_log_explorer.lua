@@ -268,6 +268,19 @@ function Model:refresh()
  end
  return changed,busy
 end
+-- Finalize only finite snapshots; live following retains incomplete lines.
+function Model:finish_snapshot()
+ for index,source in ipairs(self.sources) do
+  if #source.pending>0 then
+   source.line=source.line+1
+   self:add(index,source.pending:gsub('\r$','')..(source.overflow and ' [truncated]' or ''))
+   source.pending='';source.overflow=false
+  end
+ end
+ while #self.entries>self.max_lines do
+  self.bookmarks[self.entries[1].id]=nil;table.remove(self.entries,1)
+ end
+end
 function Model:visible()
  local out={};local query=self.query:lower()
  for _,entry in ipairs(self.entries) do
@@ -736,6 +749,7 @@ Up/Down or j/k navigate; PgUp/PgDn page; g start; G end/follow; Q quit
  end
  if snapshot or not term:is_tty() then
   repeat local _,busy=model:refresh() until not busy
+  model:finish_snapshot()
   local failed=false
   for _,source in ipairs(model.sources) do if source.error then failed=true;io.stderr:write(source.path..': '..source.error..'\n') end end
   for _,entry in ipairs(model.entries) do io.write(M.fit(model.sources[entry.source].name,20)..':'..entry.line..' '..entry.level..' '..M.fit(entry.text,#entry.text*2):gsub('%s+$','')..'\n') end
