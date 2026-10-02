@@ -31,7 +31,7 @@ local bit = require("bit")
 
 local is_windows = (ffi.os == "Windows")
 
-local enable_raw_mode, disable_raw_mode, get_terminal_size, read_key
+local enable_raw_mode, disable_raw_mode, suspend_raw_mode, resume_raw_mode, get_terminal_size, read_key
 local in_raw_mode = false
 
 -- =========================================================================
@@ -58,6 +58,7 @@ if is_windows then
         int GetConsoleMode(HANDLE hConsoleHandle, uint32_t *lpMode);
         int SetConsoleMode(HANDLE hConsoleHandle, uint32_t dwMode);
         int SetConsoleOutputCP(uint32_t wCodePageID);
+        int FlushConsoleInputBuffer(HANDLE hConsoleInput);
         void Sleep(uint32_t dwMilliseconds);
         int _kbhit(void);
         int _getch(void);
@@ -193,6 +194,35 @@ if is_windows then
         end
     end
 
+    suspend_raw_mode = function()
+        if in_raw_mode then
+            local hIn = kernel32.GetStdHandle(0xFFFFFFF6)
+            local hOut = kernel32.GetStdHandle(0xFFFFFFF5)
+            if orig_in_mode[0] ~= 0 then kernel32.SetConsoleMode(hIn, orig_in_mode[0]) end
+            if orig_out_mode[0] ~= 0 then kernel32.SetConsoleMode(hOut, orig_out_mode[0]) end
+            pcall(function() kernel32.FlushConsoleInputBuffer(hIn) end)
+            io.write("\27[?25h\27[?7h")
+            io.flush()
+        end
+    end
+
+    resume_raw_mode = function()
+        if in_raw_mode then
+            local hIn = kernel32.GetStdHandle(0xFFFFFFF6)
+            local hOut = kernel32.GetStdHandle(0xFFFFFFF5)
+            local raw_out = bit.bor(orig_out_mode[0], 0x0004) -- ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            raw_out = bit.bor(raw_out, 0x0008)                -- DISABLE_NEWLINE_AUTO_RETURN
+            raw_out = bit.band(raw_out, bit.bnot(0x0002))     -- Clear ENABLE_WRAP_AT_EOL_OUTPUT
+            kernel32.SetConsoleMode(hOut, raw_out)
+            local raw_mode = bit.band(orig_in_mode[0], bit.bnot(0x0001 + 0x0002 + 0x0004))
+            raw_mode = bit.bor(raw_mode, 0x0200)
+            kernel32.SetConsoleMode(hIn, raw_mode)
+            pcall(function() kernel32.FlushConsoleInputBuffer(hIn) end)
+            io.write("\27[?25l\27[?7l")
+            io.flush()
+        end
+    end
+
     get_terminal_size = function()
         local csbi = ffi.new("CONSOLE_SCREEN_BUFFER_INFO")
         local hOut = kernel32.GetStdHandle(0xFFFFFFF5)
@@ -287,6 +317,7 @@ ffi.cdef(posix_termios_cdef[[
 
         int tcgetattr(int fd, struct termios *termios_p);
         int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
+        int tcflush(int fd, int queue_selector);
 
         struct pollfd {
             int   fd;
@@ -439,6 +470,24 @@ ffi.cdef(posix_termios_cdef[[
         end
     end
 
+    suspend_raw_mode = function()
+        if in_raw_mode then
+            ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
+            pcall(function() ffi.C.tcflush(STDIN_FILENO, 0) end)
+            io.write("\27[?25h\27[?7h")
+            io.flush()
+        end
+    end
+
+    resume_raw_mode = function()
+        if in_raw_mode then
+            ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
+            pcall(function() ffi.C.tcflush(STDIN_FILENO, 0) end)
+            io.write("\27[?25l\27[?7l")
+            io.flush()
+        end
+    end
+
     local function install_signal_cleanup()
         if sig_cb_anchor then return end
         sig_cb_anchor = ffi.cast("sighandler_t", function(sig)
@@ -477,8 +526,21 @@ ffi.cdef(posix_termios_cdef[[
 
     local pfd = ffi.new("struct pollfd", { fd = STDIN_FILENO, events = POLLIN, revents = 0 })
     local key_buf = ffi.new("char[64]")
+    local function is_stdin_tty()
+        return ffi.C.isatty(STDIN_FILENO) == 1
+    end
 
     read_key = function(timeout_ms)
+        if not is_stdin_tty() then
+            local ch = io.read(1)
+            if not ch or ch == "" then return "q" end
+            if ch == "\27" then return "ESC"
+            elseif ch == "\n" or ch == "\r" then return "ENTER"
+            elseif ch == " " then return "SPACE"
+            elseif ch == "\t" then return "TAB"
+            else return ch end
+        end
+
         timeout_ms = timeout_ms or 50
         local ret = ffi.C.poll(pfd, 1, timeout_ms)
         if ret > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
@@ -2804,6 +2866,154 @@ local SIGNALS = {
 }
 
 -- =========================================================================
+-- 7.2 Process Diagnostic Command Runner Engine (Proposal 3)
+-- =========================================================================
+local LINUX_DIAGNOSTIC_PRESETS = {
+    { key = "1", name = "Open Files & Sockets",    cmd = "lsof -p %p", desc = "Inspect open file descriptors, pipes, and network sockets" },
+    { key = "2", name = "Live Syscall Trace",      cmd = "strace -f -p %p", desc = "Attach strace to follow all threads and syscalls" },
+    { key = "3", name = "Thread Stack Trace",      cmd = "pstack %p 2>/dev/null || gdb -batch -ex \"thread apply all bt\" -p %p", desc = "Dump multi-threaded C/native stack backtraces" },
+    { key = "4", name = "Memory Map (pmap)",       cmd = "pmap -x %p", desc = "Detailed virtual memory mappings and RSS allocation" },
+    { key = "5", name = "Systemd Service Journal", cmd = "journalctl _PID=%p -n 50 --no-pager", desc = "Inspect recent systemd service logs associated with PID" },
+}
+
+local WINDOWS_DIAGNOSTIC_PRESETS = {
+    { key = "1", name = "Loaded DLLs & Modules",   cmd = "tasklist /m /fi \"PID eq %p\"", desc = "List all DLL dynamic libraries mapped in process memory" },
+    { key = "2", name = "Active Network Sockets",  cmd = "netstat -ano | findstr \"%p\"", desc = "Inspect listening and established TCP/UDP network connections" },
+    { key = "3", name = "Thread Breakdown & State", cmd = "powershell -Command \"(Get-Process -Id %p).Threads | Format-Table Id,ThreadState,WaitReason,Priority -AutoSize\"", desc = "Inspect thread count, thread states, and scheduling priorities" },
+    { key = "4", name = "Full CLI Command & Paths", cmd = "powershell -Command \"Get-CimInstance Win32_Process -Filter \\\"ProcessId=%p\\\" | Format-List ProcessName,CommandLine,ExecutablePath,ParentProcessId,WorkingSetSize\"", desc = "Query complete command-line invocation, parent PID, and paths via WMI/CIM" },
+    { key = "5", name = "Windows Service Hosting", cmd = "tasklist /svc /fi \"PID eq %p\"", desc = "Identify which Windows service is hosted inside process" },
+}
+
+local function get_diagnostic_presets()
+    return is_windows and WINDOWS_DIAGNOSTIC_PRESETS or LINUX_DIAGNOSTIC_PRESETS
+end
+
+local function expand_diagnostic_cmd(template, proc)
+    if not template or not proc then return template or "" end
+    local pid_str = tostring(proc.pid or "")
+    local comm_str = tostring(proc.comm or "")
+    local user_str = tostring(proc.username or "")
+
+    local res = template:gsub("%%%%", "\1")
+    res = res:gsub("%%p", function() return pid_str end)
+    res = res:gsub("%%c", function() return comm_str end)
+    res = res:gsub("%%u", function() return user_str end)
+    res = res:gsub("\1", "%%")
+    return res
+end
+
+local function draw_diagnostic_modal(out, pr, custom_cmd, sel_preset_idx, term_w, term_h, theme)
+    local tc = theme or C
+    local presets = get_diagnostic_presets()
+    sel_preset_idx = math.max(1, math.min(#presets, sel_preset_idx or 1))
+    local active_template = (custom_cmd and #custom_cmd > 0) and custom_cmd or presets[sel_preset_idx].cmd
+    local preview_cmd = expand_diagnostic_cmd(active_template, pr)
+
+    local mw = math.min(84, term_w - 4)
+    local compact = (term_h < 17)
+    local mh = compact and 12 or 14
+    local mx = math.floor((term_w - mw) / 2)
+    local my = math.floor((term_h - mh) / 2)
+
+    local modal_title = string.format("Process Diagnostic Runner [PID %d: %s]", pr.pid or 0, pr.comm or "process")
+    draw_modal_box(out, mx, my, mw, mh, modal_title)
+
+    -- Row 1: Command Input Box
+    local cmd_disp = truncate(active_template, mw - 14)
+    table.insert(out, draw_box_row(mx, my + 1, mw, string.format(" %sCommand:%s [%s%s%s%s]",
+        tc.bold, tc.reset, tc.title_col, cmd_disp, tc.reset, string.rep(" ", math.max(0, mw - 14 - visual_len(cmd_disp))))))
+
+    -- Row 2: Live Preview
+    local prev_disp = truncate(preview_cmd, mw - 14)
+    table.insert(out, draw_box_row(mx, my + 2, mw, string.format(" %sPreview:%s %s$ %s%s",
+        tc.dim, tc.reset, tc.cpu_low, prev_disp, tc.reset)))
+
+    local cur_row = my + 3
+    if not compact then
+        table.insert(out, draw_box_row(mx, cur_row, mw, ""))
+        cur_row = cur_row + 1
+    end
+
+    -- Quick Presets Header
+    table.insert(out, draw_box_row(mx, cur_row, mw, string.format(" %sQuick Presets (%s):%s", tc.title_col, is_windows and "Windows" or "Linux", tc.reset)))
+    cur_row = cur_row + 1
+
+    -- Presets list
+    for i, p in ipairs(presets) do
+        local is_sel = (i == sel_preset_idx)
+        local key_tag = string.format("[%s]", p.key)
+        local line_text = string.format("   %s %-24s (%s)", key_tag, p.name, p.cmd)
+        if is_sel then
+            local sel_line = string.format(" ▶ %s %-24s (%s)", key_tag, p.name, p.cmd)
+            table.insert(out, draw_box_row(mx, cur_row, mw, tc.sel_bg .. truncate(sel_line, mw - 4) .. tc.reset))
+        else
+            table.insert(out, draw_box_row(mx, cur_row, mw, truncate(line_text, mw - 4)))
+        end
+        cur_row = cur_row + 1
+    end
+
+    if not compact then
+        table.insert(out, draw_box_row(mx, cur_row, mw, ""))
+        cur_row = cur_row + 1
+    end
+
+    -- Macro Tokens Hint
+    table.insert(out, draw_box_row(mx, cur_row, mw, string.format(" %sTokens: %%p (PID), %%c (Binary), %%u (User)%s", tc.dim, tc.reset)))
+    cur_row = cur_row + 1
+
+    -- Actions Footer
+    table.insert(out, draw_box_row(mx, cur_row, mw, string.format("  %s[Enter] Execute   [1-5] Run Preset   [↑/↓] Select   [Esc] Cancel%s", tc.bold, tc.reset)))
+end
+
+local function render_diagnostic_modal_frame(proc, custom_cmd, sel_preset_idx, term_w, term_h, theme)
+    proc = proc or { pid = 14820, comm = "luatop", username = "zliu" }
+    term_w = term_w or 80
+    term_h = term_h or 24
+    local out = {}
+    draw_diagnostic_modal(out, proc, custom_cmd, sel_preset_idx, term_w, term_h, theme or C)
+    return table.concat(out)
+end
+
+local function execute_diagnostic_command(cmd_template, proc)
+    if not cmd_template or not proc then return end
+    local expanded = expand_diagnostic_cmd(cmd_template, proc)
+    if not expanded or expanded:match("^%s*$") then return end
+
+    suspend_raw_mode()
+
+    io.write("\27[2J\27[1;1H")
+    io.write(string.format("\27[1;36m=== luatop Process Diagnostic Runner ===\27[0m\n"))
+    io.write(string.format("\27[90mTarget:   PID %d (%s) | User: %s\27[0m\n", proc.pid or 0, proc.comm or "process", proc.username or "unknown"))
+    io.write(string.format("\27[1;32mCommand:  %s\27[0m\n\n", expanded))
+    io.flush()
+
+    if is_windows then
+        os.execute('cmd.exe /c "' .. expanded .. '"')
+    else
+        os.execute(expanded)
+    end
+
+    io.write(string.format("\n\27[1;33m────────────────────────────────────────────────────────\27[0m\n"))
+    io.write(string.format("\27[1;33m[Diagnostic completed. Press Enter to return to luatop]\27[0m\n"))
+    io.flush()
+
+    -- Flush input before prompt
+    if is_windows then
+        pcall(function()
+            local kernel32 = ffi.load("kernel32")
+            local hIn = kernel32.GetStdHandle(0xFFFFFFF6)
+            kernel32.FlushConsoleInputBuffer(hIn)
+        end)
+    else
+        pcall(function() ffi.C.tcflush(0, 0) end)
+    end
+
+    pcall(function() io.read("*line") end)
+
+    resume_raw_mode()
+end
+
+-- =========================================================================
 -- 7.5 Maximized Zoom View Engine (Proposal 1)
 -- =========================================================================
 local function render_zoomed_pane(out, pane_idx, state, term_w, term_h)
@@ -3250,6 +3460,7 @@ Keybindings:
   Enter, i              Inspect selected process details
   k                     Open safe signal dispatcher modal
   R                     Open process renice modal
+  :, !                  Open process diagnostic command runner
   c, m, p, n, u, s, d, e   Sort by CPU, Mem, PID, Name, User, Threads, Disk I/O, TIME+
   r                     Toggle sort order (Ascending / Descending)
   T                     Cycle color themes on the fly
@@ -3300,7 +3511,11 @@ Keybindings:
     local show_inspector = false
     local show_signal_modal = false
     local show_renice_modal = false
+    local show_diagnostic_modal = false
     local sel_signal_idx = 1
+    local sel_diagnostic_preset = 1
+    local diagnostic_custom_cmd = ""
+    local diagnostic_is_editing = false
     local renice_val = 0
     local status_flash_msg = ""
     local status_flash_expiry = 0
@@ -3366,7 +3581,46 @@ Keybindings:
                     sel_proc = sel_proc + 3
                 elseif k.btn == 0 and not k.release then
                     -- Left Click Press
-                    if show_help or show_inspector or show_signal_modal then
+                    if show_diagnostic_modal then
+                        local mw = math.min(84, term_w - 4)
+                        local compact = (term_h < 17)
+                        local mh = compact and 12 or 14
+                        local mx = math.floor((term_w - mw) / 2)
+                        local my = math.floor((term_h - mh) / 2)
+                        local presets = get_diagnostic_presets()
+                        local header_offset = compact and 3 or 4
+                        local preset_clicked = false
+
+                        for p_i = 1, #presets do
+                            local row_y = my + header_offset + p_i
+                            if k.y == row_y and k.x >= mx and k.x <= mx + mw then
+                                sel_diagnostic_preset = p_i
+                                diagnostic_custom_cmd = presets[p_i].cmd
+                                diagnostic_is_editing = false
+                                preset_clicked = true
+                                break
+                            end
+                        end
+
+                        if not preset_clicked then
+                            if k.y == my + 1 and k.x >= mx and k.x <= mx + mw then
+                                diagnostic_is_editing = true
+                            elseif k.y == my + mh - 2 and k.x >= mx and k.x <= mx + mw then
+                                local pr = procs[sel_proc]
+                                if pr then
+                                    local cmd_to_run = (diagnostic_custom_cmd and #diagnostic_custom_cmd > 0)
+                                        and diagnostic_custom_cmd
+                                        or presets[sel_diagnostic_preset].cmd
+                                    show_diagnostic_modal = false
+                                    execute_diagnostic_command(cmd_to_run, pr)
+                                    io.write("\27[H\27[2J")
+                                    next_refresh_time = 0
+                                end
+                            elseif k.x < mx or k.x > mx + mw or k.y < my or k.y > my + mh then
+                                show_diagnostic_modal = false
+                            end
+                        end
+                    elseif show_help or show_inspector or show_signal_modal then
                         show_help = false
                         show_inspector = false
                         show_signal_modal = false
@@ -3544,6 +3798,15 @@ Keybindings:
                         renice_val = pr.nice or 0
                         show_renice_modal = true
                     end
+                elseif k == ":" or k == "!" then
+                    show_inspector = false
+                    local pr = procs[sel_proc]
+                    if pr then
+                        show_diagnostic_modal = true
+                        sel_diagnostic_preset = 1
+                        diagnostic_custom_cmd = get_diagnostic_presets()[1].cmd
+                        diagnostic_is_editing = false
+                    end
                 end
             elseif show_signal_modal then
                 if k == "ESC" or k == "q" then
@@ -3582,6 +3845,56 @@ Keybindings:
                         end
                         status_flash_expiry = os.clock() + 3.0
                     end
+                end
+            elseif show_diagnostic_modal then
+                local presets = get_diagnostic_presets()
+                if k == "ESC" or (k == "q" and not diagnostic_is_editing) then
+                    show_diagnostic_modal = false
+                    diagnostic_custom_cmd = ""
+                    diagnostic_is_editing = false
+                elseif k == "ENTER" then
+                    local pr = procs[sel_proc]
+                    if pr then
+                        local cmd_to_run = (diagnostic_custom_cmd and #diagnostic_custom_cmd > 0)
+                            and diagnostic_custom_cmd
+                            or presets[sel_diagnostic_preset].cmd
+                        show_diagnostic_modal = false
+                        execute_diagnostic_command(cmd_to_run, pr)
+                        io.write("\27[H\27[2J")
+                        next_refresh_time = 0
+                    end
+                elseif (k == "1" or k == "2" or k == "3" or k == "4" or k == "5") and not diagnostic_is_editing then
+                    local p_num = tonumber(k)
+                    if p_num and p_num <= #presets then
+                        sel_diagnostic_preset = p_num
+                        diagnostic_custom_cmd = presets[p_num].cmd
+                        local pr = procs[sel_proc]
+                        if pr then
+                            show_diagnostic_modal = false
+                            execute_diagnostic_command(diagnostic_custom_cmd, pr)
+                            io.write("\27[H\27[2J")
+                            next_refresh_time = 0
+                        end
+                    end
+                elseif k == "UP" or (k == "k" and not diagnostic_is_editing) then
+                    sel_diagnostic_preset = (sel_diagnostic_preset == 1) and #presets or (sel_diagnostic_preset - 1)
+                    diagnostic_custom_cmd = presets[sel_diagnostic_preset].cmd
+                    diagnostic_is_editing = false
+                elseif k == "DOWN" or (k == "j" and not diagnostic_is_editing) then
+                    sel_diagnostic_preset = (sel_diagnostic_preset % #presets) + 1
+                    diagnostic_custom_cmd = presets[sel_diagnostic_preset].cmd
+                    diagnostic_is_editing = false
+                elseif k == "BACKSPACE" then
+                    diagnostic_is_editing = true
+                    if #diagnostic_custom_cmd > 0 then
+                        diagnostic_custom_cmd = diagnostic_custom_cmd:sub(1, -2)
+                    end
+                elseif k == "SPACE" then
+                    diagnostic_is_editing = true
+                    diagnostic_custom_cmd = diagnostic_custom_cmd .. " "
+                elseif #k == 1 and k:byte() >= 32 and k:byte() <= 126 then
+                    diagnostic_is_editing = true
+                    diagnostic_custom_cmd = diagnostic_custom_cmd .. k
                 end
             elseif in_search_mode then
                 if k == "SPACE" then k = " " end
@@ -3742,6 +4055,14 @@ Keybindings:
                     if pr then
                         renice_val = pr.nice or 0
                         show_renice_modal = true
+                    end
+                elseif k == ":" or k == "!" then
+                    local pr = procs[sel_proc]
+                    if pr then
+                        show_diagnostic_modal = true
+                        sel_diagnostic_preset = 1
+                        diagnostic_custom_cmd = get_diagnostic_presets()[1].cmd
+                        diagnostic_is_editing = false
                     end
                 elseif k == "+" or k == "=" then
                     refresh_interval_ms = math.max(250, refresh_interval_ms - 250)
@@ -4325,7 +4646,7 @@ Keybindings:
                     C.bold, C.reset,
                     format_rate(pr.io_read_rate or 0), format_bytes(math.floor((pr.io_read_bytes or 0) / 1024)),
                     format_rate(pr.io_write_rate or 0), format_bytes(math.floor((pr.io_write_bytes or 0) / 1024)))))
-                table.insert(out, draw_box_row(mx, my + 11, mw, string.format("  %s[k] Kill   [R] Renice   [Enter / Esc] Close Inspector%s", C.title_col, C.reset)))
+                table.insert(out, draw_box_row(mx, my + 11, mw, string.format("  %s[k] Kill   [R] Renice   [:] Diag   [Enter / Esc] Close Inspector%s", C.title_col, C.reset)))
             elseif show_signal_modal and procs[sel_proc] then
                 local pr = procs[sel_proc]
                 local mw = math.min(68, term_w - 4)
@@ -4372,9 +4693,11 @@ Keybindings:
                     or "Idle / Background Priority")))
                 table.insert(out, draw_box_row(mx, my + 5, mw, string.format("  Level: %s%s%s", C.bold, label, C.reset)))
                 table.insert(out, draw_box_row(mx, my + 7, mw, string.format("  %s[←/→, +/-] Adjust   [Enter] Apply   [Esc] Cancel%s", C.dim, C.reset)))
+            elseif show_diagnostic_modal and procs[sel_proc] then
+                draw_diagnostic_modal(out, procs[sel_proc], diagnostic_custom_cmd, sel_diagnostic_preset, term_w, term_h, C)
             elseif show_help then
                 local mw = math.min(74, term_w - 4)
-                local mh = 20
+                local mh = 21
                 local mx = math.floor((term_w - mw) / 2)
                 local my = math.floor((term_h - mh) / 2)
                 draw_modal_box(out, mx, my, mw, mh, "Help & Keybindings")
@@ -4392,11 +4715,12 @@ Keybindings:
                 table.insert(out, draw_box_row(mx, my + 11, mw, "   t, F5          Toggle Process Tree view   Space Fold/Pause"))
                 table.insert(out, draw_box_row(mx, my + 12, mw, "   Enter, i       Inspect process details modal"))
                 table.insert(out, draw_box_row(mx, my + 13, mw, "   k, R           Open signal dispatcher, Renice modal"))
-                table.insert(out, draw_box_row(mx, my + 14, mw, string.format(" %sDisplay & Sorting:%s", C.title_col, C.reset)))
-                table.insert(out, draw_box_row(mx, my + 15, mw, "   c, m, p, n     Sort by CPU, Memory, PID, or Name"))
-                table.insert(out, draw_box_row(mx, my + 16, mw, "   u, s, d, e, r  Sort by User, Threads, I/O, TIME+, Reverse"))
-                table.insert(out, draw_box_row(mx, my + 17, mw, "   C, T           CPU view mode, Cycle color themes"))
-                table.insert(out, draw_box_row(mx, my + 18, mw, string.format("  %s[Esc / Enter / ?] Close Help Dialog%s", C.dim, C.reset)))
+                table.insert(out, draw_box_row(mx, my + 14, mw, "   :, !           Open process diagnostic command runner"))
+                table.insert(out, draw_box_row(mx, my + 15, mw, string.format(" %sDisplay & Sorting:%s", C.title_col, C.reset)))
+                table.insert(out, draw_box_row(mx, my + 16, mw, "   c, m, p, n     Sort by CPU, Memory, PID, or Name"))
+                table.insert(out, draw_box_row(mx, my + 17, mw, "   u, s, d, e, r  Sort by User, Threads, I/O, TIME+, Reverse"))
+                table.insert(out, draw_box_row(mx, my + 18, mw, "   C, T           CPU view mode, Cycle color themes"))
+                table.insert(out, draw_box_row(mx, my + 19, mw, string.format("  %s[Esc / Enter / ?] Close Help Dialog%s", C.dim, C.reset)))
             end
 
             -- 6. Footer Line & Search / Status
@@ -4416,10 +4740,10 @@ Keybindings:
                 local help_str
                 if term_w >= 115 then
                     help_str = in_tree_mode
-                        and string.format("%s  %s  [/] Filter  [[]/[]] Category  [Space] Fold  [Enter] Inspect  [k] Kill  [R] Renice  [c/m/p/n/u/s/d] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit", focus_hint, zoom_hint)
-                        or string.format("%s  %s  [/] Filter  [[]/[]] Category  [t] Tree  [Enter] Inspect  [k] Kill  [R] Renice  [c/m/p/n/u/s/d] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit", focus_hint, zoom_hint)
+                        and string.format("%s  %s  [/] Filter  [[]/[]] Category  [Space] Fold  [Enter] Inspect  [k] Kill  [R] Renice  [:] Diag  [c/m/p/n/u/s/d] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit", focus_hint, zoom_hint)
+                        or string.format("%s  %s  [/] Filter  [[]/[]] Category  [t] Tree  [Enter] Inspect  [k] Kill  [R] Renice  [:] Diag  [c/m/p/n/u/s/d] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit", focus_hint, zoom_hint)
                 elseif term_w >= 85 then
-                    help_str = string.format("%s  %s  [/] Filter  [[]/[]] Category  [t] Tree  [Enter] Inspect  [c/m/p] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit", focus_hint, zoom_hint)
+                    help_str = string.format("%s  %s  [/] Filter  [[]/[]] Category  [t] Tree  [Enter] Inspect  [:] Diag  [c/m/p] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit", focus_hint, zoom_hint)
                 else
                     help_str = string.format("%s  %s  [/] Filter  [?] Help  [q] Quit", focus_hint, zoom_hint)
                 end
@@ -4704,6 +5028,26 @@ local function run_self_test()
     assert(tab_hit_1 == 1, "Hit test category 1 (All)")
     print("  ✔ Proposal 4: Verified state badges, category filters, counts, and pill hit-testing")
 
+    -- Process Diagnostic Runner test (Proposal 3)
+    local test_pr = { pid = 12345, comm = "my_daemon", username = "alice" }
+    local expanded_p = expand_diagnostic_cmd("lsof -p %p | grep %c --user=%u 100%%", test_pr)
+    assert(expanded_p == "lsof -p 12345 | grep my_daemon --user=alice 100%", "Macro replacement failed: " .. tostring(expanded_p))
+
+    local diag_presets = get_diagnostic_presets()
+    assert(#diag_presets == 5, "Must have exactly 5 diagnostic presets")
+    for _, dp in ipairs(diag_presets) do
+        assert(dp.key and dp.name and dp.cmd and dp.desc, "Preset metadata missing")
+    end
+
+    for _, geom in ipairs({ { w = 80, h = 24 }, { w = 120, h = 40 }, { w = 60, h = 14 } }) do
+        local d_frame = render_diagnostic_modal_frame(test_pr, nil, 1, geom.w, geom.h)
+        assert(type(d_frame) == "string" and #d_frame > 0, "Diagnostic modal frame must render for " .. geom.w .. "x" .. geom.h)
+        assert(d_frame:find("Diagnostic Runner", 1, true) ~= nil, "Modal must contain title banner")
+        assert(d_frame:find("Command:", 1, true) ~= nil, "Modal must contain Command field")
+        assert(d_frame:find("Preview:", 1, true) ~= nil, "Modal must contain Preview field")
+    end
+    print("  ✔ Proposal 3: Verified diagnostic macro expansion, presets, and decoupled modal rendering")
+
     print("\n\27[1;32mALL SELF-TEST CHECKS PASSED SUCCESSFULLY!\27[0m")
     return true
 end
@@ -4712,42 +5056,47 @@ end
 -- 10. Module Export & CLI Entry Point
 -- =========================================================================
 local M = {
-    version                  = "2.2.0",
-    read_os_info             = read_os_info,
-    read_cpu_model           = read_cpu_model,
-    read_cpu_stats           = read_cpu_stats,
-    read_cpu_sensors         = read_cpu_sensors,
-    test_cpu_performance     = test_cpu_performance,
-    test_disk_performance    = test_disk_performance,
-    read_memory_stats        = read_memory_stats,
-    read_network_stats       = read_network_stats,
-    read_storage_stats       = read_storage_stats,
-    read_gpu_stats           = read_gpu_stats,
-    read_process_table       = read_process_table,
-    build_process_tree       = build_process_tree,
-    match_smart_filter       = match_smart_filter,
-    renice_process           = renice_process,
-    resolve_username         = resolve_username,
-    set_theme                = set_theme,
-    cycle_theme              = cycle_theme,
-    get_themes               = function() return THEMES end,
-    format_bytes             = format_bytes,
-    format_rate              = format_rate,
-    format_elapsed           = format_elapsed,
-    format_cpu_time          = format_cpu_time,
-    format_time_plus         = format_time_plus,
-    visual_len               = visual_len,
-    truncate                 = truncate,
-    make_meter_bar           = make_meter_bar,
-    render_zoomed_pane_frame = render_zoomed_pane_frame,
-    get_state_badge          = get_state_badge,
-    PROCESS_CATEGORIES       = PROCESS_CATEGORIES,
-    matches_process_category = matches_process_category,
-    count_process_categories = count_process_categories,
-    render_category_pills    = render_category_pills,
-    get_category_tab_at_x    = get_category_tab_at_x,
-    main                     = main,
-    run_self_test            = run_self_test,
+    version                       = "2.3.0",
+    read_os_info                  = read_os_info,
+    read_cpu_model                = read_cpu_model,
+    read_cpu_stats                = read_cpu_stats,
+    read_cpu_sensors              = read_cpu_sensors,
+    test_cpu_performance          = test_cpu_performance,
+    test_disk_performance         = test_disk_performance,
+    read_memory_stats             = read_memory_stats,
+    read_network_stats            = read_network_stats,
+    read_storage_stats            = read_storage_stats,
+    read_gpu_stats                = read_gpu_stats,
+    read_process_table            = read_process_table,
+    build_process_tree            = build_process_tree,
+    match_smart_filter            = match_smart_filter,
+    renice_process                = renice_process,
+    resolve_username              = resolve_username,
+    set_theme                     = set_theme,
+    cycle_theme                   = cycle_theme,
+    get_themes                    = function() return THEMES end,
+    format_bytes                  = format_bytes,
+    format_rate                   = format_rate,
+    format_elapsed                = format_elapsed,
+    format_cpu_time               = format_cpu_time,
+    format_time_plus              = format_time_plus,
+    visual_len                    = visual_len,
+    truncate                      = truncate,
+    make_meter_bar                = make_meter_bar,
+    render_zoomed_pane_frame      = render_zoomed_pane_frame,
+    get_state_badge               = get_state_badge,
+    PROCESS_CATEGORIES            = PROCESS_CATEGORIES,
+    matches_process_category      = matches_process_category,
+    count_process_categories      = count_process_categories,
+    render_category_pills         = render_category_pills,
+    get_category_tab_at_x         = get_category_tab_at_x,
+    expand_diagnostic_cmd         = expand_diagnostic_cmd,
+    get_diagnostic_presets        = get_diagnostic_presets,
+    render_diagnostic_modal_frame = render_diagnostic_modal_frame,
+    suspend_raw_mode              = suspend_raw_mode,
+    resume_raw_mode               = resume_raw_mode,
+    main                          = main,
+    run_self_test                 = run_self_test,
 }
 
 local is_entry_point = false

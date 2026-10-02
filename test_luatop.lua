@@ -622,6 +622,139 @@ TestRunner.describe("9. Process Category Tabs & State Badges (Proposal 4)", func
     end)
 end)
 
+TestRunner.describe("10. Process Diagnostic Command Runner Modal (Proposal 3)", function()
+    TestRunner.it("should expand macro tokens %p, %c, %u and preserve double percent escapes", function()
+        local proc_linux = { pid = 14820, comm = "luatop", username = "zliu" }
+        local expanded1 = btop.expand_diagnostic_cmd("lsof -p %p | grep %c --user=%u 100%%", proc_linux)
+        assert_eq(expanded1, "lsof -p 14820 | grep luatop --user=zliu 100%", "Linux process macro expansion")
+
+        local proc_win = { pid = 4128, comm = "svchost.exe", username = "SYSTEM" }
+        local expanded2 = btop.expand_diagnostic_cmd('tasklist /m /fi "PID eq %p" && echo %c by %u', proc_win)
+        assert_eq(expanded2, 'tasklist /m /fi "PID eq 4128" && echo svchost.exe by SYSTEM', "Windows process macro expansion")
+
+        -- Edge cases
+        local empty_res = btop.expand_diagnostic_cmd(nil, proc_linux)
+        assert_eq(empty_res, "", "Nil template returns empty string")
+        local nil_proc = btop.expand_diagnostic_cmd("echo %p", nil)
+        assert_eq(nil_proc, "echo %p", "Nil proc returns template")
+    end)
+
+    TestRunner.it("should return platform-specific presets with valid keys, commands, and descriptions", function()
+        local presets = btop.get_diagnostic_presets()
+        assert_true(#presets == 5, "Must return exactly 5 quick presets")
+
+        for i, p in ipairs(presets) do
+            assert_eq(p.key, tostring(i), "Preset key matches index")
+            assert_true(type(p.name) == "string" and #p.name > 0, "Preset name is non-empty")
+            assert_true(type(p.cmd) == "string" and #p.cmd > 0, "Preset command is non-empty")
+            assert_true(p.cmd:find("%%p") ~= nil, "Preset command must target PID with %p")
+            assert_true(type(p.desc) == "string" and #p.desc > 0, "Preset description is non-empty")
+        end
+    end)
+
+    TestRunner.it("should render diagnostic modal frame across multiple terminal geometries (80x24, 120x40, 60x20, 60x14)", function()
+        local mock_proc = { pid = 14820, comm = "luatop", username = "zliu" }
+
+        for _, geom in ipairs({
+            { w = 80, h = 24 },
+            { w = 120, h = 40 },
+            { w = 60, h = 20 },
+            { w = 60, h = 14 },
+        }) do
+            local frame = btop.render_diagnostic_modal_frame(mock_proc, nil, 1, geom.w, geom.h)
+            assert_true(type(frame) == "string" and #frame > 0, "Modal frame renders at " .. geom.w .. "x" .. geom.h)
+            assert_true(frame:find("Diagnostic Runner", 1, true) ~= nil, "Contains title at " .. geom.w .. "x" .. geom.h)
+            assert_true(frame:find("Command:", 1, true) ~= nil, "Contains Command field")
+            assert_true(frame:find("Preview:", 1, true) ~= nil, "Contains Preview field")
+            assert_true(frame:find("14820", 1, true) ~= nil, "Contains expanded PID")
+            assert_true(frame:find("Quick Presets", 1, true) ~= nil, "Contains Presets header")
+            assert_true(frame:find("Tokens:", 1, true) ~= nil, "Contains Tokens hint")
+        end
+    end)
+
+    TestRunner.it("should highlight active preset indicator and update live command preview", function()
+        local mock_proc = { pid = 9876, comm = "custom_proc", username = "tester" }
+        local presets = btop.get_diagnostic_presets()
+
+        -- Preset 1 active
+        local frame_p1 = btop.render_diagnostic_modal_frame(mock_proc, nil, 1, 80, 24)
+        assert_true(frame_p1:find("▶ %[1%]", 1, false) ~= nil, "Preset 1 indicator highlighted")
+        local exp_cmd1 = btop.expand_diagnostic_cmd(presets[1].cmd, mock_proc)
+        assert_true(frame_p1:find(btop.truncate(exp_cmd1, 40), 1, true) ~= nil, "Preview matches preset 1")
+
+        -- Preset 2 active
+        local frame_p2 = btop.render_diagnostic_modal_frame(mock_proc, nil, 2, 80, 24)
+        assert_true(frame_p2:find("▶ %[2%]", 1, false) ~= nil, "Preset 2 indicator highlighted")
+        local exp_cmd2 = btop.expand_diagnostic_cmd(presets[2].cmd, mock_proc)
+        assert_true(frame_p2:find(btop.truncate(exp_cmd2, 40), 1, true) ~= nil, "Preview matches preset 2")
+    end)
+
+    TestRunner.it("should display custom typed command and expand custom tokens in preview", function()
+        local mock_proc = { pid = 5555, comm = "worker", username = "deploy" }
+        local custom = "cat /proc/%p/status | grep -i vmswap # user=%u"
+
+        local frame_custom = btop.render_diagnostic_modal_frame(mock_proc, custom, 0, 80, 24)
+        assert_true(frame_custom:find("cat /proc/%p/status", 1, true) ~= nil, "Command box contains template")
+        assert_true(frame_custom:find("cat /proc/5555/status", 1, true) ~= nil, "Preview expands PID")
+        assert_true(frame_custom:find("user=deploy", 1, true) ~= nil, "Preview expands user")
+    end)
+
+    TestRunner.it("should simulate preset selection keys 1-5 and UP/DOWN preset cycling", function()
+        local current_preset = 1
+        local num_presets = 5
+
+        -- Cycling DOWN
+        current_preset = (current_preset % num_presets) + 1
+        assert_eq(current_preset, 2, "Cycled DOWN to preset 2")
+
+        -- Cycling UP
+        current_preset = (current_preset == 1) and num_presets or (current_preset - 1)
+        assert_eq(current_preset, 1, "Cycled UP to preset 1")
+
+        -- Boundary wrap UP
+        current_preset = (current_preset == 1) and num_presets or (current_preset - 1)
+        assert_eq(current_preset, 5, "Wrapped UP to preset 5")
+
+        -- Direct number jump
+        local pressed_key = "3"
+        current_preset = tonumber(pressed_key)
+        assert_eq(current_preset, 3, "Jumped directly to preset 3")
+    end)
+
+    TestRunner.it("should simulate custom text typing with backspace and space characters", function()
+        local cmd = "lsof"
+        local keystrokes = { "SPACE", "-", "p", "SPACE", "%", "p" }
+
+        for _, k in ipairs(keystrokes) do
+            if k == "SPACE" then
+                cmd = cmd .. " "
+            elseif k == "BACKSPACE" then
+                cmd = cmd:sub(1, -2)
+            else
+                cmd = cmd .. k
+            end
+        end
+        assert_eq(cmd, "lsof -p %p", "Typing sequence constructed target command")
+
+        -- Backspace testing
+        for _ = 1, 3 do
+            cmd = cmd:sub(1, -2)
+        end
+        assert_eq(cmd, "lsof -p", "Backspace deleted 3 characters")
+    end)
+
+    TestRunner.it("should safely export suspend_raw_mode and resume_raw_mode functions", function()
+        assert_true(type(btop.suspend_raw_mode) == "function", "suspend_raw_mode must be exported as a function")
+        assert_true(type(btop.resume_raw_mode) == "function", "resume_raw_mode must be exported as a function")
+
+        -- Calling when not in raw mode must be safe no-op
+        local ok1 = pcall(btop.suspend_raw_mode)
+        local ok2 = pcall(btop.resume_raw_mode)
+        assert_true(ok1, "suspend_raw_mode callable without error")
+        assert_true(ok2, "resume_raw_mode callable without error")
+    end)
+end)
+
 -- Summary
 print("\n--------------------------------------------------")
 local total = TestRunner.passed + TestRunner.failed

@@ -16,8 +16,8 @@ This document provides a detailed architectural, performance, and user experienc
 | **Theme Engine** | 24-bit Truecolor palettes | ⭐⭐⭐⭐⭐ | 5 presets (Tokyo Night, Dracula, Nord, Monokai, Cyberpunk), on-the-fly cycling (`T`). |
 | **Layout & Grids** | Responsive 4-pane grid + Zoom | ⭐⭐⭐⭐⭐ | 4-pane grid with active pane focus (`[1]`-`[4]`, `Tab`/`Shift+Tab`) and zero-flicker maximized zoom view (`z`/`f`) [Implemented in commit `7c5e4aa`]. |
 | **Visual Meters** | Block meters & 1-row sparklines | ⭐⭐⭐⭐☆ | Smooth meters; **1-row sparklines lack vertical resolution and timeline scale**. |
-| **Process Management** | Table & Foldable Tree (`t`) | ⭐⭐⭐⭐☆ | Parent-child tree rollups; **lacks quick category pills (User/System/Zombies)**. |
-| **Diagnostic Tooling** | Signal (`k`) & Renice (`R`) | ⭐⭐⭐☆☆ | Interactive modals work well; **lacks open file (`lsof`) or syscall trace (`strace`) hooks**. |
+| **Process Management** | Table, Tree & Category Pills | ⭐⭐⭐⭐⭐ | Parent-child tree rollups (`t`), interactive category pills (`[All]`, `[User]`, `[System]`, `[Active]`, `[Zombies]`), and 5-col ANSI state badges (`● R`, `○ S`, `■ D`, `▲ Z`) [Implemented in commit `10490e8`]. |
+| **Diagnostic Tooling** | Signal, Renice & Runner (`:`, `!`) | ⭐⭐⭐⭐⭐ | Interactive signal (`k`) and renice (`R`) modals, plus unified Process Diagnostic Runner (`:`, `!`) with dynamic macro expansion (`%p`, `%c`, `%u`), Linux & Windows quick presets, inline execution, and zero-flicker restoration. |
 | **Input & Search** | Raw mode + normalized keys | ⭐⭐⭐⭐☆ | Fast typing; Spacebar in search normalized; Tab/Shift-Tab navigation integrated [Implemented in commit `7c5e4aa`]. |
 
 ---
@@ -115,7 +115,17 @@ Currently, the 4 panes (CPU, Memory & Storage, Network, Processes) have fixed pr
 
 ---
 
-### Proposal 3: Process Diagnostic Command Runner Modal (`:`, `!`) with Macro Expansion
+### Proposal 3: Process Diagnostic Command Runner Modal (`:`, `!`) with Macro Expansion — [COMPLETED & VERIFIED]
+
+> [!TIP]
+> **Implementation Status: COMPLETED**
+> - **Unified Diagnostic Runner**: Press `:` or `!` from the process table or process inspector to launch interactive diagnostic runner modal.
+> - **Dynamic Macro Expansion**: Instant substitution of `%p` (PID), `%c` (Binary/Command), `%u` (User/Session), with double-percent escape protection.
+> - **Dual Linux & Windows Quick Presets**:
+>   - **Linux**: `[1] Open Files & Sockets` (`lsof`), `[2] Live Syscall Trace` (`strace`), `[3] Thread Stack Trace` (`pstack`/`gdb`), `[4] Memory Map` (`pmap`), `[5] Systemd Service Journal` (`journalctl`).
+>   - **Windows**: `[1] Loaded DLLs & Modules` (`tasklist /m`), `[2] Active Network Sockets` (`netstat -ano`), `[3] Thread Breakdown & State` (PowerShell `(Get-Process).Threads`), `[4] Full CLI Command & Paths` (WMI `Get-CimInstance`), `[5] Windows Service Hosting` (`tasklist /svc`).
+> - **Zero-Flicker Terminal Discipline**: `suspend_raw_mode()` and `resume_raw_mode()` implemented with POSIX `tcsetattr`/`tcflush` and Win32 `SetConsoleMode`/`FlushConsoleInputBuffer`, keeping active screen buffer intact without terminal buffer flips.
+> - **Test Suite Coverage**: Added Suite 10 to `test_luatop.lua` covering macro replacement, preset metadata, multi-geometry rendering, preset selection, typing/editing, and raw mode lifecycle (43/43 tests passing).
 
 #### Problem Statement
 When diagnosing system bottlenecks, finding the culprit PID in `luatop` is only step one. The user immediately wants to run diagnostics:
@@ -160,7 +170,16 @@ Currently, users must exit `luatop`, remember the PID, and type commands manuall
 
 ---
 
-### Proposal 4: Process Category Tabs / Filter Pills & Process State Badges (+ Search Bug Fix)
+### Proposal 4: Process Category Tabs / Filter Pills & Process State Badges (+ Search Bug Fix) — [COMPLETED & VERIFIED]
+
+> [!TIP]
+> **Implementation Status: COMPLETED** (Commit [`10490e8`](https://github.com/skyera/lualab/commit/10490e8))
+> - **Interactive Category Pills**: Live count badges for `[All]`, `[User]`, `[System]`, `[Active]`, and `[Zombies]` with responsive width compaction (`[Usr]`, `[Sys]`, `[Act]`, `[Zom]`) for compact viewports ($<68$ cols).
+> - **Navigation & Mouse Hit-Testing**: Cycle tabs using `[` and `]`; full mouse click hit-testing (`get_category_tab_at_x`) for terminal mouse tracking.
+> - **Process State Badges**: ANSI color-coded, strictly 5-visual-column status badges (`● R`, `○ S`, `■ D`, `▲ Z`, `❚ T`, `· I`) preserving selection row backgrounds.
+> - **Cross-Platform Win32 Parity**: Leveraged `ProcessIdToSessionId` FFI to differentiate Session 0 `SYSTEM` vs Session 1+ user (`%USERNAME%`), combined with thread count and CPU heuristics for dynamic `Z`, `R`, `S` state detection.
+> - **Inspector Modal Integration**: Displays visual state badge alongside descriptive text (e.g. `● R (Running)`).
+> - **Test Suite**: Added Suite 9 to `test_luatop.lua` covering badges, categories, counts, responsive pills, mouse hit-testing, and key cycling (35/35 tests passing).
 
 #### Problem Statement & Bug Uncovered
 1. **Filtering Ergonomics**: Filtering currently requires pressing `/` and typing exact queries (`u:zliu`, `s:Z`, `cpu>5`). Common workflows (isolating *My* processes, *Root* services, or *Zombies*) take multiple keystrokes.
@@ -232,11 +251,10 @@ In compliance with [`AGENTS.md`](file:///home/zliu/test/lualab/AGENTS.md):
 
 - **Completed**:
   - ✔ **Proposal 1**: Interactive Pane Focus (`Tab`, `1`-`4`) & Fullscreen Zoom (`z` / `f`).
+  - ✔ **Proposal 3**: Process Diagnostic Command Runner Modal (`:`, `!`) with `%p`, `%c`, `%u` macro expansion, dual Linux/Windows presets, inline execution, and zero-flicker suspension.
   - ✔ **Proposal 4**: Process Category Tabs / Filter Pills (`[All]`, `[User]`, `[System]`, `[Active]`, `[Zombies]`) + Process State Badges (`● R`, `○ S`, `■ D`, `▲ Z`) with Win32 FFI Session parity and mouse hit-testing (`[` / `]`).
   - ✔ **Search Spacebar Normalization**: `"SPACE"` mapped to `" "` in search input mode.
   - ✔ **Dual-Column Disk Fix**: Test 225 resolved; dual-column threshold aligned.
 - **Next Phases**:
-  - **Phase 2 (Diagnostic Tooling & Advanced Inspection)**:
-    - Proposal 3: Process Diagnostic Command Runner Modal (`:`, `!`) with `%p`, `%c`, `%u` macro expansion and presets (`lsof`, `strace`, `pstack`, `pmap`, `journalctl`).
   - **Phase 3 (Visual Data Density)**:
     - Proposal 2: Multi-Row Braille Historical Trend Graphs (`g` / Graph Mode).

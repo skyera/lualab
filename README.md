@@ -77,6 +77,7 @@ make
   ./LuaJIT/src/luajit ffi_midi_keyboard.lua       # Real-time interactive synthesizer, visual piano keyboard & oscilloscope
   ./LuaJIT/src/luajit ffi_elf_inspector.lua <bin> # Interactive ELF binary analyzer, symbol inspector & disassembler
   ./LuaJIT/src/luajit codefind.lua index .        # High-performance local code & document search engine (SQLite FTS5)
+  ./LuaJIT/src/luajit luatop.lua                  # Professional terminal system & process monitor (CPU, GPU, Net, Tree)
   ```
 
 - **Run Unit Tests:**
