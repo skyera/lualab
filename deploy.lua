@@ -447,6 +447,13 @@ for _, app in ipairs(apps_to_deploy) do
     written = written + 1
     print(string.format("  [ok] copied  %s -> %s (%s)", app.script, display_path(app.installed_lua), format_size(copy_result)))
 
+    if app.id == 'logexplorer' then
+        local test_name = 'test_ffi_log_explorer.lua'
+        local copied, err = copy_file(script_dir .. SEP .. test_name, target_dir .. SEP .. test_name)
+        if not copied then error('Cannot install log explorer tests: ' .. tostring(err)) end
+        written = written + 1
+    end
+
     -- 2. Launchers (primary name + aliases)
     local names = { app.name }
     if app.aliases then

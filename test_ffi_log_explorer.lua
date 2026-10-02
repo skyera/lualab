@@ -1,4 +1,6 @@
 #!/usr/bin/env luajit
+local script_dir=debug.getinfo(1,'S').source:sub(2):match('^(.*[/\\])') or './'
+package.path=script_dir..'?.lua;'..package.path
 local m=require('ffi_log_explorer')
 local passed,total=0,0
 local function test(name,fn)
@@ -217,9 +219,35 @@ remove(fixture..'/sub folder',true);remove(fixture..'/empty',true);remove(fixtur
 test('CLI snapshot/help run headlessly',function()
  local interpreter=arg[-1] or 'luajit'
  for _,option in ipairs({'','--help','--snapshot --ascii '..string.format('%q',a)}) do
-  local pipe=assert(io.popen(interpreter..' ffi_log_explorer.lua '..option..' 2>&1'))
+  local pipe=assert(io.popen(interpreter..' '..string.format('%q',script_dir..'ffi_log_explorer.lua')..' '..option..' 2>&1'))
   local text=pipe:read('*a');assert(pipe:close());assert(#text>0);assert(not text:find('\27',1,true))
  end
+end)
+test('every split of navigation CSI sequences is buffered',function()
+ for sequence,key in pairs({['\27[5~']='PAGE_UP',['\27[6~']='PAGE_DOWN',['\27[A']='UP'}) do
+  for split=1,#sequence-1 do
+   local decode=m.decoder();eq(#decode(sequence:sub(1,split)),0)
+   local keys=decode(sequence:sub(split+1));eq(#keys,1);eq(keys[1],key)
+  end
+ end
+ local decode=m.decoder();eq(#decode('\27'),0);eq(decode('',true)[1],'ESC')
+end)
+test('snapshot finalizes partial lines once and respects retention',function()
+ write(a,'INFO first\nERROR final');local model=m.Model.new({a},1);drain(model)
+ model:finish_snapshot();eq(#model.entries,1);eq(model.entries[1].text,'ERROR final')
+ eq(model.entries[1].line,2);model:finish_snapshot();eq(#model.entries,1)
+end)
+test('initial sources normalize and deduplicate browser paths',function()
+ local path=script_dir..'ffi_log_explorer.lua'
+ local model=m.Model.new({path,path});eq(#model.sources,1)
+ model:open_file(m.absolute_path(path));eq(#model.sources,1);eq(model.source,1)
+end)
+test('explicit levels override message keywords',function()
+ local model=m.Model.new({a})
+ for _,text in ipairs({'INFO request completed without error','[INFO] error count zero','{"level":"info","message":"error resolved"}'}) do
+  model:add(1,text);eq(model.entries[#model.entries].level,'INFO')
+ end
+ model:add(1,'WARN error rate rising');eq(model.entries[#model.entries].level,'WARN')
 end)
 os.remove(a);os.remove(b)
 print(string.format('Log Explorer: %d/%d tests passed',passed,total))

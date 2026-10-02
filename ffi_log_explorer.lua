@@ -727,7 +727,10 @@ Tab cycle files; S cycle severity; F toggle follow; b bookmark; B bookmarks only
 Up/Down or j/k navigate; PgUp/PgDn page; g start; G end/follow; Q quit
 --snapshot prints current logs without requiring a terminal. --test runs tests.]])
    return
-  elseif a=='--test' then dofile('test_ffi_log_explorer.lua');return
+  elseif a=='--test' then
+   local script=debug.getinfo(main,'S').source:sub(2)
+   local directory=script:match('^(.*[/\\])') or './'
+   dofile(directory..'test_ffi_log_explorer.lua');return
   elseif a=='--ascii' then ascii=true
   elseif a=='--snapshot' then snapshot=true
   elseif a=='--max-lines' then
