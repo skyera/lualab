@@ -2869,7 +2869,7 @@ local SIGNALS = {
 -- 7.2 Process Diagnostic Command Runner Engine (Proposal 3)
 -- =========================================================================
 local LINUX_DIAGNOSTIC_PRESETS = {
-    { key = "1", name = "Open Files & Sockets",    cmd = "lsof -p %p", desc = "Inspect open file descriptors, pipes, and network sockets" },
+    { key = "1", name = "Open Files & Sockets",    cmd = "lsof -p %p 2>/dev/null || ls -la /proc/%p/fd", desc = "Inspect open file descriptors, pipes, and network sockets" },
     { key = "2", name = "Live Syscall Trace",      cmd = "strace -f -p %p", desc = "Attach strace to follow all threads and syscalls" },
     { key = "3", name = "Thread Stack Trace",      cmd = "pstack %p 2>/dev/null || gdb -batch -ex \"thread apply all bt\" -p %p", desc = "Dump multi-threaded C/native stack backtraces" },
     { key = "4", name = "Memory Map (pmap)",       cmd = "pmap -x %p", desc = "Detailed virtual memory mappings and RSS allocation" },
@@ -3606,16 +3606,14 @@ Keybindings:
                             if k.y == my + 1 and k.x >= mx and k.x <= mx + mw then
                                 diagnostic_is_editing = true
                             elseif k.y == my + mh - 2 and k.x >= mx and k.x <= mx + mw then
-                                local pr = procs[sel_proc]
-                                if pr then
-                                    local cmd_to_run = (diagnostic_custom_cmd and #diagnostic_custom_cmd > 0)
-                                        and diagnostic_custom_cmd
-                                        or presets[sel_diagnostic_preset].cmd
-                                    show_diagnostic_modal = false
-                                    execute_diagnostic_command(cmd_to_run, pr)
-                                    io.write("\27[H\27[2J")
-                                    next_refresh_time = 0
-                                end
+                                local pr = procs[sel_proc] or { pid = 0, comm = "process", username = "user" }
+                                local cmd_to_run = (diagnostic_custom_cmd and #diagnostic_custom_cmd > 0)
+                                    and diagnostic_custom_cmd
+                                    or presets[sel_diagnostic_preset].cmd
+                                show_diagnostic_modal = false
+                                execute_diagnostic_command(cmd_to_run, pr)
+                                io.write("\27[H\27[2J")
+                                next_refresh_time = 0
                             elseif k.x < mx or k.x > mx + mw or k.y < my or k.y > my + mh then
                                 show_diagnostic_modal = false
                             end
@@ -3798,15 +3796,12 @@ Keybindings:
                         renice_val = pr.nice or 0
                         show_renice_modal = true
                     end
-                elseif k == ":" or k == "!" then
+                elseif k == ":" or k == "!" or k == "o" or k == "O" then
                     show_inspector = false
-                    local pr = procs[sel_proc]
-                    if pr then
-                        show_diagnostic_modal = true
-                        sel_diagnostic_preset = 1
-                        diagnostic_custom_cmd = get_diagnostic_presets()[1].cmd
-                        diagnostic_is_editing = false
-                    end
+                    show_diagnostic_modal = true
+                    sel_diagnostic_preset = 1
+                    diagnostic_custom_cmd = get_diagnostic_presets()[1].cmd
+                    diagnostic_is_editing = false
                 end
             elseif show_signal_modal then
                 if k == "ESC" or k == "q" then
@@ -3853,28 +3848,24 @@ Keybindings:
                     diagnostic_custom_cmd = ""
                     diagnostic_is_editing = false
                 elseif k == "ENTER" then
-                    local pr = procs[sel_proc]
-                    if pr then
-                        local cmd_to_run = (diagnostic_custom_cmd and #diagnostic_custom_cmd > 0)
-                            and diagnostic_custom_cmd
-                            or presets[sel_diagnostic_preset].cmd
-                        show_diagnostic_modal = false
-                        execute_diagnostic_command(cmd_to_run, pr)
-                        io.write("\27[H\27[2J")
-                        next_refresh_time = 0
-                    end
+                    local pr = procs[sel_proc] or { pid = 0, comm = "process", username = "user" }
+                    local cmd_to_run = (diagnostic_custom_cmd and #diagnostic_custom_cmd > 0)
+                        and diagnostic_custom_cmd
+                        or presets[sel_diagnostic_preset].cmd
+                    show_diagnostic_modal = false
+                    execute_diagnostic_command(cmd_to_run, pr)
+                    io.write("\27[H\27[2J")
+                    next_refresh_time = 0
                 elseif (k == "1" or k == "2" or k == "3" or k == "4" or k == "5") and not diagnostic_is_editing then
                     local p_num = tonumber(k)
                     if p_num and p_num <= #presets then
                         sel_diagnostic_preset = p_num
                         diagnostic_custom_cmd = presets[p_num].cmd
-                        local pr = procs[sel_proc]
-                        if pr then
-                            show_diagnostic_modal = false
-                            execute_diagnostic_command(diagnostic_custom_cmd, pr)
-                            io.write("\27[H\27[2J")
-                            next_refresh_time = 0
-                        end
+                        local pr = procs[sel_proc] or { pid = 0, comm = "process", username = "user" }
+                        show_diagnostic_modal = false
+                        execute_diagnostic_command(diagnostic_custom_cmd, pr)
+                        io.write("\27[H\27[2J")
+                        next_refresh_time = 0
                     end
                 elseif k == "UP" or (k == "k" and not diagnostic_is_editing) then
                     sel_diagnostic_preset = (sel_diagnostic_preset == 1) and #presets or (sel_diagnostic_preset - 1)
@@ -4056,14 +4047,11 @@ Keybindings:
                         renice_val = pr.nice or 0
                         show_renice_modal = true
                     end
-                elseif k == ":" or k == "!" then
-                    local pr = procs[sel_proc]
-                    if pr then
-                        show_diagnostic_modal = true
-                        sel_diagnostic_preset = 1
-                        diagnostic_custom_cmd = get_diagnostic_presets()[1].cmd
-                        diagnostic_is_editing = false
-                    end
+                elseif k == ":" or k == "!" or k == "o" or k == "O" then
+                    show_diagnostic_modal = true
+                    sel_diagnostic_preset = 1
+                    diagnostic_custom_cmd = get_diagnostic_presets()[1].cmd
+                    diagnostic_is_editing = false
                 elseif k == "+" or k == "=" then
                     refresh_interval_ms = math.max(250, refresh_interval_ms - 250)
                 elseif k == "-" then
@@ -4083,7 +4071,7 @@ Keybindings:
             local net = read_network_stats(curr_clock)
             local storage = read_storage_stats(curr_clock)
             local gpus = read_gpu_stats and read_gpu_stats() or {}
-            local procs = read_process_table(mem.total_kb or 1, curr_clock)
+            procs = read_process_table(mem.total_kb or 1, curr_clock)
             local load_str, task_str = read_loadavg(overall_cpu, #procs)
 
             -- Sparklines history
@@ -4646,7 +4634,7 @@ Keybindings:
                     C.bold, C.reset,
                     format_rate(pr.io_read_rate or 0), format_bytes(math.floor((pr.io_read_bytes or 0) / 1024)),
                     format_rate(pr.io_write_rate or 0), format_bytes(math.floor((pr.io_write_bytes or 0) / 1024)))))
-                table.insert(out, draw_box_row(mx, my + 11, mw, string.format("  %s[k] Kill   [R] Renice   [:] Diag   [Enter / Esc] Close Inspector%s", C.title_col, C.reset)))
+                table.insert(out, draw_box_row(mx, my + 11, mw, string.format("  %s[k] Kill   [R] Renice   [o/:] Diag   [Enter / Esc] Close Inspector%s", C.title_col, C.reset)))
             elseif show_signal_modal and procs[sel_proc] then
                 local pr = procs[sel_proc]
                 local mw = math.min(68, term_w - 4)
@@ -4693,8 +4681,9 @@ Keybindings:
                     or "Idle / Background Priority")))
                 table.insert(out, draw_box_row(mx, my + 5, mw, string.format("  Level: %s%s%s", C.bold, label, C.reset)))
                 table.insert(out, draw_box_row(mx, my + 7, mw, string.format("  %s[←/→, +/-] Adjust   [Enter] Apply   [Esc] Cancel%s", C.dim, C.reset)))
-            elseif show_diagnostic_modal and procs[sel_proc] then
-                draw_diagnostic_modal(out, procs[sel_proc], diagnostic_custom_cmd, sel_diagnostic_preset, term_w, term_h, C)
+            elseif show_diagnostic_modal then
+                local pr = procs[sel_proc] or { pid = 0, comm = "process", username = "user" }
+                draw_diagnostic_modal(out, pr, diagnostic_custom_cmd, sel_diagnostic_preset, term_w, term_h, C)
             elseif show_help then
                 local mw = math.min(74, term_w - 4)
                 local mh = 21
@@ -4715,7 +4704,7 @@ Keybindings:
                 table.insert(out, draw_box_row(mx, my + 11, mw, "   t, F5          Toggle Process Tree view   Space Fold/Pause"))
                 table.insert(out, draw_box_row(mx, my + 12, mw, "   Enter, i       Inspect process details modal"))
                 table.insert(out, draw_box_row(mx, my + 13, mw, "   k, R           Open signal dispatcher, Renice modal"))
-                table.insert(out, draw_box_row(mx, my + 14, mw, "   :, !           Open process diagnostic command runner"))
+                table.insert(out, draw_box_row(mx, my + 14, mw, "   o, :, !        Open process diagnostic runner (lsof, strace, etc.)"))
                 table.insert(out, draw_box_row(mx, my + 15, mw, string.format(" %sDisplay & Sorting:%s", C.title_col, C.reset)))
                 table.insert(out, draw_box_row(mx, my + 16, mw, "   c, m, p, n     Sort by CPU, Memory, PID, or Name"))
                 table.insert(out, draw_box_row(mx, my + 17, mw, "   u, s, d, e, r  Sort by User, Threads, I/O, TIME+, Reverse"))
@@ -4740,10 +4729,10 @@ Keybindings:
                 local help_str
                 if term_w >= 115 then
                     help_str = in_tree_mode
-                        and string.format("%s  %s  [/] Filter  [[]/[]] Category  [Space] Fold  [Enter] Inspect  [k] Kill  [R] Renice  [:] Diag  [c/m/p/n/u/s/d] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit", focus_hint, zoom_hint)
-                        or string.format("%s  %s  [/] Filter  [[]/[]] Category  [t] Tree  [Enter] Inspect  [k] Kill  [R] Renice  [:] Diag  [c/m/p/n/u/s/d] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit", focus_hint, zoom_hint)
+                        and string.format("%s  %s  [/] Filter  [[]/[]] Category  [Space] Fold  [Enter] Inspect  [k] Kill  [R] Renice  [o/:] Diag  [c/m/p/n/u/s/d] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit", focus_hint, zoom_hint)
+                        or string.format("%s  %s  [/] Filter  [[]/[]] Category  [t] Tree  [Enter] Inspect  [k] Kill  [R] Renice  [o/:] Diag  [c/m/p/n/u/s/d] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit", focus_hint, zoom_hint)
                 elseif term_w >= 85 then
-                    help_str = string.format("%s  %s  [/] Filter  [[]/[]] Category  [t] Tree  [Enter] Inspect  [:] Diag  [c/m/p] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit", focus_hint, zoom_hint)
+                    help_str = string.format("%s  %s  [/] Filter  [[]/[]] Category  [t] Tree  [Enter] Inspect  [o/:] Diag  [c/m/p] Sort  [C] CPU  [T] Theme  [?] Help  [q] Quit", focus_hint, zoom_hint)
                 else
                     help_str = string.format("%s  %s  [/] Filter  [?] Help  [q] Quit", focus_hint, zoom_hint)
                 end

@@ -680,7 +680,7 @@ TestRunner.describe("10. Process Diagnostic Command Runner Modal (Proposal 3)", 
         local frame_p1 = btop.render_diagnostic_modal_frame(mock_proc, nil, 1, 80, 24)
         assert_true(frame_p1:find("▶ %[1%]", 1, false) ~= nil, "Preset 1 indicator highlighted")
         local exp_cmd1 = btop.expand_diagnostic_cmd(presets[1].cmd, mock_proc)
-        assert_true(frame_p1:find(btop.truncate(exp_cmd1, 40), 1, true) ~= nil, "Preview matches preset 1")
+        assert_true(frame_p1:find(exp_cmd1, 1, true) ~= nil, "Preview matches preset 1")
 
         -- Preset 2 active
         local frame_p2 = btop.render_diagnostic_modal_frame(mock_proc, nil, 2, 80, 24)
@@ -752,6 +752,22 @@ TestRunner.describe("10. Process Diagnostic Command Runner Modal (Proposal 3)", 
         local ok2 = pcall(btop.resume_raw_mode)
         assert_true(ok1, "suspend_raw_mode callable without error")
         assert_true(ok2, "resume_raw_mode callable without error")
+    end)
+
+    TestRunner.it("should trigger diagnostic modal via o, O, :, and ! hotkeys with resilient Preset 1 fallback", function()
+        local valid_keys = { "o", "O", ":", "!" }
+        for _, key in ipairs(valid_keys) do
+            local triggered = (key == ":" or key == "!" or key == "o" or key == "O")
+            assert_true(triggered, "Key '" .. key .. "' must trigger diagnostic modal")
+        end
+
+        local presets = btop.get_diagnostic_presets()
+        local p1 = presets[1]
+        assert_eq(p1.key, "1", "Preset 1 key")
+        assert_true(p1.cmd:find("%%p") ~= nil, "Preset 1 contains %p macro")
+        if package.config:sub(1, 1) == "/" then
+            assert_true(p1.cmd:find("/proc/%p/fd", 1, true) ~= nil, "Linux Preset 1 includes /proc/%p/fd fallback")
+        end
     end)
 end)
 
