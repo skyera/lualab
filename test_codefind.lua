@@ -326,6 +326,53 @@ TestRunner.describe("5. CLI Invocation & Options", function()
         local ret_tui2 = os.execute(string.format("luajit codefind.lua search 'fox' --tui < %s > %s 2>&1", null_dev, null_dev))
         assert_true(ret_tui2 == 0 or ret_tui2 == true, "search --tui failed")
     end)
+
+    TestRunner.it("should execute codefind.lua help without error and output help text", function()
+        local p = io.popen("luajit codefind.lua help 2>&1")
+        local out = p and p:read("*a") or ""
+        if p then p:close() end
+        assert_true(out:find("Usage:") ~= nil, "'codefind help' did not output usage")
+        assert_true(out:find("Interactive search browser %(default in terminal%)") ~= nil, "'codefind help' missing default TUI mention")
+    end)
+
+    TestRunner.it("should output help on bare invocation in non-interactive environment", function()
+        local p = io.popen(string.format("luajit codefind.lua < %s 2>&1", null_dev))
+        local out = p and p:read("*a") or ""
+        if p then p:close() end
+        assert_true(out:find("CodeFind v") ~= nil, "Bare non-interactive invocation did not output help")
+    end)
+
+    TestRunner.it("should execute shorthand query in non-interactive environment via CLI batch search", function()
+        local tmpdir = make_tmpdir("_test_cf_shorthand_" .. os.time())
+        local f = io.open(tmpdir .. "/shorthand.lua", "w")
+        f:write("local function secret_shorthand_keyword() return 123 end\n")
+        f:close()
+
+        local custom_db = tmpdir .. "/shorthand.db"
+        local idx_cmd = string.format("luajit codefind.lua index %s --db %s > %s 2>&1", tmpdir, custom_db, null_dev)
+        os.execute(idx_cmd)
+
+        -- Execute shorthand: codefind "secret_shorthand_keyword" without typing 'search'
+        local p = io.popen(string.format("luajit codefind.lua \"secret_shorthand_keyword\" --db %s < %s 2>&1", custom_db, null_dev))
+        local out = p and p:read("*a") or ""
+        if p then p:close() end
+        assert_true(out:find("shorthand.lua") ~= nil, "Shorthand query failed to find file: " .. out)
+        assert_true(out:find("secret_shorthand_keyword") ~= nil, "Shorthand query snippet missing keyword: " .. out)
+
+        -- Execute with --cli flag
+        local p_cli = io.popen(string.format("luajit codefind.lua \"secret_shorthand_keyword\" --cli --db %s < %s 2>&1", custom_db, null_dev))
+        local out_cli = p_cli and p_cli:read("*a") or ""
+        if p_cli then p_cli:close() end
+        assert_true(out_cli:find("shorthand.lua") ~= nil, "--cli shorthand query failed: " .. out_cli)
+
+        -- Execute with --json flag
+        local p_json = io.popen(string.format("luajit codefind.lua \"secret_shorthand_keyword\" --json --db %s < %s 2>&1", custom_db, null_dev))
+        local out_json = p_json and p_json:read("*a") or ""
+        if p_json then p_json:close() end
+        assert_true(out_json:find("\"filepath\":") ~= nil, "--json shorthand query failed to output JSON: " .. out_json)
+
+        rm_tmpdir(tmpdir)
+    end)
 end)
 
 TestRunner.describe("Suite: 6. TUI Layout Resize and Viewport Clamping", function()

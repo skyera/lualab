@@ -2514,7 +2514,7 @@ local function format_query_prompt(query, cursor_pos, avail_w, is_focused)
     return prefix .. lead .. before .. cursor .. after .. trail
 end
 
-local function get_empty_state_left_lines(query, text_w)
+local function get_empty_state_left_lines(query, text_w, total_files)
     query = query or ""
     text_w = text_w or 40
     local lines = {}
@@ -2525,7 +2525,11 @@ local function get_empty_state_left_lines(query, text_w)
         else
             lines[2] = "  \27[1;36m🔍 CodeFind\27[0m"
         end
-        lines[3] = "  \27[90mType keywords to search code or files.\27[0m"
+        if total_files and total_files == 0 then
+            lines[3] = "  \27[1;33m⚡ No files indexed yet! Press Ctrl-R to index.\27[0m"
+        else
+            lines[3] = "  \27[90mType keywords to search code or files.\27[0m"
+        end
         lines[4] = ""
         lines[5] = "  \27[1;37mSearch Syntax:\27[0m"
         if text_w >= 36 then
@@ -3220,6 +3224,8 @@ function TUI.run(db, initial_query, tui_limit)
 
     refresh_search()
 
+    local db_stats = db:get_stats()
+
     local running = true
 
     local is_zoomed = false
@@ -3517,7 +3523,7 @@ function TUI.run(db, initial_query, tui_limit)
                 return pad_to(colored_line, text_w) .. left_sb
             end
         elseif #results == 0 then
-            local empty_lines = get_empty_state_left_lines(query, text_w)
+            local empty_lines = get_empty_state_left_lines(query, text_w, db_stats and db_stats.total_files)
             local line_str = empty_lines[i] or ""
             return pad_to(line_str, text_w) .. left_sb
         else
@@ -3971,7 +3977,8 @@ function TUI.run(db, initial_query, tui_limit)
             elseif key == "CTRL_R" then
                 set_status("⚡ Incremental re-indexing in progress...")
                 local stat_res = Indexer.run(db, ".", false)
-                set_status(string.format("✔ Re-indexed %d files (Total: %d)", stat_res.indexed, db:get_stats().total_files))
+                db_stats = db:get_stats()
+                set_status(string.format("✔ Re-indexed %d files (Total: %d)", stat_res.indexed, db_stats.total_files))
                 refresh_search()
             elseif key == "LEFT" or (focus_pane == "search" and key == "CTRL_B") then
                 if focus_pane == "search" then
@@ -4188,6 +4195,7 @@ CodeFind v]] .. CODEFIND_VERSION .. [[ — High-Performance Local Code & Documen
 Powered by LuaJIT FFI & SQLite FTS5 (Zero dependencies)
 
 Usage:
+  codefind [query]                 Interactive search browser (default in terminal)
   codefind <command> [arguments]
 
 Commands:
@@ -4199,12 +4207,14 @@ Commands:
   doctor                 Print environment diagnostics (interpreter, sqlite3, script in use)
   pin [n|path]           Remember which sqlite3 library to use (--list, --clear)
   finder [name]          Configure default file crawler (fd, find, builtin, auto; --list, --clear)
+  help                   Show this help message and exit
   --test                 Run built-in unit & integration test suite
 
 Options:
   -v, --version          Print version information and exit
   -h, --help             Show this help message and exit
   --tui                  Launch interactive full-screen TUI (supports live search, scroll, open)
+  --cli, --no-tui        Disable interactive TUI (force CLI batch mode)
   --json                 Output search results as JSON (for scripting/editor integration)
   --watch[=N]            After indexing, poll every N seconds (default 3) for changed files
   --finder <mode>        File crawler to use: fd, find, builtin, or auto (default: auto)
@@ -4235,6 +4245,9 @@ Search Pattern Syntax:
       @<ext> or ext:<ext>    Inline filter in query or TUI (e.g. "prepare @c", "@lua")
 
 Examples:
+  luajit codefind.lua                         # Launch interactive TUI (terminal default)
+  luajit codefind.lua "sqlite3"               # Launch TUI searching for sqlite3
+  luajit codefind.lua "sqlite3" --cli         # Output search results to stdout (CLI mode)
   luajit codefind.lua index . --watch
   luajit codefind.lua search "sqlite3_prepare"
   luajit codefind.lua search "sqlite3 OR prepare" --json
@@ -4365,7 +4378,7 @@ local function run_self_tests()
 end
 
 local function main(args)
-    if #args == 0 or args[1] == "--help" or args[1] == "-h" then
+    if args[1] == "--help" or args[1] == "-h" or args[1] == "help" then
         print_help()
         return
     end
@@ -4385,6 +4398,7 @@ local function main(args)
     local command = nil
     local cmd_args = {}
     local use_tui = false
+    local no_tui = false
     local use_json = false    -- #1: --json output mode
     local watch_interval = nil -- #3: --watch mode interval in seconds
     local ext_filter = nil
@@ -4400,11 +4414,13 @@ local function main(args)
         if a == "--version" or a == "-v" then
             print("codefind " .. CODEFIND_VERSION)
             return
-        elseif a == "--help" or a == "-h" then
+        elseif a == "--help" or a == "-h" or a == "help" then
             print_help()
             return
         elseif a == "--tui" then
             use_tui = true
+        elseif a == "--cli" or a == "--no-tui" then
+            no_tui = true
         elseif a == "--json" then
             use_json = true   -- #1: JSON output mode
         elseif a == "--watch" then
@@ -4453,9 +4469,26 @@ local function main(args)
         command = "tui"
     end
 
+    local is_interactive = is_tty_fd(0) and is_tty_fd(1)
+    local KNOWN_COMMANDS = {
+        index = true, search = true, tui = true, stats = true,
+        clean = true, doctor = true, pin = true, finder = true, help = true
+    }
+
     if not command then
+        if is_interactive and not no_tui then
+            command = "tui"
+        else
+            print_help()
+            return
+        end
+    elseif command == "help" then
         print_help()
         return
+    elseif not KNOWN_COMMANDS[command] then
+        -- Positional shorthand: codefind <query> without typing 'search' or 'tui'
+        table.insert(cmd_args, 1, command)
+        command = (is_interactive and not no_tui and not use_json) and "tui" or "search"
     end
 
     if command == "clean" then
