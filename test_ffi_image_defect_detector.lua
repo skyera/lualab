@@ -107,7 +107,7 @@ local function cells(s)
 end
 local bounds_ok=true
 for _,dims in ipairs({{2,1},{20,5},{39,12},{60,16},{80,24},{100,30},{180,60}}) do
-    for view=1,3 do
+    for view=1,4 do
         for _,ascii in ipairs({true,false}) do
             state.view,state.use_ascii=view,ascii
             local lines=ui.render_dashboard_frame(state,dims[1],dims[2])
@@ -146,6 +146,29 @@ local framed=ui.render_dashboard_frame(state,80,24)
 assert_test("Framed layout has intact corners and selected details",framed[1]:sub(1,1)=="+" and framed[1]:sub(-1)=="+" and framed[24]:sub(-1)=="+" and table.concat(framed,"\n"):find("Selected #1",1,true)~=nil)
 local narrow=ui.render_dashboard_frame(state,41,16)
 assert_test("Narrow footer retains Quit",table.concat(narrow,"\n"):find("Q Quit",1,true)~=nil)
+local crop_ok=true
+for _,b in ipairs({{x_min=0,y_min=0,width=1,height=1},
+    {x_min=39,y_min=19,width=1,height=1},{x_min=0,y_min=0,width=40,height=20},
+    {x_min=10,y_min=5,width=8,height=8}}) do
+    local crop=ui.defect_crop(original,b)
+    crop_ok=crop_ok and crop.x>=0 and crop.y>=0 and crop.x+crop.width<=40 and crop.y+crop.height<=20
+        and crop.x<=b.x_min and crop.y<=b.y_min and crop.x+crop.width>=b.x_min+b.width
+        and crop.y+crop.height>=b.y_min+b.height
+end
+assert_test("Zoom crop includes defect and clamps edge/full-image bounds",crop_ok)
+local pixels=Image.new(20,20,0,0,0)
+pixels:set_pixel(8,9,12,34,56)
+local cropped=ui.crop_view(pixels,{x=7,y=8,width=4,height=4})
+local cr,cg,cb=cropped:get_pixel(1,1)
+assert_test("Read-only crop uses exact source coordinates",cr==12 and cg==34 and cb==56 and cropped.width==4 and cropped.height==4)
+local full=ui.defect_crop(pixels,nil)
+assert_test("Empty selection uses full image crop",full.x==0 and full.y==0 and full.width==20 and full.height==20)
+state.view=4
+local zoom=table.concat(ui.render_dashboard_frame(state,80,24),"\n")
+assert_test("Zoom renders matched reference detail and crop coordinates",zoom:find("REFERENCE DETAIL",1,true) and zoom:find("[Defect Zoom]",1,true) and zoom:find("Crop",1,true))
+state.blobs={}
+assert_test("Zoom without defects renders explicit empty state",table.concat(ui.render_dashboard_frame(state,80,24),"\n"):find("Zoom: no defect selected",1,true)~=nil)
+state.blobs=blobs1
 local delta=ui.render_changed_rows({"same","new"},{"same","old"})
 assert_test("Differential update touches only changed row",delta:find("\27[2;1H",1,true) and not delta:find("\27[1;1H",1,true) and not delta:find("\27[2J",1,true))
 local decode=ui.make_key_decoder()

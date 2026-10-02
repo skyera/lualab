@@ -1146,6 +1146,25 @@ function TerminalUI.selected_overlay(img, blob)
     return copy
 end
 
+-- A read-only crop view keeps reference and sample aligned without copying pixels.
+function TerminalUI.defect_crop(img, blob)
+    if not blob then return {x=0,y=0,width=img.width,height=img.height} end
+    local pad=math.max(6,math.ceil(math.max(blob.width,blob.height)*0.4))
+    local x=math.max(0,blob.x_min-pad)
+    local y=math.max(0,blob.y_min-pad)
+    local right=math.min(img.width,blob.x_min+blob.width+pad)
+    local bottom=math.min(img.height,blob.y_min+blob.height+pad)
+    return {x=x,y=y,width=math.max(1,right-x),height=math.max(1,bottom-y)}
+end
+
+function TerminalUI.crop_view(img, crop)
+    assert(crop.x>=0 and crop.y>=0 and crop.width>=1 and crop.height>=1 and
+        crop.x+crop.width<=img.width and crop.y+crop.height<=img.height,"Crop exceeds image bounds")
+    return {width=crop.width,height=crop.height,get_pixel=function(_,x,y)
+        return img:get_pixel(x+crop.x,y+crop.y)
+    end}
+end
+
 -- Pure viewport renderer: dimensions and state are supplied by the caller.
 function TerminalUI.render_dashboard_frame(state, cols, rows)
     local width=math.max(1,cols-1)
@@ -1186,18 +1205,25 @@ function TerminalUI.render_dashboard_frame(state, cols, rows)
             state.min_area or 5,state.golden_img.width,state.golden_img.height))
         divider(ascii and "+" or "├",ascii and "+" or "┤")
         local view=state.view or 2
-        local names={"Sample","Overlay","Heatmap"}
-        local image=({state.sample_img,state.annotated_img,diff.diff_img})[view]
+        local names={"Sample","Overlay","Heatmap","Defect Zoom"}
+        local image=({state.sample_img,state.annotated_img,diff.diff_img,state.sample_img})[view]
+        local reference=state.golden_img
+        local crop
+        if view==4 then
+            crop=TerminalUI.defect_crop(reference,blob)
+            reference=TerminalUI.crop_view(reference,crop)
+            image=TerminalUI.crop_view(image,crop)
+        end
         if view==2 then image=TerminalUI.selected_overlay(image,blob) end
         local pane_h=math.max(1,math.min(16,math.floor((rows-14)*0.6)))
         local single=width<70
         local pane_w=single and inside or math.floor((inside-3)/2)
         local right=TerminalUI.render_preview(image,pane_w,pane_h,ascii)
-        local left=not single and TerminalUI.render_preview(state.golden_img,pane_w,pane_h,ascii)
-        local tabs={}
-        for i,name in ipairs(names) do tabs[#tabs+1]=i==view and ("["..name.."]") or name end
-        row(cyan..(single and table.concat(tabs," ") or
-            (fit_row("GOLDEN REFERENCE",pane_w)..reset.." "..muted..edge..reset.." "..cyan..table.concat(tabs," ")))..reset)
+        local left=not single and TerminalUI.render_preview(reference,pane_w,pane_h,ascii)
+        local heading="["..names[view].."] Tab: next"
+        row(cyan..(single and heading or
+            (fit_row(view==4 and "REFERENCE DETAIL" or "GOLDEN REFERENCE",pane_w)..reset..
+                " "..muted..edge..reset.." "..cyan..heading))..reset)
         for y=1,pane_h do row(single and right[y] or
             (left[y].." "..muted..edge..reset.." "..right[y])) end
         divider(ascii and "+" or "├",ascii and "+" or "┤")
@@ -1218,12 +1244,18 @@ function TerminalUI.render_dashboard_frame(state, cols, rows)
             else row(index==first and count==0 and green.."No defects detected."..reset or "") end
         end
         divider(ascii and "+" or "├",ascii and "+" or "┤")
-        row(blob and string.format("Selected #%d | BBox %d,%d %dx%d | Peak %.1f",blob.id,
-            blob.x_min,blob.y_min,blob.width,blob.height,blob.max_delta or 0) or "Reference and sample match within tolerance")
+        if crop and blob then
+            row(string.format("Selected #%d | Crop %d,%d %dx%d | Peak %.1f",blob.id,
+                crop.x,crop.y,crop.width,crop.height,blob.max_delta or 0))
+        else
+            row(blob and string.format("Selected #%d | BBox %d,%d %dx%d | Peak %.1f",blob.id,
+                blob.x_min,blob.y_min,blob.width,blob.height,blob.max_delta or 0) or
+                (view==4 and "Zoom: no defect selected" or "Reference and sample match within tolerance"))
+        end
         row(cyan..safe_text(state.status or "Ready")..reset)
-        row(inside<50 and "Tab View  +/- Tune  S Save  Q Quit" or
-            inside<65 and "+/- Tune  Tab View  Up/Down Select  S Save  Q Quit" or
-            "Space Generate  +/- Tune  Tab View  Up/Down Select  S Save  R Clean  Q Quit")
+        row(inside<50 and "Z Zoom  +/- Tune  S Save  Q Quit" or
+            inside<65 and "+/- Tune  Z Zoom  Up/Down Select  S Save  Q Quit" or
+            "Space Generate  +/- Tune  Z Zoom  Up/Down Select  S Save  R Clean  Q Quit")
         divider(ascii and "+" or "└",ascii and "+" or "┘")
     end
     while #lines<rows do add("") end
@@ -1268,7 +1300,7 @@ Options:
   --save-ppm             Save golden, sample, and annotated result PPM images to disk.
   --ascii                Use ASCII fallback instead of ANSI truecolor codes.
 
-Controls: Space/G generate, +/- tolerance, Tab preview, Up/Down defect,
+Controls: Space/G generate, +/- tolerance, Tab preview, Z defect zoom, Up/Down defect,
           S save images, R clean baseline, Q/Esc quit.
   --snapshot             Print non-interactive dashboard snapshot and exit immediately.
   --test                 Run the comprehensive internal regression & unit test suite.
@@ -1500,6 +1532,7 @@ local function main()
 
     local running, needs_redraw = true, true
     local view, selected, status = 2, 1, "Ready"
+    local previous_view = 2
     local previous, old_cols, old_rows
     if install_signals then install_signals(function() running=false end) end
     local ok, err = xpcall(function()
@@ -1529,7 +1562,10 @@ local function main()
                 elseif key=="+" or key=="=" or key=="-" or key=="_" then
                     detector.tolerance=math.max(5,math.min(200,detector.tolerance+((key=="+" or key=="=") and 2 or -2)))
                     run_inspection(); status="Tolerance updated"; needs_redraw=true
-                elseif key=="TAB" then view=view%3+1; needs_redraw=true
+                elseif key=="TAB" then view=view%4+1; needs_redraw=true
+                elseif key=="z" then
+                    if view==4 then view=previous_view else previous_view=view; view=4 end
+                    needs_redraw=true
                 elseif key=="UP" then selected=math.max(1,selected-1); needs_redraw=true
                 elseif key=="DOWN" then selected=math.min(#blobs,selected+1); needs_redraw=true
                 elseif key=="s" then
