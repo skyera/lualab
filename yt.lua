@@ -10,8 +10,8 @@
        - Pass --cookies <file> to load a cookies.txt file.
        - Defaults to Guest / Public mode without requiring any login.
     3. Modes:
-       - Music Mode (default with -m / --music): Searches YouTube Music (ytmsearch),
-         streams audio-only via mpv --no-video.
+       - Music Mode (default with -m / --music): Searches YouTube & streams audio-only
+         via mpv --no-video.
        - Video Mode (default with -v / --video): Searches YouTube Videos (ytsearch),
          streams in terminal via mpv --vo=tct or external window with --window.
     4. Interactive TUI:
@@ -989,49 +989,47 @@ local function normalize_site(site)
     return site
 end
 
+local function build_search_spec(query, mode, max_results, is_liked, filters, site)
+    site = normalize_site(site)
+    local is_direct_url = query:match("^https?://") or query:match("^www%.") or query:match("^youtu%.be/")
+    if is_liked then
+        if mode == "music" then
+            return '"https://music.youtube.com/playlist?list=LM"'
+        else
+            return '":ytfavorites"'
+        end
+    elseif is_direct_url then
+        return string.format("%q", query)
+    elseif SITE_SEARCH_PREFIXES[site] then
+        return string.format('"%s%d:%s"', SITE_SEARCH_PREFIXES[site], max_results, query:gsub('"', '\\"'))
+    elseif filters and filters.sort and filters.sort ~= "relevance" then
+        local sp_map = {
+            views = "CAM%253D",
+            date = "CAI%253D",
+            rating = "CAE%253D"
+        }
+        local sp = sp_map[filters.sort]
+        if sp then
+            local enc_term = query:gsub("%s+", "+")
+            return string.format('"https://www.youtube.com/results?search_query=%s&sp=%s"', enc_term, sp)
+        else
+            return string.format('"ytsearch%d:%s"', max_results, query:gsub('"', '\\"'))
+        end
+    else
+        return string.format('"ytsearch%d:%s"', max_results, query:gsub('"', '\\"'))
+    end
+end
+
 local function fetch_youtube_results(query, mode, browser, cookies_file, max_results, is_liked, proxy, insecure, filters, site)
     max_results = max_results or 20
     site = normalize_site(site)
     local is_direct_url = query:match("^https?://") or query:match("^www%.") or query:match("^youtu%.be/")
-    local term = query
-
-    if not is_liked and not is_direct_url and site == "youtube" then
-        if mode == "music" and not query:lower():find("music") and not query:lower():find("song") and not query:lower():find("audio") then
-            term = query .. " music"
-        end
-    end
 
     local items = {}
     local err_lines = {}
 
     if HAS_YTDLP then
-        local search_spec
-        if is_liked then
-            if mode == "music" then
-                search_spec = '"https://music.youtube.com/playlist?list=LM"'
-            else
-                search_spec = '":ytfavorites"'
-            end
-        elseif is_direct_url then
-            search_spec = string.format("%q", query)
-        elseif SITE_SEARCH_PREFIXES[site] then
-            search_spec = string.format('"%s%d:%s"', SITE_SEARCH_PREFIXES[site], max_results, term:gsub('"', '\\"'))
-        elseif filters and filters.sort and filters.sort ~= "relevance" then
-            local sp_map = {
-                views = "CAM%253D",
-                date = "CAI%253D",
-                rating = "CAE%253D"
-            }
-            local sp = sp_map[filters.sort]
-            if sp then
-                local enc_term = term:gsub("%s+", "+")
-                search_spec = string.format('"https://www.youtube.com/results?search_query=%s&sp=%s"', enc_term, sp)
-            else
-                search_spec = string.format('"ytsearch%d:%s"', max_results, term:gsub('"', '\\"'))
-            end
-        else
-            search_spec = string.format('"ytsearch%d:%s"', max_results, term:gsub('"', '\\"'))
-        end
+        local search_spec = build_search_spec(query, mode, max_results, is_liked, filters, site)
 
         if not is_direct_url and not SITE_SEARCH_PREFIXES[site] and not is_liked then
             return nil, "Text search is not supported for site '" .. site .. "'. Use a direct URL or a supported site (youtube, soundcloud, twitch).", insecure
@@ -2570,6 +2568,21 @@ local function run_self_tests()
     assert(clamp_font_size(55 + 5) == 60, "Font size increment failed")
     assert(clamp_font_size(55 - 5) == 50, "Font size decrement failed")
     print("  [✓] CC / subtitle font size bounding logic passed")
+
+    -- 15. Search spec generation & verbatim query preservation (audio/music mode video search)
+    assert(build_search_spec("lex fridman podcast", "music", 20, false, nil, "youtube") == '"ytsearch20:lex fridman podcast"',
+        "Search spec in music mode must preserve video query verbatim without forced suffix")
+    assert(build_search_spec("veritasium", "video", 15, false, nil, "youtube") == '"ytsearch15:veritasium"',
+        "Search spec in video mode failed")
+    assert(build_search_spec("https://youtu.be/dQw4w9WgXcQ", "music", 20, false, nil, "youtube") == '"https://youtu.be/dQw4w9WgXcQ"',
+        "Direct URL search spec failed")
+    assert(build_search_spec("", "music", 20, true, nil, "youtube") == '"https://music.youtube.com/playlist?list=LM"',
+        "Liked music playlist spec failed")
+    assert(build_search_spec("", "video", 20, true, nil, "youtube") == '":ytfavorites"',
+        "Liked video favorites spec failed")
+    assert(build_search_spec("chillhop", "music", 10, false, nil, "soundcloud") == '"scsearch10:chillhop"',
+        "Soundcloud site adapter failed")
+    print("  [✓] Search spec generation & audio-mode video search query preservation passed")
 
     print("=== All Internal Self-Tests Passed Successfully ===")
     return true
