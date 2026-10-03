@@ -2120,8 +2120,13 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
     local last_rendered_has_sub = nil
     local last_rendered_last_sub = ""
     local max_list_h = 10
+    local last_term_w, last_term_h = get_terminal_size()
 
-    local function draw_tui()
+    local function draw_tui(full_clear)
+        if full_clear then
+            io.write("\27[2J\27[H")
+            io.flush()
+        end
         local term_w, term_h = get_terminal_size()
         local has_cc_row = (MpvController.is_playing and MpvController.current_item and show_cc)
         local player_h = (MpvController.is_playing and MpvController.current_item) and (has_cc_row and 4 or 3) or 0
@@ -2231,7 +2236,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         if not (MpvController.is_playing and MpvController.current_item) then
             table.insert(buf, "\27[1;34m" .. string.rep("-", term_w) .. "\27[0m\n")
         end
-        table.insert(buf, string.format(" \27[93m[Enter]\27[0m Play  %s  \27[93m[d]\27[0m DL  \27[93m[f]\27[0m Filter  \27[93m[/]\27[0m Find  \27[93m[M]\27[0m More  \27[93m[m]\27[0m Mode  \27[93m[?]\27[0m Help  \27[91m[q]\27[0m Quit\27[K", q_footer))
+        table.insert(buf, string.format(" \27[93m[Enter]\27[0m Play  %s  \27[93m[d]\27[0m DL  \27[93m[f]\27[0m Filter  \27[93m[/]\27[0m Find  \27[93m[M]\27[0m More  \27[93m[m]\27[0m Mode  \27[93m[?]\27[0m Help  \27[91m[q]\27[0m Quit\27[K\27[J", q_footer))
         
         io.write(table.concat(buf))
         io.flush()
@@ -2246,6 +2251,13 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
     draw_tui()
 
     while true do
+        local cur_w, cur_h = get_terminal_size()
+        if cur_w ~= last_term_w or cur_h ~= last_term_h then
+            last_term_w = cur_w
+            last_term_h = cur_h
+            draw_tui(true)
+        end
+
         local k = read_key(50)
 
         -- Check background MPV status every 50ms
