@@ -2582,7 +2582,7 @@ local function print_help()
     print("\nOptions:")
     print("  -m, --music           Music mode: audio-only background mini-player via mpv (default)")
     print("  -v, --video           Video mode: video streaming in terminal via mpv --vo=tct")
-    print("  --window              In video mode, play in external MPV GUI window instead of terminal")
+    print("  -w, --window          In video mode, play in external MPV GUI window instead of terminal")
     print("  -d, --download <q|url> Download track offline to ./downloads/ (MP3 for music, MP4 for video)")
     print("  --sort <type>         Sort search results (relevance, views, date, rating)")
     print("  --duration <type>     Filter results by duration (all, short, medium, long)")
@@ -2677,7 +2677,7 @@ local function main()
             mode = "music"
         elseif a == "-v" or a == "--video" then
             mode = "video"
-        elseif a == "--window" then
+        elseif a == "-w" or a == "--window" then
             use_window = true
         elseif a == "-c" or a == "--cc" or a == "--lyrics" or a == "--subtitles" then
             show_cc = true
