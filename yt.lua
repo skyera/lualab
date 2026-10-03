@@ -469,6 +469,26 @@ local HAS_CHAFA = cmd_exists("chafa")
 local HAS_FFMPEG = cmd_exists("ffmpeg")
 local HAS_DENO  = cmd_exists("deno")
 
+local function copy_to_clipboard(text)
+    if not text or #text == 0 then return false end
+    if is_windows then
+        local p = io.popen("clip", "w")
+        if p then
+            p:write(text)
+            p:close()
+            return true
+        end
+    else
+        local p = io.popen("wl-copy 2>/dev/null || xclip -selection clipboard 2>/dev/null || xsel -b 2>/dev/null || pbcopy 2>/dev/null", "w")
+        if p then
+            p:write(text)
+            p:close()
+            return true
+        end
+    end
+    return false
+end
+
 local function get_cache_dir()
     local dir
     if is_windows then
@@ -1222,18 +1242,18 @@ end
 
 local function to_mpv_slang(sub_lang)
     if not sub_lang or sub_lang == "" or sub_lang == "en.*" or sub_lang == "en" then
-        return "en,eng,en-GB,en-US,en-orig"
+        return "en-orig,en,eng,en-US,en-GB"
     end
     local parts = {}
     for lang in sub_lang:gmatch("[^,]+") do
         local clean = lang:gsub("%.%*", ""):gsub("%*", ""):match("^%s*(.-)%s*$")
         if #clean > 0 then
+            table.insert(parts, clean .. "-orig")
             table.insert(parts, clean)
             if clean == "en" then
                 table.insert(parts, "eng")
-                table.insert(parts, "en-GB")
                 table.insert(parts, "en-US")
-                table.insert(parts, "en-orig")
+                table.insert(parts, "en-GB")
             elseif clean == "zh" then
                 table.insert(parts, "chi")
                 table.insert(parts, "zho")
@@ -1242,7 +1262,7 @@ local function to_mpv_slang(sub_lang)
             end
         end
     end
-    return #parts > 0 and table.concat(parts, ",") or "en,eng,en-GB,en-US,en-orig"
+    return #parts > 0 and table.concat(parts, ",") or "en-orig,en,eng,en-US,en-GB"
 end
 
 local function render_mini_player_lines(cur, is_paused, volume, pos, dur, sub_text, show_cc, term_w, track_idx, total_tracks, has_sub_track, last_sub_text)
@@ -1296,9 +1316,11 @@ local function render_mini_player_lines(cur, is_paused, volume, pos, dur, sub_te
     end
 
     -- Border 2 (Controls / Bottom Border)
-    local ctrl_hint_text = (term_w >= 75)
-        and "[Space] Pause  [c] CC  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol"
-        or "[Space] Pause  [c] CC  [s] Skip  [x] Stop"
+    local ctrl_hint_text = (term_w >= 85)
+        and "[Space] Pause  [c] CC  [C] Trk  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol"
+        or ((term_w >= 75)
+            and "[Space] Pause  [c] CC  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol"
+            or "[Space] Pause  [c] CC  [s] Skip  [x] Stop")
     local ctrl_hint = "\27[90m" .. ctrl_hint_text .. "\27[0m"
     local prefix2 = string.format("+-- %s ", ctrl_hint)
     local pad2 = math.max(0, term_w - display_width(strip_ansi(prefix2)) - 1)
@@ -1503,6 +1525,13 @@ end
 
 function MpvController:set_sub_font_size(size)
     self:send_command(string.format('{"command": ["set_property", "sub-font-size", %d]}', size))
+end
+
+function MpvController:cycle_sub()
+    self:send_command('{"command": ["cycle", "sub"]}')
+    self.cc_state = { prev_last_line = "", prev_displayed = "" }
+    self.sub_text = ""
+    self.last_sub_text = ""
 end
 
 function MpvController:stop()
@@ -1789,7 +1818,7 @@ local function show_queue_modal(queue)
         local foot_y = box_y + 3 + max_items
         table.insert(buf, string.format("\27[%d;%dH\27[1;36m+%s+\27[0m", foot_y, box_x, string.rep("-", box_w - 2)))
         table.insert(buf, string.format("\27[%d;%dH%s", foot_y + 1, box_x,
-            line_pad("\27[1;36m| \27[93m[Enter]\27[0m Play  \27[93m[d/Bksp]\27[0m Delete  \27[93m[c]\27[0m Clear  \27[90m[Esc/q] Close\27[0m")))
+            line_pad("\27[1;36m| \27[93m[Enter]\27[0m Play  \27[93m[y]\27[0m Copy  \27[93m[d/Bksp]\27[0m Del  \27[93m[c]\27[0m Clear  \27[90m[Esc/q] Close\27[0m")))
         table.insert(buf, string.format("\27[%d;%dH\27[1;36m+%s+\27[0m", foot_y + 2, box_x, string.rep("-", box_w - 2)))
 
         io.write(table.concat(buf))
@@ -1814,6 +1843,15 @@ local function show_queue_modal(queue)
             end
         elseif k == "ENTER" then
             return q_sel
+        elseif k == "y" or k == "Y" then
+            if #queue > 0 and q_sel >= 1 and q_sel <= #queue then
+                local sel = queue[q_sel]
+                local url = sel.url or (sel.id and ("https://www.youtube.com/watch?v=" .. sel.id))
+                if url and copy_to_clipboard(url) then
+                    status_msg = "\27[1;92m✓ Copied URL: \27[0m" .. utf8_truncate(sel.title, 28)
+                    draw_queue()
+                end
+            end
         elseif k == "d" or k == "D" or k == "BACKSPACE" then
             if #queue > 0 and q_sel >= 1 and q_sel <= #queue then
                 table.remove(queue, q_sel)
@@ -1987,10 +2025,12 @@ local function show_help_modal()
         line_pad("\27[1;36m|    \27[93m[Tab]\27[0m         Add selected track to Up-Next queue"),
         line_pad("\27[1;36m|    \27[93m[Q]\27[0m           Open Up-Next queue modal (view/delete/clear)"),
         line_pad("\27[1;36m|    \27[93m[d]\27[0m           Download offline to ./downloads/ (MP3/MP4)"),
+        line_pad("\27[1;36m|    \27[93m[y]\27[0m           Yank (copy) video URL to clipboard"),
         line_pad("\27[1;36m|    \27[93m[f]\27[0m           Search filters (Sort by Views/Date, Duration)"),
         line_pad("\27[1;36m|    \27[93m[/]\27[0m           Open search modal or paste direct URL"),
         line_pad("\27[1;36m|    \27[93m[a]\27[0m           Toggle continuous Auto-Play (Radio mode)"),
         line_pad("\27[1;36m|    \27[93m[c]\27[0m           Toggle Closed Captions (CC / Lyrics)"),
+        line_pad("\27[1;36m|    \27[93m[C]\27[0m           Cycle subtitle track (Mini-Player)"),
         line_pad("\27[1;36m|    \27[93m[+ / -]\27[0m       Increase / Decrease CC font size (+/-5 pt)"),
         line_pad("\27[1;36m|    \27[93m[h]\27[0m           Toggle Playback History (recent tracks)"),
         line_pad("\27[1;36m|    \27[93m[m]\27[0m           Toggle between Music and Video mode"),
@@ -2236,7 +2276,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         if not (MpvController.is_playing and MpvController.current_item) then
             table.insert(buf, "\27[1;34m" .. string.rep("-", term_w) .. "\27[0m\n")
         end
-        table.insert(buf, string.format(" \27[93m[Enter]\27[0m Play  %s  \27[93m[d]\27[0m DL  \27[93m[f]\27[0m Filter  \27[93m[/]\27[0m Find  \27[93m[M]\27[0m More  \27[93m[m]\27[0m Mode  \27[93m[?]\27[0m Help  \27[91m[q]\27[0m Quit\27[K\27[J", q_footer))
+        table.insert(buf, string.format(" \27[93m[Enter]\27[0m Play  %s  \27[93m[y]\27[0m Copy  \27[93m[d]\27[0m DL  \27[93m[f]\27[0m Filter  \27[93m[/]\27[0m Find  \27[93m[M]\27[0m More  \27[93m[m]\27[0m Mode  \27[93m[?]\27[0m Help  \27[91m[q]\27[0m Quit\27[K\27[J", q_footer))
         
         io.write(table.concat(buf))
         io.flush()
@@ -2339,7 +2379,18 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                         play_item(chosen_item, mode, browser, cookies_file, use_window, proxy, insecure, show_cc, sub_lang, cc_font_size)
                     end
                 end
-                draw_tui()
+            elseif k == "y" or k == "Y" then
+                local sel = (#items > 0 and selected_idx >= 1 and selected_idx <= #items and items[selected_idx])
+                    or (MpvController.is_playing and MpvController.current_item)
+                if sel then
+                    local url = sel.url or (sel.id and ("https://www.youtube.com/watch?v=" .. sel.id))
+                    if url and copy_to_clipboard(url) then
+                        status_msg = "\27[1;92m✓ Copied URL: \27[0m" .. utf8_truncate(sel.title, 32)
+                    else
+                        status_msg = "\27[1;31m✗ Failed to copy URL\27[0m"
+                    end
+                    draw_tui()
+                end
             elseif k == "d" or k == "D" then
                 if #items > 0 and selected_idx >= 1 and selected_idx <= #items then
                     local sel = items[selected_idx]
@@ -2425,9 +2476,15 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
             elseif k == "a" or k == "A" then
                 auto_play = not auto_play
                 draw_tui()
-            elseif k == "c" or k == "C" then
+            elseif k == "c" then
                 show_cc = not show_cc
                 draw_tui()
+            elseif k == "C" then
+                if MpvController.is_playing then
+                    MpvController:cycle_sub()
+                    status_msg = "Cycled subtitle track"
+                    draw_tui()
+                end
             elseif k == "+" or k == "=" then
                 cc_font_size = math.min(120, cc_font_size + 5)
                 MpvController:set_sub_font_size(cc_font_size)
@@ -2658,12 +2715,12 @@ local function run_self_tests()
         print("  [✓] Win32 Named Pipe FFI bindings validated")
     end
 
-    -- 13. Subtitle / slang language expansion
-    assert(to_mpv_slang("en.*") == "en,eng,en-GB,en-US,en-orig", "to_mpv_slang default expansion failed")
-    assert(to_mpv_slang("en") == "en,eng,en-GB,en-US,en-orig", "to_mpv_slang en expansion failed")
-    assert(to_mpv_slang("zh.*") == "zh,chi,zho,zh-Hans,zh-Hant", "to_mpv_slang zh expansion failed")
-    assert(to_mpv_slang("es.*") == "es", "to_mpv_slang es strip wildcard failed")
-    assert(to_mpv_slang("fr,de") == "fr,de", "to_mpv_slang multiple list failed")
+    -- 14. Subtitle / slang language expansion (prioritizing -orig authentic subtitles)
+    assert(to_mpv_slang("en.*") == "en-orig,en,eng,en-US,en-GB", "to_mpv_slang default expansion failed")
+    assert(to_mpv_slang("en") == "en-orig,en,eng,en-US,en-GB", "to_mpv_slang en expansion failed")
+    assert(to_mpv_slang("zh.*") == "zh-orig,zh,chi,zho,zh-Hans,zh-Hant", "to_mpv_slang zh expansion failed")
+    assert(to_mpv_slang("es.*") == "es-orig,es", "to_mpv_slang es strip wildcard failed")
+    assert(to_mpv_slang("fr,de") == "fr-orig,fr,de-orig,de", "to_mpv_slang multiple list failed")
     print("  [✓] to_mpv_slang language expansion passed")
 
     -- 14. CC font size bounding & adjustment
@@ -2764,7 +2821,24 @@ local function run_self_tests()
 
     MpvController.is_playing = false
     MpvController.read_buf = ""
+
+    -- Subtitle track cycling method state reset
+    MpvController.sub_text = "test cue"
+    MpvController.last_sub_text = "last cue"
+    MpvController.cc_state = { prev_last_line = "prev", prev_displayed = "prev" }
+    MpvController:cycle_sub()
+    assert(MpvController.sub_text == "", "cycle_sub must reset sub_text")
+    assert(MpvController.last_sub_text == "", "cycle_sub must reset last_sub_text")
+    assert(MpvController.cc_state.prev_last_line == "", "cycle_sub must reset cc_state")
     print("  [✓] IPC property parsing & rolling subtitle deduplication passed")
+
+    -- 18. Clipboard URL Copying (y key)
+    assert(copy_to_clipboard(nil) == false, "copy_to_clipboard(nil) must return false")
+    assert(copy_to_clipboard("") == false, "copy_to_clipboard('') must return false")
+    local test_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    local copy_ok = copy_to_clipboard(test_url)
+    assert(copy_ok == true, "copy_to_clipboard must succeed for valid URL string")
+    print("  [✓] Cross-platform clipboard copy (y key) validated")
 
     print("=== All Internal Self-Tests Passed Successfully ===")
     return true
@@ -2801,6 +2875,7 @@ local function print_help()
     print("  [Tab]         Add selected track to Up-Next playback queue")
     print("  [Q]           Open Up-Next playback queue modal (play, delete, clear)")
     print("  [d]           Download selected track offline into ./downloads/")
+    print("  [y]           Copy selected track URL to clipboard")
     print("  [f]           Open Search Filters & Sorting modal")
     print("  [Space]       Pause / Resume background mini-player")
     print("  [s]           Skip to next track in queue")
@@ -2810,6 +2885,7 @@ local function print_help()
     print("  [/]           Open search modal or paste URL")
     print("  [a]           Toggle Auto-Play (Radio mode)")
     print("  [c]           Toggle Closed Captions (CC / Lyrics)")
+    print("  [C]           Cycle subtitle track (Mini-Player)")
     print("  [+ / -]       Increase / Decrease CC font size (+/-5 pt)")
     print("  [m]           Toggle Music / Video mode")
     print("  [q]           Quit viewer")
