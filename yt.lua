@@ -493,6 +493,13 @@ local function clean_rolling_caption(raw, state)
     if not raw or raw == "" then
         return ""
     end
+    -- Unescape HTML entities while preserving newline structure
+    raw = raw:gsub("&amp;", "&"):gsub("&quot;", '"'):gsub("&#39;", "'"):gsub("&apos;", "'"):gsub("&lt;", "<"):gsub("&gt;", ">")
+    raw = raw:gsub("&#([0-9]+);", function(code)
+        local n = tonumber(code)
+        if n and n > 0 and n < 128 then return string.char(n) end
+        return ""
+    end)
     state = state or {}
     local prev_last = state.prev_last_line or ""
     local prev_disp = state.prev_displayed or ""
@@ -720,6 +727,15 @@ end
 
 local function sanitize_display_text(s)
     if not s or type(s) ~= "string" then return "" end
+    -- HTML entity unescaping (e.g. &#39; in YouTube captions)
+    s = s:gsub("&amp;", "&"):gsub("&quot;", '"'):gsub("&#39;", "'"):gsub("&apos;", "'"):gsub("&lt;", "<"):gsub("&gt;", ">")
+    s = s:gsub("&#([0-9]+);", function(code)
+        local n = tonumber(code)
+        if n and n > 0 and n < 128 then return string.char(n) end
+        return ""
+    end)
+    -- Strip ASS style tags {\...} and HTML tags <...>
+    s = s:gsub("{[^}]-}", ""):gsub("<[^>]->", "")
     -- 1. Strip SMP 4-byte UTF-8 emojis (U+1F000 - U+1FFFF: e.g. 🎧, 🔥, 🚀)
     s = s:gsub("[\240-\244][\128-\191][\128-\191][\128-\191]", "")
     -- 2. Strip Dingbats, Misc Symbols (U+2600 - U+27BF: 3-byte UTF-8 e.g. ✨ \u2728, 🎵, ❤, ⚡, ★)
@@ -822,7 +838,9 @@ local function parse_json_field(line, key)
                 if next_b == '"' then table.insert(chars, '"')
                 elseif next_b == "\\" then table.insert(chars, "\\")
                 elseif next_b == "/" then table.insert(chars, "/")
-                elseif next_b == "n" then table.insert(chars, " ")
+                elseif next_b == "n" then table.insert(chars, "\n")
+                elseif next_b == "r" then table.insert(chars, "\r")
+                elseif next_b == "t" then table.insert(chars, "\t")
                 elseif next_b == "u" then
                     -- Keep \uXXXX intact for unescape_unicode to parse
                     local u_part = line:sub(pos - 1, pos + 4)
@@ -1227,6 +1245,68 @@ local function to_mpv_slang(sub_lang)
     return #parts > 0 and table.concat(parts, ",") or "en,eng,en-GB,en-US,en-orig"
 end
 
+local function render_mini_player_lines(cur, is_paused, volume, pos, dur, sub_text, show_cc, term_w, track_idx, total_tracks, has_sub_track, last_sub_text)
+    term_w = math.max(30, term_w or 80)
+    dur = (dur and dur > 0) and dur or (cur and cur.duration or 0)
+    pos = pos or 0
+    sub_text = sub_text or ""
+    last_sub_text = last_sub_text or ""
+    local lines = {}
+
+    local st_badge = is_paused and "\27[1;93m[PAUSED]\27[0m" or "\27[1;92m[PLAYING]\27[0m"
+    local vol_str = string.format("\27[96mVol: %d%%\27[0m", volume or 100)
+    local title = cur and cur.title or "Unknown"
+    local title_part = utf8_truncate(title, math.max(10, term_w - 48))
+    
+    -- Border 1 (Top Border)
+    local prefix1 = string.format("+-- > Now Playing: %s --- %s --- %s ", title_part, vol_str, st_badge)
+    local pad1 = math.max(0, term_w - display_width(strip_ansi(prefix1)) - 1)
+    table.insert(lines, string.format("\27[1;36m%s%s+\27[0m\27[K\n", prefix1, string.rep("-", pad1)))
+
+    -- Progress Line (Row 2)
+    local cur_fmt = (pos and pos > 0) and format_duration(pos) or "00:00"
+    local dur_fmt = (dur and dur > 0) and format_duration(dur) or "--:--"
+    local bar_w = math.max(10, math.min(30, term_w - 50))
+    local pct = (dur > 0) and math.min(1.0, math.max(0.0, pos / dur)) or 0
+    local filled = math.floor(pct * bar_w)
+    local prog_bar = string.rep("=", filled) .. (filled < bar_w and ">" or "") .. string.rep("-", math.max(0, bar_w - 1 - filled))
+    local track_info = (track_idx and total_tracks and total_tracks > 0) and string.format("  \27[90m(Track %d/%d)\27[0m", track_idx, total_tracks) or ""
+    local prog_content = string.format(" \27[1;36m|\27[0m \27[1;33m%s/%s\27[0m [\27[1;32m%s\27[0m]%s", cur_fmt, dur_fmt, prog_bar, track_info)
+    local pad_prog = math.max(0, term_w - display_width(strip_ansi(prog_content)) - 1)
+    table.insert(lines, string.format("%s%s\27[1;36m|\27[0m\27[K\n", prog_content, string.rep(" ", pad_prog)))
+
+    -- Dedicated CC / Subtitles Row (Row 3)
+    if show_cc then
+        local max_cc_w = math.max(10, term_w - 14)
+        local cc_content
+        if has_sub_track == false then
+            cc_content = "\27[90m[CC] (No subtitles available for this track)\27[0m"
+        elseif #sub_text > 0 then
+            local clean_sub = sanitize_display_text(sub_text)
+            cc_content = string.format("\27[1;93m[CC]\27[0m \27[1;97m\"%s\"\27[0m", utf8_truncate(clean_sub, max_cc_w))
+        elseif #last_sub_text > 0 then
+            local clean_sub = sanitize_display_text(last_sub_text)
+            cc_content = string.format("\27[1;93m[CC]\27[0m \27[90m\"%s\"\27[0m", utf8_truncate(clean_sub, max_cc_w))
+        else
+            cc_content = "\27[90m[CC] (Listening for speech / instrumental...)\27[0m"
+        end
+        local cc_line = string.format(" \27[1;36m|\27[0m %s", cc_content)
+        local pad_cc = math.max(0, term_w - display_width(strip_ansi(cc_line)) - 1)
+        table.insert(lines, string.format("%s%s\27[1;36m|\27[0m\27[K\n", cc_line, string.rep(" ", pad_cc)))
+    end
+
+    -- Border 2 (Controls / Bottom Border)
+    local ctrl_hint_text = (term_w >= 75)
+        and "[Space] Pause  [c] CC  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol"
+        or "[Space] Pause  [c] CC  [s] Skip  [x] Stop"
+    local ctrl_hint = "\27[90m" .. ctrl_hint_text .. "\27[0m"
+    local prefix2 = string.format("+-- %s ", ctrl_hint)
+    local pad2 = math.max(0, term_w - display_width(strip_ansi(prefix2)) - 1)
+    table.insert(lines, string.format("\27[1;36m+-- %s %s+\27[0m\27[K\n", ctrl_hint, string.rep("-", pad2)))
+
+    return lines
+end
+
 -- =========================================================================
 -- 5. Background Mini-Player & Foreground Playback Controller
 -- =========================================================================
@@ -1238,10 +1318,13 @@ local MpvController = {
     volume = 100,
     is_paused = false,
     sub_text = "",
+    last_sub_text = "",
+    has_sub_track = nil,
     is_eof = false,
     pipe_handle = nil,
     pipe_name = nil,
     read_buf = "",
+    cc_state = { prev_last_line = "", prev_displayed = "" },
 }
 
 function MpvController:send_command(json_str)
@@ -1260,11 +1343,10 @@ function MpvController:start(item, show_cc, sub_lang, browser, cookies_file, pro
     self.pipe_name = pipe_path
 
     local raw_opts = {}
-    if show_cc then
-        table.insert(raw_opts, "write-subs=")
-        table.insert(raw_opts, "write-auto-subs=")
-        table.insert(raw_opts, string.format("sub-langs=%s", sub_lang or "en.*"))
-    end
+    table.insert(raw_opts, "write-subs=")
+    table.insert(raw_opts, "write-auto-subs=")
+    table.insert(raw_opts, string.format("sub-langs=%s", sub_lang or "en.*"))
+
     if browser and #browser > 0 then
         table.insert(raw_opts, string.format("cookies-from-browser=%s", browser))
     elseif cookies_file and #cookies_file > 0 then
@@ -1285,10 +1367,8 @@ function MpvController:start(item, show_cc, sub_lang, browser, cookies_file, pro
     if proxy and #proxy > 0 then
         extra_mpv_opts = extra_mpv_opts .. string.format(" --http-proxy=%q", proxy)
     end
-    if show_cc then
-        local font_opt = (sub_font_size and sub_font_size > 0) and string.format(" --sub-font-size=%d", sub_font_size) or ""
-        extra_mpv_opts = extra_mpv_opts .. string.format(" --sub-auto=all --sub-visibility=yes%s --slang=%s", font_opt, to_mpv_slang(sub_lang))
-    end
+    local font_opt = (sub_font_size and sub_font_size > 0) and string.format(" --sub-font-size=%d", sub_font_size) or ""
+    extra_mpv_opts = extra_mpv_opts .. string.format(" --subs-fallback=yes --sub-auto=all --sub-visibility=yes%s --slang=%s", font_opt, to_mpv_slang(sub_lang))
 
     local cmd
     if is_windows then
@@ -1305,7 +1385,7 @@ function MpvController:start(item, show_cc, sub_lang, browser, cookies_file, pro
         local GENERIC_WRITE = 0x40000000
         local OPEN_EXISTING = 3
         local INVALID_HANDLE_VALUE = ffi.cast("HANDLE", -1)
-        for _ = 1, 25 do
+        for _ = 1, 50 do
             sleep_ms(100)
             local h = kernel32.CreateFileA(pipe_path, bit.bor(GENERIC_READ, GENERIC_WRITE), 0, nil, OPEN_EXISTING, 0, nil)
             if h ~= INVALID_HANDLE_VALUE then
@@ -1322,8 +1402,11 @@ function MpvController:start(item, show_cc, sub_lang, browser, cookies_file, pro
     self.volume = 100
     self.is_paused = false
     self.sub_text = ""
+    self.last_sub_text = ""
+    self.has_sub_track = nil
     self.is_eof = false
     self.read_buf = ""
+    self.cc_state = { prev_last_line = "", prev_displayed = "" }
 
     self:send_command('{"command": ["observe_property", 1, "time-pos"]}')
     self:send_command('{"command": ["observe_property", 2, "duration"]}')
@@ -1331,6 +1414,7 @@ function MpvController:start(item, show_cc, sub_lang, browser, cookies_file, pro
     self:send_command('{"command": ["observe_property", 4, "sub-text"]}')
     self:send_command('{"command": ["observe_property", 5, "volume"]}')
     self:send_command('{"command": ["observe_property", 6, "eof-reached"]}')
+    self:send_command('{"command": ["observe_property", 7, "sub"]}')
 end
 
 function MpvController:poll()
@@ -1353,23 +1437,40 @@ function MpvController:poll()
         local line = self.read_buf:sub(1, nl - 1)
         self.read_buf = self.read_buf:sub(nl + 1)
 
-        if line:find('"event":"end-file"') or (line:find('"name":"eof-reached"') and line:find('true')) then
+        local prop = parse_json_field(line, "name")
+        if line:find('"event":"end-file"') or (prop == "eof-reached" and parse_json_field(line, "data") == true) then
             self.is_eof = true
-        elseif line:find('"name":"time-pos"') then
+        elseif prop == "time-pos" then
             local t = parse_json_field(line, "data")
             if t then self.time_pos = math.floor(t) end
-        elseif line:find('"name":"duration"') then
+        elseif prop == "duration" then
             local d = parse_json_field(line, "data")
             if d then self.duration = math.floor(d) end
-        elseif line:find('"name":"pause"') then
-            local p = line:find('"data":true') ~= nil
+        elseif prop == "pause" then
+            local p = parse_json_field(line, "data") == true
             self.is_paused = p
-        elseif line:find('"name":"volume"') then
+        elseif prop == "volume" then
             local v = parse_json_field(line, "data")
             if v then self.volume = math.floor(v) end
-        elseif line:find('"name":"sub-text"') then
+        elseif prop == "sub-text" then
             local s = parse_json_field(line, "data") or ""
-            self.sub_text = s
+            if #s > 0 then
+                local cleaned = clean_rolling_caption(s, self.cc_state)
+                if cleaned and #cleaned > 0 then
+                    self.sub_text = cleaned
+                    self.last_sub_text = cleaned
+                end
+                self.has_sub_track = true
+            else
+                self.sub_text = ""
+            end
+        elseif prop == "sub" then
+            local d = parse_json_field(line, "data")
+            if d == false or d == nil or line:find('"data":null') or line:find('"data":"no"') then
+                self.has_sub_track = false
+            else
+                self.has_sub_track = true
+            end
         end
     end
 
@@ -1392,6 +1493,8 @@ end
 
 function MpvController:seek(delta)
     self:send_command(string.format('{"command": ["seek", %d, "relative"]}', delta))
+    self.cc_state = { prev_last_line = "", prev_displayed = "" }
+    self.sub_text = ""
 end
 
 function MpvController:change_volume(delta)
@@ -1416,8 +1519,11 @@ function MpvController:stop()
     self.volume = 100
     self.is_paused = false
     self.sub_text = ""
+    self.last_sub_text = ""
+    self.has_sub_track = nil
     self.is_eof = false
     self.read_buf = ""
+    self.cc_state = { prev_last_line = "", prev_displayed = "" }
 end
 local function play_item(item, mode, browser, cookies_file, use_external_window, proxy, insecure, show_cc, sub_lang, sub_font_size)
     if not HAS_MPV then
@@ -1468,7 +1574,7 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
         -- Terminal video uses the status line for CC; GUI video uses normal subtitle rendering.
         local sub_vis = (mode == "video" and not use_external_window) and "no" or (show_cc and "yes" or "no")
         local font_opt = (sub_font_size and sub_font_size > 0) and string.format(" --sub-font-size=%d", sub_font_size) or ""
-        extra_mpv_opts = extra_mpv_opts .. string.format(" --sub-auto=all --sub-visibility=%s%s --slang=%s", sub_vis, font_opt, to_mpv_slang(sub_lang))
+        extra_mpv_opts = extra_mpv_opts .. string.format(" --subs-fallback=yes --sub-auto=all --sub-visibility=%s%s --slang=%s", sub_vis, font_opt, to_mpv_slang(sub_lang))
     end
 
     local term_w, term_h = get_terminal_size()
@@ -2011,11 +2117,14 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
     local last_rendered_pos = -1
     local last_rendered_sub = ""
     local last_rendered_pause = nil
+    local last_rendered_has_sub = nil
+    local last_rendered_last_sub = ""
     local max_list_h = 10
 
     local function draw_tui()
         local term_w, term_h = get_terminal_size()
-        local player_h = (MpvController.is_playing and MpvController.current_item) and 3 or 0
+        local has_cc_row = (MpvController.is_playing and MpvController.current_item and show_cc)
+        local player_h = (MpvController.is_playing and MpvController.current_item) and (has_cc_row and 4 or 3) or 0
         max_list_h = math.max(4, term_h - 7 - player_h)
 
         -- Clamp selection
@@ -2096,40 +2205,23 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
 
         -- 4. Mini-Player Box (when playing)
         if MpvController.is_playing and MpvController.current_item then
-            local cur = MpvController.current_item
-            local st_badge = MpvController.is_paused and "\27[1;93m[PAUSED]\27[0m" or "\27[1;92m[PLAYING]\27[0m"
-            local vol_str = string.format("\27[96mVol: %d%%\27[0m", MpvController.volume)
-            local title_part = utf8_truncate(cur.title, math.max(10, term_w - 45))
-            
-            -- Border 1
-            local pad1 = math.max(0, term_w - display_width(title_part) - 48)
-            table.insert(buf, string.format("\27[1;36m+-- \27[1;32m> Now Playing: \27[1;37m%s\27[1;36m --- %s --- %s %s+\27[0m\27[K\n",
-                title_part, vol_str, st_badge, string.rep("-", pad1)))
-            
-            -- Progress & CC
-            local dur = MpvController.duration > 0 and MpvController.duration or (cur.duration or 0)
-            local pos = MpvController.time_pos or 0
-            local cur_fmt = format_duration(pos)
-            local dur_fmt = format_duration(dur)
-            local bar_w = 12
-            local pct = (dur > 0) and math.min(1.0, math.max(0.0, pos / dur)) or 0
-            local filled = math.floor(pct * bar_w)
-            local prog_bar = string.rep("=", filled) .. (filled < bar_w and ">" or "") .. string.rep("-", math.max(0, bar_w - 1 - filled))
-            
-            local cc_part = ""
-            if show_cc and #MpvController.sub_text > 0 then
-                local max_cc_w = math.max(10, term_w - 45)
-                local clean_sub = sanitize_display_text(MpvController.sub_text)
-                cc_part = string.format(" | \27[1;93mCC: \27[1;97m%s\27[0m", utf8_truncate(clean_sub, max_cc_w))
+            local p_lines = render_mini_player_lines(
+                MpvController.current_item,
+                MpvController.is_paused,
+                MpvController.volume,
+                MpvController.time_pos,
+                MpvController.duration,
+                MpvController.sub_text,
+                show_cc,
+                term_w,
+                selected_idx,
+                #items,
+                MpvController.has_sub_track,
+                MpvController.last_sub_text
+            )
+            for _, l in ipairs(p_lines) do
+                table.insert(buf, l)
             end
-            
-            local player_line = string.format(" \27[1;36m|\27[0m \27[1;33m%s/%s\27[0m [\27[1;32m%s\27[0m]%s", cur_fmt, dur_fmt, prog_bar, cc_part)
-            table.insert(buf, player_line .. "\27[K\n")
-            
-            -- Border 2 (Controls)
-            local ctrl_hint = "\27[90m[Space] Pause  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol\27[0m"
-            local pad2 = math.max(0, term_w - 60)
-            table.insert(buf, string.format("\27[1;36m+-- %s %s+\27[0m\27[K\n", ctrl_hint, string.rep("-", pad2)))
         end
 
         -- 5. Footer Help
@@ -2145,6 +2237,8 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         last_rendered_pos = MpvController.time_pos
         last_rendered_sub = MpvController.sub_text
         last_rendered_pause = MpvController.is_paused
+        last_rendered_has_sub = MpvController.has_sub_track
+        last_rendered_last_sub = MpvController.last_sub_text
     end
 
     draw_tui()
@@ -2174,7 +2268,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                     MpvController:stop()
                     draw_tui()
                 end
-            elseif (st.time_pos ~= last_rendered_pos or st.sub_text ~= last_rendered_sub or st.is_paused ~= last_rendered_pause) then
+            elseif (st.time_pos ~= last_rendered_pos or st.sub_text ~= last_rendered_sub or st.is_paused ~= last_rendered_pause or MpvController.has_sub_track ~= last_rendered_has_sub or MpvController.last_sub_text ~= last_rendered_last_sub) then
                 draw_tui()
             end
         end
@@ -2224,11 +2318,11 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                     local chosen_item = table.remove(queue, chosen_idx)
                     save_history_item(chosen_item)
                     if mode == "music" then
-                        MpvController:start(chosen_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure)
+                        MpvController:start(chosen_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure, cc_font_size)
                         status_msg = "Playing: " .. utf8_truncate(chosen_item.title, 30)
                     else
                         MpvController:stop()
-                        play_item(chosen_item, mode, browser, cookies_file, use_window, proxy, insecure, show_cc, sub_lang)
+                        play_item(chosen_item, mode, browser, cookies_file, use_window, proxy, insecure, show_cc, sub_lang, cc_font_size)
                     end
                 end
                 draw_tui()
@@ -2583,6 +2677,80 @@ local function run_self_tests()
     assert(build_search_spec("chillhop", "music", 10, false, nil, "soundcloud") == '"scsearch10:chillhop"',
         "Soundcloud site adapter failed")
     print("  [✓] Search spec generation & audio-mode video search query preservation passed")
+
+    -- 16. Mini-player dedicated CC layout & renderer invariant tests
+    local sample_item = { title = "Lex Fridman Podcast #418 - Sam Altman", duration = 6734 }
+    local lines_cc_on = render_mini_player_lines(sample_item, false, 90, 252, 6734, "The pace of progress is extraordinary.", true, 100, 1, 20, true, "The pace of progress is extraordinary.")
+    assert(#lines_cc_on == 4, "Mini-player with CC ON must render exactly 4 lines")
+    assert(lines_cc_on[3]:find("%[CC%]") ~= nil, "Line 3 must contain [CC] badge")
+    assert(lines_cc_on[3]:find("The pace of progress is extraordinary%.") ~= nil, "Line 3 must contain active subtitle text")
+
+    -- Lingering subtitles during speech pause
+    local lines_cc_linger = render_mini_player_lines(sample_item, false, 90, 255, 6734, "", true, 100, 1, 20, true, "The pace of progress is extraordinary.")
+    assert(#lines_cc_linger == 4, "Mini-player with lingering subtitle must render 4 lines")
+    assert(lines_cc_linger[3]:find("The pace of progress is extraordinary%.") ~= nil, "Lingering subtitle must remain visible during speech pause")
+
+    -- No subtitle track on video
+    local lines_no_subs = render_mini_player_lines(sample_item, false, 90, 252, 6734, "", true, 100, 1, 20, false, "")
+    assert(#lines_no_subs == 4, "Mini-player with no subtitle track must render 4 lines")
+    assert(lines_no_subs[3]:find("No subtitles available") ~= nil, "Missing subtitle track must be indicated clearly")
+
+    local lines_cc_idle = render_mini_player_lines(sample_item, false, 90, 252, 6734, "", true, 100, 1, 20, nil, "")
+    assert(#lines_cc_idle == 4, "Mini-player with CC idle must render 4 lines stably")
+    assert(lines_cc_idle[3]:find("%(Listening for speech / instrumental%.%.%.%)") ~= nil, "Idle CC row must show listening placeholder")
+
+    local lines_cc_off = render_mini_player_lines(sample_item, true, 80, 50, 6734, "Ignored subtitle", false, 100, 1, 20, true, "Ignored")
+    assert(#lines_cc_off == 3, "Mini-player with CC OFF must render exactly 3 lines")
+    assert(lines_cc_off[1]:find("%[PAUSED%]") ~= nil, "Mini-player paused badge failed")
+
+    -- Boundary checks: narrow terminal and zero duration
+    local lines_narrow = render_mini_player_lines({ title = "A", duration = 0 }, false, 100, 0, 0, "Test", true, 35, 1, 1, true, "Test")
+    -- Exact width alignment invariants across various terminal sizes
+    for _, test_w in ipairs({ 80, 120, 148 }) do
+        local test_lines = render_mini_player_lines(sample_item, false, 90, 252, 6734, "The pace of progress is extraordinary.", true, test_w, 1, 20, true, "The pace of progress is extraordinary.")
+        assert(#test_lines == 4, "Mini-player must render 4 lines for width " .. test_w)
+        for row_idx, l in ipairs(test_lines) do
+            local clean_l = strip_ansi(l):gsub("\n$", "")
+            assert(display_width(clean_l) == test_w, string.format("Row %d width (%d) must exactly match term_w (%d)", row_idx, display_width(clean_l), test_w))
+        end
+    end
+    print("  [✓] Mini-player dedicated CC layout & renderer invariants passed")
+
+    -- 17. IPC Property Parsing & Subtitle Collision Prevention
+    local ipc_sub_text = '{"event":"property-change","id":4,"name":"sub-text","data":"So today we\'re going to discuss LuaJIT"}'
+    local ipc_sub_track = '{"event":"property-change","id":7,"name":"sub","data":1}'
+    local ipc_sub_none = '{"event":"property-change","id":7,"name":"sub","data":false}'
+    assert(parse_json_field(ipc_sub_text, "name") == "sub-text", "IPC sub-text name extraction failed")
+    assert(parse_json_field(ipc_sub_track, "name") == "sub", "IPC sub track name extraction failed")
+    assert(parse_json_field(ipc_sub_text, "data") == "So today we're going to discuss LuaJIT", "IPC sub-text data extraction failed")
+    assert(parse_json_field(ipc_sub_track, "data") == 1, "IPC sub data extraction failed")
+    assert(parse_json_field(ipc_sub_none, "data") == false, "IPC sub false data extraction failed")
+
+    -- Multiline JSON string newline preservation
+    local multiline_json = '{"name":"sub-text","data":"Line 1\\nLine 2"}'
+    assert(parse_json_field(multiline_json, "data") == "Line 1\nLine 2", "parse_json_field must preserve \\n newline escapes")
+
+    -- Sanitization entity & ASS tag stripping
+    local dirty_cc = "{\\an8}<i>Don&#39;t</i> miss &quot;LuaJIT&quot; &amp; friends!"
+    local clean_cc = sanitize_display_text(dirty_cc)
+    assert(clean_cc == "Don't miss \"LuaJIT\" & friends!", "Caption HTML/ASS sanitization failed: " .. tostring(clean_cc))
+
+    -- Simulated MpvController IPC buffer stream decoding with rolling caption deduplication
+    MpvController.is_playing = true
+    MpvController.cc_state = { prev_last_line = "", prev_displayed = "" }
+    MpvController.read_buf = ipc_sub_track .. "\n" .. '{"name":"sub-text","data":"France is now spending a\\nthird of its national budget"}\n'
+    MpvController:poll()
+    assert(MpvController.has_sub_track == true, "MpvController has_sub_track should be true")
+    assert(MpvController.sub_text == "France is now spending a third of its national budget", "Initial cue mismatch: " .. tostring(MpvController.sub_text))
+
+    -- Subsequent cue repeats line 1; deduplication must strip repeated overlap
+    MpvController.read_buf = '{"name":"sub-text","data":"third of its national budget\\non defense"}\n'
+    MpvController:poll()
+    assert(MpvController.sub_text == "on defense", "Overlapping words must be stripped from rolling cue: " .. tostring(MpvController.sub_text))
+
+    MpvController.is_playing = false
+    MpvController.read_buf = ""
+    print("  [✓] IPC property parsing & rolling subtitle deduplication passed")
 
     print("=== All Internal Self-Tests Passed Successfully ===")
     return true
