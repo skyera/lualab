@@ -145,6 +145,23 @@ local ok,e=xpcall(function()
   check(result.errors[1].path==dir..(kind=='candidate' and '/c' or '/a'),'identify failed path: '..kind)
  end
  -- End representative regressions.
+ -- Regression: invalid UTF-8 paths must retain reversible bytes in JSON.
+ local invalid_dir=directory('invalid-utf8')
+ local invalid_path=write('invalid-utf8/bad-\255','same');write('invalid-utf8/copy','same')
+ local raw_result=finder.scan({invalid_dir})
+ local safe=json.decode(finder.to_json(raw_result))
+ local function unhex(s) return (s:gsub('..',function(pair) return string.char(tonumber(pair,16)) end)) end
+ check(#safe.groups==1 and safe.groups[1].paths_hex~=nil,'JSON raw-byte paths included')
+ check(unhex(safe.groups[1].paths_hex[1])==invalid_path,'JSON filename bytes recover exactly')
+ local invalids={'\192\175','\237\160\128','\244\144\128\128','\226\130','\128','\255'}
+ for _,raw in ipairs(invalids) do
+  local doc=json.decode(finder.to_json({groups={},errors={{path=raw,message=raw}},files=0,redundant_bytes=0,skipped_links=0}))
+  check(unhex(doc.errors[1].path_hex)==raw and unhex(doc.errors[1].message_hex)==raw,'invalid UTF-8 error bytes retained')
+ end
+ local unicode='中文-😀-\194\128-\239\191\191-\244\143\191\191'
+ local unicode_doc=json.decode(finder.to_json({groups={{size=1,paths={unicode}}},errors={},files=1,redundant_bytes=0,skipped_links=0}))
+ check(unicode_doc.groups[1].paths[1]==unicode and unicode_doc.groups[1].paths_hex==nil,'valid UTF-8 unchanged')
+ -- End JSON regressions.
  if ffi.C.geteuid() ~= 0 then
   directory('unreadable'); local denied=write('unreadable/a','abc'); write('unreadable/b','abc')
   assert(ffi.C.chmod(denied,0)==0)

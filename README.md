@@ -146,6 +146,12 @@ Output is sorted by descending file size and then path. Text output quotes paths
 so control characters cannot affect the terminal. JSON contains `groups`
 (`size`, `paths`), `files`, `redundant_bytes`, `skipped_links`, and `errors`.
 
+For Linux filenames containing invalid UTF-8, JSON display paths substitute
+U+FFFD for invalid bytes. The affected group also includes `paths_hex`, a parallel
+array encoding the original bytes of every path. Error records similarly add
+`path_hex` or `message_hex` when needed. Decode hex to recover the exact bytes;
+valid Unicode paths keep their existing representation.
+
 Requires Windows 8+ with file-ID support, or 64-bit Linux with libc/kernel
 support for `statx`. Exit status is 0 for
 complete scans (including no duplicates), 1 for filesystem/read errors, and 2

@@ -382,24 +382,63 @@ function M.render(r)
  lines[#lines+1]=string.format('%d duplicate group(s); %.0f redundant content bytes; %d files scanned',#r.groups,r.redundant_bytes,r.files)
  return table.concat(lines,'\n')..'\n'
 end
+-- Preserve valid UTF-8; replace invalid bytes only in display strings. Raw
+-- filename bytes are carried separately as hex whenever replacement occurs.
 local function json_string(value)
- return '"' .. value:gsub('[%z\1-\31\\"]', function(c)
-  if c == '"' then return '\\"' end
-  if c == '\\' then return '\\\\' end
-  return string.format('\\u%04x', c:byte())
- end) .. '"'
+ local out, i, invalid = {'"'}, 1, false
+ while i <= #value do
+  local b = value:byte(i)
+  if b < 128 then
+   if b == 34 then out[#out+1] = '\\"'
+   elseif b == 92 then out[#out+1] = '\\\\'
+   elseif b < 32 then out[#out+1] = string.format('\\u%04x', b)
+   else out[#out+1] = string.char(b) end
+   i = i + 1
+  else
+   local n = b >= 194 and b <= 223 and 2 or
+    b >= 224 and b <= 239 and 3 or b >= 240 and b <= 244 and 4 or 0
+   local valid = n > 0 and i + n - 1 <= #value
+   for j=1,n-1 do
+    local c = value:byte(i+j)
+    if not c or c < 128 or c > 191 then valid = false end
+   end
+   local second = value:byte(i+1)
+   if (b == 224 and (not second or second < 160)) or
+      (b == 237 and second and second > 159) or
+      (b == 240 and (not second or second < 144)) or
+      (b == 244 and second and second > 143) then valid = false end
+   if valid then out[#out+1] = value:sub(i,i+n-1); i = i + n
+   else out[#out+1] = '\\ufffd'; invalid = true; i = i + 1 end
+  end
+ end
+ out[#out+1] = '"'
+ return table.concat(out), invalid
+end
+local function hex_bytes(value)
+ return (value:gsub('.', function(c) return string.format('%02x', c:byte()) end))
 end
 function M.to_json(r)
  local groups, errors = {}, {}
  for _, group in ipairs(r.groups) do
-  local paths = {}
-  for _, path in ipairs(group.paths) do paths[#paths+1] = json_string(path) end
+  local paths, raw_paths, invalid = {}, {}, false
+  for _, path in ipairs(group.paths) do
+   local encoded, bad = json_string(path)
+   paths[#paths+1] = encoded
+   invalid = invalid or bad
+  end
+  if invalid then
+   for _, path in ipairs(group.paths) do raw_paths[#raw_paths+1] = '"' .. hex_bytes(path) .. '"' end
+  end
   groups[#groups+1] = '{"size":' .. string.format('%.0f', group.size) ..
-   ',"paths":[' .. table.concat(paths, ',') .. ']}'
+   ',"paths":[' .. table.concat(paths, ',') .. ']' ..
+   (invalid and ',"paths_hex":[' .. table.concat(raw_paths, ',') .. ']' or '') .. '}'
  end
  for _, error in ipairs(r.errors) do
-  errors[#errors+1] = '{"path":' .. json_string(error.path) ..
-   ',"message":' .. json_string(error.message) .. '}'
+  local path, bad_path = json_string(error.path)
+  local message, bad_message = json_string(error.message)
+  errors[#errors+1] = '{"path":' .. path .. ',"message":' .. message ..
+   (bad_path and ',"path_hex":"' .. hex_bytes(error.path) .. '"' or '') ..
+   (bad_message and ',"message_hex":"' .. hex_bytes(error.message) .. '"' or '') .. '}'
  end
  return '{"groups":[' .. table.concat(groups, ',') .. '],"errors":[' ..
   table.concat(errors, ',') .. '],"files":' .. string.format('%.0f', r.files) ..
