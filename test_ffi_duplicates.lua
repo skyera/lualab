@@ -90,6 +90,10 @@ local ok,e=xpcall(function()
  out,status=cli(quote(root))
  check(status==0 and out:find('3 duplicate group',1,true)~=nil,'text CLI output')
  out,status=cli('--help'); check(status==0 and out:find('Usage:',1,true)~=nil,'help')
+ for _,section in ipairs({'Options','Examples','Scanning and results','Exit status','TUI keys','--tui','--json','--min-size=BYTES','1048576','Space','Ctrl-C','NEW filename'}) do
+  check(out:find(section,1,true)~=nil,'help explains '..section)
+ end
+ local short_help,short_status=cli('-h');check(short_status==0 and short_help==out,'short help matches long help')
  out,status=cli('--wat'); check(status==2 and out:find('Unknown option',1,true)~=nil,'unknown flag')
  out,status=cli('--min-size=-1'); check(status==2,'negative size')
  out,status=cli('--min-size=9007199254740992'); check(status==2,'inexact size')

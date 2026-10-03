@@ -7,6 +7,7 @@
 
 local test_suites = {
     { file = "test_ffi_duplicates.lua", description = "FFI read-only duplicate-file finder" },
+    { file = "test_ffi_duplicates_tui.lua", description = "Duplicate finder TUI rendering and input" },
     { file = "test_ffi_suite.lua", description = "LuaJIT FFI Structs & C Binding Suite" },
     { file = "test_gallery_portrait.lua", description = "Procedural Portrait Gallery & HTML Exporter" },
     { file = "test_ffi_log_explorer.lua", description = "Windows/Linux Log Explorer Suite" },

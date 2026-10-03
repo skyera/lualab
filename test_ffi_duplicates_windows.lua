@@ -131,6 +131,14 @@ function native.GetFullPathNameW(w,n,out)
  return #assert(units(s))+1
 end
 function native.CreateFileW(w,access,share,security,creation,flags)
+ if creation==1 then
+  assert(access==0x40000000 and share==0 and flags==128,'exclusive export creation flags')
+  local path=text(w)
+  if state.files[path] then state.error=183;return invalid end
+  if state.deny_create then state.error=5;return invalid end
+  local file={id=100,data=''};state.files[path]=file
+  local h={file=file,offset=0};state.handles[h]=true;return h
+ end
  check(share==7 and creation==3 and bit.band(flags,0x02200000)==0x02200000,'open flags and sharing')
  assert(access == 0x80 or access == 0x80000000, 'metadata opens must request FILE_READ_ATTRIBUTES')
  local path=text(w);local f=state.files[path]
@@ -163,6 +171,11 @@ function native.ReadFile(h,buf,size,out)
  if f.read_error then state.error=5;return 0 end
  local s=f.data:sub(h.offset+1,h.offset+math.min(size,10000))
  ffi.copy(buf,s,#s);h.offset=h.offset+#s;out[0]=#s;return 1
+end
+function native.WriteFile(h,buf,size,out)
+ if state.write_error then state.error=5;return 0 end
+ local n=state.zero_write and 0 or math.min(size,10000)
+ h.file.data=h.file.data..buf:sub(1,n);out[0]=n;return 1
 end
 function native.FindFirstFileW(w,data)
  local path=text(w):gsub('\\%*$','');local dir=state.files[path]
@@ -263,4 +276,19 @@ state.files[base].names={}
 check(fs.list('C:\\fixture',function() error('empty directory visited') end),'empty Windows directory')
 check(next(state.handles)==nil and next(state.finds)==nil,'all native handles closed')
 check(#json.decode(winfinder.to_json(r)).groups==2,'Windows result JSON roundtrip')
+check(fs.write_new('C:\\export.json','中文-😀'),'Windows Unicode export creation')
+check(state.files['\\\\?\\C:\\export.json'].data=='中文-😀','Windows export content')
+check(not fs.write_new('C:\\export.json','overwrite'),'Windows export refuses overwrite')
+check(state.files['\\\\?\\C:\\export.json'].data=='中文-😀','Windows existing file preserved')
+local large=string.rep('\0\255',40000)
+check(fs.write_new('C:\\large.json',large),'Windows chunked export')
+check(state.files['\\\\?\\C:\\large.json'].data==large,'Windows short writes handled')
+state.deny_create=true
+check(not fs.write_new('C:\\denied.json','data'),'Windows export access error')
+state.deny_create=false;state.zero_write=true
+check(not fs.write_new('C:\\zero.json','data'),'Windows zero write fails cleanly')
+state.zero_write=false;state.write_error=true
+check(not fs.write_new('C:\\failed.json','data'),'Windows write failure reported')
+state.write_error=false
+check(next(state.handles)==nil,'Windows export handles closed on all paths')
 print(string.format('PASS: %d Windows backend checks (Win32 API double; native runtime unavailable)',count))

@@ -122,6 +122,7 @@ hash, and confirms every match byte-for-byte. It never deletes or modifies files
 
 ```bash
 luajit ffi_duplicates.lua ./photos ./backup
+luajit ffi_duplicates.lua --tui ./photos ./backup
 luajit ffi_duplicates.lua --min-size=1048576 .
 luajit ffi_duplicates.lua --json . > duplicates.json
 luajit ffi_duplicates.lua -- ./-unusual-directory
@@ -151,6 +152,29 @@ U+FFFD for invalid bytes. The affected group also includes `paths_hex`, a parall
 array encoding the original bytes of every path. Error records similarly add
 `path_hex` or `message_hex` when needed. Decode hex to recover the exact bytes;
 valid Unicode paths keep their existing representation.
+
+Use `--tui` in an interactive Linux terminal or Windows console to browse
+duplicate groups sorted by redundant bytes. Wide terminals show groups and files
+side by side; narrow terminals show the active pane. Arrow keys or `j`/`k` move,
+Tab switches panes, Page Up/Down and Home/End navigate, `/` filters paths, Space
+marks groups, Enter opens scrollable full-path details, and `!` opens scan errors.
+Escape returns from a view or cancels a prompt; `q` exits. During scanning,
+`q`/Escape cancel and Ctrl-C exits with status 130.
+Press `?` for scrollable help with all keys, filtering instructions, and export
+behavior; Enter/Escape returns to the previous view. `--help` (or `-h`) shows
+options, Linux/Windows examples, scan behavior, exit codes, and TUI keys.
+
+Press `e` to export marked groups, or the current group when none are marked.
+Enter a new JSON filename; existing files are preserved. Scanned files are never
+modified. A failed write may leave a partial export file. `--tui` and `--json`
+cannot be combined, and redirected terminal input/output is rejected cleanly.
+
+TUI verification commands:
+
+```bash
+luajit test_ffi_duplicates_tui.lua
+python3 test_ffi_duplicates_tui_pty.py  # Linux: real terminal resize/input/signal checks
+```
 
 Requires Windows 8+ with file-ID support, or 64-bit Linux with libc/kernel
 support for `statx`. Exit status is 0 for

@@ -25,6 +25,7 @@ all: $(LUAJIT_LIB) $(BIN1) $(BIN2) $(BIN3) $(BIN4)
 
 test: $(LUAJIT_LIB)
 	$(LUAJIT_DIR)/src/luajit test_ffi_duplicates.lua
+	$(LUAJIT_DIR)/src/luajit test_ffi_duplicates_tui.lua
 	$(LUAJIT_DIR)/src/luajit test_gallery_portrait.lua
 	$(LUAJIT_DIR)/src/luajit test_pix.lua
 	$(LUAJIT_DIR)/src/luajit test_ffi_3d_viewer.lua

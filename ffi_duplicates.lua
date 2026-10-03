@@ -39,6 +39,7 @@ local function windows_backend(native, shell)
         int __stdcall GetFileInformationByHandleEx(void *, int, void *, uint32_t);
         uint32_t __stdcall GetFileType(void *);
         int __stdcall ReadFile(void *, void *, uint32_t, uint32_t *, void *);
+        int __stdcall WriteFile(void *, const void *, uint32_t, uint32_t *, void *);
         int __stdcall CloseHandle(void *);
         void *__stdcall FindFirstFileW(const uint16_t *, DupFindData *);
         int __stdcall FindNextFileW(void *, DupFindData *);
@@ -149,6 +150,37 @@ local function windows_backend(native, shell)
         return open_path(path, 0x80000000)
     end
 
+    function M.write_new(path, text)
+        local name, e = M.path(path)
+        if not name then
+            return nil, e
+        end
+        local h = native.CreateFileW(name, 0x40000000, 0, nil, 1, 128, nil)
+        if h == invalid or h == nil then
+            return nil, err()
+        end
+        local offset, count = 1, ffi.new('uint32_t[1]')
+        while offset <= #text do
+            local part = text:sub(offset, offset + 65535)
+            if native.WriteFile(h, part, #part, count, nil) == 0 then
+                e = err()
+                break
+            end
+            if count[0] == 0 then
+                e = 'Export write made no progress'
+                break
+            end
+            offset = offset + tonumber(count[0])
+        end
+        if native.CloseHandle(h) == 0 and not e then
+            e = err()
+        end
+        if e then
+            return nil, e
+        end
+        return true
+    end
+
     function M.metadata(path, handle)
         local h, e = handle
         if not h then
@@ -244,7 +276,9 @@ local function windows_backend(native, shell)
                 break
             end
             if name ~= '.' and name ~= '..' then
-                visit(name)
+                if visit(name) == false then
+                    break
+                end
             end
             if native.FindNextFileW(h, data) == 0 then
                 if native.GetLastError() ~= 18 then
@@ -331,6 +365,7 @@ local function linux_backend()
         int statx(int fd, const char *path, int flags, unsigned int mask, dup_stat *out);
         int open(const char *path, int flags, ...);
         long read(int fd, void *buf, unsigned long count);
+        long write(int fd, const void *buf, unsigned long count);
         int close(int fd);
         char *strerror(int err);
     ]])
@@ -379,6 +414,36 @@ local function linux_backend()
         return fd
     end
 
+    function M.write_new(path, text)
+        local fd = C.open(path, 0x80000 + 0x20000 + 0xc1, ffi.cast('unsigned int', 420))
+        if fd < 0 then
+            return nil, err()
+        end
+        local offset, e = 1, nil
+        while offset <= #text do
+            local part = text:sub(offset, offset + 65535)
+            local n = tonumber(C.write(fd, part, #part))
+            if n < 0 then
+                if ffi.errno() ~= 4 then
+                    e = err()
+                    break
+                end
+            elseif n == 0 then
+                e = 'Export write made no progress'
+                break
+            else
+                offset = offset + n
+            end
+        end
+        if C.close(fd) ~= 0 and not e then
+            e = err()
+        end
+        if e then
+            return nil, e
+        end
+        return true
+    end
+
     function M.read(fd, buf, size)
         while true do
             local n = tonumber(C.read(fd, buf, size))
@@ -416,7 +481,9 @@ local function linux_backend()
             end
             local name = ffi.string(entry.name)
             if name ~= '.' and name ~= '..' then
-                visit(name)
+                if visit(name) == false then
+                    break
+                end
             end
         end
         C.closedir(d)
@@ -429,6 +496,1044 @@ local function linux_backend()
 end
 
 local backend = ffi.os == 'Windows' and windows_backend() or linux_backend()
+
+-- The TUI model and frame generators are independent of terminal I/O.
+local TUI = {}
+TUI.help_lines = {
+    'Browsing',
+    '  Up/Down or j/k  Move in the active pane.',
+    '  PgUp/PgDn       Move one page; Home/End jump to first/last.',
+    '  Tab             Switch groups/files; narrow screens show one pane.',
+    '  Enter           View full paths and sizes for the current group.',
+    '  /               Filter groups by literal text in any file path.',
+    '  Space           Mark/unmark the current group for export.',
+    '  e               Export marked groups, or the current group if none marked.',
+    '  !               View scan errors.',
+    '  ?               Open help; press ? again to return.',
+    '  q or Esc        Quit from the browsing view.',
+    '',
+    'Filter and export prompts',
+    '  Type text       Spaces and Unicode characters are supported.',
+    '  Backspace       Remove the last character.',
+    '  Enter           Keep the filter, or write the JSON export.',
+    '  Esc             Cancel; a filter returns to its previous value.',
+    '  Clear filter    Press /, erase its text, then Enter.',
+    '',
+    'Details, errors, and help',
+    '  Up/Down         Scroll one line.',
+    '  PgUp/PgDn       Scroll one page; Home/End jump to top/bottom.',
+    '  Enter/Esc or q  Return to the previous view.',
+    '  Ctrl-C          Exit from any view or prompt (status 130).',
+    '',
+    'Scan and export behavior',
+    '  During scanning, q or Esc cancels; Ctrl-C exits with status 130.',
+    '  Groups contain byte-identical files and are sorted by redundant bytes.',
+    '  Marked groups remain marked when hidden by a filter.',
+    '  Export writes JSON to a NEW filename; existing files are preserved.',
+    '  A failed export may leave a partial file. Scanned files are read-only.',
+    '  Redundant bytes describe logical content, not guaranteed disk savings.',
+}
+local CLI_HELP = table.concat({
+    'Duplicate Finder - find byte-identical files without modifying them.',
+    '',
+    'Usage: luajit ffi_duplicates.lua [OPTIONS] [--] [PATH ...]',
+    'Scan files or directories recursively. With no PATH, scan the current directory.',
+    '',
+    'Options',
+    '  --tui              Browse groups in an interactive terminal or Windows console.',
+    '  --json             Write machine-readable results to stdout; errors go to stderr.',
+    '  --min-size=BYTES   Include files at least this many bytes (default: 0).',
+    '  -h, --help         Show this help and exit.',
+    '  --                 Treat all following arguments as paths, even if starting with -.',
+    '  --tui and --json cannot be combined.',
+    '',
+    'Examples',
+    '  luajit ffi_duplicates.lua                         # Scan the current directory',
+    '  luajit ffi_duplicates.lua ./photos ./backup       # Scan multiple roots',
+    '  luajit ffi_duplicates.lua --tui ./photos          # Browse duplicate groups',
+    '  luajit ffi_duplicates.lua --min-size=1048576 .    # Files of at least 1 MiB',
+    '  luajit ffi_duplicates.lua --min-size=1 .          # Exclude empty files',
+    '  luajit ffi_duplicates.lua --json . > duplicates.json',
+    '  luajit ffi_duplicates.lua -- -photos              # A path starting with -',
+    '  luajit ffi_duplicates.lua --tui "C:\\Users\\Alice\\Downloads"',
+    '',
+    'Scanning and results',
+    '  Hidden and empty files are included unless excluded by --min-size.',
+    '  Symlinks, Windows reparse points, and special files are skipped.',
+    '  Repeated roots and hard links are counted once by native file identity.',
+    '  Matches are confirmed byte-for-byte. CLI groups are sorted by file size.',
+    '  Scans are not snapshots; detected file changes are reported as errors.',
+    '  Redundant bytes describe logical content, not guaranteed disk savings.',
+    '  Requires Windows 8+ with file-ID support, or 64-bit Linux with statx.',
+    '  --tui requires interactive input AND output; use CLI/JSON for pipelines.',
+    '',
+    'Exit status',
+    '  0  Complete CLI scan (including no matches), or normal TUI exit/cancellation.',
+    '  1  CLI scan errors or a TUI runtime failure.',
+    '  2  Invalid arguments or an unavailable interactive terminal.',
+    '  130  Ctrl-C in the TUI.',
+    '',
+    'TUI keys - press ? inside the interface for scrollable help',
+}, '\n') .. '\n' .. table.concat(TUI.help_lines, '\n') .. '\n'
+local function char_at(text, index)
+    local b = text:byte(index)
+    if not b then
+        return nil
+    end
+    local n = b < 128 and 1
+        or b >= 194 and b <= 223 and 2
+        or b >= 224 and b <= 239 and 3
+        or b >= 240 and b <= 244 and 4
+        or 1
+    if index + n - 1 > #text then
+        return nil
+    end
+    local cp = n == 1 and b or b % (2 ^ (7 - n))
+    for j = 1, n - 1 do
+        local c = text:byte(index + j)
+        if c < 128 or c > 191 then
+            return '?', 1, 63
+        end
+        cp = cp * 64 + c - 128
+    end
+    if
+        (n == 1 and b >= 128)
+        or (
+            n > 1
+            and (
+                cp < ({ [2] = 128, [3] = 2048, [4] = 65536 })[n]
+                or cp > 0x10ffff
+                or (cp >= 0xd800 and cp <= 0xdfff)
+            )
+        )
+    then
+        return '?', 1, 63
+    end
+    return text:sub(index, index + n - 1), n, cp
+end
+local function cell_width(cp)
+    if (cp >= 0x300 and cp <= 0x36f) or (cp >= 0xfe00 and cp <= 0xfe0f) then
+        return 0
+    end
+    if
+        cp >= 0x1100
+        and (
+            cp <= 0x115f
+            or (cp >= 0x2e80 and cp <= 0xa4cf)
+            or (cp >= 0xac00 and cp <= 0xd7a3)
+            or (cp >= 0xf900 and cp <= 0xfaff)
+            or (cp >= 0xfe10 and cp <= 0xff60)
+            or (cp >= 0xffe0 and cp <= 0xffe6)
+            or cp >= 0x1f300
+        )
+    then
+        return 2
+    end
+    return 1
+end
+function TUI.fit(text, width)
+    local out, used, i = {}, 0, 1
+    while i <= #text do
+        local ch, n, cp = char_at(text, i)
+        if not ch then
+            ch, n, cp = '?', 1, 63
+        end
+        if cp < 32 or (cp >= 127 and cp < 160) then
+            ch, cp = ' ', 32
+        end
+        local cells = cell_width(cp)
+        if used + cells > width then
+            break
+        end
+        out[#out + 1], used, i = ch, used + cells, i + n
+    end
+    return table.concat(out) .. string.rep(' ', math.max(0, width - used))
+end
+local function pop_utf8(text)
+    local i = #text
+    while i > 0 and text:byte(i) >= 128 and text:byte(i) < 192 do
+        i = i - 1
+    end
+    return text:sub(1, math.max(0, i - 1))
+end
+local function wrap(text, width)
+    local lines, line, used, i = {}, {}, 0, 1
+    width = math.max(1, width)
+    while i <= #text do
+        local ch, n, cp = char_at(text, i)
+        if not ch then
+            ch, n, cp = '?', 1, 63
+        end
+        if cp < 32 or (cp >= 127 and cp < 160) then
+            ch, cp = ' ', 32
+        end
+        local cells = cell_width(cp)
+        if cells > width then
+            ch, cells = '?', 1
+        end
+        if used + cells > width then
+            lines[#lines + 1], line, used = table.concat(line), {}, 0
+        end
+        line[#line + 1], used, i = ch, used + cells, i + n
+    end
+    lines[#lines + 1] = table.concat(line)
+    return lines
+end
+local function tail(text, width)
+    local lines = wrap(text, width)
+    return lines[#lines]
+end
+local function human(bytes)
+    local units, index = { 'B', 'KiB', 'MiB', 'GiB', 'TiB' }, 1
+    while bytes >= 1024 and index < #units do
+        bytes, index = bytes / 1024, index + 1
+    end
+    return string.format(index == 1 and '%.0f %s' or '%.1f %s', bytes, units[index])
+end
+function TUI.decoder()
+    local pending = ''
+    return function(bytes, flush)
+        pending = pending .. (bytes or '')
+        local keys = {}
+        while #pending > 0 do
+            if pending:sub(1, 1) == '\27' then
+                if
+                    not flush
+                    and (pending == '\27' or pending:match('^\27%[[0-9;]*$') or pending == '\27O')
+                then
+                    break
+                end
+                local sequence = pending:match('^\27%[[0-9;]*[A-Za-z~]')
+                    or pending:match('^\27O[A-Za-z]')
+                if sequence then
+                    local key = ({
+                        ['\27[A'] = 'UP',
+                        ['\27[B'] = 'DOWN',
+                        ['\27[C'] = 'RIGHT',
+                        ['\27[D'] = 'LEFT',
+                        ['\27[5~'] = 'PAGE_UP',
+                        ['\27[6~'] = 'PAGE_DOWN',
+                        ['\27[H'] = 'HOME',
+                        ['\27[F'] = 'END',
+                        ['\27OH'] = 'HOME',
+                        ['\27OF'] = 'END',
+                        ['\27[1~'] = 'HOME',
+                        ['\27[4~'] = 'END',
+                    })[sequence]
+                    if key then
+                        keys[#keys + 1] = key
+                    end
+                    pending = pending:sub(#sequence + 1)
+                else
+                    keys[#keys + 1] = 'ESC'
+                    pending = pending:sub(2)
+                end
+            else
+                local ch, n = char_at(pending, 1)
+                if not ch then
+                    if not flush then
+                        break
+                    end
+                    ch, n = '?', 1
+                end
+                keys[#keys + 1] = ({
+                    [' '] = 'SPACE',
+                    ['\t'] = 'TAB',
+                    ['\127'] = 'BACKSPACE',
+                    ['\8'] = 'BACKSPACE',
+                    ['\r'] = 'ENTER',
+                    ['\n'] = 'ENTER',
+                    ['\3'] = 'CTRL_C',
+                })[ch] or ch
+                pending = pending:sub(n + 1)
+            end
+        end
+        return keys
+    end
+end
+local Model = {}
+Model.__index = Model
+function TUI.model(result)
+    local model = setmetatable({
+        result = result,
+        groups = {},
+        visible = {},
+        marked = {},
+        group = 1,
+        file = 1,
+        group_scroll = 0,
+        file_scroll = 0,
+        pane = 'groups',
+        query = '',
+        view = 'browse',
+        detail_scroll = 0,
+        status = 'Ready',
+        input = '',
+        cols = 80,
+        rows = 24,
+    }, Model)
+    for _, group in ipairs(result.groups) do
+        model.groups[#model.groups + 1] = group
+    end
+    table.sort(model.groups, function(a, b)
+        local av, bv = a.size * (#a.paths - 1), b.size * (#b.paths - 1)
+        return av == bv and a.paths[1] < b.paths[1] or av > bv
+    end)
+    model:filter()
+    return model
+end
+function Model:selected()
+    return self.visible[self.group]
+end
+function Model:filter()
+    self.visible = {}
+    local query = self.query:lower()
+    for _, group in ipairs(self.groups) do
+        for _, path in ipairs(group.paths) do
+            if path:lower():find(query, 1, true) then
+                self.visible[#self.visible + 1] = group
+                break
+            end
+        end
+    end
+    self.group, self.file, self.group_scroll, self.file_scroll = 1, 1, 0, 0
+    self.filter_pending = false
+end
+function Model:clamp(cols, rows)
+    self.cols, self.rows = cols, rows
+    local height = math.max(1, rows - 4)
+    local function clamp(selected, scroll, count)
+        selected = count == 0 and 0 or math.max(1, math.min(count, selected))
+        scroll = math.max(0, math.min(scroll, math.max(0, count - height)))
+        if selected > 0 then
+            scroll = math.max(0, math.min(selected - 1, math.max(scroll, selected - height)))
+        end
+        return selected, scroll
+    end
+    self.group, self.group_scroll = clamp(self.group, self.group_scroll, #self.visible)
+    local group = self:selected()
+    self.file, self.file_scroll = clamp(self.file, self.file_scroll, group and #group.paths or 0)
+    if self.view ~= 'browse' then
+        self.detail_scroll = math.min(
+            self.detail_scroll,
+            math.max(0, #TUI.detail_lines(self, math.max(1, cols - 1)) - height)
+        )
+    end
+end
+function Model:export_result()
+    local result = {
+        groups = {},
+        errors = self.result.errors,
+        files = self.result.files,
+        redundant_bytes = 0,
+        skipped_links = self.result.skipped_links,
+    }
+    for _, group in ipairs(self.groups) do
+        if self.marked[group] then
+            result.groups[#result.groups + 1] = group
+        end
+    end
+    if #result.groups == 0 and self:selected() then
+        result.groups[1] = self:selected()
+    end
+    for _, group in ipairs(result.groups) do
+        result.redundant_bytes = result.redundant_bytes + group.size * (#group.paths - 1)
+    end
+    return result
+end
+function Model:key(key)
+    if key == 'CTRL_C' or key == 'EOF' then
+        return false
+    end
+    if self.prompt then
+        if key == 'ESC' then
+            if self.prompt == 'filter' then
+                self.query = self.before_query
+                self.filter_pending = true
+            end
+            self.prompt = nil
+        elseif key == 'ENTER' then
+            if self.prompt == 'export' then
+                if self.input == '' then
+                    self.status = 'Enter a new JSON filename'
+                    return true
+                end
+                local effect = { path = self.input, result = self:export_result() }
+                self.prompt = nil
+                return true, effect
+            end
+            self.prompt = nil
+        elseif key == 'BACKSPACE' then
+            self.input = pop_utf8(self.input)
+        else
+            local text = key == 'SPACE' and ' ' or key
+            local _, n = char_at(text, 1)
+            if n == #text and not text:find('[%z\1-\31\127]') then
+                self.input = self.input .. text
+            end
+        end
+        if self.prompt == 'filter' then
+            self.query = self.input
+            self.filter_pending = true
+        end
+        return true
+    end
+    if key == '?' then
+        if self.view == 'help' then
+            self.view, self.detail_scroll = self.help_return_view, self.help_return_scroll
+        else
+            self.help_return_view, self.help_return_scroll = self.view, self.detail_scroll
+            self.view, self.detail_scroll = 'help', 0
+        end
+        self:clamp(self.cols, self.rows)
+        return true
+    end
+    if self.view ~= 'browse' then
+        if key == 'ESC' or key == 'ENTER' or key == 'q' then
+            if self.view == 'help' then
+                self.view, self.detail_scroll = self.help_return_view, self.help_return_scroll
+            else
+                self.view, self.detail_scroll = 'browse', 0
+            end
+        else
+            local delta = ({
+                UP = -1,
+                DOWN = 1,
+                PAGE_UP = -math.max(1, self.rows - 4),
+                PAGE_DOWN = math.max(1, self.rows - 4),
+            })[key]
+            if key == 'HOME' then
+                self.detail_scroll = 0
+            elseif key == 'END' then
+                self.detail_scroll = 1000000000
+            elseif delta then
+                self.detail_scroll = math.max(0, self.detail_scroll + delta)
+            end
+        end
+        self:clamp(self.cols, self.rows)
+        return true
+    end
+    if key == 'q' or key == 'ESC' then
+        return false
+    elseif key == 'TAB' then
+        self.pane = self.pane == 'groups' and 'files' or 'groups'
+    elseif key == '/' then
+        self.prompt = 'filter'
+        self.before_query = self.query
+        self.input = self.query
+    elseif key == 'SPACE' then
+        local group = self:selected()
+        if group then
+            self.marked[group] = not self.marked[group]
+        end
+    elseif key == 'e' then
+        if self:selected() or next(self.marked) then
+            self.prompt = 'export'
+            self.input = ''
+            self.status = 'Create a new JSON file; existing files are preserved'
+        else
+            self.status = 'No groups to export'
+        end
+    elseif key == '!' then
+        self.view = 'errors'
+        self.detail_scroll = 0
+    elseif key == 'ENTER' then
+        if self:selected() then
+            self.view = 'details'
+            self.detail_scroll = 0
+        end
+    else
+        local field = self.pane == 'groups' and 'group' or 'file'
+        local group = self:selected()
+        local count = field == 'group' and #self.visible or group and #group.paths or 0
+        local delta = ({
+            UP = -1,
+            DOWN = 1,
+            PAGE_UP = -math.max(1, self.rows - 4),
+            PAGE_DOWN = math.max(1, self.rows - 4),
+            j = 1,
+            k = -1,
+        })[key]
+        if key == 'HOME' then
+            self[field] = 1
+        elseif key == 'END' then
+            self[field] = count
+        elseif delta then
+            self[field] = self[field] + delta
+        end
+        if field == 'group' then
+            self.file, self.file_scroll = 1, 0
+        end
+    end
+    self:clamp(self.cols, self.rows)
+    return true
+end
+local function header(model)
+    return string.format(
+        'Duplicate Finder | %d groups | %d errors | %s redundant',
+        #model.visible,
+        #model.result.errors,
+        human(model.result.redundant_bytes)
+    )
+end
+function TUI.detail_lines(model, width)
+    local lines = {}
+    local function add(text)
+        for _, line in ipairs(wrap(text, width)) do
+            lines[#lines + 1] = line
+        end
+    end
+    if model.view == 'help' then
+        for _, line in ipairs(TUI.help_lines) do
+            add(line)
+        end
+    elseif model.view == 'errors' then
+        if #model.result.errors == 0 then
+            add('No scan errors.')
+        end
+        for _, error in ipairs(model.result.errors) do
+            add(error.path)
+            add('  ' .. error.message)
+            add('')
+        end
+    else
+        local group = model:selected()
+        if not group then
+            add('No group selected.')
+        else
+            add(
+                string.format(
+                    '%d identical files | %.0f bytes each | %s redundant',
+                    #group.paths,
+                    group.size,
+                    human(group.size * (#group.paths - 1))
+                )
+            )
+            add('Selected file: ' .. (group.paths[model.file] or group.paths[1]))
+            add('')
+            for i, path in ipairs(group.paths) do
+                add(tostring(i) .. '. ' .. path)
+                add('')
+            end
+        end
+    end
+    return lines
+end
+function TUI.render_details(model, cols, rows)
+    local width, frame = math.max(0, cols - 1), {}
+    local lines = TUI.detail_lines(model, math.max(1, width))
+    local offset = math.min(model.detail_scroll, math.max(0, #lines - math.max(1, rows - 4)))
+    for y = 1, rows do
+        local text = ''
+        if y == 1 then
+            text = header(model)
+        elseif y == 2 then
+            text = model.view == 'help' and 'Help - keys, scanning, and export'
+                or model.view == 'errors' and 'Scan errors'
+                or 'Group details'
+        elseif y == rows then
+            text = width >= 65
+                    and 'Up/Down Scroll  PgUp/PgDn Page  Home/End  Enter/Esc Back  ? Help'
+                or 'Up/Down Scroll  Enter/Esc Back  ? Help'
+        elseif y == rows - 1 then
+            text = string.format('Line %d of %d', offset + 1, #lines)
+        else
+            text = lines[offset + y - 2] or ''
+        end
+        frame[y] = TUI.fit(text, width)
+    end
+    return frame
+end
+function TUI.render_browse(model, cols, rows)
+    local width, frame = math.max(0, cols - 1), {}
+    local split = width >= 70
+    local left = split and math.floor(width * 0.38) or width
+    local group = model:selected()
+    local function group_line(i)
+        local g = model.visible[i]
+        if not g then
+            return ''
+        end
+        return (i == model.group and '> ' or '  ')
+            .. (model.marked[g] and '[x] ' or '[ ] ')
+            .. #g.paths
+            .. ' files | '
+            .. human(g.size * (#g.paths - 1))
+    end
+    local function file_line(i)
+        return group and group.paths[i] and ((i == model.file and '> ' or '  ') .. group.paths[i])
+            or ''
+    end
+    for y = 1, rows do
+        local text = ''
+        if model.prompt and rows <= 4 and y == rows then
+            text = (model.prompt == 'filter' and '/' or 'e:')
+                .. tail(model.input, math.max(1, width - 3))
+                .. '_'
+        elseif y == 1 then
+            text = header(model)
+        elseif y == 2 then
+            local a = (model.pane == 'groups' and '* ' or '  ') .. 'Groups: redundant bytes'
+            local b = (model.pane == 'files' and '* ' or '  ') .. 'Files'
+            text = split and TUI.fit(a, left) .. ' | ' .. b or model.pane == 'groups' and a or b
+        elseif y == rows then
+            if model.prompt then
+                if width < 65 then
+                    text = model.prompt == 'filter' and 'Enter Keep  Esc Cancel'
+                        or 'Enter Save  Esc Cancel'
+                else
+                    text = model.prompt == 'filter'
+                            and 'Type to filter | Enter Keep | Esc Cancel | Backspace Erase'
+                        or 'New filename | Enter Save | Esc Cancel | Existing files preserved'
+                end
+            elseif width >= 90 then
+                text =
+                    '? Help  Up/Down Move  Tab Pane  / Filter  Space Mark  Enter Details  e Export  ! Errors  q Quit'
+            elseif width >= 60 then
+                text = '? Help  Tab Pane  / Filter  Space Mark  e Export  ! Errors  q Quit'
+            else
+                text = '? Help  Tab Pane  / Filter  q Quit'
+            end
+        elseif y == rows - 1 then
+            if model.prompt then
+                text = (model.prompt == 'filter' and 'Filter: ' or 'Export JSON: ')
+                    .. tail(model.input, math.max(1, width - 14))
+                    .. '_'
+            elseif model.query ~= '' then
+                text = 'Filter: ' .. model.query .. ' | ' .. model.status
+            else
+                text = model.status
+            end
+        elseif split then
+            text = TUI.fit(group_line(model.group_scroll + y - 2), left)
+                .. ' | '
+                .. file_line(model.file_scroll + y - 2)
+        elseif model.pane == 'groups' then
+            text = group_line(model.group_scroll + y - 2)
+        else
+            text = file_line(model.file_scroll + y - 2)
+        end
+        if y == 3 and #model.visible == 0 and rows > 4 then
+            text = 'No duplicate groups match the filter.'
+        end
+        frame[y] = TUI.fit(text, width)
+    end
+    return frame
+end
+function TUI.render_progress(progress, cols, rows)
+    local frame = {}
+    local lines = {
+        'Duplicate Finder | scanning',
+        progress.phase or 'Scanning',
+        string.format(
+            '%d files | %d errors | %s read',
+            progress.files or 0,
+            progress.errors or 0,
+            human(progress.bytes or 0)
+        ),
+        progress.path or '',
+    }
+    for y = 1, rows do
+        frame[y] = TUI.fit(
+            y == rows and 'q / Esc Cancel scan  Ctrl-C Exit' or lines[y] or '',
+            math.max(0, cols - 1)
+        )
+    end
+    return frame
+end
+function TUI.frame(model, cols, rows)
+    if model.view == 'browse' then
+        return TUI.render_browse(model, cols, rows)
+    end
+    return TUI.render_details(model, cols, rows)
+end
+function TUI.diff(frame, previous)
+    local out = { '\27[?2026h' }
+    local changed = false
+    for row, line in ipairs(frame) do
+        if not previous or line ~= previous[row] then
+            out[#out + 1] = string.format('\27[%d;1H%s\27[K', row, line)
+            changed = true
+        end
+    end
+    if not changed then
+        return ''
+    end
+    out[#out + 1] = '\27[?2026l'
+    return table.concat(out)
+end
+
+-- Terminal adapters are lazy so CLI/JSON use never touches terminal settings.
+function TUI.terminal(platform, native)
+    platform = platform or ffi.os
+    local term = { active = false, decode = TUI.decoder() }
+    function term:write(text)
+        if text ~= '' then
+            assert(io.write(text))
+            assert(io.flush())
+        end
+    end
+    if platform == 'Windows' then
+        ffi.cdef([[
+            typedef struct {
+                int16_t x, y;
+            } DupCoord;
+            typedef struct {
+                int16_t left, top, right, bottom;
+            } DupRect;
+            typedef struct {
+                DupCoord size, cursor;
+                uint16_t attributes;
+                DupRect window;
+                DupCoord maximum;
+            } DupConsoleInfo;
+            typedef struct {
+                int32_t down;
+                uint16_t repeats, key, scan, unicode;
+                uint32_t control;
+            } DupKeyEvent;
+            typedef struct {
+                uint16_t type, padding;
+                union {
+                    DupKeyEvent key;
+                    uint8_t other[16];
+                } event;
+            } DupInputRecord;
+            void *__stdcall GetStdHandle(uint32_t);
+            int __stdcall GetConsoleMode(void *, uint32_t *);
+            int __stdcall SetConsoleMode(void *, uint32_t);
+            int __stdcall GetConsoleScreenBufferInfo(void *, DupConsoleInfo *);
+            int __stdcall GetNumberOfConsoleInputEvents(void *, uint32_t *);
+            int __stdcall ReadConsoleInputW(void *, DupInputRecord *, uint32_t, uint32_t *);
+            uint32_t __stdcall WaitForSingleObject(void *, uint32_t);
+            uint64_t __stdcall GetTickCount64(void);
+        ]])
+        native = native or ffi.load('kernel32')
+        term.input, term.output = native.GetStdHandle(0xfffffff6), native.GetStdHandle(0xfffffff5)
+        term.inmode, term.outmode = ffi.new('uint32_t[1]'), ffi.new('uint32_t[1]')
+        function term:is_tty()
+            return native.GetConsoleMode(self.input, self.inmode) ~= 0
+                and native.GetConsoleMode(self.output, self.outmode) ~= 0
+        end
+        function term:now()
+            return tonumber(native.GetTickCount64()) / 1000
+        end
+        function term:size()
+            local info = ffi.new('DupConsoleInfo[1]')
+            if native.GetConsoleScreenBufferInfo(self.output, info) ~= 0 then
+                return math.max(1, tonumber(info[0].window.right - info[0].window.left + 1)),
+                    math.max(1, tonumber(info[0].window.bottom - info[0].window.top + 1))
+            end
+            return 80, 24
+        end
+        function term:enter()
+            assert(self:is_tty(), 'Windows console unavailable')
+            self.codepage = native.GetConsoleOutputCP()
+            self.active = true
+            assert(
+                native.SetConsoleMode(self.output, bit.bor(self.outmode[0], 4)) ~= 0,
+                'Virtual terminal output unavailable'
+            )
+            local mode = bit.bor(bit.band(self.inmode[0], bit.bnot(0x247)), 0x88)
+            assert(native.SetConsoleMode(self.input, mode) ~= 0, 'Cannot enable console input')
+            assert(native.SetConsoleOutputCP(65001) ~= 0, 'Cannot enable UTF-8 output')
+            self:write('\27[?2026h\27[?1049h\27[?25l\27[?7l\27[2J\27[?2026l')
+        end
+        function term:restore()
+            if self.active then
+                pcall(self.write, self, '\27[?2026l\27[0m\27[?7h\27[?1049l\27[?25h')
+                native.SetConsoleMode(self.input, self.inmode[0])
+                native.SetConsoleMode(self.output, self.outmode[0])
+                native.SetConsoleOutputCP(self.codepage)
+                self.active = false
+            end
+        end
+        local function utf8(cp)
+            if cp < 128 then
+                return string.char(cp)
+            elseif cp < 2048 then
+                return string.char(192 + math.floor(cp / 64), 128 + cp % 64)
+            elseif cp < 65536 then
+                return string.char(
+                    224 + math.floor(cp / 4096),
+                    128 + math.floor(cp / 64) % 64,
+                    128 + cp % 64
+                )
+            else
+                return string.char(
+                    240 + math.floor(cp / 262144),
+                    128 + math.floor(cp / 4096) % 64,
+                    128 + math.floor(cp / 64) % 64,
+                    128 + cp % 64
+                )
+            end
+        end
+        function term:keys(timeout)
+            local keys = {}
+            local count, read_count = ffi.new('uint32_t[1]'), ffi.new('uint32_t[1]')
+            local record = ffi.new('DupInputRecord[1]')
+            if timeout > 0 then
+                native.WaitForSingleObject(self.input, timeout)
+            end
+            for _ = 1, 1024 do
+                if native.GetNumberOfConsoleInputEvents(self.input, count) == 0 then
+                    return { 'EOF' }
+                end
+                if count[0] == 0 then
+                    break
+                end
+                if
+                    native.ReadConsoleInputW(self.input, record, 1, read_count) == 0
+                    or read_count[0] == 0
+                then
+                    return { 'EOF' }
+                end
+                if record[0].type == 1 and record[0].event.key.down ~= 0 then
+                    local e = record[0].event.key
+                    local key = ({
+                        [38] = 'UP',
+                        [40] = 'DOWN',
+                        [37] = 'LEFT',
+                        [39] = 'RIGHT',
+                        [33] = 'PAGE_UP',
+                        [34] = 'PAGE_DOWN',
+                        [36] = 'HOME',
+                        [35] = 'END',
+                    })[tonumber(e.key)]
+                    for _ = 1, math.max(1, tonumber(e.repeats)) do
+                        local cp = tonumber(e.unicode)
+                        if key then
+                            keys[#keys + 1] = key
+                        elseif cp >= 0xd800 and cp <= 0xdbff then
+                            self.surrogate = cp
+                        elseif cp >= 0xdc00 and cp <= 0xdfff and self.surrogate then
+                            cp = 0x10000 + (self.surrogate - 0xd800) * 1024 + cp - 0xdc00
+                            self.surrogate = nil
+                            for _, k in ipairs(self.decode(utf8(cp), true)) do
+                                keys[#keys + 1] = k
+                            end
+                        elseif cp ~= 0 then
+                            self.surrogate = nil
+                            for _, k in ipairs(self.decode(utf8(cp), true)) do
+                                keys[#keys + 1] = k
+                            end
+                        end
+                    end
+                end
+            end
+            return keys
+        end
+    else
+        ffi.cdef([[
+            typedef struct {
+                uint32_t iflag, oflag, cflag, lflag;
+                uint8_t line, cc[32];
+                uint32_t ispeed, ospeed;
+            } DupTermios;
+            typedef struct {
+                int fd;
+                int16_t events, revents;
+            } DupPoll;
+            typedef struct {
+                uint16_t rows, cols, x, y;
+            } DupWinSize;
+            typedef struct {
+                int64_t sec, nsec;
+            } DupClock;
+            int isatty(int);
+            int tcgetattr(int, DupTermios *);
+            int tcsetattr(int, int, const DupTermios *);
+            void cfmakeraw(DupTermios *);
+            int ioctl(int, unsigned long, ...);
+            int poll(DupPoll *, unsigned long, int);
+            int clock_gettime(int, DupClock *);
+            typedef void (*dup_signal_handler)(int);
+            dup_signal_handler signal(int, dup_signal_handler);
+        ]])
+        local C = ffi.C
+        term.original = ffi.new('DupTermios[1]')
+        function term:is_tty()
+            return C.isatty(0) ~= 0 and C.isatty(1) ~= 0
+        end
+        function term:now()
+            local time = ffi.new('DupClock[1]')
+            assert(C.clock_gettime(1, time) == 0, 'Cannot read monotonic clock')
+            return tonumber(time[0].sec) + tonumber(time[0].nsec) / 1000000000
+        end
+        function term:size()
+            local size = ffi.new('DupWinSize[1]')
+            if C.ioctl(1, 0x5413, size) == 0 and size[0].cols > 0 and size[0].rows > 0 then
+                return tonumber(size[0].cols), tonumber(size[0].rows)
+            end
+            return 80, 24
+        end
+        function term:enter()
+            assert(C.tcgetattr(0, self.original) == 0, 'Cannot read terminal settings')
+            local raw = ffi.new('DupTermios[1]')
+            ffi.copy(raw, self.original, ffi.sizeof(raw))
+            C.cfmakeraw(raw)
+            raw[0].cc[5], raw[0].cc[6] = 0, 0
+            assert(C.tcsetattr(0, 0, raw) == 0, 'Cannot enable raw input')
+            self.active = true
+            self.callback = ffi.cast('dup_signal_handler', function(sig)
+                self.stopped = 128 + sig
+            end)
+            self.old_int = C.signal(2, self.callback)
+            self.old_term = C.signal(15, self.callback)
+            self:write('\27[?2026h\27[?1049h\27[?25l\27[?7l\27[2J\27[?2026l')
+        end
+        function term:restore()
+            if self.active then
+                C.tcsetattr(0, 0, self.original)
+                pcall(self.write, self, '\27[?2026l\27[0m\27[?7h\27[?1049l\27[?25h')
+                self.active = false
+            end
+            if self.callback then
+                C.signal(2, self.old_int)
+                C.signal(15, self.old_term)
+                self.callback:free()
+                self.callback = nil
+            end
+        end
+        function term:keys(timeout)
+            local p = ffi.new('DupPoll[1]', { { 0, 1, 0 } })
+            local buf = ffi.new('uint8_t[4096]')
+            local keys = {}
+            for _ = 1, 64 do
+                local ready = C.poll(p, 1, timeout)
+                timeout = 0
+                if ready <= 0 then
+                    break
+                end
+                if bit.band(p[0].revents, 1) ~= 0 then
+                    local n = tonumber(C.read(0, buf, 4096))
+                    if n <= 0 then
+                        keys[#keys + 1] = 'EOF'
+                        break
+                    end
+                    self.last_input = self:now()
+                    for _, key in ipairs(self.decode(ffi.string(buf, n))) do
+                        keys[#keys + 1] = key
+                    end
+                elseif bit.band(p[0].revents, 24) ~= 0 then
+                    keys[#keys + 1] = 'EOF'
+                    break
+                else
+                    break
+                end
+            end
+            local flush = self.last_input and self:now() - self.last_input >= 0.03
+            for _, key in ipairs(self.decode('', flush)) do
+                keys[#keys + 1] = key
+            end
+            return keys
+        end
+    end
+    return term
+end
+
+function TUI.run(api, roots, options, term)
+    term = term or TUI.terminal()
+    if not term:is_tty() then
+        io.stderr:write(
+            '--tui requires an interactive terminal (use CLI or --json for pipelines)\n'
+        )
+        return 2
+    end
+    local jit_enabled = require('jit').status()
+    -- A Lua signal callback must never enter a compiled FFI call.
+    require('jit').off()
+    local result, previous, oldcols, oldrows, cancelled, exit_code
+    local function emit(frame, cols, rows)
+        local resized = oldcols and (oldcols ~= cols or oldrows ~= rows)
+        if resized then
+            previous = nil
+        end
+        local output = TUI.diff(frame, previous)
+        if resized then
+            output = output:gsub('^\27%[%?2026h', '\27[?2026h\27[2J', 1)
+        end
+        term:write(output)
+        previous, oldcols, oldrows = frame, cols, rows
+    end
+    local ok, message = xpcall(function()
+        term:enter()
+        local last_frame = -math.huge
+        local scan_options = { min_size = options.min_size }
+        scan_options.progress = function(phase, path, bytes, r)
+            local keys = term:keys(0)
+            for _, key in ipairs(keys) do
+                if key == 'q' or key == 'ESC' or key == 'EOF' or key == 'CTRL_C' then
+                    cancelled = true
+                    exit_code = key == 'CTRL_C' and 130 or 0
+                end
+            end
+            if term.stopped then
+                cancelled = true
+                exit_code = term.stopped
+            end
+            if cancelled then
+                return false
+            end
+            local now = term:now()
+            if now - last_frame >= 0.05 then
+                local cols, rows = term:size()
+                emit(
+                    TUI.render_progress({
+                        phase = phase,
+                        path = path,
+                        bytes = bytes,
+                        files = r.files,
+                        errors = #r.errors,
+                    }, cols, rows),
+                    cols,
+                    rows
+                )
+                last_frame = now
+            end
+            return true
+        end
+        result = api.scan(roots, scan_options)
+        if cancelled or result.cancelled then
+            return
+        end
+        local model = TUI.model(result)
+        while not term.stopped do
+            local cols, rows = term:size()
+            model:clamp(cols, rows)
+            emit(TUI.frame(model, cols, rows), cols, rows)
+            local keys = term:keys(30)
+            for _, key in ipairs(keys) do
+                local running, effect = model:key(key)
+                if not running then
+                    exit_code = key == 'CTRL_C' and 130 or 0
+                    return
+                end
+                if effect then
+                    local saved, e = api.export_file(effect.path, effect.result)
+                    model.status = saved and 'Saved: ' .. effect.path
+                        or 'Export failed: ' .. tostring(e)
+                end
+                if model.filter_pending then
+                    -- Echo first; filtering follows the prompt-only frame.
+                    emit(TUI.frame(model, cols, rows), cols, rows)
+                    model:filter()
+                    model:clamp(cols, rows)
+                end
+            end
+        end
+        exit_code = term.stopped
+    end, debug.traceback)
+    term:restore()
+    if jit_enabled then
+        require('jit').on()
+    end
+    if not ok then
+        io.stderr:write(message, '\n')
+        return 1
+    end
+    return exit_code or (result and #result.errors > 0 and 1 or 0)
+end
 
 local function new(backend)
     local M = {}
@@ -467,7 +1572,7 @@ local function new(backend)
         return s and s.signature == file.signature
     end
 
-    function M.hash(file)
+    function M.hash(file, progress)
         local fd, e = open_checked(file)
         if not fd then
             return nil, e
@@ -482,6 +1587,10 @@ local function new(backend)
             if n == 0 then
                 break
             end
+            if progress and progress(n) == false then
+                backend.close(fd)
+                return nil, 'Scan cancelled'
+            end
             total = total + n
             for i = 0, n - 1 do
                 h = bit.bxor(bit.tobit(h * 33), buf[i])
@@ -495,7 +1604,7 @@ local function new(backend)
         return tostring(h)
     end
 
-    function M.equal(a, b)
+    function M.equal(a, b, progress)
         local fa, e = open_checked(a)
         if not fa then
             return nil, e, a
@@ -516,6 +1625,11 @@ local function new(backend)
                 e = ea or eb
                 failed_file = not na and a or b
                 break
+            end
+            if progress and progress(na + nb) == false then
+                backend.close(fa)
+                backend.close(fb)
+                return nil, 'Scan cancelled', a
             end
             total = total + na
             if na ~= nb or ffi.C.memcmp(ba, bb, na) ~= 0 then
@@ -549,6 +1663,16 @@ local function new(backend)
         local result =
             { groups = {}, errors = {}, files = 0, redundant_bytes = 0, skipped_links = 0 }
         local seen, dirs, sizes, pending = {}, {}, {}, {}
+        local bytes_read = 0
+
+        local function tick(phase, path, bytes)
+            bytes_read = bytes_read + (bytes or 0)
+            if options.progress and options.progress(phase, path, bytes_read, result) == false then
+                result.cancelled = true
+                return false
+            end
+            return true
+        end
 
         local function warning(path, message)
             result.errors[#result.errors + 1] = { path = path, message = message }
@@ -558,6 +1682,9 @@ local function new(backend)
         end
         while #pending > 0 do
             local path = table.remove(pending)
+            if not tick('Discovering files', path) then
+                return result
+            end
             local s, e = metadata(path)
             if not s then
                 warning(path, e)
@@ -566,8 +1693,15 @@ local function new(backend)
             elseif s.kind == 0x4000 and not dirs[s.id] then
                 dirs[s.id] = true
                 local ok, message = backend.list(path, function(name)
-                    pending[#pending + 1] = backend.join(path, name)
+                    local child = backend.join(path, name)
+                    if not tick('Discovering files', child) then
+                        return false
+                    end
+                    pending[#pending + 1] = child
                 end)
+                if result.cancelled then
+                    return result
+                end
                 if not ok then
                     warning(path, message)
                 end
@@ -588,7 +1722,15 @@ local function new(backend)
                 end)
                 local buckets = {}
                 for _, file in ipairs(files) do
-                    local hash, e = (options.hash or M.hash)(file)
+                    if not tick('Hashing candidates', file.path) then
+                        return result
+                    end
+                    local hash, e = (options.hash or M.hash)(file, function(bytes)
+                        return tick('Hashing candidates', file.path, bytes)
+                    end)
+                    if result.cancelled then
+                        return result
+                    end
                     if not hash then
                         warning(file.path, e)
                     else
@@ -602,7 +1744,12 @@ local function new(backend)
                         local found, failed = false, false
                         for _, group in ipairs(groups) do
                             while #group > 0 do
-                                local same, e, bad = M.equal(group[1], file)
+                                local same, e, bad = M.equal(group[1], file, function(bytes)
+                                    return tick('Comparing candidates', file.path, bytes)
+                                end)
+                                if result.cancelled then
+                                    return result
+                                end
                                 if same == nil then
                                     warning(bad.path, e)
                                     if bad == file then
@@ -776,24 +1923,23 @@ local function new(backend)
             .. '}'
     end
 
+    function M.export_file(path, result)
+        return backend.write_new(path, M.to_json(result) .. '\n')
+    end
+
     function M.main(args)
-        local roots, opts, json_output = {}, {}, false
+        local roots, opts, json_output, tui = {}, {}, false, false
         local literal = false
         for _, a in ipairs(args) do
             if not literal and a == '--' then
                 literal = true
             elseif not literal and (a == '--help' or a == '-h') then
-                io.write(
-                    'Usage: luajit ffi_duplicates.lua [--json] [--min-size=BYTES]'
-                        .. ' [--] [PATH ...]\n'
-                        .. 'Default PATH: .; recursive, read-only; '
-                        .. 'skips symlinks/reparse points and repeated hard links.\n'
-                        .. 'Exit: 0 complete, 1 scan errors, 2 invalid arguments. '
-                        .. 'Windows / Linux 64-bit.\n'
-                )
+                io.write(CLI_HELP)
                 return 0
             elseif not literal and a == '--json' then
                 json_output = true
+            elseif not literal and a == '--tui' then
+                tui = true
             elseif not literal and a:match('^%-%-min%-size=') then
                 local value = a:match('^%-%-min%-size=(%d+)$')
                 local n = tonumber(value)
@@ -812,6 +1958,13 @@ local function new(backend)
         if #roots == 0 then
             roots = { '.' }
         end
+        if tui and json_output then
+            io.stderr:write('--tui and --json cannot be combined\n')
+            return 2
+        end
+        if tui then
+            return TUI.run(M, roots, opts)
+        end
         local r = M.scan(roots, opts)
         if json_output then
             io.write(M.to_json(r), '\n')
@@ -829,6 +1982,7 @@ end
 local M = new(backend)
 M.new = new
 M.windows_backend = windows_backend
+M.tui = TUI
 
 local caller = debug.getinfo(2, 'f')
 if ... == 'ffi_duplicates' and caller and caller.func == require then
