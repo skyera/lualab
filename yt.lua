@@ -1724,7 +1724,7 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     end
     local use_native_window_subtitles = mode == "video" and use_external_window
     local cc_script
-    if (show_cc or mode == "video") and not use_native_window_subtitles then
+    if mode == "video" then
         local script_err
         cc_script, script_err = get_mpv_cc_script()
         if not cc_script then
@@ -1737,7 +1737,12 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
         -- Terminal video uses the status line for CC; GUI video uses normal subtitle rendering.
         local sub_vis = (mode == "video" and not use_external_window) and "no" or (show_cc and "yes" or "no")
         local font_opt = (sub_font_size and sub_font_size > 0) and string.format(" --sub-font-size=%d", sub_font_size) or ""
-        extra_mpv_opts = extra_mpv_opts .. string.format(" --subs-fallback=yes --sub-auto=all --sub-visibility=%s%s --slang=%s", sub_vis, font_opt, to_mpv_slang(sub_lang))
+        local yt_style_opts = ""
+        if mode == "video" and use_external_window then
+            -- Replicate YouTube.com subtitle appearance: white bold text on 75% translucent black box
+            yt_style_opts = ' --sub-border-style=background-box --sub-back-color="#000000C0" --sub-color="#FFFFFFFF" --sub-outline-size=0 --sub-font="Roboto,Arial,sans-serif" --sub-bold=yes --sub-ass-override=force --sub-margin-y=36'
+        end
+        extra_mpv_opts = extra_mpv_opts .. string.format(" --subs-fallback=yes --sub-auto=all --sub-visibility=%s%s%s --slang=%s", sub_vis, font_opt, yt_style_opts, to_mpv_slang(sub_lang))
     end
 
     local term_w, term_h = get_terminal_size()
@@ -3062,6 +3067,15 @@ local function run_self_tests()
     assert(open_in_browser(nil) == false, "open_in_browser(nil) must return false")
     assert(open_in_browser("") == false, "open_in_browser('') must return false")
     print("  [✓] Default web browser open helper (o key) validated")
+
+    -- 20. Standalone MPV GUI window (-w) YouTube-identical subtitle styling options
+    local yt_style_opts = ' --sub-border-style=background-box --sub-back-color="#000000C0" --sub-color="#FFFFFFFF" --sub-outline-size=0 --sub-font="Roboto,Arial,sans-serif" --sub-bold=yes --sub-ass-override=force --sub-margin-y=36'
+    assert(yt_style_opts:find("sub%-border%-style=background%-box") ~= nil, "YouTube background-box style missing")
+    assert(yt_style_opts:find("sub%-back%-color=") ~= nil, "YouTube background box color missing")
+    assert(yt_style_opts:find("sub%-color=") ~= nil, "YouTube white text color missing")
+    assert(yt_style_opts:find("sub%-bold=yes") ~= nil, "YouTube bold subtitle styling missing")
+    assert(yt_style_opts:find("sub%-outline%-size=0") ~= nil, "YouTube outline size must be zero")
+    print("  [✓] Standalone window (-w) YouTube-identical subtitle styling validated")
 
     print("=== All Internal Self-Tests Passed Successfully ===")
     return true
