@@ -489,6 +489,19 @@ local function copy_to_clipboard(text)
     return false
 end
 
+local function open_in_browser(url)
+    if not url or #url == 0 then return false end
+    if is_windows then
+        local cmd = string.format('start "" %q', url)
+        local ok = safe_execute(cmd)
+        return (ok == 0 or ok == true)
+    else
+        local cmd = string.format('(xdg-open %q || open %q) 2>/dev/null &', url, url)
+        local ok = safe_execute(cmd)
+        return (ok == 0 or ok == true)
+    end
+end
+
 local function get_cache_dir()
     local dir
     if is_windows then
@@ -1854,7 +1867,7 @@ local function show_queue_modal(queue)
         local foot_y = box_y + 3 + max_items
         table.insert(buf, string.format("\27[%d;%dH\27[1;36m+%s+\27[0m", foot_y, box_x, string.rep("-", box_w - 2)))
         table.insert(buf, string.format("\27[%d;%dH%s", foot_y + 1, box_x,
-            line_pad("\27[1;36m| \27[93m[Enter]\27[0m Play  \27[93m[y]\27[0m Copy  \27[93m[d/Bksp]\27[0m Del  \27[93m[c]\27[0m Clear  \27[90m[Esc/q] Close\27[0m")))
+            line_pad("\27[1;36m| \27[93m[Enter]\27[0m Play  \27[93m[o]\27[0m Open  \27[93m[y]\27[0m Copy  \27[93m[d/Bksp]\27[0m Del  \27[93m[c]\27[0m Clear  \27[90m[Esc/q] Close\27[0m")))
         table.insert(buf, string.format("\27[%d;%dH\27[1;36m+%s+\27[0m", foot_y + 2, box_x, string.rep("-", box_w - 2)))
 
         io.write(table.concat(buf))
@@ -1879,6 +1892,15 @@ local function show_queue_modal(queue)
             end
         elseif k == "ENTER" then
             return q_sel
+        elseif k == "o" or k == "O" or k == "b" or k == "B" then
+            if #queue > 0 and q_sel >= 1 and q_sel <= #queue then
+                local sel = queue[q_sel]
+                local url = sel.url or (sel.id and ("https://www.youtube.com/watch?v=" .. sel.id))
+                if url and open_in_browser(url) then
+                    status_msg = "\27[1;92m✓ Opened in browser: \27[0m" .. utf8_truncate(sel.title, 28)
+                    draw_queue()
+                end
+            end
         elseif k == "y" or k == "Y" then
             if #queue > 0 and q_sel >= 1 and q_sel <= #queue then
                 local sel = queue[q_sel]
@@ -2061,6 +2083,7 @@ local function show_help_modal()
         line_pad("\27[1;36m|    \27[93m[Tab]\27[0m         Add selected track to Up-Next queue"),
         line_pad("\27[1;36m|    \27[93m[Q]\27[0m           Open Up-Next queue modal (view/delete/clear)"),
         line_pad("\27[1;36m|    \27[93m[d]\27[0m           Download offline to ./downloads/ (MP3/MP4)"),
+        line_pad("\27[1;36m|    \27[93m[o]\27[0m           Open video in default web browser"),
         line_pad("\27[1;36m|    \27[93m[y]\27[0m           Yank (copy) video URL to clipboard"),
         line_pad("\27[1;36m|    \27[93m[f]\27[0m           Search filters (Sort by Views/Date, Duration)"),
         line_pad("\27[1;36m|    \27[93m[/]\27[0m           Open search modal or paste direct URL"),
@@ -2312,7 +2335,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         if not (MpvController.is_playing and MpvController.current_item) then
             table.insert(buf, "\27[1;34m" .. string.rep("-", term_w) .. "\27[0m\n")
         end
-        table.insert(buf, string.format(" \27[93m[Enter]\27[0m Play  %s  \27[93m[y]\27[0m Copy  \27[93m[d]\27[0m DL  \27[93m[f]\27[0m Filter  \27[93m[/]\27[0m Find  \27[93m[M]\27[0m More  \27[93m[m]\27[0m Mode  \27[93m[?]\27[0m Help  \27[91m[q]\27[0m Quit\27[K\27[J", q_footer))
+        table.insert(buf, string.format(" \27[93m[Enter]\27[0m Play  %s  \27[93m[o]\27[0m Open  \27[93m[y]\27[0m Copy  \27[93m[d]\27[0m DL  \27[93m[f]\27[0m Filter  \27[93m[/]\27[0m Find  \27[93m[M]\27[0m More  \27[93m[m]\27[0m Mode  \27[93m[?]\27[0m Help  \27[91m[q]\27[0m Quit\27[K\27[J", q_footer))
         
         io.write(table.concat(buf))
         io.flush()
@@ -2414,6 +2437,18 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                         MpvController:stop()
                         play_item(chosen_item, mode, browser, cookies_file, use_window, proxy, insecure, show_cc, sub_lang, cc_font_size)
                     end
+                end
+            elseif k == "o" or k == "O" or k == "b" or k == "B" then
+                local sel = (#items > 0 and selected_idx >= 1 and selected_idx <= #items and items[selected_idx])
+                    or (MpvController.is_playing and MpvController.current_item)
+                if sel then
+                    local url = sel.url or (sel.id and ("https://www.youtube.com/watch?v=" .. sel.id))
+                    if url and open_in_browser(url) then
+                        status_msg = "\27[1;92m✓ Opened in browser: \27[0m" .. utf8_truncate(sel.title, 32)
+                    else
+                        status_msg = "\27[1;31m✗ Failed to open browser\27[0m"
+                    end
+                    draw_tui()
                 end
             elseif k == "y" or k == "Y" then
                 local sel = (#items > 0 and selected_idx >= 1 and selected_idx <= #items and items[selected_idx])
@@ -2905,6 +2940,11 @@ local function run_self_tests()
     assert(copy_ok == true, "copy_to_clipboard must succeed for valid URL string")
     print("  [✓] Cross-platform clipboard copy (y key) validated")
 
+    -- 19. Default Web Browser Opening (o key)
+    assert(open_in_browser(nil) == false, "open_in_browser(nil) must return false")
+    assert(open_in_browser("") == false, "open_in_browser('') must return false")
+    print("  [✓] Default web browser open helper (o key) validated")
+
     print("=== All Internal Self-Tests Passed Successfully ===")
     return true
 end
@@ -2940,6 +2980,7 @@ local function print_help()
     print("  [Tab]         Add selected track to Up-Next playback queue")
     print("  [Q]           Open Up-Next playback queue modal (play, delete, clear)")
     print("  [d]           Download selected track offline into ./downloads/")
+    print("  [o]           Open selected track in default web browser")
     print("  [y]           Copy selected track URL to clipboard")
     print("  [f]           Open Search Filters & Sorting modal")
     print("  [Space]       Pause / Resume background mini-player")
