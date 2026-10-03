@@ -121,3 +121,54 @@ dog:eat()        -- inherited Animal method
 
 -- Explicitly call parent method
 Animal.speak(dog)
+
+-- version 4
+-- Base class
+local Animal = {}
+Animal.__index = Animal
+
+function Animal:new(name)
+    local object = {name=name}
+    setmetatable(object, self)
+    return object
+end
+
+function Animal:speak()
+    print(self.name .. " makes a sound")
+end
+
+-- Sublcass
+local Dog = setmetatable({}, {__index=Animal})
+Dog.__index = Dog
+
+function Dog:new(name, breed)
+    local object = Animal.new(self, name)
+    object.breed = breed
+    return object
+end
+
+function Dog:speak()
+    print(self.name .. " barks")
+end
+
+function Dog:fetch()
+    print(self.name .. " fetches the ball.")
+end
+
+-- Another subclass
+local Cat = setmetatable({}, {__index=Animal})
+Cat.__index = Cat
+
+function Cat:speak()
+    print(self.name .. " meows.")
+end
+
+-- Create objects
+local animal = Animal:new("Generic animal")
+local dog = Dog:new("Rex", "Labrador")
+local cat = Cat:new("Mittens")
+
+animal:speak()
+dog:speak()
+dog:fetch()
+cat:speak()
