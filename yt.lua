@@ -710,6 +710,18 @@ mp.observe_property("sub-text", "string", function(_, value)
         mp.set_property("user-data/yt-cc", cleaned)
     end
 end)
+
+mp.observe_property("track-list", "native", function(_, tracks)
+    if not tracks then return end
+    for _, track in ipairs(tracks) do
+        if track.type == "sub" and ((track.lang and track.lang:find("%%-orig")) or (track.title and track.title:find("Original"))) then
+            if not track.selected then
+                mp.set_property("sid", track.id)
+                break
+            end
+        end
+    end
+end)
 ]])
     f:close()
     return script_file
@@ -1342,6 +1354,7 @@ local MpvController = {
     sub_text = "",
     last_sub_text = "",
     has_sub_track = nil,
+    has_switched_orig = false,
     is_eof = false,
     pipe_handle = nil,
     pipe_name = nil,
@@ -1426,6 +1439,7 @@ function MpvController:start(item, show_cc, sub_lang, browser, cookies_file, pro
     self.sub_text = ""
     self.last_sub_text = ""
     self.has_sub_track = nil
+    self.has_switched_orig = false
     self.is_eof = false
     self.read_buf = ""
     self.cc_state = { prev_last_line = "", prev_displayed = "" }
@@ -1437,6 +1451,7 @@ function MpvController:start(item, show_cc, sub_lang, browser, cookies_file, pro
     self:send_command('{"command": ["observe_property", 5, "volume"]}')
     self:send_command('{"command": ["observe_property", 6, "eof-reached"]}')
     self:send_command('{"command": ["observe_property", 7, "sub"]}')
+    self:send_command('{"command": ["observe_property", 8, "track-list"]}')
 end
 
 function MpvController:poll()
@@ -1493,6 +1508,25 @@ function MpvController:poll()
             else
                 self.has_sub_track = true
             end
+        elseif prop == "track-list" then
+            if not self.has_switched_orig then
+                for obj in line:gmatch("{([^{}]+)}") do
+                    local t_type = obj:match('"type":"([^"]+)"')
+                    if t_type == "sub" then
+                        local t_id = obj:match('"id":(%d+)')
+                        local t_lang = obj:match('"lang":"([^"]+)"') or ""
+                        local t_title = obj:match('"title":"([^"]+)"') or ""
+                        local t_sel = obj:match('"selected":true') ~= nil
+                        if (t_lang:find("%%-orig") or t_title:find("Original")) and t_id then
+                            if not t_sel then
+                                self:send_command(string.format('{"command": ["set_property", "sid", %d]}', tonumber(t_id)))
+                            end
+                            self.has_switched_orig = true
+                            break
+                        end
+                    end
+                end
+            end
         end
     end
 
@@ -1528,6 +1562,7 @@ function MpvController:set_sub_font_size(size)
 end
 
 function MpvController:cycle_sub()
+    self.has_switched_orig = true
     self:send_command('{"command": ["cycle", "sub"]}')
     self.cc_state = { prev_last_line = "", prev_displayed = "" }
     self.sub_text = ""
@@ -1550,6 +1585,7 @@ function MpvController:stop()
     self.sub_text = ""
     self.last_sub_text = ""
     self.has_sub_track = nil
+    self.has_switched_orig = false
     self.is_eof = false
     self.read_buf = ""
     self.cc_state = { prev_last_line = "", prev_displayed = "" }
@@ -2830,7 +2866,36 @@ local function run_self_tests()
     assert(MpvController.sub_text == "", "cycle_sub must reset sub_text")
     assert(MpvController.last_sub_text == "", "cycle_sub must reset last_sub_text")
     assert(MpvController.cc_state.prev_last_line == "", "cycle_sub must reset cc_state")
-    print("  [✓] IPC property parsing & rolling subtitle deduplication passed")
+    assert(MpvController.has_switched_orig == true, "cycle_sub must set has_switched_orig = true")
+
+    -- Automatic switching to original subtitle track on track-list event
+    local sent_cmds = {}
+    local orig_send = MpvController.send_command
+    MpvController.send_command = function(self, cmd)
+        table.insert(sent_cmds, cmd)
+    end
+    MpvController.is_playing = true
+    MpvController.has_switched_orig = false
+    local test_track_list = '{"event":"property-change","name":"track-list","data":[{"id":1,"type":"sub","lang":"en","selected":true},{"id":2,"type":"sub","lang":"en-orig","selected":false}]}'
+    MpvController.read_buf = test_track_list .. "\n"
+    MpvController:poll()
+    assert(MpvController.has_switched_orig == true, "MpvController must set has_switched_orig = true when en-orig track found")
+    assert(#sent_cmds == 1, "Must send exactly 1 command to switch track")
+    assert(sent_cmds[1]:find('"set_property", "sid", 2') ~= nil, "Command must set sid to track 2: " .. tostring(sent_cmds[1]))
+
+    -- If already selected, should not redundantly send set_property
+    sent_cmds = {}
+    MpvController.has_switched_orig = false
+    local test_track_list_sel = '{"event":"property-change","name":"track-list","data":[{"id":2,"type":"sub","lang":"en-orig","selected":true}]}'
+    MpvController.read_buf = test_track_list_sel .. "\n"
+    MpvController:poll()
+    assert(MpvController.has_switched_orig == true, "MpvController must mark has_switched_orig")
+    assert(#sent_cmds == 0, "Must not send set_property if orig track is already selected")
+
+    MpvController.send_command = orig_send
+    MpvController.is_playing = false
+    MpvController.read_buf = ""
+    print("  [✓] IPC property parsing, rolling caption deduplication & track-list auto-selection passed")
 
     -- 18. Clipboard URL Copying (y key)
     assert(copy_to_clipboard(nil) == false, "copy_to_clipboard(nil) must return false")
