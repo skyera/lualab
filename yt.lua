@@ -735,6 +735,21 @@ mp.observe_property("sub-text", "string", function(_, value)
     end
 end)
 
+local cc_styles = {
+    { name = "White (High Contrast)", color = "#FFFFFFFF", back = "#000000E6", outline = 2 },
+    { name = "Yellow (BBC/Netflix Standard)", color = "#FFFF00FF", back = "#000000F0", outline = 2 },
+    { name = "Cyan (Cool)", color = "#00FFFFFF", back = "#000000F0", outline = 2 },
+}
+local cur_style_idx = 1
+mp.add_forced_key_binding("Alt+c", "cycle_cc_style", function()
+    cur_style_idx = (cur_style_idx % #cc_styles) + 1
+    local s = cc_styles[cur_style_idx]
+    mp.set_property("sub-color", s.color)
+    mp.set_property("sub-back-color", s.back)
+    mp.set_property("sub-outline-size", s.outline)
+    mp.osd_message("CC Style: " .. s.name, 2)
+end)
+
 mp.observe_property("track-list", "native", function(_, tracks)
     if not tracks then return end
     for _, track in ipairs(tracks) do
@@ -1688,7 +1703,7 @@ function MpvController:stop()
     self.read_buf = ""
     self.cc_state = { prev_last_line = "", prev_displayed = "" }
 end
-local function play_item(item, mode, browser, cookies_file, use_external_window, proxy, insecure, show_cc, sub_lang, sub_font_size)
+local function play_item(item, mode, browser, cookies_file, use_external_window, proxy, insecure, show_cc, sub_lang, sub_font_size, sub_color)
     if not HAS_MPV then
         io.write("\27[H\27[2J\27[1;31mError: mpv is not installed.\27[0m\n\nPlease install mpv to play audio/video streams.\nPress any key to return...")
         io.flush()
@@ -1739,8 +1754,10 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
         local font_opt = (sub_font_size and sub_font_size > 0) and string.format(" --sub-font-size=%d", sub_font_size) or ""
         local yt_style_opts = ""
         if mode == "video" and use_external_window then
-            -- Replicate YouTube.com subtitle appearance: white bold text on 75% translucent black box
-            yt_style_opts = ' --sub-border-style=background-box --sub-back-color="#000000C0" --sub-color="#FFFFFFFF" --sub-outline-size=0 --sub-font="Roboto,Arial,sans-serif" --sub-bold=yes --sub-ass-override=force --sub-margin-y=36'
+            -- Replicate YouTube.com subtitle appearance with high contrast against white backgrounds:
+            -- 90% opaque dark box (#000000E6), crisp 2px black outline, and subtle drop shadow.
+            local text_color = (sub_color == "yellow") and "#FFFF00FF" or ((sub_color == "cyan") and "#00FFFFFF" or "#FFFFFFFF")
+            yt_style_opts = string.format(' --sub-border-style=background-box --sub-back-color="#000000E6" --sub-color=%q --sub-outline-size=2 --sub-outline-color="#FF000000" --sub-shadow-offset=1.5 --sub-shadow-color="#FF000000" --sub-font="Roboto,Arial,sans-serif" --sub-bold=yes --sub-ass-override=force --sub-margin-y=36', text_color)
         end
         extra_mpv_opts = extra_mpv_opts .. string.format(" --subs-fallback=yes --sub-auto=all --sub-visibility=%s%s%s --slang=%s", sub_vis, font_opt, yt_style_opts, to_mpv_slang(sub_lang))
     end
@@ -2198,6 +2215,7 @@ local function show_help_modal()
         line_pad("\27[1;36m|  \27[1;33mMPV Video Window Controls:\27[0m"),
         line_pad("\27[1;36m|    \27[93m[v]\27[0m           Toggle subtitle visibility (Show/Hide CC)"),
         line_pad("\27[1;36m|    \27[93m[j / J]\27[0m       Cycle subtitle tracks / languages"),
+        line_pad("\27[1;36m|    \27[93m[Alt+c]\27[0m       Cycle CC style (White, Yellow, Cyan)"),
         string.format("\27[1;36m+%s+\27[0m", string.rep("-", box_w - 2)),
         line_pad("\27[1;36m|  \27[90mPress any key to close this help modal...\27[0m"),
         string.format("\27[1;36m+%s+\27[0m", string.rep("-", box_w - 2)),
@@ -2214,12 +2232,13 @@ end
 -- =========================================================================
 -- 7. Main Interactive TUI Application
 -- =========================================================================
-local function run_app(init_query, init_mode, browser, cookies_file, is_liked, use_window, proxy, insecure, init_show_cc, init_sub_lang, init_filters, init_site, init_sub_font_size)
+local function run_app(init_query, init_mode, browser, cookies_file, is_liked, use_window, proxy, insecure, init_show_cc, init_sub_lang, init_filters, init_site, init_sub_font_size, init_sub_color)
     local current_query = init_query or ""
     local mode = init_mode or "music"
     local show_cc = (init_show_cc ~= nil) and init_show_cc or true
     local sub_lang = init_sub_lang or "en.*"
     local cc_font_size = (init_sub_font_size and init_sub_font_size > 0) and math.max(10, math.min(120, init_sub_font_size)) or 55
+    local sub_color = init_sub_color or "white"
     local site = normalize_site(init_site)
     local selected_idx = 1
     local scroll_offset = 0
@@ -2615,7 +2634,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                     MpvController:stop()
                     local sel = items[selected_idx]
                     save_history_item(sel)
-                    play_item(sel, mode, browser, cookies_file, use_window, proxy, insecure, show_cc, sub_lang, cc_font_size)
+                    play_item(sel, mode, browser, cookies_file, use_window, proxy, insecure, show_cc, sub_lang, cc_font_size, sub_color)
                     draw_tui()
                 end
             elseif k == "m" then
@@ -2690,7 +2709,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                         draw_tui()
                     else
                         MpvController:stop()
-                        local exit_code = play_item(sel, mode, browser, cookies_file, use_window, proxy, insecure, show_cc, sub_lang, cc_font_size)
+                        local exit_code = play_item(sel, mode, browser, cookies_file, use_window, proxy, insecure, show_cc, sub_lang, cc_font_size, sub_color)
                         draw_tui()
                         if auto_play and (exit_code == 0 or exit_code == true) and selected_idx < #items then
                             selected_idx = selected_idx + 1
@@ -3068,14 +3087,34 @@ local function run_self_tests()
     assert(open_in_browser("") == false, "open_in_browser('') must return false")
     print("  [✓] Default web browser open helper (o key) validated")
 
-    -- 20. Standalone MPV GUI window (-w) YouTube-identical subtitle styling options
-    local yt_style_opts = ' --sub-border-style=background-box --sub-back-color="#000000C0" --sub-color="#FFFFFFFF" --sub-outline-size=0 --sub-font="Roboto,Arial,sans-serif" --sub-bold=yes --sub-ass-override=force --sub-margin-y=36'
-    assert(yt_style_opts:find("sub%-border%-style=background%-box") ~= nil, "YouTube background-box style missing")
-    assert(yt_style_opts:find("sub%-back%-color=") ~= nil, "YouTube background box color missing")
-    assert(yt_style_opts:find("sub%-color=") ~= nil, "YouTube white text color missing")
-    assert(yt_style_opts:find("sub%-bold=yes") ~= nil, "YouTube bold subtitle styling missing")
-    assert(yt_style_opts:find("sub%-outline%-size=0") ~= nil, "YouTube outline size must be zero")
-    print("  [✓] Standalone window (-w) YouTube-identical subtitle styling validated")
+    -- 20. Standalone MPV GUI window (-w) YouTube-identical subtitle styling & high-contrast options
+    local script_file = get_mpv_cc_script()
+    assert(script_file ~= nil and #script_file > 0, "get_mpv_cc_script must return valid path")
+    local sf = io.open(script_file, "r")
+    assert(sf ~= nil, "Unable to open generated MPV CC script file")
+    local script_content = sf:read("*a")
+    sf:close()
+    assert(script_content:find("Alt%+c") ~= nil, "MPV CC script must bind Alt+c for cycling styles")
+    assert(script_content:find("cycle_cc_style") ~= nil, "MPV CC script must define cycle_cc_style")
+
+    local function build_test_yt_style(color)
+        local text_color = (color == "yellow") and "#FFFF00FF" or ((color == "cyan") and "#00FFFFFF" or "#FFFFFFFF")
+        return string.format(' --sub-border-style=background-box --sub-back-color="#000000E6" --sub-color=%q --sub-outline-size=2 --sub-outline-color="#FF000000" --sub-shadow-offset=1.5 --sub-shadow-color="#FF000000" --sub-font="Roboto,Arial,sans-serif" --sub-bold=yes --sub-ass-override=force --sub-margin-y=36', text_color)
+    end
+    local yt_style_white = build_test_yt_style("white")
+    assert(yt_style_white:find("sub%-border%-style=background%-box") ~= nil, "YouTube background-box style missing")
+    assert(yt_style_white:find('sub%-back%-color="#000000E6"') ~= nil, "High contrast 90% opaque background box missing")
+    assert(yt_style_white:find('sub%-color="#FFFFFFFF"') ~= nil, "YouTube white text color missing")
+    assert(yt_style_white:find("sub%-outline%-size=2") ~= nil, "High contrast 2px outline missing")
+    assert(yt_style_white:find("sub%-shadow%-offset=1.5") ~= nil, "Subtle drop-shadow missing")
+    assert(yt_style_white:find("sub%-bold=yes") ~= nil, "YouTube bold subtitle styling missing")
+
+    local yt_style_yellow = build_test_yt_style("yellow")
+    assert(yt_style_yellow:find('sub%-color="#FFFF00FF"') ~= nil, "Yellow CC color missing")
+
+    local yt_style_cyan = build_test_yt_style("cyan")
+    assert(yt_style_cyan:find('sub%-color="#00FFFFFF"') ~= nil, "Cyan CC color missing")
+    print("  [✓] Standalone window (-w) YouTube-identical & high-contrast subtitle styling validated")
 
     print("=== All Internal Self-Tests Passed Successfully ===")
     return true
@@ -3098,6 +3137,8 @@ local function print_help()
     print("  --sub-lang <lang>     Preferred subtitle/lyrics language pattern (default: en.*)")
     print("  --sub-font-size <pts> Font size for subtitles / CC (default: 55, range: 10-120)")
     print("  --cc-font-size <pts>  Alias for --sub-font-size")
+    print("  --sub-color <color>   Subtitle color: white, yellow, cyan (default: white)")
+    print("  --cc-color <color>    Alias for --sub-color")
     print("  --browser <name>      Extract session cookies from browser (firefox, chrome, brave, edge)")
     print("  --no-interactive      Non-interactive script/batch mode (print results and exit)")
     print("  --cookies <file>      Use Netscape format cookies.txt file")
@@ -3125,6 +3166,7 @@ local function print_help()
     print("  [c]           Toggle Closed Captions (CC / Lyrics)")
     print("  [C]           Cycle subtitle track (Mini-Player)")
     print("  [+ / -]       Increase / Decrease CC font size (+/-5 pt)")
+    print("  [Alt+c]       Cycle CC style: White, Yellow, Cyan (in MPV GUI window)")
     print("  [m]           Toggle Music / Video mode")
     print("  [q]           Quit viewer")
     print("\nSystem Status:")
@@ -3160,6 +3202,7 @@ local function main()
     local show_cc = true
     local sub_lang = "en.*"
     local sub_font_size = 55
+    local sub_color = "white"
     local download_target = nil
     local active_filters = { sort = "relevance", duration = "all" }
     local site = "youtube"
@@ -3200,6 +3243,12 @@ local function main()
             local parsed_size = tonumber(arg[i])
             if parsed_size then
                 sub_font_size = math.max(10, math.min(120, math.floor(parsed_size)))
+            end
+        elseif a == "--sub-color" or a == "--cc-color" then
+            i = i + 1
+            local c = (arg[i] or "white"):lower()
+            if c == "yellow" or c == "cyan" or c == "white" then
+                sub_color = c
             end
         elseif a == "-d" or a == "--download" then
             i = i + 1
@@ -3284,7 +3333,7 @@ local function main()
         return
     end
 
-    run_app(query, mode, browser, cookies_file, is_liked, use_window, proxy, insecure, show_cc, sub_lang, active_filters, site, sub_font_size)
+    run_app(query, mode, browser, cookies_file, is_liked, use_window, proxy, insecure, show_cc, sub_lang, active_filters, site, sub_font_size, sub_color)
 end
 
 main()
