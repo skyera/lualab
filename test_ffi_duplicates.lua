@@ -16,6 +16,7 @@ int rmdir(const char *path);
 int chmod(const char *path, unsigned int mode);
 unsigned int geteuid(void);
 int mkfifo(const char *path, unsigned int mode);
+char *getcwd(char *buf, size_t size);
 ]]
 local template=ffi.new('char[?]',64,'/tmp/lualab-duplicates-XXXXXX')
 assert(ffi.C.mkdtemp(template) ~= nil)
@@ -162,6 +163,15 @@ local ok,e=xpcall(function()
  local unicode_doc=json.decode(finder.to_json({groups={{size=1,paths={unicode}}},errors={},files=1,redundant_bytes=0,skipped_links=0}))
  check(unicode_doc.groups[1].paths[1]==unicode and unicode_doc.groups[1].paths_hex==nil,'valid UTF-8 unchanged')
  -- End JSON regressions.
+ -- Regression: the CLI argument must not be mistaken for a require call.
+ directory('ffi_duplicates'); write('ffi_duplicates/a','same');write('ffi_duplicates/b','same')
+ local cwd=ffi.new('char[4096]');assert(ffi.C.getcwd(cwd,4096)~=nil)
+ local script=ffi.string(cwd)..'/ffi_duplicates.lua'
+ local command='cd '..quote(root)..' && '..quote(arg[-1] or 'luajit')..' '..quote(script)..' ffi_duplicates'
+ local process=assert(io.popen(command..' 2>&1'));local named_output=process:read('*a');process:close()
+ check(named_output:find('1 duplicate group',1,true)~=nil,'literal ffi_duplicates root executes CLI')
+ check(require('ffi_duplicates')==finder,'module loading still works')
+ -- End module regressions.
  if ffi.C.geteuid() ~= 0 then
   directory('unreadable'); local denied=write('unreadable/a','abc'); write('unreadable/b','abc')
   assert(ffi.C.chmod(denied,0)==0)

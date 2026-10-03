@@ -471,7 +471,8 @@ end
 local M = new(backend)
 M.new = new
 M.windows_backend = windows_backend
-if ... == 'ffi_duplicates' then return M end
+local caller = debug.getinfo(2, 'f')
+if ... == 'ffi_duplicates' and caller and caller.func == require then return M end
 local args, message = arg
 if backend.arguments then args, message = backend.arguments(arg) end
 if not args then io.stderr:write(message, '\n'); os.exit(2) end
