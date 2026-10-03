@@ -341,11 +341,10 @@ local function linux_backend()
     end
 
     function M.metadata(path, fd)
-        local s = ffi.new('dup_stat[1]')
+        local s = ffi.new('dup_stat')
         if C.statx(fd or -100, fd and '' or path, fd and 4096 or 256, 0x7ff, s) ~= 0 then
             return nil, err()
         end
-        s = s[0]
         if bit.band(s.mask, 0x3c3) ~= 0x3c3 then
             return nil, 'incomplete filesystem metadata'
         end
