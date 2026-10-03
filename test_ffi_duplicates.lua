@@ -121,6 +121,30 @@ local ok,e=xpcall(function()
   return finder.hash(file)
  end})
  check(#replacement.groups==0 and #replacement.errors==1,'replacement FIFO rejected without blocking')
+ -- Regression: representative failures must preserve surviving duplicates.
+ for _, kind in ipairs({'removed', 'changed', 'candidate', 'multiple'}) do
+  local dir=directory('recovery-'..kind)
+  write('recovery-'..kind..'/a','same'); write('recovery-'..kind..'/b','same')
+  write('recovery-'..kind..'/c','same'); write('recovery-'..kind..'/d','same')
+  local result=finder.scan({dir},{hash=function(file)
+   local h,err=finder.hash(file)
+   if file.path==dir..'/d' then
+    if kind=='changed' then
+     local f=assert(io.open(dir..'/a','wb'));f:write('xxxx');f:close()
+    elseif kind=='candidate' then assert(os.remove(dir..'/c'))
+    else
+     assert(os.remove(dir..'/a'))
+     if kind=='multiple' then assert(os.remove(dir..'/b')) end
+    end
+   end
+   return h,err
+  end})
+  local expected=kind=='multiple' and 2 or 3
+  check(#result.groups==1 and #result.groups[1].paths==expected,'recover after '..kind..' failure')
+  check(#result.errors==(kind=='multiple' and 2 or 1),'report failed files once: '..kind)
+  check(result.errors[1].path==dir..(kind=='candidate' and '/c' or '/a'),'identify failed path: '..kind)
+ end
+ -- End representative regressions.
  if ffi.C.geteuid() ~= 0 then
   directory('unreadable'); local denied=write('unreadable/a','abc'); write('unreadable/b','abc')
   assert(ffi.C.chmod(denied,0)==0)

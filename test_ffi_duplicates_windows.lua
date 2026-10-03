@@ -223,6 +223,18 @@ check(#r.errors==0 and #r.groups==2 and r.files==6,'shared scanner with Windows 
 check(r.redundant_bytes==#data and r.skipped_links==2,'Windows hard links and reparse points')
 local collisions=winfinder.scan({'C:\\fixture'},{hash=function() return 'collision' end})
 check(#collisions.groups==2 and #collisions.groups[1].paths==2,'Windows byte comparison rejects collisions')
+ -- Regression: recover when a representative fails during ReadFile.
+ local recovery='\\\\?\\C:\\recovery'
+ state.files[recovery]={id=20,attr=16,names={'a','b','c'}}
+ for i,name in ipairs({'a','b','c'}) do state.files[recovery..'\\'..name]={id=20+i,data='same'} end
+ local recovered=winfinder.scan({'C:\\recovery'},{hash=function(file)
+  local h,e=winfinder.hash(file)
+  if file.path=='C:\\recovery\\c' then state.files[recovery..'\\a'].read_error=true end
+  return h,e
+ end})
+ check(#recovered.groups==1 and #recovered.groups[1].paths==2,'ReadFile representative failure preserves matches')
+ check(#recovered.errors==1 and recovered.errors[1].path=='C:\\recovery\\a','ReadFile failure attributed correctly')
+ -- End read-error regressions.
 check(#winfinder.scan({'C:\\fixture'},{min_size=1}).groups==1,'Windows minimum size')
 check(#winfinder.scan({'C:\\missing'}).errors==1,'missing Windows path')
 local f=assert(fs.metadata('C:\\fixture\\a'));f.path='C:\\fixture\\a'

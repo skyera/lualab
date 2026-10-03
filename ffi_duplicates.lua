@@ -288,20 +288,22 @@ function M.hash(file)
  return tostring(h)
 end
 function M.equal(a, b)
- local fa, e = open_checked(a); if not fa then return nil, e end
- local fb; fb, e = open_checked(b); if not fb then backend.close(fa); return nil, e end
+ local fa, e = open_checked(a); if not fa then return nil, e, a end
+ local fb; fb, e = open_checked(b); if not fb then backend.close(fa); return nil, e, b end
  local ba, bb = ffi.new('uint8_t[65536]'), ffi.new('uint8_t[65536]')
- local same, total = true, 0
+ local same, total, failed_file = true, 0, nil
  while true do
   local na, ea = read_chunk(fa, ba); local nb, eb = read_chunk(fb, bb)
-  if not na or not nb then same=nil; e=ea or eb; break end
+  if not na or not nb then same=nil; e=ea or eb; failed_file=not na and a or b; break end
   total = total + na
   if na ~= nb or ffi.C.memcmp(ba, bb, na) ~= 0 then same=false; break end
   if na == 0 then break end
  end
- if not stable(a, fa) or not stable(b, fb) or (same and total ~= a.size) then same=nil; e='file changed during comparison' end
+ if not stable(a, fa) then same=nil; e='file changed during comparison'; failed_file=a
+ elseif not stable(b, fb) then same=nil; e='file changed during comparison'; failed_file=b
+ elseif same and total ~= a.size then same=nil; e='file changed during comparison'; failed_file=a end
  backend.close(fa); backend.close(fb)
- return same, e
+ return same, e, failed_file
 end
 function M.scan(roots, options)
  options = options or {}
@@ -342,9 +344,18 @@ function M.scan(roots, options)
     for _, file in ipairs(bucket) do
      local found, failed=false,false
      for _, group in ipairs(groups) do
-      local same,e=M.equal(group[1],file)
-      if same == nil then warning(file.path,e); failed=true; break end
-      if same then table.insert(group,file); found=true; break end
+      while #group > 0 do
+       local same,e,bad=M.equal(group[1],file)
+       if same == nil then
+        warning(bad.path,e)
+        if bad == file then failed=true; break end
+        table.remove(group,1)
+       else
+        if same then table.insert(group,file); found=true end
+        break
+       end
+      end
+      if found or failed then break end
      end
      if not found and not failed then groups[#groups+1]={file} end
     end
