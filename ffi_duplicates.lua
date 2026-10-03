@@ -90,7 +90,7 @@ local invalid = ffi.cast('void*', -1)
  function M.open(path) return open_path(path, 0x80000000) end
  function M.metadata(path, handle)
   local h, e = handle
-  if not h then h, e = open_path(path, 0); if not h then return nil, e end end
+  if not h then h, e = open_path(path, 0x80); if not h then return nil, e end end
   local function finish(value, message)
    if not handle then M.close(h) end
    return value, message

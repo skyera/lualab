@@ -132,6 +132,7 @@ function native.GetFullPathNameW(w,n,out)
 end
 function native.CreateFileW(w,access,share,security,creation,flags)
  check(share==7 and creation==3 and bit.band(flags,0x02200000)==0x02200000,'open flags and sharing')
+ assert(access == 0x80 or access == 0x80000000, 'metadata opens must request FILE_READ_ATTRIBUTES')
  local path=text(w);local f=state.files[path]
  if not f then state.error=2;return invalid end
  if f.denied then state.error=5;return invalid end
