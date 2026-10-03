@@ -51,6 +51,7 @@ make
 
 - **Run FFI Examples (requires LuaJIT):**
   ```bash
+  luajit ffi_duplicates.lua ~/Downloads ~/Pictures  # Find exact duplicate files (Windows / Linux)
   ./LuaJIT/src/luajit ffi_system_info.lua   # Rich POSIX system diagnostics, hardware specs & memory benchmark (--compact, --json, --bench)
   ./LuaJIT/src/luajit ffi_advanced_demo.lua
   ./LuaJIT/src/luajit ffi_sqlite_demo.lua   # In-memory SQLite3 FFI engine & benchmark
@@ -110,3 +111,46 @@ logexplorer app.log         # Follow a log file
 ```
 
 The default install location is `~/bin` on Linux and `C:\app\bin` on Windows.
+
+### Duplicate-file finder
+
+`ffi_duplicates.lua` is a standalone script that recursively scans files or
+directories using Linux libc FFI (`statx`, `opendir`, `read`) or native Windows
+APIs. Both backends and JSON output are included in the same script, with no
+additional Lua modules or external commands required. It groups candidates by size, computes a streaming
+hash, and confirms every match byte-for-byte. It never deletes or modifies files.
+
+```bash
+luajit ffi_duplicates.lua ./photos ./backup
+luajit ffi_duplicates.lua --min-size=1048576 .
+luajit ffi_duplicates.lua --json . > duplicates.json
+luajit ffi_duplicates.lua -- ./-unusual-directory
+luajit test_ffi_duplicates.lua
+```
+
+On Windows, use native Windows LuaJIT (no WSL needed):
+
+```powershell
+luajit ffi_duplicates.lua "C:\Users\Alice\Downloads" "D:\Backup"
+luajit ffi_duplicates.lua --json "C:\Users\Alice\Pictures"
+```
+
+Windows paths and command-line arguments use Unicode Win32 APIs, including
+extended-length drive and UNC paths. Symlinks, junctions, and other reparse
+points are skipped, including cloud placeholders with reparse attributes.
+
+With no paths, it scans the current directory. Hidden files and empty files are
+included; `--min-size=1` excludes empty files. Symlinks and special files are
+skipped, and repeated roots and hard links are counted once by device/inode.
+Output is sorted by descending file size and then path. Text output quotes paths
+so control characters cannot affect the terminal. JSON contains `groups`
+(`size`, `paths`), `files`, `redundant_bytes`, `skipped_links`, and `errors`.
+
+Requires Windows 8+ with file-ID support, or 64-bit Linux with libc/kernel
+support for `statx`. Exit status is 0 for
+complete scans (including no duplicates), 1 for filesystem/read errors, and 2
+for invalid arguments. Errors appear on stderr and in JSON. Read buffers are
+bounded; file metadata and paths are held in memory. Detected changes during
+hashing/comparison produce errors, but a scan is not a filesystem snapshot:
+rescan quiescent files before taking action. Redundant bytes describe logical
+content, not guaranteed disk savings from sparse, compressed, or reflink files.
