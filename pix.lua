@@ -4577,6 +4577,17 @@ local function render_video_progress_bar(cur_sec, total_sec, bar_w)
     return table.concat(bar)
 end
 
+-- Replace the previous view without clearing or switching terminal buffers.
+-- Pure output generator so viewport transitions can be checked headlessly.
+local function render_video_viewport_background(term_h)
+    local out = {"\27[?2026h\27[0m"}
+    for row = 1, math.max(1, term_h) do
+        out[#out + 1] = string.format("\27[%d;1H\27[2K", row)
+    end
+    out[#out + 1] = "\27[H\27[?2026l"
+    return table.concat(out)
+end
+
 local function render_video_frame_halfblock(raw_bytes, frame_w, frame_h, pad, row_start)
     local fit_rows = math.floor(frame_h / 2)
     local out = {}
@@ -4979,6 +4990,8 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
         io.flush()
     end
 
+    io.write(render_video_viewport_background(term_h))
+    io.flush()
     draw_static_header()
     update_dynamic_header(fps)
     open_stream(0)
