@@ -2228,7 +2228,9 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         local auto_footer = auto_play and "\27[1;92mON\27[0m" or "\27[90mOFF\27[0m"
         local cc_footer = show_cc and "\27[1;92mON\27[0m" or "\27[90mOFF\27[0m"
         local q_footer = string.format("\27[93m[Tab]\27[0m Q(%d)  \27[93m[Q]\27[0m View", #queue)
-        table.insert(buf, "\27[1;34m" .. string.rep("-", term_w) .. "\27[0m\n")
+        if not (MpvController.is_playing and MpvController.current_item) then
+            table.insert(buf, "\27[1;34m" .. string.rep("-", term_w) .. "\27[0m\n")
+        end
         table.insert(buf, string.format(" \27[93m[Enter]\27[0m Play  %s  \27[93m[d]\27[0m DL  \27[93m[f]\27[0m Filter  \27[93m[/]\27[0m Find  \27[93m[M]\27[0m More  \27[93m[m]\27[0m Mode  \27[93m[?]\27[0m Help  \27[91m[q]\27[0m Quit\27[K", q_footer))
         
         io.write(table.concat(buf))
