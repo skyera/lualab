@@ -300,6 +300,8 @@ local function posix_termios_cdef(def)
         def = def:gsub("unsigned%s+int(%s+[%w_]*tcflag_t)", "unsigned long%1")
         def = def:gsub("unsigned%s+int(%s+[%w_]*speed_t)", "unsigned long%1")
         def = def:gsub("c_cc%[32%]", "c_cc[20]")
+        def = def:gsub("unsigned%s+short%s+sun_family;", "unsigned char sun_len; unsigned char sun_family;")
+        def = def:gsub("sun_path%[108%]", "sun_path[104]")
     end
     return def
 end
@@ -343,6 +345,15 @@ ffi.cdef(posix_termios_cdef[[
         int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
         int poll(struct pollfd *fds, unsigned long nfds, int timeout);
         long read(int fd, void *buf, size_t count);
+        long write(int fd, const void *buf, size_t count);
+        int close(int fd);
+        int socket(int domain, int type, int protocol);
+        int connect(int sockfd, const void *addr, unsigned int addrlen);
+        int unlink(const char *pathname);
+        struct sockaddr_un {
+            unsigned short sun_family;
+            char sun_path[108];
+        };
         int isatty(int fd);
         int usleep(unsigned int usec);
         int clock_gettime(int clk_id, struct timespec *tp);
@@ -1357,6 +1368,16 @@ end
 -- =========================================================================
 -- 5. Background Mini-Player & Foreground Playback Controller
 -- =========================================================================
+local function make_sockaddr_un(path)
+    local addr = ffi.new("struct sockaddr_un")
+    if ffi.os == "OSX" or ffi.os == "BSD" then
+        pcall(function() addr.sun_len = ffi.sizeof(addr) end)
+    end
+    addr.sun_family = 1 -- AF_UNIX
+    ffi.copy(addr.sun_path, path)
+    return addr
+end
+
 local MpvController = {
     is_playing = false,
     current_item = nil,
@@ -1370,16 +1391,31 @@ local MpvController = {
     has_switched_orig = false,
     is_eof = false,
     pipe_handle = nil,
+    sock_fd = nil,
     pipe_name = nil,
     read_buf = "",
     cc_state = { prev_last_line = "", prev_displayed = "" },
 }
+
+function MpvController:init_observers()
+    self:send_command('{"command": ["observe_property", 1, "time-pos"]}')
+    self:send_command('{"command": ["observe_property", 2, "duration"]}')
+    self:send_command('{"command": ["observe_property", 3, "pause"]}')
+    self:send_command('{"command": ["observe_property", 4, "sub-text"]}')
+    self:send_command('{"command": ["observe_property", 5, "volume"]}')
+    self:send_command('{"command": ["observe_property", 6, "eof-reached"]}')
+    self:send_command('{"command": ["observe_property", 7, "sub"]}')
+    self:send_command('{"command": ["observe_property", 8, "track-list"]}')
+end
 
 function MpvController:send_command(json_str)
     if is_windows and self.pipe_handle then
         local data = json_str .. "\n"
         local written = ffi.new("DWORD[1]")
         kernel32.WriteFile(self.pipe_handle, data, #data, written, nil)
+    elseif not is_windows and self.sock_fd and self.sock_fd >= 0 then
+        local data = json_str .. "\n"
+        ffi.C.write(self.sock_fd, data, #data)
     end
 end
 
@@ -1441,6 +1477,19 @@ function MpvController:start(item, show_cc, sub_lang, browser, cookies_file, pro
                 break
             end
         end
+    else
+        for _ = 1, 30 do
+            sleep_ms(20)
+            local fd = ffi.C.socket(1, 1, 0) -- AF_UNIX=1, SOCK_STREAM=1
+            if fd >= 0 then
+                local addr = make_sockaddr_un(pipe_path)
+                if ffi.C.connect(fd, addr, ffi.sizeof(addr)) == 0 then
+                    self.sock_fd = fd
+                    break
+                end
+                ffi.C.close(fd)
+            end
+        end
     end
 
     self.is_playing = true
@@ -1457,14 +1506,7 @@ function MpvController:start(item, show_cc, sub_lang, browser, cookies_file, pro
     self.read_buf = ""
     self.cc_state = { prev_last_line = "", prev_displayed = "" }
 
-    self:send_command('{"command": ["observe_property", 1, "time-pos"]}')
-    self:send_command('{"command": ["observe_property", 2, "duration"]}')
-    self:send_command('{"command": ["observe_property", 3, "pause"]}')
-    self:send_command('{"command": ["observe_property", 4, "sub-text"]}')
-    self:send_command('{"command": ["observe_property", 5, "volume"]}')
-    self:send_command('{"command": ["observe_property", 6, "eof-reached"]}')
-    self:send_command('{"command": ["observe_property", 7, "sub"]}')
-    self:send_command('{"command": ["observe_property", 8, "track-list"]}')
+    self:init_observers()
 end
 
 function MpvController:poll()
@@ -1477,6 +1519,40 @@ function MpvController:poll()
             local read_bytes = ffi.new("DWORD[1]")
             if kernel32.ReadFile(self.pipe_handle, buf, avail[0], read_bytes, nil) ~= 0 and read_bytes[0] > 0 then
                 self.read_buf = self.read_buf .. ffi.string(buf, read_bytes[0])
+            end
+        end
+    elseif not is_windows then
+        if not self.sock_fd and self.pipe_name then
+            local fd = ffi.C.socket(1, 1, 0)
+            if fd >= 0 then
+                local addr = make_sockaddr_un(self.pipe_name)
+                if ffi.C.connect(fd, addr, ffi.sizeof(addr)) == 0 then
+                    self.sock_fd = fd
+                    self:init_observers()
+                else
+                    ffi.C.close(fd)
+                end
+            end
+        end
+        if self.sock_fd and self.sock_fd >= 0 then
+            local pfd = ffi.new("struct pollfd", { fd = self.sock_fd, events = 1, revents = 0 })
+            while true do
+                local ret = ffi.C.poll(pfd, 1, 0)
+                if ret > 0 and bit.band(pfd.revents, 1) ~= 0 then
+                    local buf = ffi.new("char[4096]")
+                    local n = ffi.C.read(self.sock_fd, buf, 4096)
+                    if n > 0 then
+                        self.read_buf = self.read_buf .. ffi.string(buf, n)
+                    else
+                        self.is_eof = true
+                        break
+                    end
+                elseif ret > 0 and (bit.band(pfd.revents, 0x0010) ~= 0 or bit.band(pfd.revents, 0x0008) ~= 0) then
+                    self.is_eof = true
+                    break
+                else
+                    break
+                end
             end
         end
     end
@@ -1583,12 +1659,21 @@ function MpvController:cycle_sub()
 end
 
 function MpvController:stop()
-    if self.pipe_handle then
+    if is_windows and self.pipe_handle then
         self:send_command('{"command": ["quit"]}')
         sleep_ms(50)
         kernel32.CloseHandle(self.pipe_handle)
         self.pipe_handle = nil
+    elseif not is_windows and self.sock_fd then
+        self:send_command('{"command": ["quit"]}')
+        sleep_ms(50)
+        ffi.C.close(self.sock_fd)
+        self.sock_fd = nil
     end
+    if not is_windows and self.pipe_name then
+        pcall(function() ffi.C.unlink(self.pipe_name) end)
+    end
+    self.pipe_name = nil
     self.is_playing = false
     self.current_item = nil
     self.time_pos = 0
@@ -2775,7 +2860,7 @@ local function run_self_tests()
     assert(SITE_SEARCH_PREFIXES.twitch == "twsearch", "Twitch search adapter missing")
     print("  [✓] Site search adapters passed")
 
-    -- 13. Win32 Named Pipe FFI bindings
+    -- 13. Platform IPC FFI bindings (Win32 Named Pipe / POSIX UNIX Domain Socket)
     if is_windows then
         assert(kernel32 ~= nil, "kernel32 library handle must be initialized")
         assert(kernel32.CreateFileA ~= nil, "kernel32.CreateFileA must be defined")
@@ -2784,6 +2869,17 @@ local function run_self_tests()
         assert(kernel32.PeekNamedPipe ~= nil, "kernel32.PeekNamedPipe must be defined")
         assert(kernel32.CloseHandle ~= nil, "kernel32.CloseHandle must be defined")
         print("  [✓] Win32 Named Pipe FFI bindings validated")
+    else
+        assert(ffi.C.socket ~= nil, "ffi.C.socket must be defined")
+        assert(ffi.C.connect ~= nil, "ffi.C.connect must be defined")
+        assert(ffi.C.write ~= nil, "ffi.C.write must be defined")
+        assert(ffi.C.read ~= nil, "ffi.C.read must be defined")
+        assert(ffi.C.close ~= nil, "ffi.C.close must be defined")
+        assert(ffi.C.unlink ~= nil, "ffi.C.unlink must be defined")
+        local test_addr = make_sockaddr_un("/tmp/test_ipc.sock")
+        assert(test_addr.sun_family == 1, "sockaddr_un sun_family must be AF_UNIX (1)")
+        assert(ffi.string(test_addr.sun_path) == "/tmp/test_ipc.sock", "sockaddr_un path mismatch")
+        print("  [✓] POSIX UNIX domain socket FFI bindings validated")
     end
 
     -- 14. Subtitle / slang language expansion (prioritizing -orig authentic subtitles)
@@ -2931,6 +3027,28 @@ local function run_self_tests()
     MpvController.is_playing = false
     MpvController.read_buf = ""
     print("  [✓] IPC property parsing, rolling caption deduplication & track-list auto-selection passed")
+
+    -- 17b. Live MPV POSIX IPC stream verification (if mpv installed)
+    if HAS_MPV and not is_windows then
+        local live_item = { url = "av://lavfi:sine=frequency=440:duration=3", title = "IPC Test", duration = 3 }
+        MpvController:start(live_item, true, "en.*")
+        assert(MpvController.is_playing == true, "MpvController:start must mark is_playing = true")
+        local got_pos = false
+        for _ = 1, 30 do
+            sleep_ms(30)
+            local st = MpvController:poll()
+            if st and st.time_pos and st.time_pos > 0 then
+                got_pos = true
+                break
+            end
+        end
+        MpvController:toggle_pause()
+        assert(MpvController.is_paused == true, "toggle_pause must toggle is_paused")
+        MpvController:stop()
+        assert(MpvController.is_playing == false, "MpvController:stop must mark is_playing = false")
+        assert(MpvController.sock_fd == nil, "MpvController:stop must reset sock_fd")
+        print("  [✓] Live MPV POSIX UNIX domain socket IPC lifecycle validated")
+    end
 
     -- 18. Clipboard URL Copying (y key)
     assert(copy_to_clipboard(nil) == false, "copy_to_clipboard(nil) must return false")
