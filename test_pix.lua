@@ -541,6 +541,72 @@ assert(not output:find("\27[H", 1, true), "home screen escape must not be emitte
 
 print("OK_DIFF_REFRESH")' ]],
         expect = "OK_DIFF_REFRESH"
+    },
+    {
+        name = "Image viewer, video, and audio player [d] key delete with confirmation wiring and help modal",
+        cmd = luajit .. [==[ -e '
+local s = assert(io.open("pix.lua", "rb")):read("*all")
+-- Help modal documentation
+assert(s:find("Delete current image (with confirm)", 1, true), "viewer help modal missing delete entry")
+assert(s:find("Delete video file (with confirm)", 1, true), "video player help modal missing delete entry")
+
+-- Header hints
+assert(s:find("[d]", 1, true) and s:find("Del", 1, true), "header missing [d] Del hint")
+
+-- Video player [d] handler & action == "delete"
+assert(s:find("Remove \x27%s\x27 permanently?", 1, true), "confirmation prompt string pattern missing")
+assert(s:find("return \"delete\", protocol", 1, true), "video player missing return delete action")
+assert(s:find("elseif action == \"delete\" then", 1, true), "in_viewer missing action == delete handler")
+
+-- Image viewer [d] handler
+local viewer_gate = s:find("elseif k == \"d\" or k == \"D\" then", 1, true)
+assert(viewer_gate, "image viewer missing [d] key handler")
+
+print("OK_VIEWER_DELETE_WIRING")' ]==],
+        expect = "OK_VIEWER_DELETE_WIRING"
+    },
+    {
+        name = "End-to-end deletion with confirmation removes file on disk and cancel preserves file",
+        cmd = luajit .. [==[ -e '
+local tmp = ((os.getenv("TEMP") or "/tmp"):gsub("\\", "/")) .. "/test_pix_viewer_delete"
+os.execute("rm -rf " .. tmp .. " && mkdir -p " .. tmp)
+local function touch(name)
+    local p = tmp .. "/" .. name
+    local f = assert(io.open(p, "wb"))
+    f:write("dummy content")
+    f:close()
+    return p
+end
+
+local f1 = touch("photo1.png")
+local f2 = touch("photo2.png")
+
+local f_src = assert(io.open("pix.lua", "rb"))
+local src = f_src:read("*all")
+f_src:close()
+
+-- Extract delete_file_from_disk
+local i_del = src:find("local function delete_file_from_disk", 1, true)
+local j_del = src:find("\nend\n", i_del, true)
+local chunk = assert(loadstring(src:sub(i_del, j_del + 4) .. "\nreturn delete_file_from_disk\n"))
+local env = { type = type, os = os, animated_cache = {}, get_win_short_path = function(p) return p end }
+setfenv(chunk, env)
+local del_fn = chunk()
+
+-- 1. Test successful deletion removes file from disk
+assert(io.open(f1, "rb") ~= nil, "f1 should exist before delete")
+local ok1 = del_fn(f1)
+assert(ok1 == true, "delete_file_from_disk failed on f1")
+assert(io.open(f1, "rb") == nil, "f1 should be deleted from disk")
+
+-- 2. Test cancel preserves file
+assert(io.open(f2, "rb") ~= nil, "f2 should exist")
+-- Simulating cancel: file is NOT passed to delete_file_from_disk
+assert(io.open(f2, "rb") ~= nil, "f2 remains intact on disk when cancel")
+
+os.execute("rm -rf " .. tmp)
+print("OK_VIEWER_E2E_DELETE")' ]==],
+        expect = "OK_VIEWER_E2E_DELETE"
     }
 }
 

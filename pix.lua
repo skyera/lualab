@@ -3229,9 +3229,9 @@ local function render_image_unicode_block(img_entry, current_idx, total_count, t
         "  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s | Path: %s\27[0m\n",
         img_entry.size_str, img.width, img.height, date_info, eng, dpath))
     local cycle_hint = (zoom and zoom > 1.0)
-        and string.format("  \27[1;93m[Zoom %.1fx]\27[0m  \27[93m[+ / -]\27[0m Zoom  \27[93m[Arrows/WASD]\27[0m Pan  \27[93m[0]\27[0m Reset  \27[92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n", zoom)
-        or (total_e and string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[93m[+/-]\27[0m Zoom  \27[1;96m[t]\27[0m Cycle Engine (%d available)  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n", total_e)
-            or "  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[93m[+/-]\27[0m Zoom  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n")
+        and string.format("  \27[1;93m[Zoom %.1fx]\27[0m  \27[93m[+ / -]\27[0m Zoom  \27[93m[Arrows/WASD]\27[0m Pan  \27[93m[0]\27[0m Reset  \27[91m[d]\27[0m Del  \27[92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n", zoom)
+        or (total_e and string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[93m[+/-]\27[0m Zoom  \27[1;96m[t]\27[0m Cycle Engine (%d available)  \27[91m[d]\27[0m Del  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n", total_e)
+            or "  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[93m[+/-]\27[0m Zoom  \27[1;96m[t]\27[0m Cycle Engine  \27[91m[d]\27[0m Del  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n")
     table.insert(out, cycle_hint)
     table.insert(out, "\27[90m" .. string.rep("─", blen) .. "\27[0m\n")
 
@@ -3595,8 +3595,8 @@ local function render_image_chafa(img_entry, current_idx, total_count, term_w, t
     end
     table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s | Path: %s\27[0m\n",
         img_entry.size_str, img.width, img.height, date_info, eng_label, disp_path))
-    local cycle_hint = total_e and string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine (%d available)  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n", total_e)
-        or "  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"
+    local cycle_hint = total_e and string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine (%d available)  \27[91m[d]\27[0m Del  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n", total_e)
+        or "  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine  \27[91m[d]\27[0m Del  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"
     table.insert(out, cycle_hint)
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
@@ -3776,8 +3776,8 @@ local function render_image_timg_cli(img_entry, current_idx, total_count, term_w
     local eng_prefix = (cur_e and total_e) and string.format("[%d/%d] ", cur_e, total_e) or ""
     table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s\27[1;96mtimg (External CLI)\27[90m | Path: %s\27[0m\n",
         img_entry.size_str, img.width, img.height, date_info, eng_prefix, disp_path))
-    local cycle_hint = total_e and string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine (%d available)  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n", total_e)
-        or "  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"
+    local cycle_hint = total_e and string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine (%d available)  \27[91m[d]\27[0m Del  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n", total_e)
+        or "  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine  \27[91m[d]\27[0m Del  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"
     table.insert(out, cycle_hint)
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
@@ -3843,8 +3843,8 @@ local function render_image_chafa_cli_direct(img_entry, current_idx, total_count
     local eng_prefix = (cur_e and total_e) and string.format("[%d/%d] ", cur_e, total_e) or ""
     table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s\27[1;95mChafa (External CLI)\27[90m | Path: %s\27[0m\n",
         img_entry.size_str, img.width, img.height, date_info, eng_prefix, disp_path))
-    local cycle_hint = total_e and string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine (%d available)  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n", total_e)
-        or "  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"
+    local cycle_hint = total_e and string.format("  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine (%d available)  \27[91m[d]\27[0m Del  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n", total_e)
+        or "  \27[93m[←/P]\27[0m Prev  \27[93m[→/N]\27[0m Next  \27[1;96m[t]\27[0m Cycle Engine  \27[91m[d]\27[0m Del  \27[1;92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n"
     table.insert(out, cycle_hint)
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
@@ -4059,8 +4059,8 @@ local function render_image_kitty(img_entry, current_idx, total_count, term_w, t
     local eng_prefix = (cur_e and total_e) and string.format("[%d/%d] ", cur_e, total_e) or ""
     table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s\27[1;95mKitty Graphics Protocol\27[90m | Path: %s\27[0m\n",
         img_entry.size_str, iw, ih, date_info, eng_prefix, disp_path))
-    local cycle_hint = total_e and string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine (%d available)   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n", total_e)
-        or "  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"
+    local cycle_hint = total_e and string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine (%d available)   \27[91m[d]\27[0m Del   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n", total_e)
+        or "  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[91m[d]\27[0m Del   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"
     table.insert(out, cycle_hint)
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
     if pad_top > 0 then table.insert(out, string.rep("\n", pad_top)) end
@@ -4123,9 +4123,9 @@ local function render_image_halfblock(img_entry, current_idx, total_count, term_
     table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s\27[1;92mANSI 24-bit Truecolor Half-Block (▄)\27[90m | Path: %s\27[0m\n",
         img_entry.size_str, img.width, img.height, date_info, eng_prefix, disp_path))
     local cycle_hint = (zoom > 1.0)
-        and string.format("  \27[1;93m[Zoom %.1fx]\27[0m  \27[93m[+ / -]\27[0m Zoom  \27[93m[Arrows/WASD]\27[0m Pan  \27[93m[0]\27[0m Reset  \27[92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n", zoom)
-        or (total_e and string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[93m[+/-]\27[0m Zoom   \27[1;96m[t]\27[0m Cycle Engine (%d available)   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n", total_e)
-            or "  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[93m[+/-]\27[0m Zoom   \27[1;96m[t]\27[0m Cycle Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n")
+        and string.format("  \27[1;93m[Zoom %.1fx]\27[0m  \27[93m[+ / -]\27[0m Zoom  \27[93m[Arrows/WASD]\27[0m Pan  \27[93m[0]\27[0m Reset  \27[91m[d]\27[0m Del  \27[92m[Enter/B]\27[0m Back  \27[91m[Q]\27[0m Quit\n", zoom)
+        or (total_e and string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[93m[+/-]\27[0m Zoom   \27[1;96m[t]\27[0m Cycle Engine (%d available)   \27[91m[d]\27[0m Del   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n", total_e)
+            or "  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[93m[+/-]\27[0m Zoom   \27[1;96m[t]\27[0m Cycle Engine   \27[91m[d]\27[0m Del   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n")
     table.insert(out, cycle_hint)
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
@@ -4286,8 +4286,8 @@ local function render_image_iterm2(img_entry, current_idx, total_count, term_w, 
     local eng_prefix = (cur_e and total_e) and string.format("[%d/%d] ", cur_e, total_e) or ""
     table.insert(out, string.format("  \27[90mSize: %s | Original: %dx%d | Date: %s | Engine: %s\27[1;94miTerm2 Inline Protocol\27[90m | Path: %s\27[0m\n",
         img_entry.size_str, iw, ih, date_info, eng_prefix, disp_path))
-    local cycle_hint = total_e and string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine (%d available)   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n", total_e)
-        or "  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"
+    local cycle_hint = total_e and string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine (%d available)   \27[91m[d]\27[0m Del   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n", total_e)
+        or "  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[91m[d]\27[0m Del   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"
     table.insert(out, cycle_hint)
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
     if pad_top > 0 then table.insert(out, string.rep("\n", pad_top)) end
@@ -4402,8 +4402,8 @@ local function render_image_sixel(img_entry, current_idx, total_count, term_w, t
     local eng_prefix = (cur_e and total_e) and string.format("[%d/%d] ", cur_e, total_e) or ""
     table.insert(out, string.format("  \27[90mSize: %s | Date: %s | Engine: %s\27[1;95mSixel Graphics Protocol\27[90m | Path: %s\27[0m\n",
         img_entry.size_str, date_info, eng_prefix, disp_path))
-    local cycle_hint = total_e and string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine (%d available)   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n", total_e)
-        or "  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"
+    local cycle_hint = total_e and string.format("  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine (%d available)   \27[91m[d]\27[0m Del   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n", total_e)
+        or "  \27[93m[←/P/PgUp]\27[0m Prev   \27[93m[→/N/PgDn]\27[0m Next   \27[1;96m[t]\27[0m Cycle Engine   \27[91m[d]\27[0m Del   \27[1;92m[Enter/B]\27[0m Back   \27[91m[Q]\27[0m Quit\n"
     table.insert(out, cycle_hint)
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
     local frame = table.concat(out):gsub("\n", "\27[K\n") .. "\27[J"
@@ -4955,7 +4955,7 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
         table.insert(out, "\n")
         local play_engine_hint = string.format("  \27[1;96m[m]\27[0m Engine (%d)", #get_available_play_engines())
         local audio_hint = (v_info.has_audio and not is_anim and get_has_ffplay()) and "  \27[93m[a]\27[0m Audio" or ""
-        table.insert(out, string.format("  \27[93m[Space/p]\27[0m Pause  \27[93m[←/→]\27[0m ±5s  \27[93m[↑/↓]\27[0m ±60s  \27[93m[0-9]\27[0m %%  \27[93m[[/]]\27[0m Spd%s  \27[93m[l]\27[0m Loop%s  \27[91m[q]\27[0m Back\27[K\n", audio_hint, play_engine_hint))
+        table.insert(out, string.format("  \27[93m[Space/p]\27[0m Pause  \27[93m[←/→]\27[0m ±5s  \27[93m[↑/↓]\27[0m ±60s  \27[93m[0-9]\27[0m %%  \27[93m[[/]]\27[0m Spd%s  \27[93m[l]\27[0m Loop%s  \27[91m[d]\27[0m Del  \27[91m[q]\27[0m Back\27[K\n", audio_hint, play_engine_hint))
         table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\27[K\n")
         io.write(table.concat(out))
         io.flush()
@@ -5220,6 +5220,34 @@ local function play_video_screen(img_entry, current_idx, total_count, protocol)
                     update_dynamic_header(current_fps)
                     open_stream(cur_time)
                 end
+            elseif k == "d" or k == "D" then
+                stop_audio()
+                local was_paused = is_paused
+                is_paused = true
+                local tw, _ = get_terminal_size()
+                local nm = utf8_truncate(to_display_text(img_entry.filename), math.max(12, tw - 58))
+                io.write(string.format("\27[4;1H\27[2K  \27[1;41;97m DELETE \27[0m \27[1;91mRemove '%s' permanently?  \27[1;92m[y]\27[1;91m Yes   \27[1;93m[n/Esc]\27[0m\27[1;91m Cancel\27[0m", nm))
+                io.flush()
+                local ck = read_key()
+                if ck == "y" or ck == "Y" then
+                    close_stream()
+                    return "delete", protocol
+                elseif ck == "Q" or ck == "CTRL_C" then
+                    close_stream()
+                    return "quit", protocol
+                else
+                    if show_osd then
+                        draw_static_header()
+                        update_dynamic_header(current_fps)
+                    else
+                        io.write("\27[4;1H\27[2K")
+                        io.flush()
+                    end
+                    if not was_paused then
+                        is_paused = false
+                        if audio_enabled then start_audio(cur_time) end
+                    end
+                end
             elseif k == "?" then
                 local tw, th = get_terminal_size()
                 render_help_modal(tw, th, protocol)
@@ -5318,7 +5346,7 @@ local function play_music_screen(audio_entry, current_idx, total_count)
             current_idx, total_count, to_display_text(audio_entry.filename), status, speed))
         table.insert(out, string.format("  \27[90mFormat: %s  Size: %s\27[0m\n\n", audio_entry.extension, audio_entry.size_str))
         table.insert(out, string.format("  \27[1;37m%s\27[0m  \27[1;36m%s\27[0m\n", format_position(), bar))
-        table.insert(out, "\n  \27[93m[Space/p]\27[0m Pause  \27[93m[←/→]\27[0m ±5s  \27[93m[↑/↓]\27[0m ±60s  \27[93m[[/]]\27[0m Speed  \27[91m[q]\27[0m Back\n")
+        table.insert(out, "\n  \27[93m[Space/p]\27[0m Pause  \27[93m[←/→]\27[0m ±5s  \27[93m[↑/↓]\27[0m ±60s  \27[93m[[/]]\27[0m Speed  \27[91m[d]\27[0m Del  \27[91m[q]\27[0m Back\n")
         table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
         local frame = table.concat(out):gsub("\n", "\27[K\n") .. "\27[J"
         io.write("\27[?2026h" .. frame .. "\27[?2026l")
@@ -5384,6 +5412,26 @@ local function play_music_screen(audio_entry, current_idx, total_count)
             elseif k == "PAGE_UP" then
                 stop_audio()
                 return "prev"
+            elseif k == "d" or k == "D" then
+                stop_audio()
+                local was_paused = is_paused
+                is_paused = true
+                local tw, _ = get_terminal_size()
+                local nm = utf8_truncate(to_display_text(audio_entry.filename), math.max(12, tw - 58))
+                io.write(string.format("\27[4;1H\27[2K  \27[1;41;97m DELETE \27[0m \27[1;91mRemove '%s' permanently?  \27[1;92m[y]\27[1;91m Yes   \27[1;93m[n/Esc]\27[0m\27[1;91m Cancel\27[0m", nm))
+                io.flush()
+                local ck = read_key()
+                if ck == "y" or ck == "Y" then
+                    return "delete"
+                elseif ck == "Q" or ck == "CTRL_C" then
+                    return "quit"
+                else
+                    if not was_paused and not is_eof then
+                        is_paused = false
+                        start_audio(cur_time)
+                    end
+                    draw_screen()
+                end
             end
             draw_screen()
         elseif not is_eof then
@@ -5448,6 +5496,7 @@ local function render_help_modal(term_w, term_h, active_protocol)
         "│    + / - / z           Zoom in / Zoom out (1x - 16x)        │",
         "│    Arrows / WASD       Pan image viewport (when zoomed in)  │",
         "│    0                   Reset zoom & pan to fit window       │",
+        "│    d                   Delete current image (with confirm)  │",
         cycle_line,
         "│    q / Esc / b         Return to file/folder list           │",
         "│                                                             │",
@@ -5468,6 +5517,7 @@ local function render_help_modal(term_w, term_h, active_protocol)
         "│    o                   Toggle OSD / header visibility       │",
         "│    m                   Cycle play engine (FFI/FFmpeg/mpv)   │",
         "│    w                   Toggle MPV window mode (GUI / TCT)   │",
+        "│    d                   Delete video file (with confirm)     │",
         "│    q / b / Esc         Return to the file list              │",
         "│                                                             │",
         "│  Search & Sorting:                                          │",
@@ -6179,6 +6229,20 @@ local function main()
                                 selected_idx = img_indices[img_pos]
                                 update_page_window()
                             end
+                        elseif action == "delete" then
+                            kitty_clear_screen()
+                            local ok, err = delete_file_from_disk(cur_img.filepath)
+                            if ok then
+                                drop_deleted_item(cur_img)
+                                local remaining = get_image_indices()
+                                if #remaining == 0 then
+                                    in_viewer = false
+                                end
+                                current_msg = "Deleted: " .. to_display_text(cur_img.filename)
+                            else
+                                current_msg = "Delete failed: " .. to_display_text(tostring(err))
+                            end
+                            needs_full_redraw = true
                         end
                     elseif is_audio_file(cur_img.filepath or cur_img.extension) then
                         local action = play_music_screen(cur_img, img_pos, #img_indices)
@@ -6202,6 +6266,20 @@ local function main()
                                 selected_idx = img_indices[img_pos]
                                 update_page_window()
                             end
+                        elseif action == "delete" then
+                            kitty_clear_screen()
+                            local ok, err = delete_file_from_disk(cur_img.filepath)
+                            if ok then
+                                drop_deleted_item(cur_img)
+                                local remaining = get_image_indices()
+                                if #remaining == 0 then
+                                    in_viewer = false
+                                end
+                                current_msg = "Deleted: " .. to_display_text(cur_img.filename)
+                            else
+                                current_msg = "Delete failed: " .. to_display_text(tostring(err))
+                            end
+                            needs_full_redraw = true
                         end
                     else
                         local ok, view_err = render_image_screen(cur_img, img_pos, #img_indices, active_protocol, viewer_zoom, viewer_pan_x, viewer_pan_y)
@@ -6241,9 +6319,35 @@ local function main()
                         elseif viewer_zoom > 1.0 and (k == "a" or k == "LEFT") then
                             local step_x = (cur_img.width or 800) * (0.1 / viewer_zoom)
                             viewer_pan_x = viewer_pan_x - step_x
-                        elseif viewer_zoom > 1.0 and (k == "d" or k == "RIGHT") then
+                        elseif viewer_zoom > 1.0 and k == "RIGHT" then
                             local step_x = (cur_img.width or 800) * (0.1 / viewer_zoom)
                             viewer_pan_x = viewer_pan_x + step_x
+                        elseif k == "d" or k == "D" then
+                            local term_w, _ = get_terminal_size()
+                            local nm = utf8_truncate(to_display_text(cur_img.filename), math.max(12, term_w - 58))
+                            io.write(string.format("\27[?2026h\27[4;1H\27[2K  \27[1;41;97m DELETE \27[0m \27[1;91mRemove '%s' permanently?  \27[1;92m[y]\27[1;91m Yes   \27[1;93m[n/Esc]\27[0m\27[1;91m Cancel\27[0m\27[?2026l", nm))
+                            io.flush()
+                            local ck = read_key()
+                            if ck == "y" or ck == "Y" then
+                                kitty_clear_screen()
+                                local ok, err = delete_file_from_disk(cur_img.filepath)
+                                if ok then
+                                    drop_deleted_item(cur_img)
+                                    viewer_zoom = 1.0; viewer_pan_x = 0; viewer_pan_y = 0
+                                    local remaining = get_image_indices()
+                                    if #remaining == 0 then
+                                        in_viewer = false
+                                    end
+                                    current_msg = "Deleted: " .. to_display_text(cur_img.filename)
+                                else
+                                    current_msg = "Delete failed: " .. to_display_text(tostring(err))
+                                end
+                                needs_full_redraw = true
+                            elseif ck == "Q" or ck == "CTRL_C" then
+                                break
+                            else
+                                needs_full_redraw = true
+                            end
                         elseif k == "RIGHT" or k == "n" or k == "SPACE" or k == "PAGE_DOWN" or k == "l" or k == "j" or k == "CTRL_D" or k == "CTRL_F" then
                             kitty_clear_screen()
                             viewer_zoom = 1.0; viewer_pan_x = 0; viewer_pan_y = 0
