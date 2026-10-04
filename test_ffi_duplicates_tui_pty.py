@@ -21,7 +21,7 @@ LUAJIT = os.environ.get('LUALAB_LUAJIT', 'luajit')
 
 
 class Session:
-    def __init__(self, root, cols=100, rows=18):
+    def __init__(self, root, cols=100, rows=18, env=None):
         self.master, self.slave = pty.openpty()
         self.resize(cols, rows)
         self.original = termios.tcgetattr(self.slave)
@@ -30,6 +30,7 @@ class Session:
             [LUAJIT, str(SCRIPT), '--tui', str(root)],
             stdin=self.slave, stdout=self.slave, stderr=self.slave,
             start_new_session=True,
+            env=env,
         )
 
     def resize(self, cols, rows):
@@ -139,6 +140,28 @@ class DuplicateTUI(unittest.TestCase):
         session.wait_for(b'Ready')
         session.send(b'\x03')
         session.finish(130)
+
+    def test_polished_layout_and_color_preferences(self):
+        environment = dict(os.environ, TERM='xterm-256color')
+        environment.pop('NO_COLOR', None)
+        session = self.session(env=environment)
+        session.wait_for(b'Ready')
+        self.assertIn('┌─ Groups'.encode(), session.output)
+        self.assertIn('┬─ Files'.encode(), session.output)
+        self.assertIn(b'\x1b[1;97;44m', session.output)
+        self.assertIn(b'0 marked', session.output)
+        session.send(b' ')
+        session.wait_for(b'1 marked')
+        session.send(b'q')
+        session.finish()
+        for preference in ({'NO_COLOR': '1'}, {'TERM': 'dumb'}):
+            env = dict(environment, **preference)
+            session = self.session(env=env)
+            session.wait_for(b'Ready')
+            self.assertIn('┌─ Groups'.encode(), session.output)
+            self.assertNotRegex(session.output, rb'\x1b\[[1-9][0-9;]*m')
+            session.send(b'q')
+            session.finish()
 
     def test_cancel_during_hashing(self):
         payload = b'large duplicate payload\0' * 400000

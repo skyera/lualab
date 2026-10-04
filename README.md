@@ -160,6 +160,12 @@ Tab switches panes, Page Up/Down and Home/End navigate, `/` filters paths, Space
 marks groups, Enter opens scrollable full-path details, and `!` opens scan errors.
 Escape returns from a view or cancels a prompt; `q` exits. During scanning,
 `q`/Escape cancel and Ctrl-C exits with status 130.
+Bordered panes align file counts and redundant sizes. A blue selection bar shows
+the active item, and the status line counts marked groups. Long paths display
+their trailing filename; Enter shows full paths. Help, errors, and scan progress
+use the same layout, with a compact fallback for small terminals. Set `NO_COLOR`
+to disable colors (also disabled when `TERM=dumb`); borders and selection markers
+remain visible.
 Press `?` for scrollable help with all keys, filtering instructions, and export
 behavior; Enter/Escape returns to the previous view. `--help` (or `-h`) shows
 options, Linux/Windows examples, scan behavior, exit codes, and TUI keys.

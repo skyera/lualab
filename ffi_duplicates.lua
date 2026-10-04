@@ -649,6 +649,91 @@ function TUI.fit(text, width)
     end
     return table.concat(out) .. string.rep(' ', math.max(0, width - used))
 end
+-- Keep frame text separate from trusted SGR styling. Paths never become escape sequences.
+local palette = {
+    title = '1;36',
+    border = '90',
+    active = '1;97;44',
+    passive = '36',
+    marked = '32',
+    text = '37',
+    muted = '90',
+    warning = '33',
+    prompt = '1;36',
+}
+local function frame_row(frame, row, color, ...)
+    local plain, painted = {}, {}
+    for _, piece in ipairs({ ... }) do
+        local text, role = piece[1], piece[2]
+        plain[#plain + 1] = text
+        painted[#painted + 1] = color ~= false
+                and palette[role]
+                and '\27[' .. palette[role] .. 'm' .. text .. '\27[0m'
+            or text
+    end
+    frame[row] = table.concat(plain)
+    frame.paint = frame.paint or {}
+    frame.paint[row] = table.concat(painted)
+end
+local function framed(cols, rows)
+    return cols >= 36 and rows >= 6
+end
+function TUI.content_width(cols, rows)
+    return math.max(1, cols - (framed(cols, rows) and 5 or 1))
+end
+local function border_label(text, width)
+    return TUI.fit('─ ' .. text .. ' ', width):gsub(' +$', function(spaces)
+        return ' ' .. string.rep('─', #spaces - 1)
+    end)
+end
+local function key_bar(text, width)
+    local pieces = {}
+    for hint in text:gmatch('[^|]+') do
+        local key, label = hint:match('^%s*(%S+)%s*(.-)%s*$')
+        if key then
+            pieces[#pieces + 1] = { ' ' .. key, 'title' }
+            pieces[#pieces + 1] = { ' ' .. label .. ' ', 'muted' }
+        end
+    end
+    -- Hints are trusted ASCII literals; clip them before applying styles.
+    local remaining, out = width, {}
+    for _, piece in ipairs(pieces) do
+        local used = math.min(#piece[1], remaining)
+        out[#out + 1] = { piece[1]:sub(1, used), piece[2] }
+        remaining = remaining - used
+        if remaining == 0 then
+            break
+        end
+    end
+    out[#out + 1] = { string.rep(' ', remaining), 'muted' }
+    return out
+end
+function TUI.ellipsize(text, width)
+    if width <= 0 then
+        return ''
+    end
+    local chars, cells, total, index = {}, {}, 0, 1
+    while index <= #text do
+        local ch, n, cp = char_at(text, index)
+        ch, n, cp = ch or '?', n or 1, cp or 63
+        if cp < 32 or (cp >= 127 and cp < 160) then
+            ch, cp = ' ', 32
+        end
+        chars[#chars + 1], cells[#cells + 1] = ch, cell_width(cp)
+        total, index = total + cell_width(cp), index + n
+    end
+    if total <= width then
+        return TUI.fit(table.concat(chars), width)
+    end
+    local first, used = #chars + 1, 1
+    for i = #chars, 1, -1 do
+        if used + cells[i] > width then
+            break
+        end
+        first, used = i, used + cells[i]
+    end
+    return TUI.fit('…' .. table.concat(chars, '', first), width)
+end
 local function pop_utf8(text)
     local i = #text
     while i > 0 and text:byte(i) >= 128 and text:byte(i) < 192 do
@@ -816,7 +901,7 @@ function Model:clamp(cols, rows)
     if self.view ~= 'browse' then
         self.detail_scroll = math.min(
             self.detail_scroll,
-            math.max(0, #TUI.detail_lines(self, math.max(1, cols - 1)) - height)
+            math.max(0, #TUI.detail_lines(self, TUI.content_width(cols, rows)) - height)
         )
     end
 end
@@ -976,6 +1061,26 @@ local function header(model)
         human(model.result.redundant_bytes)
     )
 end
+local function header_row(frame, model, width)
+    if width < 35 then
+        frame_row(frame, 1, model.color, { TUI.fit(header(model), width), 'title' })
+        return
+    end
+    local summary = string.format(
+        '%d groups · %s redundant · %d scanned · %d errors',
+        #model.visible,
+        human(model.result.redundant_bytes),
+        model.result.files,
+        #model.result.errors
+    )
+    frame_row(
+        frame,
+        1,
+        model.color,
+        { TUI.fit(' Duplicate Finder', 20), 'title' },
+        { TUI.fit(summary, width - 20), 'muted' }
+    )
+end
 function TUI.detail_lines(model, width)
     local lines = {}
     local function add(text)
@@ -1021,123 +1126,284 @@ function TUI.detail_lines(model, width)
 end
 function TUI.render_details(model, cols, rows)
     local width, frame = math.max(0, cols - 1), {}
-    local lines = TUI.detail_lines(model, math.max(1, width))
+    local box = framed(cols, rows)
+    local lines = TUI.detail_lines(model, TUI.content_width(cols, rows))
     local offset = math.min(model.detail_scroll, math.max(0, #lines - math.max(1, rows - 4)))
     for y = 1, rows do
         local text = ''
+        local role = 'text'
         if y == 1 then
             text = header(model)
+            role = 'title'
         elseif y == 2 then
             text = model.view == 'help' and 'Help - keys, scanning, and export'
                 or model.view == 'errors' and 'Scan errors'
                 or 'Group details'
+            role = model.view == 'errors' and 'warning' or 'title'
         elseif y == rows then
             text = width >= 65
-                    and 'Up/Down Scroll  PgUp/PgDn Page  Home/End  Enter/Esc Back  ? Help'
-                or 'Up/Down Scroll  Enter/Esc Back  ? Help'
+                    and 'Up/Down Scroll | PgUp/PgDn Page | Home/End Jump | Enter/Esc Back | ? Help'
+                or 'Up/Down Scroll | Esc Back | ? Help'
         elseif y == rows - 1 then
-            text = string.format('Line %d of %d', offset + 1, #lines)
+            text = string.format('Line %d of %d', #lines == 0 and 0 or offset + 1, #lines)
+            role = 'muted'
         else
             text = lines[offset + y - 2] or ''
         end
-        frame[y] = TUI.fit(text, width)
+        if y == 1 then
+            header_row(frame, model, width)
+        elseif box and y == 2 then
+            frame_row(
+                frame,
+                y,
+                model.color,
+                { '┌' .. border_label(text, width - 2) .. '┐', role }
+            )
+        elseif box and y == rows - 1 then
+            frame_row(
+                frame,
+                y,
+                model.color,
+                { '└' .. border_label(text, width - 2) .. '┘', 'border' }
+            )
+        elseif box and y > 2 and y < rows - 1 then
+            frame_row(
+                frame,
+                y,
+                model.color,
+                { '│ ', 'border' },
+                { TUI.fit(text, width - 4), role },
+                { ' │', 'border' }
+            )
+        elseif y == rows and rows > 2 then
+            frame_row(frame, y, model.color, unpack(key_bar(text, width)))
+        else
+            frame_row(frame, y, model.color, { TUI.fit(text, width), role })
+        end
     end
     return frame
 end
 function TUI.render_browse(model, cols, rows)
     local width, frame = math.max(0, cols - 1), {}
+    local box = framed(cols, rows)
     local split = width >= 70
     local left = split and math.floor(width * 0.38) or width
+    local group_width = left - (box and (split and 1 or 2) or 0)
+    local file_width = split and width - left - (box and 2 or 3) or group_width
     local group = model:selected()
     local function group_line(i)
         local g = model.visible[i]
         if not g then
             return ''
         end
-        return (i == model.group and '> ' or '  ')
+        local label = (i == model.group and '> ' or '  ')
             .. (model.marked[g] and '[x] ' or '[ ] ')
             .. #g.paths
-            .. ' files | '
-            .. human(g.size * (#g.paths - 1))
+            .. ' files'
+        local size = human(g.size * (#g.paths - 1))
+        if box then
+            return TUI.fit(label, group_width - 10) .. string.rep(' ', 10 - #size) .. size
+        end
+        return label .. ' | ' .. size
     end
     local function file_line(i)
-        return group and group.paths[i] and ((i == model.file and '> ' or '  ') .. group.paths[i])
-            or ''
+        if not group or not group.paths[i] then
+            return ''
+        end
+        return (i == model.file and '> ' or '  ')
+            .. TUI.ellipsize(group.paths[i], math.max(0, file_width - 2))
+    end
+    local function selection_role(pane, index)
+        if index == (pane == 'groups' and model.group or model.file) and index > 0 then
+            return model.pane == pane and 'active' or 'passive'
+        end
+        return pane == 'groups' and model.marked[model.visible[index]] and 'marked'
+            or pane == 'files' and 'muted'
+            or 'text'
     end
     for y = 1, rows do
         local text = ''
+        local role = 'text'
         if model.prompt and rows <= 4 and y == rows then
             text = (model.prompt == 'filter' and '/' or 'e:')
                 .. tail(model.input, math.max(1, width - 3))
                 .. '_'
+            role = 'prompt'
         elseif y == 1 then
             text = header(model)
+            role = 'title'
         elseif y == 2 then
-            local a = (model.pane == 'groups' and '* ' or '  ') .. 'Groups: redundant bytes'
-            local b = (model.pane == 'files' and '* ' or '  ') .. 'Files'
-            text = split and TUI.fit(a, left) .. ' | ' .. b or model.pane == 'groups' and a or b
+            local a = 'Groups · redundant bytes'
+            local b = 'Files · ' .. (group and #group.paths or 0) .. ' copies'
+            if box then
+                if split then
+                    frame_row(frame, y, model.color, {
+                        '┌' .. border_label(a, group_width),
+                        model.pane == 'groups' and 'title' or 'border',
+                    }, {
+                        '┬' .. border_label(b, file_width) .. '┐',
+                        model.pane == 'files' and 'title' or 'border',
+                    })
+                else
+                    frame_row(frame, y, model.color, {
+                        '┌'
+                            .. border_label(model.pane == 'groups' and a or b, group_width)
+                            .. '┐',
+                        'title',
+                    })
+                end
+            else
+                text = split and TUI.fit(a, left) .. ' | ' .. b or model.pane == 'groups' and a or b
+                role = 'title'
+            end
         elseif y == rows then
             if model.prompt then
                 if width < 65 then
-                    text = model.prompt == 'filter' and 'Enter Keep  Esc Cancel'
-                        or 'Enter Save  Esc Cancel'
+                    text = model.prompt == 'filter' and 'Enter Keep | Esc Cancel'
+                        or 'Enter Save | Esc Cancel'
                 else
                     text = model.prompt == 'filter'
-                            and 'Type to filter | Enter Keep | Esc Cancel | Backspace Erase'
-                        or 'New filename | Enter Save | Esc Cancel | Existing files preserved'
+                            and 'Enter Keep filter | Esc Cancel | Backspace Erase'
+                        or 'Enter Save JSON | Esc Cancel | Backspace Erase'
                 end
-            elseif width >= 90 then
+            elseif width >= 110 then
                 text =
-                    '? Help  Up/Down Move  Tab Pane  / Filter  Space Mark  Enter Details  e Export  ! Errors  q Quit'
+                    '? Help | Up/Down Move | Tab Pane | / Filter | Space Mark | Enter Details | e Export | ! Errors | q Quit'
             elseif width >= 60 then
-                text = '? Help  Tab Pane  / Filter  Space Mark  e Export  ! Errors  q Quit'
+                text = '? Help | Tab Pane | / Filter | Space Mark | e Export | q Quit'
             else
-                text = '? Help  Tab Pane  / Filter  q Quit'
+                text = '? Help | Tab Pane | / Filter | q Quit'
             end
         elseif y == rows - 1 then
             if model.prompt then
                 text = (model.prompt == 'filter' and 'Filter: ' or 'Export JSON: ')
-                    .. tail(model.input, math.max(1, width - 14))
+                    .. tail(model.input, math.max(1, width - (box and 18 or 14)))
                     .. '_'
+                role = 'prompt'
             elseif model.query ~= '' then
                 text = 'Filter: ' .. model.query .. ' | ' .. model.status
+                role = 'muted'
             else
-                text = model.status
+                local marked = 0
+                for _, selected in pairs(model.marked) do
+                    if selected then
+                        marked = marked + 1
+                    end
+                end
+                text = model.status .. ' · ' .. marked .. ' marked'
+                role = model.status:find('failed', 1, true) and 'warning' or 'muted'
             end
-        elseif split then
-            text = TUI.fit(group_line(model.group_scroll + y - 2), left)
-                .. ' | '
-                .. file_line(model.file_scroll + y - 2)
-        elseif model.pane == 'groups' then
-            text = group_line(model.group_scroll + y - 2)
+            if box then
+                frame_row(
+                    frame,
+                    y,
+                    model.color,
+                    { '└' .. border_label(text, width - 2) .. '┘', role }
+                )
+            end
         else
-            text = file_line(model.file_scroll + y - 2)
+            local gi, fi = model.group_scroll + y - 2, model.file_scroll + y - 2
+            local a, b = group_line(gi), file_line(fi)
+            if y == 3 and #model.visible == 0 and rows > 4 then
+                a = model.query == '' and 'No duplicate files found.'
+                    or 'No groups match the filter.'
+                b = 'Try a different filter.'
+                if model.query == '' then
+                    b = 'No groups to display.'
+                end
+            end
+            if box and split then
+                frame_row(
+                    frame,
+                    y,
+                    model.color,
+                    { '│', 'border' },
+                    { TUI.fit(a, group_width), selection_role('groups', gi) },
+                    { '│', 'border' },
+                    { TUI.fit(b, file_width), selection_role('files', fi) },
+                    { '│', 'border' }
+                )
+            elseif box then
+                frame_row(frame, y, model.color, { '│', 'border' }, {
+                    TUI.fit(model.pane == 'groups' and a or b, group_width),
+                    selection_role(model.pane, model.pane == 'groups' and gi or fi),
+                }, { '│', 'border' })
+            else
+                text = split and TUI.fit(a, left) .. ' | ' .. b or model.pane == 'groups' and a or b
+            end
         end
-        if y == 3 and #model.visible == 0 and rows > 4 then
-            text = 'No duplicate groups match the filter.'
+        if not frame[y] then
+            if y == 1 then
+                header_row(frame, model, width)
+            elseif y == rows and rows > 4 then
+                frame_row(frame, y, model.color, unpack(key_bar(text, width)))
+            else
+                frame_row(frame, y, model.color, { TUI.fit(text, width), role })
+            end
         end
-        frame[y] = TUI.fit(text, width)
     end
     return frame
 end
 function TUI.render_progress(progress, cols, rows)
     local frame = {}
+    local width, box = math.max(0, cols - 1), framed(cols, rows)
     local lines = {
         'Duplicate Finder | scanning',
-        progress.phase or 'Scanning',
+        box and 'Scan in progress' or progress.phase or 'Scanning',
+        box and 'Working: ' .. (progress.phase or 'Scanning') or string.format(
+            '%d files | %d errors | %s read',
+            progress.files or 0,
+            progress.errors or 0,
+            human(progress.bytes or 0)
+        ),
         string.format(
             '%d files | %d errors | %s read',
             progress.files or 0,
             progress.errors or 0,
             human(progress.bytes or 0)
         ),
-        progress.path or '',
+        TUI.ellipsize(progress.path or '', TUI.content_width(cols, rows)),
     }
+    if not box then
+        lines[4], lines[5] = progress.path or '', nil
+    end
     for y = 1, rows do
-        frame[y] = TUI.fit(
-            y == rows and 'q / Esc Cancel scan  Ctrl-C Exit' or lines[y] or '',
-            math.max(0, cols - 1)
-        )
+        if y == rows then
+            frame_row(
+                frame,
+                y,
+                progress.color,
+                unpack(key_bar('q/Esc Cancel scan | Ctrl-C Exit', width))
+            )
+        elseif box and y == 2 then
+            frame_row(
+                frame,
+                y,
+                progress.color,
+                { '┌' .. border_label(lines[2], width - 2) .. '┐', 'title' }
+            )
+        elseif box and y == rows - 1 then
+            frame_row(frame, y, progress.color, {
+                '└' .. border_label('Results appear when scanning completes', width - 2) .. '┘',
+                'border',
+            })
+        elseif box and y > 2 then
+            frame_row(
+                frame,
+                y,
+                progress.color,
+                { '│ ', 'border' },
+                { TUI.fit(lines[y] or '', width - 4), y == 3 and 'title' or 'muted' },
+                { ' │', 'border' }
+            )
+        else
+            frame_row(
+                frame,
+                y,
+                progress.color,
+                { TUI.fit(lines[y] or '', width), y == 1 and 'title' or 'text' }
+            )
+        end
     end
     return frame
 end
@@ -1151,8 +1417,10 @@ function TUI.diff(frame, previous)
     local out = { '\27[?2026h' }
     local changed = false
     for row, line in ipairs(frame) do
-        if not previous or line ~= previous[row] then
-            out[#out + 1] = string.format('\27[%d;1H%s\27[K', row, line)
+        local painted = frame.paint and frame.paint[row] or line
+        local old = previous and (previous.paint and previous.paint[row] or previous[row])
+        if painted ~= old then
+            out[#out + 1] = string.format('\27[%d;1H%s\27[K', row, painted)
             changed = true
         end
     end
@@ -1444,6 +1712,7 @@ function TUI.run(api, roots, options, term)
     -- A Lua signal callback must never enter a compiled FFI call.
     require('jit').off()
     local result, previous, oldcols, oldrows, cancelled, exit_code
+    local color = os.getenv('NO_COLOR') == nil and os.getenv('TERM') ~= 'dumb'
     local function emit(frame, cols, rows)
         local resized = oldcols and (oldcols ~= cols or oldrows ~= rows)
         if resized then
@@ -1485,6 +1754,7 @@ function TUI.run(api, roots, options, term)
                         bytes = bytes,
                         files = r.files,
                         errors = #r.errors,
+                        color = color,
                     }, cols, rows),
                     cols,
                     rows
@@ -1498,6 +1768,7 @@ function TUI.run(api, roots, options, term)
             return
         end
         local model = TUI.model(result)
+        model.color = color
         while not term.stopped do
             local cols, rows = term:size()
             model:clamp(cols, rows)

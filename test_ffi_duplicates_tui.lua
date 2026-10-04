@@ -23,6 +23,21 @@ for i = 1, 35 do
     result.groups[#result.groups + 1] = group
     result.redundant_bytes = result.redundant_bytes + group.size
 end
+local function validate_frame(frame, cols, rows)
+    check(#frame == rows, 'renderer row count')
+    for row, line in ipairs(frame) do
+        check(not line:find('\27', 1, true), 'filename cannot inject terminal controls')
+        check(tui.fit(line, cols - 1) == line, 'renderer clamps display cells')
+        local painted = frame.paint[row]
+        local stripped = painted:gsub('\27%[[%d;]+m', '')
+        check(stripped == line, 'styling preserves every display cell')
+        check(not stripped:find('\27', 1, true), 'painted rows contain only SGR controls')
+        check(
+            not painted:find('\27%[[%d;]+m') or painted:sub(-4) == '\27[0m',
+            'colored rows restore the default style'
+        )
+    end
+end
 -- Run each renderer directly across empty/full, Unicode/control, and viewport boundaries.
 for _, data in ipairs({
     result,
@@ -32,7 +47,12 @@ for _, data in ipairs({
         { 1, 1 },
         { 2, 2 },
         { 12, 4 },
+        { 35, 6 },
+        { 36, 5 },
+        { 36, 6 },
         { 40, 12 },
+        { 70, 6 },
+        { 71, 6 },
         { 71, 5 },
         { 80, 24 },
         {
@@ -47,23 +67,27 @@ for _, data in ipairs({
             for _, pane in ipairs({ 'groups', 'files' }) do
                 model.pane = pane
                 local frame = tui.frame(model, size[1], size[2])
-                check(#frame == size[2], 'renderer row count')
-                for _, line in ipairs(frame) do
-                    check(not line:find('\27', 1, true), 'filename cannot inject terminal controls')
-                    check(tui.fit(line, size[1] - 1) == line, 'renderer clamps display cells')
-                end
+                validate_frame(frame, size[1], size[2])
+                model.color = false
+                local monochrome = tui.frame(model, size[1], size[2])
+                validate_frame(monochrome, size[1], size[2])
+                check(
+                    table.concat(monochrome.paint) == table.concat(frame),
+                    'monochrome retains borders and selection markers without SGR'
+                )
+                model.color = true
             end
         end
-        for _, line in
-            ipairs(
+        for _, color in ipairs({ true, false }) do
+            validate_frame(
                 tui.render_progress(
-                    { phase = 'Hashing', path = '中文\27\n', files = 0 },
+                    { phase = 'Hashing', path = '中文\27\n', files = 0, color = color },
                     size[1],
                     size[2]
-                )
+                ),
+                size[1],
+                size[2]
             )
-        do
-            check(not line:find('\27', 1, true), 'progress sanitizes controls')
         end
     end
 end
@@ -89,6 +113,10 @@ check(model.file == 2 and model.pane == 'files', 'file pane navigation')
 model:key('ENTER')
 model:key('END')
 local bottom = model.detail_scroll
+check(
+    bottom == math.max(0, #tui.detail_lines(model, tui.content_width(100, 12)) - 8),
+    'details END uses bordered content width'
+)
 model:key('UP')
 check(model.detail_scroll == math.max(0, bottom - 1), 'details scroll up after END')
 model:key('ESC')
@@ -193,6 +221,39 @@ check(count == 2, 'local group movement changes only selection rows')
 check(diff:sub(1, 8) == '\27[?2026h' and diff:sub(-8) == '\27[?2026l', 'atomic synchronized frame')
 check(tui.diff(second, second) == '', 'unchanged frame emits nothing')
 check(not diff:find('\27[2J', 1, true), 'movement never clears')
+local styled = tui.model(result)
+styled:clamp(100, 12)
+local colored = tui.frame(styled, 100, 12)
+check(colored[2]:find('┌', 1, true) and colored[2]:find('┬', 1, true), 'wide bordered panes')
+check(colored.paint[3]:find('\27[1;97;44m', 1, true), 'active selection has a blue background')
+styled:key('TAB')
+local switched = tui.frame(styled, 100, 12)
+check(table.concat(colored) == table.concat(switched), 'pane focus retains the text layout')
+check(tui.diff(switched, colored) ~= '', 'style-only focus changes redraw')
+local _, focus_rows = tui.diff(switched, colored):gsub('\27%[%d+;1H', '')
+check(focus_rows == 2, 'focus updates only pane titles and selected cells')
+styled.color = false
+local uncolored = tui.frame(styled, 100, 12)
+check(tui.diff(uncolored, switched) ~= '', 'color changes invalidate cached paint')
+styled:key('SPACE')
+check(tui.frame(styled, 100, 12)[11]:find('1 marked', 1, true), 'status reports marked groups')
+for width = 0, 45 do
+    for _, path in ipairs({
+        '',
+        'a',
+        '/long/中文/文件-😀.txt',
+        'C:\\photos\\backup\\image.jpg',
+        '/bad\27[2J\n\255/path/last.txt',
+    }) do
+        local label = tui.ellipsize(path, width)
+        check(tui.fit(label, width) == label, 'path elision respects display width')
+        check(not label:find('\27', 1, true), 'elided paths cannot inject terminal controls')
+    end
+end
+check(
+    tui.ellipsize('/very/long/path/image.jpg', 12) == '…h/image.jpg',
+    'elision keeps the basename and trailing path'
+)
 -- Actual export preserves existing files and uses the same standalone JSON schema.
 local path = os.tmpname()
 os.remove(path)
