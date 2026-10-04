@@ -102,6 +102,9 @@ if is_windows then
         void* FindFirstFileA(const char* lpFileName, WIN32_FIND_DATAA* lpFindFileData);
         int   FindNextFileA(void* hFindFile, WIN32_FIND_DATAA* lpFindFileData);
         int   FindClose(void* hFindFile);
+        int   DeleteFileA(const char* lpFileName);
+        int   RemoveDirectoryA(const char* lpPathName);
+        int   SetFileAttributesA(const char* lpFileName, uint32_t dwFileAttributes);
         int FlushConsoleInputBuffer(HANDLE hConsoleInput);
         char* _fullpath(char *absPath, const char *relPath, size_t maxLength);
     ]]
@@ -912,6 +915,69 @@ local function shell_quote(path)
         return '"' .. path:gsub('"', '\\"') .. '"'
     end
     return "'" .. path:gsub("'", "'\\''") .. "'"
+end
+
+local function copy_file_or_dir(src, dst)
+    if is_windows then
+        local win_src = src:gsub("/", "\\")
+        local win_dst = dst:gsub("/", "\\")
+        local cmd = string.format('xcopy /E /I /Y %s %s >nul 2>&1 || copy /Y %s %s >nul 2>&1',
+            shell_quote(win_src), shell_quote(win_dst), shell_quote(win_src), shell_quote(win_dst))
+        return os.execute(cmd) == 0
+    else
+        local cmd = string.format('cp -r %s %s 2>/dev/null', shell_quote(src), shell_quote(dst))
+        return os.execute(cmd) == 0
+    end
+end
+
+local function move_file_or_dir(src, dst)
+    if is_windows then
+        local win_src = src:gsub("/", "\\")
+        local win_dst = dst:gsub("/", "\\")
+        local cmd = string.format('move /Y %s %s >nul 2>&1', shell_quote(win_src), shell_quote(win_dst))
+        return os.execute(cmd) == 0
+    else
+        local cmd = string.format('mv %s %s 2>/dev/null', shell_quote(src), shell_quote(dst))
+        return os.execute(cmd) == 0
+    end
+end
+
+local function delete_file_or_dir(target_path, is_dir)
+    if not is_dir then
+        local ok, err = os.remove(target_path)
+        if ok then return true end
+        if err and tostring(err):find("No such file") then
+            return false
+        end
+        if is_windows and kernel32 then
+            pcall(function() kernel32.SetFileAttributesA(target_path, 128) end)
+            local res = 0
+            pcall(function() res = kernel32.DeleteFileA(target_path) end)
+            if res ~= 0 then return true end
+            local win_path = target_path:gsub("/", "\\")
+            os.execute(string.format('del /F /Q %s >nul 2>&1', shell_quote(win_path)))
+        else
+            os.execute(string.format('rm -f %s 2>/dev/null', shell_quote(target_path)))
+        end
+        local fh = io.open(target_path, "r")
+        if fh then
+            fh:close()
+            return false
+        end
+        return true
+    else
+        local ok = os.remove(target_path)
+        if ok then return true end
+        if is_windows and kernel32 then
+            local res = 0
+            pcall(function() res = kernel32.RemoveDirectoryA(target_path) end)
+            if res ~= 0 then return true end
+            local win_path = target_path:gsub("/", "\\")
+            return os.execute(string.format('rmdir /S /Q %s >nul 2>&1', shell_quote(win_path))) == 0
+        else
+            return os.execute(string.format('rm -rf %s 2>/dev/null', shell_quote(target_path))) == 0
+        end
+    end
 end
 
 local function is_command_available(cmd)
@@ -2798,37 +2864,6 @@ local function main(args)
         return targets
     end
 
-    local function copy_file_or_dir(src, dst)
-        if is_windows then
-            local cmd = string.format('xcopy /E /I /Y %q %q >nul 2>&1 || copy /Y %q %q >nul 2>&1',
-                src, dst, src, dst)
-            return os.execute(cmd)
-        else
-            local cmd = string.format('cp -r %s %s 2>/dev/null', shell_quote(src), shell_quote(dst))
-            return os.execute(cmd)
-        end
-    end
-
-    local function move_file_or_dir(src, dst)
-        if is_windows then
-            local cmd = string.format('move /Y %q %q >nul 2>&1', src, dst)
-            return os.execute(cmd)
-        else
-            local cmd = string.format('mv %s %s 2>/dev/null', shell_quote(src), shell_quote(dst))
-            return os.execute(cmd)
-        end
-    end
-
-    local function delete_file_or_dir(target_path, is_dir)
-        if is_windows then
-            local cmd = is_dir and string.format('rmdir /S /Q %q >nul 2>&1', target_path)
-                               or string.format('del /F /Q %q >nul 2>&1', target_path)
-            return os.execute(cmd)
-        else
-            local cmd = string.format('rm -rf %s 2>/dev/null', shell_quote(target_path))
-            return os.execute(cmd)
-        end
-    end
 
     enable_raw_mode()
 
@@ -3931,11 +3966,24 @@ local function main(args)
                                                       or string.format("Delete %d selected items?", #targets)
                     if show_confirm_modal("CONFIRM DELETION", prompt_msg) then
                         local count = #targets
+                        local deleted_count = 0
+                        local failed_count = 0
                         for _, item in ipairs(targets) do
-                            delete_file_or_dir(item.path, item.is_dir)
-                            selected_paths[item.path] = nil
+                            local ok = delete_file_or_dir(item.path, item.is_dir)
+                            if ok then
+                                deleted_count = deleted_count + 1
+                                selected_paths[item.path] = nil
+                            else
+                                failed_count = failed_count + 1
+                            end
                         end
-                        set_status_message(string.format("\27[1;32m✓ Deleted %d item(s)\27[0m", count))
+                        if failed_count == 0 then
+                            set_status_message(string.format("\27[1;32m✓ Deleted %d item(s)\27[0m", deleted_count))
+                        elseif deleted_count > 0 then
+                            set_status_message(string.format("\27[1;33m⚠ Deleted %d item(s), %d failed\27[0m", deleted_count, failed_count))
+                        else
+                            set_status_message(string.format("\27[1;31m✗ Failed to delete %d item(s)\27[0m", failed_count))
+                        end
                         clear_preview_cache()
                         preview_pending = true
                         reload_current()
@@ -3988,6 +4036,8 @@ local M = {
     resolve_text_editor = resolve_text_editor,
     read_dir_entries    = read_dir_entries,
     sort_entries        = sort_entries,
+    resolve_canonical_path = resolve_canonical_path,
+    get_parent_dir      = get_parent_dir,
     enable_raw_mode                 = enable_raw_mode,
     disable_raw_mode                = disable_raw_mode,
     clear_preview_cache             = clear_preview_cache,
@@ -4011,6 +4061,9 @@ local M = {
     is_stdin_tty                    = is_stdin_tty,
     show_command_modal              = show_command_modal,
     render_command_modal_frame      = render_command_modal_frame,
+    delete_file_or_dir              = delete_file_or_dir,
+    copy_file_or_dir                = copy_file_or_dir,
+    move_file_or_dir                = move_file_or_dir,
     main                            = main,
 }
 

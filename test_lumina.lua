@@ -615,16 +615,25 @@ pcall(function()
 end)
 
 local function resolve_startup_path(requested_path)
-    local buf = ffi.new("char[4096]")
-    local canonical = requested_path
-    if ffi.C.realpath(requested_path, buf) ~= nil then
-        canonical = ffi.string(buf)
-    end
-
+    local canonical = lumina.resolve_canonical_path and lumina.resolve_canonical_path(requested_path) or requested_path
     local is_directory = false
-    local st = ffi.new("struct stat")
-    if ffi.C.stat(requested_path, st) == 0 then
-        is_directory = (bit.band(tonumber(st.st_mode), 0xF000) == 0x4000)
+    if ffi.os == "Windows" then
+        local k32 = ffi.load("kernel32")
+        local fd = ffi.new("WIN32_FIND_DATAA")
+        local hFind = k32.FindFirstFileA(requested_path, fd)
+        if hFind ~= ffi.cast("void*", -1) and hFind ~= nil then
+            is_directory = (bit.band(fd.dwFileAttributes, 0x10) ~= 0)
+            k32.FindClose(hFind)
+        end
+    else
+        local buf = ffi.new("char[4096]")
+        if ffi.C.realpath(requested_path, buf) ~= nil then
+            canonical = ffi.string(buf)
+        end
+        local st = ffi.new("struct stat")
+        if ffi.C.stat(requested_path, st) == 0 then
+            is_directory = (bit.band(tonumber(st.st_mode), 0xF000) == 0x4000)
+        end
     end
 
     local current_dir = canonical
@@ -635,7 +644,7 @@ local function resolve_startup_path(requested_path)
         if requested_file then
             requested_file:close()
             initial_selection_name = requested_path:match("([^/\\]+)$")
-            local parent = canonical:match("^(.*)/[^/]+$") or "/"
+            local parent = lumina.get_parent_dir and lumina.get_parent_dir(canonical) or canonical:match("^(.*)[/\\][^/\\]+$") or "/"
             current_dir = parent
         end
     end
@@ -1574,7 +1583,11 @@ do
 
     -- 3. calculate_dir_size functional tests with temporary test directory
     local tmp_dir = "tmp_usage_test_" .. tostring(os.time())
-    os.execute(string.format("mkdir -p %s/sub1 %s/sub2", tmp_dir, tmp_dir))
+    if ffi.os == "Windows" then
+        os.execute(string.format("mkdir %s\\sub1 >nul 2>&1 && mkdir %s\\sub2 >nul 2>&1", tmp_dir, tmp_dir))
+    else
+        os.execute(string.format("mkdir -p %s/sub1 %s/sub2 2>/dev/null", tmp_dir, tmp_dir))
+    end
 
     local f1 = io.open(tmp_dir .. "/sub1/f1.txt", "wb")
     f1:write(string.rep("A", 1024)) -- 1024 bytes
@@ -1594,8 +1607,8 @@ do
     -- Cycle / recursion guard test: max_depth = 0 returns 0
     assert_eq(Lumina.calculate_dir_size(tmp_dir, 0), 0, "calculate_dir_size returns 0 when max_depth is 0")
 
-    -- Clean up temporary test files
-    os.execute(string.format("rm -rf %s", tmp_dir))
+    -- Clean up temporary test files using Lumina.delete_file_or_dir
+    Lumina.delete_file_or_dir(tmp_dir, true)
 
     -- 4. State & Keybinding tests in lumina.lua
     assert_true(l_code28:find("is_disk_usage_mode%s*=%s*false") ~= nil, "lumina.lua declares is_disk_usage_mode state")
@@ -1636,13 +1649,9 @@ do
     assert_false(Lumina.is_archive_file({ name = "archive.zip", ext = "zip", is_dir = true }), "Directory named .zip is not an archive file")
 
     -- 2. Mock Zip archive creation and testing
-    local tmp_zip = "/tmp/test_lumina_suite29.zip"
-    local py_cmd = string.format([[python3 -c "import zipfile
-with zipfile.ZipFile('%s', 'w') as zf:
-    zf.writestr('README.md', 'Hello World\n')
-    zf.writestr('src/main.lua', 'print(\"main\")\n')
-    zf.writestr('docs/', '')
-"]], tmp_zip)
+    local py_bin = ffi.os == "Windows" and "python" or "python3"
+    local tmp_zip = ffi.os == "Windows" and "test_lumina_suite29.zip" or "/tmp/test_lumina_suite29.zip"
+    local py_cmd = string.format([[%s -c "import zipfile; zf = zipfile.ZipFile('%s', 'w'); zf.writestr('README.md', 'Hello World\n'); zf.writestr('src/main.lua', 'print(\"main\")\n'); zf.writestr('docs/', ''); zf.close()"]], py_bin, tmp_zip:gsub("\\", "/"))
     os.execute(py_cmd)
 
     local zip_info = Lumina.parse_zip_central_directory(tmp_zip)
@@ -1681,17 +1690,11 @@ with zipfile.ZipFile('%s', 'w') as zf:
     end
     assert_true(has_more, "generate_archive_preview truncates list and shows '... and N more items'")
 
-    os.execute("rm -f " .. tmp_zip)
+    Lumina.delete_file_or_dir(tmp_zip, false)
 
     -- 4. Mock Tar.gz archive creation and testing
-    local tmp_tar = "/tmp/test_lumina_suite29.tar.gz"
-    local py_tar_cmd = string.format([[python3 -c "import tarfile, io
-with tarfile.open('%s', 'w:gz') as tf:
-    ti = tarfile.TarInfo(name='app/config.json')
-    data = b'{\"port\": 8080}'
-    ti.size = len(data)
-    tf.addfile(ti, io.BytesIO(data))
-"]], tmp_tar)
+    local tmp_tar = ffi.os == "Windows" and "test_lumina_suite29.tar.gz" or "/tmp/test_lumina_suite29.tar.gz"
+    local py_tar_cmd = string.format([[%s -c "import tarfile, io; tf = tarfile.open('%s', 'w:gz'); ti = tarfile.TarInfo(name='app/config.json'); data = b'{\"port\": 8080}'; ti.size = len(data); tf.addfile(ti, io.BytesIO(data)); tf.close()"]], py_bin, tmp_tar:gsub("\\", "/"))
     os.execute(py_tar_cmd)
 
     local tar_preview = Lumina.generate_archive_preview(tmp_tar, "gz", 20, 60)
@@ -1700,7 +1703,7 @@ with tarfile.open('%s', 'w:gz') as tf:
     local tar_clean = Lumina.strip_ansi(table.concat(tar_preview, "\n"))
     assert_true(tar_clean:find("app/config.json") ~= nil, "Tar preview lists app/config.json")
 
-    os.execute("rm -f " .. tmp_tar)
+    Lumina.delete_file_or_dir(tmp_tar, false)
 
     -- 5. Nonexistent/corrupted file fallback
     local bad_preview = Lumina.generate_archive_preview("/nonexistent/file.zip", "zip", 20, 60)
@@ -1727,41 +1730,46 @@ do
     assert_true(Lumina.create_history_tracker ~= nil, "Lumina exports create_history_tracker helper")
 
     -- 2. Initialization tests
-    local tracker = Lumina.create_history_tracker("/home/zliu/test/lualab", 64)
+    local d_root = Lumina.resolve_canonical_path("/home/zliu/test/lualab")
+    local d_src  = Lumina.resolve_canonical_path("/home/zliu/test/lualab/src")
+    local d_eng  = Lumina.resolve_canonical_path("/home/zliu/test/lualab/src/engine")
+    local d_docs = Lumina.resolve_canonical_path("/home/zliu/test/lualab/docs")
+
+    local tracker = Lumina.create_history_tracker(d_root, 64)
     assert_eq(tracker.get_index(), 1, "Initial history index is 1")
     assert_eq(#tracker.get_stack(), 1, "Initial history stack size is 1")
-    assert_eq(tracker.current(), "/home/zliu/test/lualab", "Initial current dir matches start dir")
+    assert_eq(tracker.current(), d_root, "Initial current dir matches start dir")
     assert_false(tracker.can_go_back(), "Cannot go back on initial start")
     assert_false(tracker.can_go_forward(), "Cannot go forward on initial start")
     assert_eq(tracker.back(), nil, "back() returns nil when already at root")
     assert_eq(tracker.forward(), nil, "forward() returns nil when already at head")
 
     -- 3. Push and Navigation tests
-    tracker.push("/home/zliu/test/lualab/src")
+    tracker.push(d_src)
     assert_eq(tracker.get_index(), 2, "Index advances to 2 after push")
     assert_eq(#tracker.get_stack(), 2, "Stack size is 2 after push")
-    assert_eq(tracker.current(), "/home/zliu/test/lualab/src", "current() reflects newly pushed dir")
+    assert_eq(tracker.current(), d_src, "current() reflects newly pushed dir")
     assert_true(tracker.can_go_back(), "can_go_back() is true at index 2")
     assert_false(tracker.can_go_forward(), "can_go_forward() is false at head")
 
     -- Redundant push is ignored
-    tracker.push("/home/zliu/test/lualab/src")
+    tracker.push(d_src)
     assert_eq(#tracker.get_stack(), 2, "Pushing same current dir is ignored")
 
     -- Push third directory
-    tracker.push("/home/zliu/test/lualab/src/engine")
+    tracker.push(d_eng)
     assert_eq(tracker.get_index(), 3, "Index advances to 3")
     assert_eq(#tracker.get_stack(), 3, "Stack size is 3")
 
     -- 4. Jump back tests
     local prev1 = tracker.back()
-    assert_eq(prev1, "/home/zliu/test/lualab/src", "First back() returns second directory")
+    assert_eq(prev1, d_src, "First back() returns second directory")
     assert_eq(tracker.get_index(), 2, "Index decrements to 2")
     assert_true(tracker.can_go_back(), "Can still go back at index 2")
     assert_true(tracker.can_go_forward(), "Can go forward after jumping back")
 
     local prev2 = tracker.back()
-    assert_eq(prev2, "/home/zliu/test/lualab", "Second back() returns root directory")
+    assert_eq(prev2, d_root, "Second back() returns root directory")
     assert_eq(tracker.get_index(), 1, "Index decrements to 1")
     assert_false(tracker.can_go_back(), "Cannot go back past index 1")
     assert_true(tracker.can_go_forward(), "Can go forward from index 1")
@@ -1771,32 +1779,36 @@ do
 
     -- 5. Jump forward tests
     local next1 = tracker.forward()
-    assert_eq(next1, "/home/zliu/test/lualab/src", "First forward() returns second directory")
+    assert_eq(next1, d_src, "First forward() returns second directory")
     assert_eq(tracker.get_index(), 2, "Index increments to 2")
 
     local next2 = tracker.forward()
-    assert_eq(next2, "/home/zliu/test/lualab/src/engine", "Second forward() returns third directory")
+    assert_eq(next2, d_eng, "Second forward() returns third directory")
     assert_eq(tracker.get_index(), 3, "Index increments to 3")
     assert_false(tracker.can_go_forward(), "Cannot go forward past head")
     assert_eq(tracker.forward(), nil, "Extra forward() returns nil")
 
     -- 6. Forward history truncation on branching navigation
-    tracker.back() -- now at index 2 (/home/zliu/test/lualab/src)
+    tracker.back() -- now at index 2 (d_src)
     assert_eq(tracker.get_index(), 2, "Back to index 2")
-    tracker.push("/home/zliu/test/lualab/docs") -- navigate to new branch
+    tracker.push(d_docs) -- navigate to new branch
     assert_eq(tracker.get_index(), 3, "Index is 3 after branching push")
     assert_eq(#tracker.get_stack(), 3, "Stack size is 3 after forward truncation")
-    assert_eq(tracker.current(), "/home/zliu/test/lualab/docs", "Current is new branch")
+    assert_eq(tracker.current(), d_docs, "Current is new branch")
     assert_false(tracker.can_go_forward(), "Forward history was cleanly truncated")
 
     -- 7. Max capacity capping
-    local small_tracker = Lumina.create_history_tracker("/dir0", 3)
-    small_tracker.push("/dir1")
-    small_tracker.push("/dir2")
-    small_tracker.push("/dir3") -- pushes beyond max_size 3
+    local c_d0 = Lumina.resolve_canonical_path("/dir0")
+    local c_d1 = Lumina.resolve_canonical_path("/dir1")
+    local c_d2 = Lumina.resolve_canonical_path("/dir2")
+    local c_d3 = Lumina.resolve_canonical_path("/dir3")
+    local small_tracker = Lumina.create_history_tracker(c_d0, 3)
+    small_tracker.push(c_d1)
+    small_tracker.push(c_d2)
+    small_tracker.push(c_d3) -- pushes beyond max_size 3
     assert_eq(#small_tracker.get_stack(), 3, "Stack size clamped to max_size 3")
-    assert_eq(small_tracker.get_stack()[1], "/dir1", "Oldest /dir0 evicted from stack")
-    assert_eq(small_tracker.current(), "/dir3", "Current is /dir3")
+    assert_eq(small_tracker.get_stack()[1], c_d1, "Oldest /dir0 evicted from stack")
+    assert_eq(small_tracker.current(), c_d3, "Current is /dir3")
 
     -- 8. Integration checks in lumina.lua source code
     local lf30 = io.open("lumina.lua", "r")
@@ -1888,11 +1900,14 @@ do
     assert_true(exp_mix:find("/backup/") ~= nil, "Mixed macros preserves trailing path")
 
     -- 8. Execution of shell command via execute_shell_command
-    local ok_run, code_run = Lumina.execute_shell_command("true", "/tmp", true)
+    local test_shell_dir = ffi.os == "Windows" and "." or "/tmp"
+    local test_cmd_succ = ffi.os == "Windows" and "cmd /c exit 0" or "true"
+    local test_cmd_fail = ffi.os == "Windows" and "cmd /c exit 7" or "sh -c 'exit 7'"
+    local ok_run, code_run = Lumina.execute_shell_command(test_cmd_succ, test_shell_dir, true)
     assert_true(ok_run ~= nil and ok_run ~= false, "execute_shell_command executes successfully")
     assert_eq(code_run, 0, "execute_shell_command returns 0 for successful command")
 
-    local ok_fail, code_fail = Lumina.execute_shell_command("sh -c 'exit 7'", "/tmp", true)
+    local ok_fail, code_fail = Lumina.execute_shell_command(test_cmd_fail, test_shell_dir, true)
     assert_eq(code_fail, 7, "execute_shell_command parses non-zero exit code correctly")
 
     -- 9. Render command modal frame test (zero formatting errors across edge cases)
@@ -1944,6 +1959,122 @@ do
     assert_true(l_code31:find("GetConsoleMode") ~= nil,
         "lumina.lua defines Windows is_stdin_tty with GetConsoleMode")
 end
+
+-- =========================================================================
+-- Test Suite 32: File Deletion, Copy & Move Operations & D Key Status Accuracy
+-- =========================================================================
+(function()
+    print("\n-- Test Suite 32: File Deletion, Copy & Move Operations & D Key Status Accuracy --")
+
+    -- 1. Helper exports
+    assert_true(type(Lumina.delete_file_or_dir) == "function", "Lumina exports delete_file_or_dir helper")
+    assert_true(type(Lumina.copy_file_or_dir) == "function", "Lumina exports copy_file_or_dir helper")
+    assert_true(type(Lumina.move_file_or_dir) == "function", "Lumina exports move_file_or_dir helper")
+
+    local function file_exists(p)
+        local h = io.open(p, "r")
+        if h then
+            h:close()
+            return true
+        end
+        return false
+    end
+
+    -- 2. Delete regular file
+    local f_norm = "test_del_norm_" .. tostring(os.time()) .. ".txt"
+    local f = io.open(f_norm, "w"); f:write("hello delete"); f:close()
+    assert_true(file_exists(f_norm), "Normal file exists before delete")
+    local ok_del1 = Lumina.delete_file_or_dir(f_norm, false)
+    assert_true(ok_del1, "delete_file_or_dir returns true for normal file")
+    assert_false(file_exists(f_norm), "Normal file is deleted from disk")
+
+    -- 3. Delete file with spaces in filename
+    local f_space = "test del space_" .. tostring(os.time()) .. ".txt"
+    local f_s = io.open(f_space, "w"); f_s:write("space content"); f_s:close()
+    assert_true(file_exists(f_space), "File with spaces exists before delete")
+    local ok_del2 = Lumina.delete_file_or_dir(f_space, false)
+    assert_true(ok_del2, "delete_file_or_dir returns true for file with spaces")
+    assert_false(file_exists(f_space), "File with spaces is deleted from disk")
+
+    -- 4. Delete file with forward slashes in path
+    local f_slash = "./test_del_slash_" .. tostring(os.time()) .. ".txt"
+    local f_sl = io.open(f_slash, "w"); f_sl:write("slash content"); f_sl:close()
+    assert_true(file_exists(f_slash), "File with forward slash path exists before delete")
+    local ok_del3 = Lumina.delete_file_or_dir(f_slash, false)
+    assert_true(ok_del3, "delete_file_or_dir returns true for forward slash path")
+    assert_false(file_exists(f_slash), "File with forward slash path is deleted from disk")
+
+    -- 5. Delete read-only file (force delete)
+    local f_ro = "test_del_ro_" .. tostring(os.time()) .. ".txt"
+    local f_r = io.open(f_ro, "w"); f_r:write("read only"); f_r:close()
+    if ffi.os == "Windows" then
+        os.execute(string.format('attrib +r "%s"', f_ro))
+    else
+        os.execute(string.format('chmod 444 "%s"', f_ro))
+    end
+    local ok_del4 = Lumina.delete_file_or_dir(f_ro, false)
+    assert_true(ok_del4, "delete_file_or_dir returns true for read-only file")
+    assert_false(file_exists(f_ro), "Read-only file is deleted from disk")
+
+    -- 6. Delete empty directory
+    local d_empty = "test_del_empty_" .. tostring(os.time())
+    if ffi.os == "Windows" then
+        os.execute(string.format('mkdir "%s"', d_empty))
+    else
+        os.execute(string.format('mkdir -p "%s"', d_empty))
+    end
+    local ok_del5 = Lumina.delete_file_or_dir(d_empty, true)
+    assert_true(ok_del5, "delete_file_or_dir returns true for empty directory")
+
+    -- 7. Delete nested non-empty directory tree
+    local d_nested = "test_del_nested_" .. tostring(os.time())
+    if ffi.os == "Windows" then
+        os.execute(string.format('mkdir "%s\\sub1\\sub2"', d_nested))
+    else
+        os.execute(string.format('mkdir -p "%s/sub1/sub2"', d_nested))
+    end
+    local nf1 = io.open(d_nested .. "/sub1/f1.txt", "w"); nf1:write("nest1"); nf1:close()
+    local nf2 = io.open(d_nested .. "/sub1/sub2/f2.txt", "w"); nf2:write("nest2"); nf2:close()
+    local ok_del6 = Lumina.delete_file_or_dir(d_nested, true)
+    assert_true(ok_del6, "delete_file_or_dir returns true for nested non-empty directory tree")
+
+    -- 8. Delete non-existent file returns false
+    local ok_del7 = Lumina.delete_file_or_dir("nonexistent_del_file_9999.xyz", false)
+    assert_false(ok_del7, "delete_file_or_dir returns false for non-existent file")
+
+    -- 9. Copy and Move operations
+    local f_src = "test_src_" .. tostring(os.time()) .. ".txt"
+    local f_dst = "test_dst_" .. tostring(os.time()) .. ".txt"
+    local cf = io.open(f_src, "w"); cf:write("copy move test"); cf:close()
+    local ok_cp = Lumina.copy_file_or_dir(f_src, f_dst)
+    assert_true(ok_cp, "copy_file_or_dir succeeds")
+    assert_true(file_exists(f_dst), "Destination file exists after copy")
+
+    local f_mv = "test_mv_" .. tostring(os.time()) .. ".txt"
+    local ok_mv = Lumina.move_file_or_dir(f_dst, f_mv)
+    assert_true(ok_mv, "move_file_or_dir succeeds")
+    assert_true(file_exists(f_mv), "Moved destination file exists")
+    assert_false(file_exists(f_dst), "Original destination file gone after move")
+
+    Lumina.delete_file_or_dir(f_src, false)
+    Lumina.delete_file_or_dir(f_mv, false)
+
+    -- 10. Source integration checks in lumina.lua for D key handling
+    local lf32 = io.open("lumina.lua", "r")
+    local l_code32 = lf32:read("*a")
+    lf32:close()
+
+    assert_true(l_code32:find("local ok = delete_file_or_dir%(item%.path, item%.is_dir%)") ~= nil,
+        "lumina.lua inspects delete_file_or_dir return status in key D loop")
+    assert_true(l_code32:find("deleted_count = deleted_count %+ 1") ~= nil,
+        "lumina.lua tracks deleted_count on success")
+    assert_true(l_code32:find("failed_count = failed_count %+ 1") ~= nil,
+        "lumina.lua tracks failed_count on failure")
+    assert_true(l_code32:find("if ok then%s+deleted_count = deleted_count %+ 1%s+selected_paths%[item%.path%] = nil") ~= nil,
+        "lumina.lua only clears selected_paths tag when deletion succeeded")
+    assert_true(l_code32:find("Deleted %%d item%(s%), %%d failed") ~= nil,
+        "lumina.lua reports partial deletion failure accurately")
+end)()
 
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
