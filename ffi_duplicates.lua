@@ -230,10 +230,15 @@ local function windows_backend(native, shell)
             .. tostring(basic[0].write)
             .. ':'
             .. tostring(basic[0].change)
+        local unix_sec = basic[0].write > 116444736000000000LL
+                and tonumber((basic[0].write - 116444736000000000LL) / 10000000LL)
+            or 0
         return finish({
             id = id,
             signature = signature,
             size = size,
+            mtime = unix_sec,
+            date = unix_sec > 0 and os.date('%Y-%m-%d %H:%M:%S', unix_sec) or nil,
             kind = bit.band(attr, 16) ~= 0 and 0x4000 or 0x8000,
         })
     end
@@ -398,10 +403,13 @@ local function linux_backend()
             .. tostring(s.ctime.sec)
             .. ':'
             .. s.ctime.nsec
+        local sec = tonumber(s.mtime.sec)
         return {
             id = id,
             signature = signature,
             size = tonumber(s.size),
+            mtime = sec,
+            date = sec and sec > 0 and os.date('%Y-%m-%d %H:%M:%S', sec) or nil,
             kind = bit.band(s.mode, 0xf000),
         }
     end
@@ -1108,16 +1116,19 @@ function TUI.detail_lines(model, width)
         else
             add(
                 string.format(
-                    '%d identical files | %.0f bytes each | %s redundant',
+                    '%d identical files | %.0f bytes each (%s) | %s redundant',
                     #group.paths,
                     group.size,
+                    human(group.size),
                     human(group.size * (#group.paths - 1))
                 )
             )
             add('Selected file: ' .. (group.paths[model.file] or group.paths[1]))
             add('')
             for i, path in ipairs(group.paths) do
-                add(tostring(i) .. '. ' .. path)
+                local date_str = group.files and group.files[i] and group.files[i].date
+                local line = tostring(i) .. '. ' .. (date_str and ('[' .. date_str .. ']  ') or '') .. path
+                add(line)
                 add('')
             end
         end
@@ -1210,8 +1221,14 @@ function TUI.render_browse(model, cols, rows)
         if not group or not group.paths[i] then
             return ''
         end
-        return (i == model.file and '> ' or '  ')
-            .. TUI.ellipsize(group.paths[i], math.max(0, file_width - 2))
+        local prefix = (i == model.file and '> ' or '  ')
+        local date_str = group.files and group.files[i] and group.files[i].date
+        if date_str and file_width >= 45 then
+            local short_date = date_str:sub(1, 16) .. '  '
+            local remaining = math.max(0, file_width - 2 - #short_date)
+            return prefix .. short_date .. TUI.ellipsize(group.paths[i], remaining)
+        end
+        return prefix .. TUI.ellipsize(group.paths[i], math.max(0, file_width - 2))
     end
     local function selection_role(pane, index)
         if index == (pane == 'groups' and model.group or model.file) and index > 0 then
@@ -1234,7 +1251,8 @@ function TUI.render_browse(model, cols, rows)
             role = 'title'
         elseif y == 2 then
             local a = 'Groups · redundant bytes'
-            local b = 'Files · ' .. (group and #group.paths or 0) .. ' copies'
+            local b = group and ('Files · ' .. #group.paths .. ' copies (' .. human(group.size) .. ')')
+                or 'Files · 0 copies'
             if box then
                 if split then
                     frame_row(frame, y, model.color, {
@@ -2046,12 +2064,20 @@ local function new(backend)
                     end
                     for _, group in ipairs(groups) do
                         if #group > 1 then
-                            local paths = {}
+                            local paths, files = {}, {}
                             for _, file in ipairs(group) do
                                 paths[#paths + 1] = file.path
+                                files[#files + 1] = {
+                                    path = file.path,
+                                    mtime = file.mtime,
+                                    date = file.date,
+                                }
                             end
-                            result.groups[#result.groups + 1] =
-                                { size = group[1].size, paths = paths }
+                            result.groups[#result.groups + 1] = {
+                                size = group[1].size,
+                                paths = paths,
+                                files = files,
+                            }
                             result.redundant_bytes = result.redundant_bytes
                                 + group[1].size * (#group - 1)
                         end
@@ -2074,16 +2100,23 @@ local function new(backend)
     function M.render(r)
         local lines = {}
         for i, g in ipairs(r.groups) do
-            lines[#lines + 1] =
-                string.format('Group %d: %d files, %.0f bytes each', i, #g.paths, g.size)
-            for _, path in ipairs(g.paths) do
-                lines[#lines + 1] = '  ' .. string.format('%q', path):gsub('\\\n', '\\n')
+            lines[#lines + 1] = string.format(
+                'Group %d: %d files, %.0f bytes each (%s)',
+                i,
+                #g.paths,
+                g.size,
+                human(g.size)
+            )
+            for j, path in ipairs(g.paths) do
+                local date_str = g.files and g.files[j] and g.files[j].date and ('  [' .. g.files[j].date .. ']') or ''
+                lines[#lines + 1] = '  ' .. string.format('%q', path):gsub('\\\n', '\\n') .. date_str
             end
         end
         lines[#lines + 1] = string.format(
-            '%d duplicate group(s); %.0f redundant content bytes; %d files scanned',
+            '%d duplicate group(s); %.0f redundant content bytes (%s); %d files scanned',
             #r.groups,
             r.redundant_bytes,
+            human(r.redundant_bytes),
             r.files
         )
         return table.concat(lines, '\n') .. '\n'
