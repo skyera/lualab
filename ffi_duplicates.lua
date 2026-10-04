@@ -2236,7 +2236,25 @@ local function new(backend)
         if tui then
             return TUI.run(M, roots, opts)
         end
+        if not json_output then
+            local last_tick = 0
+            opts.progress = function(phase, path, bytes_read, r)
+                local now = os.clock()
+                if now - last_tick >= 0.1 then
+                    local msg = string.format('%s (%d files scanned)...', phase, r.files)
+                    if #msg > 75 then msg = msg:sub(1, 72) .. '...' end
+                    io.stderr:write(string.format('\r%-75s', msg))
+                    io.stderr:flush()
+                    last_tick = now
+                end
+                return true
+            end
+        end
         local r = M.scan(roots, opts)
+        if opts.progress then
+            io.stderr:write(string.format('\r%75s\r', ''))
+            io.stderr:flush()
+        end
         if json_output then
             io.write(M.to_json(r), '\n')
         else
@@ -2245,6 +2263,8 @@ local function new(backend)
         for _, e in ipairs(r.errors) do
             io.stderr:write(string.format('%q: %q\n', e.path, e.message))
         end
+        io.stdout:flush()
+        io.stderr:flush()
         return #r.errors > 0 and 1 or 0
     end
     return M
@@ -2271,6 +2291,8 @@ end
 
 local restore = backend.console_utf8 and backend.console_utf8()
 local code = M.main(args)
+io.stdout:flush()
+io.stderr:flush()
 if restore then
     restore()
 end
