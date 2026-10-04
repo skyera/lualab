@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 """Linux terminal integration checks using a real PTY and native scanner."""
+import sys
+
+if sys.platform != 'linux':
+    print('SKIPPED: test_ffi_duplicates_tui_pty.py requires Linux PTY')
+    sys.exit(0)
+
 import errno
 import fcntl
 import json
@@ -10,7 +16,6 @@ import select
 import signal
 import struct
 import subprocess
-import sys
 import tempfile
 import termios
 import time

@@ -57,16 +57,26 @@ if ffi.os == 'Windows' then
   for i=1,5 do long=long..'\\'..string.rep('x',55);directory(long) end
   local l=write(long..'\\long.bin','long');write('long-copy.bin','long')
   check(#l>260 and #finder.scan({l,fs.join(root,'long-copy.bin')}).groups==1,'native extended-length paths')
-  local p=io.popen('"'..(arg[-1] or 'luajit')..'" ffi_duplicates.lua --json "'..root..'" 2>&1')
-  assert(p);local out=p:read('*a');p:close()
+  local function cli(args)
+   local p=io.popen('""'..(arg[-1] or 'luajit')..'" ffi_duplicates.lua '..args..' 2>&1"')
+   assert(p);local out=p:read('*a');p:close()
+   return out
+  end
+  local out=cli('--json "'..root..'"')
   check(#json.decode(out).groups==4,'native CLI JSON')
+  local help=cli('--help')
+  check(help:find('Usage:',1,true)~=nil,'native CLI help')
+  local short_help=cli('-h')
+  check(short_help==help,'native CLI short help')
+  local rel = require('./ffi_duplicates')
+  check(type(rel) == 'table' and type(rel.scan) == 'function', 'relative module require')
  end,debug.traceback)
  for i=#paths,1,-1 do native.DeleteFileW(fs.path(paths[i])) end
  for i=#dirs,1,-1 do native.RemoveDirectoryW(fs.path(dirs[i])) end
  native.RemoveDirectoryW(fs.path(root))
  if not ok then error(e) end
  print(string.format('PASS: %d native Windows duplicate finder checks',count))
- return
+ count = 0
 end
 
 -- A Win32 API double exercises the actual Windows backend, not a replacement
@@ -291,4 +301,4 @@ state.zero_write=false;state.write_error=true
 check(not fs.write_new('C:\\failed.json','data'),'Windows write failure reported')
 state.write_error=false
 check(next(state.handles)==nil,'Windows export handles closed on all paths')
-print(string.format('PASS: %d Windows backend checks (Win32 API double; native runtime unavailable)',count))
+print(string.format('PASS: %d Windows backend checks (Win32 API double)',count))

@@ -2256,7 +2256,7 @@ M.windows_backend = windows_backend
 M.tui = TUI
 
 local caller = debug.getinfo(2, 'f')
-if ... == 'ffi_duplicates' and caller and caller.func == require then
+if caller and caller.func == require then
     return M
 end
 
