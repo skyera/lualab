@@ -5481,6 +5481,7 @@ local function render_help_modal(term_w, term_h, active_protocol)
         "├─────────────────────────────────────────────────────────────┤",
         "│  File Navigation (Vim / Arrows):                            │",
         "│    ↑ / k, ↓ / j        Move selection up / down             │",
+        "│    p                   Toggle right image preview pane      │",
         "│    h, l / o / Enter    Navigate to parent / Open item       │",
         "│    g / G               Jump to first / last item            │",
         "│    Ctrl-D / Ctrl-U     Scroll half page down / up           │",
@@ -5567,8 +5568,25 @@ local function render_help_modal(term_w, term_h, active_protocol)
 end
 
 local format_item_line
+local format_split_item_line
 local render_selection_differential
+local render_preview_pane_lines
 local render_file_list
+local preview_pane_cache = {}
+local preview_pane_cache_order = {}
+local MAX_PREVIEW_PANE_CACHE = 32
+
+local function center_preview_text(raw_text, target_w, fg_color)
+    fg_color = fg_color or "\27[0m"
+    local disp_w = display_width(raw_text)
+    if disp_w > target_w then
+        raw_text = utf8_truncate(raw_text, target_w)
+        disp_w = display_width(raw_text)
+    end
+    local pad_l = math.max(0, math.floor((target_w - disp_w) / 2))
+    local pad_r = math.max(0, target_w - disp_w - pad_l)
+    return string.rep(" ", pad_l) .. fg_color .. raw_text .. "\27[0m" .. string.rep(" ", pad_r)
+end
 
 format_item_line = function(images, i, is_sel, col2_w, icon_mode)
     local img = images[i]
@@ -5609,6 +5627,202 @@ format_item_line = function(images, i, is_sel, col2_w, icon_mode)
     end
 end
 
+format_split_item_line = function(images, i, is_sel, left_w, icon_mode)
+    local img = images[i]
+    if not img then return string.rep(" ", left_w) end
+    local icon = get_file_icon(img.extension, icon_mode)
+    local icon_prefix = (icon ~= "") and (icon .. " ") or ""
+    local icon_cols = display_width(icon_prefix)
+
+    local inner_w = left_w - 2
+    local col1_w = 5
+    local col3_w = 6
+    local col4_w = (inner_w >= 44) and 8 or 0
+    local col2_w = math.max(8, inner_w - col1_w - col3_w - (col4_w > 0 and (col4_w + 3) or 2))
+    local max_fn_w = math.max(4, col2_w - icon_cols)
+    local fn = utf8_truncate(to_display_text(img.filename), max_fn_w)
+    local fn_display_w = display_width(fn) + icon_cols
+    local pad_len = math.max(0, col2_w - fn_display_w)
+    local padded_col2 = icon_prefix .. fn .. string.rep(" ", pad_len)
+
+    local line_str
+    if col4_w > 0 then
+        local sz = img.size_str or "-"
+        if #sz > col4_w then sz = sz:sub(1, col4_w) end
+        line_str = string.format("%-5s %s %-6s %-" .. col4_w .. "s",
+            string.format("[%d]", i),
+            padded_col2,
+            img.extension:sub(1, 6),
+            sz
+        )
+    else
+        line_str = string.format("%-5s %s %-6s",
+            string.format("[%d]", i),
+            padded_col2,
+            img.extension:sub(1, 6)
+        )
+    end
+    local cur_len = display_width(line_str)
+    if cur_len < inner_w then
+        line_str = line_str .. string.rep(" ", inner_w - cur_len)
+    end
+
+    if is_sel then
+        return string.format("\27[1;93m▶ \27[1;97;44m%s\27[0m", line_str)
+    else
+        return string.format("  \27[37m%s\27[0m", line_str)
+    end
+end
+
+render_preview_pane_lines = function(item, pane_w, pane_h)
+    if not item or pane_w < 8 or pane_h < 4 then
+        local empty = {}
+        for r = 1, pane_h do table.insert(empty, string.rep(" ", pane_w)) end
+        return empty
+    end
+
+    local cache_key = tostring(item.filepath or item.filename) .. ":" .. pane_w .. ":" .. pane_h .. ":" .. tostring(item.size or 0)
+    if preview_pane_cache[cache_key] then
+        return preview_pane_cache[cache_key]
+    end
+
+    local lines = {}
+    if item.is_dir then
+        local mid = math.max(2, math.floor(pane_h / 2))
+        for r = 1, pane_h do
+            if r == mid - 2 then
+                table.insert(lines, center_preview_text("📁 [Directory]", pane_w, "\27[1;36m"))
+            elseif r == mid - 1 then
+                table.insert(lines, center_preview_text(to_display_text(item.filename), pane_w, "\27[1;37m"))
+            elseif r == mid + 1 then
+                table.insert(lines, center_preview_text("[Enter] Open Folder", pane_w, "\27[90m"))
+            elseif r == mid + 2 then
+                table.insert(lines, center_preview_text("[Backspace / h] Up Level", pane_w, "\27[90m"))
+            else
+                table.insert(lines, string.rep(" ", pane_w))
+            end
+        end
+    elseif is_audio_file(item.filepath or item.extension) then
+        local mid = math.max(2, math.floor(pane_h / 2))
+        for r = 1, pane_h do
+            if r == mid - 2 then
+                table.insert(lines, center_preview_text("🎵 [Audio Track]", pane_w, "\27[1;35m"))
+            elseif r == mid - 1 then
+                table.insert(lines, center_preview_text(to_display_text(item.filename), pane_w, "\27[1;37m"))
+            elseif r == mid then
+                table.insert(lines, center_preview_text(string.format("Format: %s  •  Size: %s", (item.extension or ""):upper(), item.size_str or "-"), pane_w, "\27[90m"))
+            elseif r == mid + 2 then
+                table.insert(lines, center_preview_text("[Enter] Play Audio in pix", pane_w, "\27[92m"))
+            else
+                table.insert(lines, string.rep(" ", pane_w))
+            end
+        end
+    else
+        local img, err = load_image(item.filepath)
+        if img and img.width and img.height and img.pixels and img.width > 0 and img.height > 0 then
+            local meta_rows = 2
+            local avail_h = math.max(2, pane_h - meta_rows)
+            local avail_w = math.max(4, pane_w)
+            local optical_aspect = (img.width / img.height) * 2.0
+            local target_h = avail_h * 2
+            local target_w = avail_w
+            local out_h, out_w
+            if img.height > target_h or math.floor((img.height / 2) * optical_aspect) > target_w then
+                out_h = target_h
+                out_w = math.max(2, math.floor((out_h / 2) * optical_aspect))
+                if out_w > target_w then
+                    out_w = target_w
+                    out_h = math.max(2, math.floor((out_w / optical_aspect) * 2))
+                end
+            else
+                out_h = img.height
+                out_w = math.max(2, math.floor((out_h / 2) * optical_aspect))
+                if out_w > target_w then
+                    out_w = target_w
+                    out_h = math.max(2, math.floor((out_w / optical_aspect) * 2))
+                end
+            end
+            if out_h > target_h then out_h = target_h end
+            if out_h % 2 ~= 0 then out_h = out_h - 1 end
+            if out_h < 2 then out_h = 2 end
+
+            local text_rows = math.floor(out_h / 2)
+            local pad_left = math.max(0, math.floor((pane_w - out_w) / 2))
+            local pad_right = math.max(0, pane_w - out_w - pad_left)
+            local pad_top = math.max(0, math.floor((avail_h - text_rows) / 2))
+            local pad_bot = math.max(0, avail_h - text_rows - pad_top)
+
+            for _ = 1, pad_top do
+                table.insert(lines, string.rep(" ", pane_w))
+            end
+
+            local iw = img.width
+            local ih = img.height
+            local px = img.pixels
+            for y = 0, out_h - 1, 2 do
+                local seg = { string.rep(" ", pad_left) }
+                local last_top_r, last_top_g, last_top_b = -1, -1, -1
+                local last_bot_r, last_bot_g, last_bot_b = -1, -1, -1
+                for x = 0, out_w - 1 do
+                    local src_x = math.min(iw - 1, math.max(0, math.floor(x * (iw / out_w))))
+                    local src_y_top = math.min(ih - 1, math.max(0, math.floor(y * (ih / out_h))))
+                    local src_y_bot = math.min(ih - 1, math.max(0, math.floor((y + 1) * (ih / out_h))))
+
+                    local top = px[src_y_top * iw + src_x]
+                    local bot = px[src_y_bot * iw + src_x]
+                    local tr, tg, tb = top.r, top.g, top.b
+                    local br, bg, bb = bot.r, bot.g, bot.b
+
+                    if tr ~= last_top_r or tg ~= last_top_g or tb ~= last_top_b then
+                        table.insert(seg, string.format("\27[48;2;%d;%d;%dm", tr, tg, tb))
+                        last_top_r, last_top_g, last_top_b = tr, tg, tb
+                    end
+                    if br ~= last_bot_r or bg ~= last_bot_g or bb ~= last_bot_b then
+                        table.insert(seg, string.format("\27[38;2;%d;%d;%dm", br, bg, bb))
+                        last_bot_r, last_bot_g, last_bot_b = br, bg, bb
+                    end
+                    table.insert(seg, "▄")
+                end
+                table.insert(seg, "\27[0m" .. string.rep(" ", pad_right))
+                table.insert(lines, table.concat(seg))
+            end
+
+            for _ = 1, pad_bot do
+                table.insert(lines, string.rep(" ", pane_w))
+            end
+
+            local meta1 = string.format("%dx%d • %s • %s", img.width, img.height, (item.extension or ""):upper(), item.size_str or "-")
+            table.insert(lines, center_preview_text(meta1, pane_w, "\27[1;37m"))
+            table.insert(lines, center_preview_text("[Enter] Fullscreen View", pane_w, "\27[90m"))
+        else
+            local mid = math.max(2, math.floor(pane_h / 2))
+            for r = 1, pane_h do
+                if r == mid - 1 then
+                    table.insert(lines, center_preview_text("⚠️ Preview Unavailable", pane_w, "\27[1;33m"))
+                elseif r == mid then
+                    table.insert(lines, center_preview_text(err and tostring(err):sub(1, pane_w - 4) or "Unsupported format", pane_w, "\27[90m"))
+                else
+                    table.insert(lines, string.rep(" ", pane_w))
+                end
+            end
+        end
+    end
+
+    if #lines > pane_h then
+        while #lines > pane_h do table.remove(lines) end
+    elseif #lines < pane_h then
+        while #lines < pane_h do table.insert(lines, string.rep(" ", pane_w)) end
+    end
+
+    if #preview_pane_cache_order >= MAX_PREVIEW_PANE_CACHE then
+        local oldest = table.remove(preview_pane_cache_order, 1)
+        preview_pane_cache[oldest] = nil
+    end
+    table.insert(preview_pane_cache_order, cache_key)
+    preview_pane_cache[cache_key] = lines
+    return lines
+end
+
 render_selection_differential = function(images, old_sel, new_sel, page_offset, icon_mode)
     if not images or #images == 0 then return end
     local term_w, term_h = get_terminal_size()
@@ -5642,7 +5856,7 @@ render_selection_differential = function(images, old_sel, new_sel, page_offset, 
     io.flush()
 end
 
-render_file_list = function(dir_path, images, total_unfiltered, selected_idx, page_offset, msg, search_mode, search_query, sort_mode, sort_desc, recursive, icon_mode, show_hidden, confirm_item)
+render_file_list = function(dir_path, images, total_unfiltered, selected_idx, page_offset, msg, search_mode, search_query, sort_mode, sort_desc, recursive, icon_mode, show_hidden, confirm_item, preview_pane)
     local term_w, term_h = get_terminal_size()
     local out = {}
     table.insert(out, "\27[H") -- Home cursor without blanking the frame
@@ -5654,7 +5868,7 @@ render_file_list = function(dir_path, images, total_unfiltered, selected_idx, pa
         io.flush()
     end
 
-    local bar_len = math.min(term_w - 2, 90)
+    local bar_len = (preview_pane and term_w >= 60) and math.max(20, term_w - 2) or math.min(term_w - 2, 90)
     table.insert(out, "\27[1;34m" .. string.rep("═", bar_len) .. "\27[0m\n")
     
     local sort_label = sort_mode:upper() .. (sort_desc and " (Desc)" or " (Asc)")
@@ -5665,7 +5879,8 @@ render_file_list = function(dir_path, images, total_unfiltered, selected_idx, pa
         title_icon = "\238\176\169 \238\180\157 " -- 󰋩 󰕼
     end
     local title_left = string.format("  %s\27[1;36mPIX\27[0m \27[1;37m— Terminal Media Viewer\27[0m \27[90m(LuaJIT FFI)\27[0m", title_icon)
-    local title_right = string.format("\27[90mSort: \27[1;93m⇅ %s\27[90m [s/r]\27[0m", sort_label)
+    local pane_tag = string.format("   \27[1;96m[p]\27[0m \27[90mPane: %s\27[0m", preview_pane and "\27[1;92mON\27[0m" or "\27[90mOFF\27[0m")
+    local title_right = string.format("\27[90mSort: \27[1;93m⇅ %s\27[90m [s/r]\27[0m%s", sort_label, pane_tag)
     table.insert(out, string.format("%s   %s\n", title_left, title_right))
 
     local scan_type = recursive and "Recursive" or "Level 1"
@@ -5683,13 +5898,13 @@ render_file_list = function(dir_path, images, total_unfiltered, selected_idx, pa
         local sq_disp = utf8_truncate(to_display_text(search_query), max_sq_w)
         table.insert(out, string.format("  \27[90mFilter: \27[1;93m'%s'\27[0m \27[90m(%d matches) [Esc/ / to clear]\27[0m   \27[93m[?]\27[0m Help   \27[91m[Q]\27[0m Quit\n", sq_disp, #images))
     elseif term_w >= 115 then
-        table.insert(out, string.format("  \27[93m[↑/↓/k/j]\27[0m Move   \27[1;92m[Enter/l]\27[0m Open/View   \27[93m[h/Backsp]\27[0m Up   \27[91m[d]\27[0m Delete   \27[93m[/]\27[0m Filter   \27[93m[i]\27[0m Icon   \27[93m[?]\27[0m Help   \27[91m[Q]\27[0m Quit\n"))
+        table.insert(out, string.format("  \27[93m[↑/↓/k/j]\27[0m Move   \27[1;92m[Enter/l]\27[0m Open/View   \27[1;96m[p]\27[0m Preview   \27[93m[h/Backsp]\27[0m Up   \27[91m[d]\27[0m Delete   \27[93m[/]\27[0m Filter   \27[93m[i]\27[0m Icon   \27[93m[?]\27[0m Help   \27[91m[Q]\27[0m Quit\n"))
     elseif term_w >= 95 then
-        table.insert(out, string.format("  \27[93m[↑/↓/k/j]\27[0m Move  \27[1;92m[Enter/l]\27[0m View  \27[93m[h]\27[0m Up  \27[91m[d]\27[0m Del  \27[93m[/]\27[0m Filter  \27[93m[i]\27[0m Icon  \27[93m[?]\27[0m Help  \27[91m[Q]\27[0m Quit\n"))
+        table.insert(out, string.format("  \27[93m[↑/↓/k/j]\27[0m Move  \27[1;92m[Enter/l]\27[0m View  \27[1;96m[p]\27[0m Prev  \27[93m[h]\27[0m Up  \27[91m[d]\27[0m Del  \27[93m[/]\27[0m Filter  \27[93m[i]\27[0m Icon  \27[93m[?]\27[0m Help  \27[91m[Q]\27[0m Quit\n"))
     elseif term_w >= 80 then
-        table.insert(out, string.format("  \27[93m[↑/↓/k/j]\27[0m Move  \27[1;92m[Enter]\27[0m View  \27[93m[h]\27[0m Up  \27[91m[d]\27[0m Del  \27[93m[/]\27[0m Find  \27[93m[?]\27[0m Help  \27[91m[Q]\27[0m Quit\n"))
+        table.insert(out, string.format("  \27[93m[↑/↓/k/j]\27[0m Move  \27[1;92m[Enter]\27[0m View  \27[1;96m[p]\27[0m Prev  \27[93m[h]\27[0m Up  \27[91m[d]\27[0m Del  \27[93m[/]\27[0m Find  \27[93m[?]\27[0m Help  \27[91m[Q]\27[0m Quit\n"))
     else
-        table.insert(out, string.format("  \27[93m[↑/↓]\27[0m Move  \27[1;92m[Enter]\27[0m View  \27[93m[h]\27[0m Up  \27[91m[d]\27[0m Del  \27[93m[?]\27[0m Help  \27[91m[Q]\27[0m Quit\n"))
+        table.insert(out, string.format("  \27[93m[↑/↓]\27[0m Move  \27[1;92m[Enter]\27[0m View  \27[1;96m[p]\27[0m Prev  \27[93m[h]\27[0m Up  \27[91m[d]\27[0m Del  \27[93m[?]\27[0m Help  \27[91m[Q]\27[0m Quit\n"))
     end
     table.insert(out, "\27[90m" .. string.rep("─", bar_len) .. "\27[0m\n")
 
@@ -5723,27 +5938,90 @@ render_file_list = function(dir_path, images, total_unfiltered, selected_idx, pa
     local page_start = page_offset or 1
     local page_end = math.min(#images, page_start + max_items_per_page - 1)
 
-    -- Dynamic Columns
-    local col1_w = 6   -- Index
-    local col3_w = 8   -- Format
-    local col4_w = 12  -- Size
-    local col5_w = 12  -- Date
-    local col2_w = math.max(20, term_w - (col1_w + col3_w + col4_w + col5_w + 10))
+    local is_split = preview_pane and (term_w >= 60)
 
-    local filename_hdr = "FILENAME" .. string.rep(" ", math.max(0, col2_w - 8))
-    table.insert(out, string.format("  \27[1;37m%-6s %s %-8s %-12s %-12s\27[0m\n",
-        "INDEX", filename_hdr, "FORMAT", "SIZE", "DATE"))
-    table.insert(out, "  \27[90m" .. string.rep("─", math.min(bar_len - 2, col1_w + col2_w + col3_w + col4_w + col5_w + 4)) .. "\27[0m\n")
+    if is_split then
+        local left_w = math.max(34, math.floor(term_w * 0.48))
+        local right_w = math.max(20, term_w - left_w - 3)
 
-    for i = page_start, page_end do
-        local line = format_item_line(images, i, i == selected_idx, col2_w, icon_mode)
-        table.insert(out, line .. "\n")
-    end
+        local sel_item = images[selected_idx]
+        local prev_title = "PREVIEW"
+        if sel_item then
+            local fn = utf8_truncate(to_display_text(sel_item.filename), math.max(10, right_w - 14))
+            prev_title = "PREVIEW: " .. fn
+        end
 
-    table.insert(out, "\n")
-    if #images > max_items_per_page then
-        table.insert(out, string.format("  \27[90mShowing %d-%d of %d matches. Use ↑ / ↓ or PgUp / PgDn to scroll.\27[0m\n",
-            page_start, page_end, #images))
+        local left_inner = left_w - 2
+        local col1_w = 5
+        local col3_w = 6
+        local col4_w = (left_inner >= 44) and 8 or 0
+        local col2_w = math.max(8, left_inner - col1_w - col3_w - (col4_w > 0 and (col4_w + 3) or 2))
+        local fn_hdr = "FILENAME" .. string.rep(" ", math.max(0, col2_w - 8))
+
+        local left_hdr_str
+        if col4_w > 0 then
+            left_hdr_str = string.format("  %-5s %s %-6s %-" .. col4_w .. "s", "INDEX", fn_hdr, "FORMAT", "SIZE")
+        else
+            left_hdr_str = string.format("  %-5s %s %-6s", "INDEX", fn_hdr, "FORMAT")
+        end
+        local pad_l_hdr = math.max(0, left_w - display_width(left_hdr_str))
+        left_hdr_str = left_hdr_str .. string.rep(" ", pad_l_hdr)
+
+        local right_hdr_str = " " .. prev_title
+        local pad_r_hdr = math.max(0, right_w - display_width(right_hdr_str))
+        right_hdr_str = right_hdr_str .. string.rep(" ", pad_r_hdr)
+
+        table.insert(out, string.format("\27[1;37m%s\27[90m│\27[1;36m%s\27[0m\n", left_hdr_str, right_hdr_str))
+        table.insert(out, string.format("  \27[90m%s┼%s\27[0m\n", string.rep("─", left_w - 2), string.rep("─", right_w)))
+
+        local preview_lines = render_preview_pane_lines(sel_item, right_w, max_items_per_page)
+
+        for row_idx = 1, max_items_per_page do
+            local i = page_start + row_idx - 1
+            local left_line
+            if i <= page_end then
+                left_line = format_split_item_line(images, i, i == selected_idx, left_w, icon_mode)
+            else
+                left_line = string.rep(" ", left_w)
+            end
+            local right_line = preview_lines[row_idx] or string.rep(" ", right_w)
+            table.insert(out, left_line .. "\27[90m│\27[0m" .. right_line .. "\n")
+        end
+
+        table.insert(out, "\n")
+        local left_foot
+        if #images > max_items_per_page then
+            left_foot = string.format("  \27[90mShowing %d-%d of %d matches.\27[0m", page_start, page_end, #images)
+        else
+            left_foot = string.format("  \27[90m%d item%s\27[0m", #images, #images == 1 and "" or "s")
+        end
+        local pad_foot_l = math.max(0, left_w - display_width(left_foot))
+        left_foot = left_foot .. string.rep(" ", pad_foot_l)
+        local right_foot = " \27[90m[p] Close Preview  [Enter] Fullscreen\27[0m"
+        table.insert(out, left_foot .. "\27[90m│\27[0m" .. right_foot .. "\n")
+    else
+        -- Standard single full-width pane
+        local col1_w = 6   -- Index
+        local col3_w = 8   -- Format
+        local col4_w = 12  -- Size
+        local col5_w = 12  -- Date
+        local col2_w = math.max(20, term_w - (col1_w + col3_w + col4_w + col5_w + 10))
+
+        local filename_hdr = "FILENAME" .. string.rep(" ", math.max(0, col2_w - 8))
+        table.insert(out, string.format("  \27[1;37m%-6s %s %-8s %-12s %-12s\27[0m\n",
+            "INDEX", filename_hdr, "FORMAT", "SIZE", "DATE"))
+        table.insert(out, "  \27[90m" .. string.rep("─", math.min(bar_len - 2, col1_w + col2_w + col3_w + col4_w + col5_w + 4)) .. "\27[0m\n")
+
+        for i = page_start, page_end do
+            local line = format_item_line(images, i, i == selected_idx, col2_w, icon_mode)
+            table.insert(out, line .. "\n")
+        end
+
+        table.insert(out, "\n")
+        if #images > max_items_per_page then
+            table.insert(out, string.format("  \27[90mShowing %d-%d of %d matches. Use ↑ / ↓ or PgUp / PgDn to scroll.\27[0m\n",
+                page_start, page_end, #images))
+        end
     end
 
     write_frame()
@@ -5838,6 +6116,7 @@ local function main()
         print("  --select, -s <id>     Directly select and display media #id")
         print("  --sort <name|date|size> Initial sort order (default: name)")
         print("  --hidden, -a          Include hidden (dot) files and folders (toggle with [.])")
+        print("  -p, --preview         Enable side-by-side image preview pane in file list (toggle with [p])")
         print("  --play-engine <auto|ffi|ffmpeg|mpv> Video play engine (default: auto)")
         print("  --window, -w          Play video in external MPV GUI window instead of terminal")
         print("  --nerd-icons          Use Nerd Font glyphs instead of standard Unicode")
@@ -6034,10 +6313,12 @@ local function main()
         end
     end
 
+    local preview_pane = args["--preview"] or args["-p"] or false
+
     -- 4. Non-interactive fallback (e.g., pipes or redirect)
     if non_interactive then
         while true do
-            render_file_list(target_dir, raw_images, #raw_images, 1, 1, nil, false, "", sort_mode, sort_desc, recursive, icon_mode, show_hidden)
+            render_file_list(target_dir, raw_images, #raw_images, 1, 1, nil, false, "", sort_mode, sort_desc, recursive, icon_mode, show_hidden, nil, preview_pane)
             io.write(string.format("\n\27[1;32mEnter item number [1-%d] to open/view, or 'q' to quit: \27[0m", #raw_images))
             io.flush()
             local line = io.read("*l")
@@ -6110,6 +6391,8 @@ local function main()
         search_query = ""
         search_mode = false
         pending_delete = nil
+        preview_pane_cache = {}
+        preview_pane_cache_order = {}
         filtered_images = filter_images(raw_images, search_query)
         selected_idx = 1
         page_offset = 1
@@ -6150,6 +6433,8 @@ local function main()
                 break
             end
         end
+        preview_pane_cache = {}
+        preview_pane_cache_order = {}
         filtered_images = filter_images(raw_images, search_query)
         if #filtered_images == 0 then
             selected_idx = 1
@@ -6399,7 +6684,7 @@ local function main()
                 update_page_window()
 
                 if needs_full_redraw then
-                    render_file_list(target_dir, filtered_images, #raw_images, selected_idx, page_offset, current_msg, search_mode, search_query, sort_mode, sort_desc, recursive, icon_mode, show_hidden, pending_delete)
+                    render_file_list(target_dir, filtered_images, #raw_images, selected_idx, page_offset, current_msg, search_mode, search_query, sort_mode, sort_desc, recursive, icon_mode, show_hidden, pending_delete, preview_pane)
                     current_msg = nil
                     needs_full_redraw = false
                 end
@@ -6524,6 +6809,10 @@ local function main()
                         selected_idx = 1
                         page_offset = 1
                         needs_full_redraw = true
+                    elseif k == "p" or k == "P" then
+                        preview_pane = not preview_pane
+                        current_msg = preview_pane and "Preview Pane: ON (Split View)" or "Preview Pane: OFF (Full List)"
+                        needs_full_redraw = true
                     elseif k == "." then
                         -- Toggle hidden (dot) files and folders
                         show_hidden = not show_hidden
@@ -6605,7 +6894,9 @@ local function main()
                     needs_full_redraw = true
                 else
                     update_page_window()
-                    if selected_idx ~= old_sel and page_offset == old_page then
+                    if preview_pane then
+                        needs_full_redraw = true
+                    elseif selected_idx ~= old_sel and page_offset == old_page then
                         render_selection_differential(filtered_images, old_sel, selected_idx, page_offset, icon_mode)
                         needs_full_redraw = false
                     elseif page_offset ~= old_page then

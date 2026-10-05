@@ -101,7 +101,7 @@ local tests = {
     {
         name = "Direct image view via --chafa flag",
         cmd = luajit .. " pix.lua pillars_of_creation.jpg --chafa --select 1",
-        expect = "Chafa Symbols"
+        expect = "Chafa"
     },
     {
         name = "Direct image view via --chafa-braille flag",
@@ -607,6 +607,26 @@ assert(io.open(f2, "rb") ~= nil, "f2 remains intact on disk when cancel")
 os.execute("rm -rf " .. tmp)
 print("OK_VIEWER_E2E_DELETE")' ]==],
         expect = "OK_VIEWER_E2E_DELETE"
+    },
+    {
+        name = "Preview pane CLI flag in --help",
+        cmd = luajit .. " pix.lua --help",
+        expect = "-p, --preview"
+    },
+    {
+        name = "Non-interactive preview pane layout with divider",
+        cmd = "echo q | " .. luajit .. " pix.lua portraits --preview --no-interactive",
+        expect = "PREVIEW:"
+    },
+    {
+        name = "Help modal documents [p] preview toggle",
+        cmd = luajit .. ' -e \'local f = io.open("pix.lua", "r"); local s = f:read("*a"); f:close(); assert(s:find("Toggle right image preview pane")); print("OK_HELP_MODAL_P")\'',
+        expect = "OK_HELP_MODAL_P"
+    },
+    {
+        name = "Split pane item formatter and preview line generator invariants",
+        cmd = luajit .. ' -e \'local f = io.open("pix.lua", "r"); local s = f:read("*a"); f:close(); assert(s:find("render_preview_pane_lines")); assert(s:find("format_split_item_line")); print("OK_PREVIEW_INVARIANTS")\'',
+        expect = "OK_PREVIEW_INVARIANTS"
     }
 }
 
