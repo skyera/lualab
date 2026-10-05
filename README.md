@@ -82,6 +82,7 @@ make
   ./LuaJIT/src/luajit ffi_elf_inspector.lua <bin> # Interactive ELF binary analyzer, symbol inspector & disassembler
   ./LuaJIT/src/luajit codefind.lua index .        # High-performance local code & document search engine (SQLite FTS5)
   ./LuaJIT/src/luajit luatop.lua                  # Professional terminal system & process monitor (CPU, GPU, Net, Tree)
+  ./LuaJIT/src/luajit enigma.lua                  # WWII Enigma cipher machine simulator & glowing lampboard TUI
   ```
 
 - **Run Unit Tests:**
