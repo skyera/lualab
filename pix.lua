@@ -2839,7 +2839,14 @@ local function load_image_uncached(filepath)
             local th = (v_info and v_info.height > 0) and v_info.height or 480
             local r = create_video_reader(filepath, tw, th)
             if r then
+                if v_info and v_info.duration and v_info.duration > 2.0 and r.seek then
+                    r:seek(1.0)
+                end
                 local raw, _ = r:read_frame()
+                if not raw and v_info and v_info.duration and v_info.duration > 2.0 and r.seek then
+                    r:seek(0.0)
+                    raw, _ = r:read_frame()
+                end
                 r:close()
                 if raw then
                     local pixels = ffi.new("PixelRGB[?]", tw * th)
@@ -2855,7 +2862,7 @@ local function load_image_uncached(filepath)
         end
 
         local devnull = is_windows and "2>nul" or "2>/dev/null"
-        local cmd = string.format("ffmpeg -nostdin -loglevel quiet -i %q -vframes 1 -f image2pipe -vcodec ppm - %s", filepath, devnull)
+        local cmd = string.format("ffmpeg -nostdin -loglevel quiet -ss 00:00:01 -i %q -vframes 1 -f image2pipe -vcodec ppm - %s || ffmpeg -nostdin -loglevel quiet -i %q -vframes 1 -f image2pipe -vcodec ppm - %s", filepath, devnull, filepath, devnull)
         local pipe = io.popen(cmd, POPEN_READ_BIN)
         if pipe then
             local img = parse_ppm_stream(pipe)
@@ -5718,6 +5725,7 @@ render_preview_pane_lines = function(item, pane_w, pane_h)
             end
         end
     else
+        local is_vid = is_video_file(item.filepath or item.extension)
         local img, err = load_image(item.filepath)
         if img and img.width and img.height and img.pixels and img.width > 0 and img.height > 0 then
             local meta_rows = 2
@@ -5791,18 +5799,46 @@ render_preview_pane_lines = function(item, pane_w, pane_h)
                 table.insert(lines, string.rep(" ", pane_w))
             end
 
-            local meta1 = string.format("%dx%d • %s • %s", img.width, img.height, (item.extension or ""):upper(), item.size_str or "-")
-            table.insert(lines, center_preview_text(meta1, pane_w, "\27[1;37m"))
-            table.insert(lines, center_preview_text("[Enter] Fullscreen View", pane_w, "\27[90m"))
+            if is_vid then
+                local v_info = get_video_info(item.filepath)
+                local dur = (v_info and v_info.duration_str and v_info.duration_str ~= "00:00") and (v_info.duration_str .. " • ") or ""
+                local fps_str = (v_info and v_info.fps and v_info.fps > 0) and string.format(" • %dfps", math.floor(v_info.fps + 0.5)) or ""
+                local meta1 = string.format("🎬 %s%dx%d%s • %s", dur, img.width, img.height, fps_str, item.size_str or "-")
+                table.insert(lines, center_preview_text(meta1, pane_w, "\27[1;37m"))
+                table.insert(lines, center_preview_text("[Enter / Space] Play Video  [w] Window", pane_w, "\27[1;92m"))
+            else
+                local meta1 = string.format("%dx%d • %s • %s", img.width, img.height, (item.extension or ""):upper(), item.size_str or "-")
+                table.insert(lines, center_preview_text(meta1, pane_w, "\27[1;37m"))
+                table.insert(lines, center_preview_text("[Enter] Fullscreen View", pane_w, "\27[90m"))
+            end
         else
-            local mid = math.max(2, math.floor(pane_h / 2))
-            for r = 1, pane_h do
-                if r == mid - 1 then
-                    table.insert(lines, center_preview_text("⚠️ Preview Unavailable", pane_w, "\27[1;33m"))
-                elseif r == mid then
-                    table.insert(lines, center_preview_text(err and tostring(err):sub(1, pane_w - 4) or "Unsupported format", pane_w, "\27[90m"))
-                else
-                    table.insert(lines, string.rep(" ", pane_w))
+            if is_vid then
+                local v_info = get_video_info(item.filepath)
+                local mid = math.max(2, math.floor(pane_h / 2))
+                for r = 1, pane_h do
+                    if r == mid - 2 then
+                        table.insert(lines, center_preview_text("🎬 [Video File]", pane_w, "\27[1;36m"))
+                    elseif r == mid - 1 then
+                        table.insert(lines, center_preview_text(to_display_text(item.filename), pane_w, "\27[1;37m"))
+                    elseif r == mid then
+                        local dur = (v_info and v_info.duration_str and v_info.duration_str ~= "00:00") and ("Duration: " .. v_info.duration_str .. "  •  ") or ""
+                        table.insert(lines, center_preview_text(string.format("%sSize: %s", dur, item.size_str or "-"), pane_w, "\27[90m"))
+                    elseif r == mid + 2 then
+                        table.insert(lines, center_preview_text("[Enter / Space] Play Video in pix", pane_w, "\27[1;92m"))
+                    else
+                        table.insert(lines, string.rep(" ", pane_w))
+                    end
+                end
+            else
+                local mid = math.max(2, math.floor(pane_h / 2))
+                for r = 1, pane_h do
+                    if r == mid - 1 then
+                        table.insert(lines, center_preview_text("⚠️ Preview Unavailable", pane_w, "\27[1;33m"))
+                    elseif r == mid then
+                        table.insert(lines, center_preview_text(err and tostring(err):sub(1, pane_w - 4) or "Unsupported format", pane_w, "\27[90m"))
+                    else
+                        table.insert(lines, string.rep(" ", pane_w))
+                    end
                 end
             end
         end
@@ -5945,10 +5981,12 @@ render_file_list = function(dir_path, images, total_unfiltered, selected_idx, pa
         local right_w = math.max(20, term_w - left_w - 3)
 
         local sel_item = images[selected_idx]
-        local prev_title = "PREVIEW"
+        local is_vid = sel_item and is_video_file(sel_item.filepath or sel_item.extension)
+        local prev_title = is_vid and "VIDEO" or "PREVIEW"
         if sel_item then
-            local fn = utf8_truncate(to_display_text(sel_item.filename), math.max(10, right_w - 14))
-            prev_title = "PREVIEW: " .. fn
+            local max_fn = is_vid and (right_w - 18) or (right_w - 14)
+            local fn = utf8_truncate(to_display_text(sel_item.filename), math.max(10, max_fn))
+            prev_title = (is_vid and "🎬 VIDEO: " or "PREVIEW: ") .. fn
         end
 
         local left_inner = left_w - 2
@@ -5997,7 +6035,9 @@ render_file_list = function(dir_path, images, total_unfiltered, selected_idx, pa
         end
         local pad_foot_l = math.max(0, left_w - display_width(left_foot))
         left_foot = left_foot .. string.rep(" ", pad_foot_l)
-        local right_foot = " \27[90m[p] Close Preview  [Enter] Fullscreen\27[0m"
+        local right_foot = is_vid
+            and " \27[90m[p] Close Preview  \27[1;92m[Enter]\27[90m Play Video\27[0m"
+            or  " \27[90m[p] Close Preview  [Enter] Fullscreen\27[0m"
         table.insert(out, left_foot .. "\27[90m│\27[0m" .. right_foot .. "\n")
     else
         -- Standard single full-width pane

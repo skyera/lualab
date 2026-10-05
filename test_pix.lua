@@ -627,6 +627,16 @@ print("OK_VIEWER_E2E_DELETE")' ]==],
         name = "Split pane item formatter and preview line generator invariants",
         cmd = luajit .. ' -e \'local f = io.open("pix.lua", "r"); local s = f:read("*a"); f:close(); assert(s:find("render_preview_pane_lines")); assert(s:find("format_split_item_line")); print("OK_PREVIEW_INVARIANTS")\'',
         expect = "OK_PREVIEW_INVARIANTS"
+    },
+    {
+        name = "Video file preview pane metadata and play action hints",
+        cmd = luajit .. ' -e \'local f = io.open("pix.lua", "r"); local s = f:read("*a"); f:close(); assert(s:find("Play Video")); assert(s:find("VIDEO:")); print("OK_VIDEO_PREVIEW")\'',
+        expect = "OK_VIDEO_PREVIEW"
+    },
+    {
+        name = "Video preview thumbnail seeking and duration detection",
+        cmd = luajit .. ' -e \'local f = io.open("pix.lua", "r"); local s = f:read("*a"); f:close(); assert(s:find("ss 00:00:01")); assert(s:find("r:seek%(1%.0%)")); print("OK_VIDEO_SEEK")\'',
+        expect = "OK_VIDEO_SEEK"
     }
 }
 
