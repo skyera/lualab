@@ -278,34 +278,61 @@ ffi.cdef(posix_termios_cdef[[
     end
 
     local pfd = ffi.new("struct pollfd", { fd = STDIN_FILENO, events = POLLIN, revents = 0 })
-    local key_buf = ffi.new("char[16]")
+    local key_buf = ffi.new("char[64]")
+    local key_queue = {}
 
     read_key = function(timeout_ms)
+        if #key_queue > 0 then
+            return table.remove(key_queue, 1)
+        end
         timeout_ms = timeout_ms or 0
         local ret = ffi.C.poll(pfd, 1, timeout_ms)
-        if ret > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
-            local n = ffi.C.read(STDIN_FILENO, key_buf, 16)
-            if n > 0 then
-                local c0 = key_buf[0]
-                if c0 == 27 then
-                    if n >= 3 and key_buf[1] == 91 then
-                        local c2 = key_buf[2]
-                        if c2 == 65 then return "UP"
-                        elseif c2 == 66 then return "DOWN"
-                        elseif c2 == 67 then return "RIGHT"
-                        elseif c2 == 68 then return "LEFT"
+        if ret > 0 then
+            if bit.band(pfd.revents, POLLIN) ~= 0 then
+                local n = ffi.C.read(STDIN_FILENO, key_buf, 64)
+                if n > 0 then
+                    local i = 0
+                    while i < n do
+                        local c0 = key_buf[i]
+                        if c0 == 27 then
+                            if i + 2 < n and key_buf[i+1] == 91 then
+                                local c2 = key_buf[i+2]
+                                if c2 == 65 then table.insert(key_queue, "UP")
+                                elseif c2 == 66 then table.insert(key_queue, "DOWN")
+                                elseif c2 == 67 then table.insert(key_queue, "RIGHT")
+                                elseif c2 == 68 then table.insert(key_queue, "LEFT")
+                                end
+                                i = i + 3
+                            else
+                                table.insert(key_queue, "ESC")
+                                i = i + 1
+                            end
+                        elseif c0 == 32 then
+                            table.insert(key_queue, "SPACE")
+                            i = i + 1
+                        elseif c0 == 10 or c0 == 13 then
+                            table.insert(key_queue, "ENTER")
+                            i = i + 1
+                        elseif c0 == 3 then
+                            table.insert(key_queue, "CTRL_C")
+                            i = i + 1
+                        elseif c0 >= 32 and c0 <= 126 then
+                            table.insert(key_queue, string.char(c0):lower())
+                            i = i + 1
+                        else
+                            i = i + 1
                         end
                     end
-                    return "ESC"
-                elseif c0 == 32 then
-                    return "SPACE"
-                elseif c0 == 10 or c0 == 13 then
-                    return "ENTER"
-                elseif c0 == 3 then
-                    return "CTRL_C"
-                elseif c0 >= 32 and c0 <= 126 then
-                    return string.char(c0):lower()
+                    if #key_queue > 0 then
+                        return table.remove(key_queue, 1)
+                    end
+                elseif n == 0 then
+                    -- EOF on stdin (pipe or file closed)
+                    return "q"
                 end
+            elseif bit.band(pfd.revents, 16) ~= 0 or bit.band(pfd.revents, 8) ~= 0 then
+                -- POLLHUP (16) or POLLERR (8)
+                return "q"
             end
         end
         return nil
@@ -463,27 +490,252 @@ for k, v in pairs(PIECES) do
 end
 
 -- =========================================================================
--- 4. High Score File Management
+-- 4. SQLite Score Persistence & Database Layer
 -- =========================================================================
+local DB_FILE = ".tetris.db"
 local SCORE_FILE = ".tetris_score"
 local LEGACY_SCORE_FILE = ".russian_block_score"
 
-local function load_high_score()
-    local f = io.open(SCORE_FILE, "r") or io.open(LEGACY_SCORE_FILE, "r")
-    if f then
-        local val = tonumber(f:read("*a")) or 0
-        f:close()
-        return val
+ffi.cdef[[
+    typedef struct sqlite3 sqlite3;
+    typedef struct sqlite3_stmt sqlite3_stmt;
+
+    int sqlite3_open(const char *filename, sqlite3 **ppDb);
+    int sqlite3_close(sqlite3 *db);
+    const char *sqlite3_errmsg(sqlite3 *db);
+    int sqlite3_exec(sqlite3 *db, const char *sql, int (*callback)(void*, int, char**, char**), void *arg, char **errmsg);
+    int sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nByte, sqlite3_stmt **ppStmt, const char **pzTail);
+    int sqlite3_step(sqlite3_stmt *pStmt);
+    int sqlite3_finalize(sqlite3_stmt *pStmt);
+    int sqlite3_reset(sqlite3_stmt *pStmt);
+    int sqlite3_bind_int(sqlite3_stmt *pStmt, int idx, int val);
+    int sqlite3_bind_double(sqlite3_stmt *pStmt, int idx, double val);
+    int sqlite3_bind_text(sqlite3_stmt *pStmt, int idx, const char *val, int len, void(*destructor)(void*));
+    int sqlite3_column_count(sqlite3_stmt *pStmt);
+    int sqlite3_column_int(sqlite3_stmt *pStmt, int iCol);
+    double sqlite3_column_double(sqlite3_stmt *pStmt, int iCol);
+    const unsigned char *sqlite3_column_text(sqlite3_stmt *pStmt, int iCol);
+]]
+
+local sqlite_lib = nil
+pcall(function()
+    local candidates = { "sqlite3", "libsqlite3.so.0", "libsqlite3.so", "sqlite3.dll" }
+    for _, name in ipairs(candidates) do
+        local ok, lib = pcall(ffi.load, name)
+        if ok and lib then
+            sqlite_lib = lib
+            break
+        end
     end
-    return 0
+end)
+
+local SQLITE_OK   = 0
+local SQLITE_ROW  = 100
+local SQLITE_DONE = 101
+
+local function get_sqlite_db()
+    if not sqlite_lib then return nil end
+    local db_ptr = ffi.new("sqlite3*[1]")
+    local rc = sqlite_lib.sqlite3_open(DB_FILE, db_ptr)
+    if rc ~= SQLITE_OK then return nil end
+    local db = db_ptr[0]
+    local schema_sql = [[
+        CREATE TABLE IF NOT EXISTS tetris_scores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            played_at TEXT NOT NULL,
+            score INTEGER NOT NULL,
+            lines INTEGER NOT NULL,
+            level INTEGER NOT NULL,
+            pieces INTEGER NOT NULL,
+            max_combo INTEGER NOT NULL,
+            duration_s INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_tetris_scores_score ON tetris_scores(score DESC);
+    ]]
+    sqlite_lib.sqlite3_exec(db, schema_sql, nil, nil, nil)
+    return db
 end
 
-local function save_high_score(val)
+local function close_sqlite_db(db)
+    if db and sqlite_lib then
+        sqlite_lib.sqlite3_close(db)
+    end
+end
+
+local function load_high_score()
+    local max_score = 0
+    -- 1. Try reading from SQLite
+    if sqlite_lib then
+        local db = get_sqlite_db()
+        if db then
+            local stmt_ptr = ffi.new("sqlite3_stmt*[1]")
+            local rc = sqlite_lib.sqlite3_prepare_v2(db, "SELECT COALESCE(MAX(score), 0) FROM tetris_scores;", -1, stmt_ptr, nil)
+            if rc == SQLITE_OK then
+                local stmt = stmt_ptr[0]
+                if sqlite_lib.sqlite3_step(stmt) == SQLITE_ROW then
+                    max_score = sqlite_lib.sqlite3_column_int(stmt, 0)
+                end
+                sqlite_lib.sqlite3_finalize(stmt)
+            end
+            close_sqlite_db(db)
+        end
+    end
+
+    -- 2. Fall back to text files if SQLite yielded 0 or failed
+    if max_score <= 0 then
+        local f = io.open(SCORE_FILE, "r") or io.open(LEGACY_SCORE_FILE, "r")
+        if f then
+            max_score = tonumber(f:read("*a")) or 0
+            f:close()
+        end
+    end
+    return max_score
+end
+
+local function save_game_record(score, lines, level, pieces, combo, duration_s)
+    score = score or 0
+    lines = lines or 0
+    level = level or 1
+    pieces = pieces or 0
+    combo = combo or 0
+    duration_s = duration_s or 0
+
+    -- Always update text file for backward compatibility
     local f = io.open(SCORE_FILE, "w")
     if f then
-        f:write(tostring(val))
+        f:write(tostring(score))
         f:close()
     end
+
+    -- Insert into SQLite database
+    if not sqlite_lib then return false end
+    local db = get_sqlite_db()
+    if not db then return false end
+
+    local insert_sql = [[
+        INSERT INTO tetris_scores (played_at, score, lines, level, pieces, max_combo, duration_s)
+        VALUES (datetime('now', 'localtime'), ?, ?, ?, ?, ?, ?);
+    ]]
+    local stmt_ptr = ffi.new("sqlite3_stmt*[1]")
+    local rc = sqlite_lib.sqlite3_prepare_v2(db, insert_sql, -1, stmt_ptr, nil)
+    if rc == SQLITE_OK then
+        local stmt = stmt_ptr[0]
+        sqlite_lib.sqlite3_bind_int(stmt, 1, score)
+        sqlite_lib.sqlite3_bind_int(stmt, 2, lines)
+        sqlite_lib.sqlite3_bind_int(stmt, 3, level)
+        sqlite_lib.sqlite3_bind_int(stmt, 4, pieces)
+        sqlite_lib.sqlite3_bind_int(stmt, 5, combo)
+        sqlite_lib.sqlite3_bind_int(stmt, 6, duration_s)
+        sqlite_lib.sqlite3_step(stmt)
+        sqlite_lib.sqlite3_finalize(stmt)
+    end
+    close_sqlite_db(db)
+    return true
+end
+
+local function get_top_scores(limit)
+    limit = limit or 10
+    local records = {}
+    if not sqlite_lib then return records end
+    local db = get_sqlite_db()
+    if not db then return records end
+
+    local query_sql = [[
+        SELECT played_at, score, lines, level, pieces, max_combo, duration_s
+        FROM tetris_scores
+        ORDER BY score DESC, lines DESC
+        LIMIT ?;
+    ]]
+    local stmt_ptr = ffi.new("sqlite3_stmt*[1]")
+    local rc = sqlite_lib.sqlite3_prepare_v2(db, query_sql, -1, stmt_ptr, nil)
+    if rc == SQLITE_OK then
+        local stmt = stmt_ptr[0]
+        sqlite_lib.sqlite3_bind_int(stmt, 1, limit)
+        while sqlite_lib.sqlite3_step(stmt) == SQLITE_ROW do
+            local date_str = ffi.string(sqlite_lib.sqlite3_column_text(stmt, 0))
+            local score = sqlite_lib.sqlite3_column_int(stmt, 1)
+            local lines = sqlite_lib.sqlite3_column_int(stmt, 2)
+            local level = sqlite_lib.sqlite3_column_int(stmt, 3)
+            local pieces = sqlite_lib.sqlite3_column_int(stmt, 4)
+            local combo = sqlite_lib.sqlite3_column_int(stmt, 5)
+            local duration_s = sqlite_lib.sqlite3_column_int(stmt, 6)
+            table.insert(records, {
+                played_at = date_str,
+                score = score,
+                lines = lines,
+                level = level,
+                pieces = pieces,
+                max_combo = combo,
+                duration_s = duration_s
+            })
+        end
+        sqlite_lib.sqlite3_finalize(stmt)
+    end
+    close_sqlite_db(db)
+    return records
+end
+
+local function get_db_summary()
+    local summary = { count = 0, total_lines = 0, max_score = 0, avg_score = 0 }
+    if not sqlite_lib then return summary end
+    local db = get_sqlite_db()
+    if not db then return summary end
+
+    local query_sql = "SELECT COUNT(*), COALESCE(SUM(lines), 0), COALESCE(MAX(score), 0), COALESCE(AVG(score), 0) FROM tetris_scores;"
+    local stmt_ptr = ffi.new("sqlite3_stmt*[1]")
+    local rc = sqlite_lib.sqlite3_prepare_v2(db, query_sql, -1, stmt_ptr, nil)
+    if rc == SQLITE_OK then
+        local stmt = stmt_ptr[0]
+        if sqlite_lib.sqlite3_step(stmt) == SQLITE_ROW then
+            summary.count = sqlite_lib.sqlite3_column_int(stmt, 0)
+            summary.total_lines = sqlite_lib.sqlite3_column_int(stmt, 1)
+            summary.max_score = sqlite_lib.sqlite3_column_int(stmt, 2)
+            summary.avg_score = math.floor(sqlite_lib.sqlite3_column_double(stmt, 3))
+        end
+        sqlite_lib.sqlite3_finalize(stmt)
+    end
+    close_sqlite_db(db)
+    return summary
+end
+
+local function print_cli_leaderboard(options)
+    options = options or {}
+    local records = get_top_scores(10)
+    local summary = get_db_summary()
+    local is_ascii = options.ascii_mode
+
+    print("================================================================================")
+    if is_ascii then
+        print("                 TETRIS (LUAJIT FFI) - ALL-TIME HALL OF FAME                    ")
+    else
+        print("             \27[1;33m🏆  TETRIS (LUAJIT FFI) - ALL-TIME HALL OF FAME  🏆\27[0m")
+    end
+    print("================================================================================")
+    print(string.format(" Database: \27[36m%s\27[0m  |  Games: \27[1;32m%d\27[0m  |  All-Time Lines: \27[1;36m%d\27[0m  |  Avg Score: \27[1;33m%d\27[0m",
+        DB_FILE, summary.count, summary.total_lines, summary.avg_score))
+    print("--------------------------------------------------------------------------------")
+    print(" RANK   SCORE      LINES   LVL   PIECES   COMBO   DURATION   DATE & TIME        ")
+    print("--------------------------------------------------------------------------------")
+
+    if #records == 0 then
+        print("   (No games recorded yet in SQLite database. Play a game to record scores!)    ")
+    else
+        for i, r in ipairs(records) do
+            local medal
+            if is_ascii then
+                medal = "  "
+            else
+                medal = (i == 1) and "🥇" or ((i == 2) and "🥈" or ((i == 3) and "🥉" or "  "))
+            end
+            local dur_m = math.floor(r.duration_s / 60)
+            local dur_s = r.duration_s % 60
+            local dur_str = string.format("%dm %02ds", dur_m, dur_s)
+            local rank_color = (i == 1) and "\27[1;33m" or ((i == 2) and "\27[1;37m" or ((i == 3) and "\27[33m" or "\27[0m"))
+            print(string.format(" %s %s#%-2d\27[0m  \27[1;32m%8d\27[0m     %4d    %2d    %5d    x%-2d    %7s    %s",
+                medal, rank_color, i, r.score, r.lines, r.level, r.pieces, r.max_combo, dur_str, r.played_at))
+        end
+    end
+    print("================================================================================\n")
 end
 
 -- =========================================================================
@@ -523,6 +775,10 @@ function TetrisGame.new(options)
     self.banner_text = nil
     self.banner_color = nil
     self.banner_until = 0
+    self.start_time = get_time_ms()
+    self.max_combo = 0
+    self.recorded = false
+    self.showing_leaderboard = false
 
     self:reset()
     return self
@@ -551,13 +807,31 @@ function TetrisGame:clear_board()
     ffi.fill(self.board, ffi.sizeof("BoardCell") * (TOTAL_ROWS * BOARD_COLS), 0)
 end
 
+function TetrisGame:record_session()
+    if self.recorded then return end
+    self.recorded = true
+    if self.stats.pieces_dropped > 0 or self.stats.score > 0 then
+        local duration_s = math.floor((get_time_ms() - (self.start_time or get_time_ms())) / 1000)
+        save_game_record(self.stats.score, self.stats.lines, self.stats.level,
+            self.stats.pieces_dropped, self.max_combo or self.stats.combos, duration_s)
+        self.stats.high_score = math.max(self.stats.high_score, load_high_score())
+    end
+end
+
 function TetrisGame:reset()
+    if not self.recorded and (self.stats.pieces_dropped > 0 or self.stats.score > 0) then
+        self:record_session()
+    end
     self:clear_board()
     self.stats.score = 0
     self.stats.lines = 0
     self.stats.level = 1
     self.stats.pieces_dropped = 0
     self.stats.combos = 0
+    self.max_combo = 0
+    self.start_time = get_time_ms()
+    self.recorded = false
+    self.showing_leaderboard = false
     self.bag = {}
     self.held_piece = nil
     self.can_hold = true
@@ -584,7 +858,7 @@ function TetrisGame:update_gravity()
 end
 
 function TetrisGame:get_next_event_timeout(now)
-    if self.game_over or self.paused or not self.active_piece then
+    if self.game_over or self.paused or self.showing_leaderboard or not self.active_piece then
         return 50
     end
     local time_to_gravity = math.max(1, self.gravity_ms - (now - self.last_fall_time))
@@ -700,6 +974,7 @@ function TetrisGame:spawn_piece(piece_type)
     if not self:can_place(self.active_piece.matrix, self.active_piece.x, self.active_piece.y) then
         self.game_over = true
         self.dirty = true
+        self:record_session()
         return false
     end
 
@@ -860,6 +1135,7 @@ function TetrisGame:lock_active_piece()
                 if self.stats.score > self.stats.high_score then
                     save_high_score(self.stats.score)
                 end
+                self:record_session()
                 return
             end
         end
@@ -940,6 +1216,9 @@ function TetrisGame:collapse_lines(full_lines)
 
     -- Combo bonus
     self.stats.combos = self.stats.combos + 1
+    if self.stats.combos > (self.max_combo or 0) then
+        self.max_combo = self.stats.combos
+    end
     if self.stats.combos > 1 then
         base_score = base_score + (50 * (self.stats.combos - 1) * lvl)
     end
@@ -973,7 +1252,7 @@ function TetrisGame:collapse_lines(full_lines)
 end
 
 function TetrisGame:tick(current_time)
-    if self.game_over or self.paused or not self.active_piece then return end
+    if self.game_over or self.paused or self.showing_leaderboard or not self.active_piece then return end
 
     local ap = self.active_piece
     local on_ground = not self:can_place(ap.matrix, ap.x, ap.y + 1)
@@ -1250,7 +1529,105 @@ local function fmt_num_5(val)
     end
 end
 
+local function pad_center(s, target_w)
+    local cur_w = utf8_visible_width(s)
+    if cur_w >= target_w then return s end
+    local left = math.floor((target_w - cur_w) / 2)
+    local right = target_w - cur_w - left
+    return string.rep(" ", left) .. s .. string.rep(" ", right)
+end
+
+function TetrisGame:render_leaderboard_frame()
+    local U = self.ascii_mode and UI_CHARS.ascii or UI_CHARS.unicode
+    local out = { "\27[H" } -- Move cursor home
+
+    -- Header Banner (width: 59 columns = 1 space + 1 corner + 56 h_lines + 1 corner)
+    table.insert(out, " \27[1;33m" .. U.tl .. string.rep(U.h_line, 56) .. U.tr .. "\27[0m\n")
+    local title_raw = self.ascii_mode
+        and "TETRIS HALL OF FAME - TOP 10 RANKINGS"
+        or  "🏆  TETRIS HALL OF FAME - TOP 10 RANKINGS  🏆"
+    local title_str = pad_center(title_raw, 56)
+    table.insert(out, string.format(" \27[1;33m%s\27[1;33m%s\27[1;33m%s\27[0m\n", U.v_line, title_str, U.v_line))
+    table.insert(out, " \27[1;33m" .. U.bl .. string.rep(U.h_line, 56) .. U.br .. "\27[0m\n")
+
+    local records = get_top_scores(10)
+    local summary = get_db_summary()
+
+    -- Inner box top border
+    table.insert(out, " \27[1;33m" .. U.b_tl .. string.rep(U.b_box_h, 56) .. U.b_tr .. "\27[0m\n")
+
+    -- Aggregate summary
+    local summary_str = string.format("  Games: %d   Lines: %d   Avg: %d   DB: %s",
+        summary.count, summary.total_lines, summary.avg_score, DB_FILE)
+    table.insert(out, string.format(" \27[1;33m%s\27[0m%s\27[1;33m%s\27[0m\n",
+        U.b_box_v, pad_right(summary_str, 56), U.b_box_v))
+
+    -- Divider
+    table.insert(out, " \27[1;33m" .. U.b_t_left .. string.rep(U.b_box_h, 56) .. U.b_t_r .. "\27[0m\n")
+
+    -- Column Headers
+    local col_hdr = "  RANK     SCORE   LINES  LVL  COMBO   TIME      DATE   "
+    table.insert(out, string.format(" \27[1;33m%s\27[0m\27[1;37m%s\27[0m\27[1;33m%s\27[0m\n",
+        U.b_box_v, pad_right(col_hdr, 56), U.b_box_v))
+
+    -- Divider
+    table.insert(out, " \27[1;33m" .. U.b_t_left .. string.rep(U.b_box_h, 56) .. U.b_t_r .. "\27[0m\n")
+
+    -- 10 Rows of Scores
+    for i = 1, 10 do
+        local r = records[i]
+        local row_str
+        if r then
+            local medal
+            if self.ascii_mode then
+                medal = string.format(" #%-2d", i)
+            else
+                medal = (i == 1) and "🥇#1" or ((i == 2) and "🥈#2" or ((i == 3) and "🥉#3" or string.format(" #%-2d", i)))
+            end
+            local dur_m = math.floor(r.duration_s / 60)
+            local dur_s = r.duration_s % 60
+            local dur_str = string.format("%dm %02ds", dur_m, dur_s)
+            local date_part = r.played_at:sub(1, 10)
+
+            local rank_color = (i == 1) and "\27[1;33m" or ((i == 2) and "\27[1;37m" or ((i == 3) and "\27[33m" or "\27[0m"))
+            local score_color = (i <= 3) and "\27[1;32m" or "\27[32m"
+
+            local colored_line = string.format("  %s%s\27[0m  %s%8d\27[0m    \27[36m%3d\27[0m   %2d   \27[35mx%-2d\27[0m   %6s  \27[90m%10s\27[0m",
+                rank_color, medal, score_color, r.score, r.lines, r.level, r.max_combo, dur_str, date_part)
+
+            row_str = pad_right(colored_line, 56)
+        else
+            local placeholder
+            if i == 1 and #records == 0 then
+                placeholder = "        (No games recorded yet in SQLite database)      "
+            else
+                placeholder = string.format("  #%-2d         --      --    --    --       --        --", i)
+            end
+            row_str = pad_right(placeholder, 56)
+        end
+
+        table.insert(out, string.format(" \27[1;33m%s\27[0m%s\27[1;33m%s\27[0m\n",
+            U.b_box_v, row_str, U.b_box_v))
+    end
+
+    -- Divider
+    table.insert(out, " \27[1;33m" .. U.b_t_left .. string.rep(U.b_box_h, 56) .. U.b_t_r .. "\27[0m\n")
+
+    -- Navigation prompt
+    local nav_text = "   [H]/[ESC]/[ENTER] : Return to Game   |   [Q] : Quit  "
+    table.insert(out, string.format(" \27[1;33m%s\27[0m\27[1;32m%s\27[0m\27[1;33m%s\27[0m\n",
+        U.b_box_v, pad_right(nav_text, 56), U.b_box_v))
+
+    -- Bottom border
+    table.insert(out, " \27[1;33m" .. U.b_bl .. string.rep(U.b_box_h, 56) .. U.b_br .. "\27[0m\n")
+
+    return table.concat(out)
+end
+
 function TetrisGame:render_frame(now)
+    if self.showing_leaderboard then
+        return self:render_leaderboard_frame()
+    end
     now = now or get_time_ms()
     local U = self.ascii_mode and UI_CHARS.ascii or UI_CHARS.unicode
     local out = { "\27[H" } -- Move cursor home
@@ -1329,15 +1706,14 @@ function TetrisGame:render_frame(now)
     table.insert(left_lines, string.format("\27[1;35m%s\27[0m Z   : RotCC \27[1;35m%s\27[0m", U.b_box_v, U.b_box_v))
     table.insert(left_lines, string.format("\27[1;35m%s\27[0m %s/S : Soft  \27[1;35m%s\27[0m", U.b_box_v, k_down, U.b_box_v))
     table.insert(left_lines, string.format("\27[1;35m%s\27[0m Space: Drop \27[1;35m%s\27[0m", U.b_box_v, U.b_box_v))
-    table.insert(left_lines, string.format("\27[1;35m%s\27[0m C / H: Hold \27[1;35m%s\27[0m", U.b_box_v, U.b_box_v))
+    table.insert(left_lines, string.format("\27[1;35m%s\27[0m C    : Hold \27[1;35m%s\27[0m", U.b_box_v, U.b_box_v))
+    table.insert(left_lines, string.format("\27[1;35m%s\27[0m H    : Top10\27[1;35m%s\27[0m", U.b_box_v, U.b_box_v))
     table.insert(left_lines, string.format("\27[1;35m%s\27[0m P/Esc: Pause\27[1;35m%s\27[0m", U.b_box_v, U.b_box_v))
     table.insert(left_lines, string.format("\27[1;35m%s\27[0m R    : Reset\27[1;35m%s\27[0m", U.b_box_v, U.b_box_v))
     table.insert(left_lines, string.format("\27[1;35m%s\27[0m Q    : Quit \27[1;35m%s\27[0m", U.b_box_v, U.b_box_v))
     table.insert(left_lines, string.format("\27[1;35m%s%s%s\27[0m", U.b_bl, string.rep(U.b_box_h, 13), U.b_br))
 
-    -- Left panel footer (rows 19..20): Pieces counter & FFI OS centered in 15 columns
-    local pieces_str = string.format("  PIECES: %-5d", math.min(self.stats.pieces_dropped, 99999))
-    table.insert(left_lines, pad_right(pieces_str, 15))
+    -- Left panel footer (row 20): FFI OS centered in 15 columns
     local os_tag = string.format("(FFI %s)", ffi.os)
     local os_tag_len = #os_tag
     local l_pad = math.max(0, math.floor((15 - os_tag_len) / 2))
@@ -1527,6 +1903,14 @@ local function run_interactive_game(options)
             local key = read_key(wait_ms)
             if key == "q" or key == "CTRL_C" then
                 break
+            elseif game.showing_leaderboard then
+                if key == "h" or key == "ESC" or key == "ENTER" or key == "SPACE" then
+                    game.showing_leaderboard = false
+                    game.dirty = true
+                end
+            elseif key == "h" then
+                game.showing_leaderboard = true
+                game.dirty = true
             elseif key == "p" or key == "ESC" then
                 game.paused = not game.paused
                 game.dirty = true
@@ -1546,7 +1930,7 @@ local function run_interactive_game(options)
                     game:soft_drop()
                 elseif key == "SPACE" then
                     game:hard_drop()
-                elseif key == "c" or key == "h" then
+                elseif key == "c" then
                     game:hold_piece()
                 end
             end
@@ -1567,6 +1951,7 @@ local function run_interactive_game(options)
         end
     end)
 
+    game:record_session()
     disable_raw_mode()
 
     if not ok then
@@ -1780,6 +2165,7 @@ Usage:
 
 Options:
     --help, -h          Show this help message and exit
+    --scores, -s        Show all-time high scores and leaderboard from SQLite
     --test              Run internal automated unit tests and exit
     --snapshot          Render a single frame snapshot to stdout and exit
     --demo [frames]     Run automated AI bot autoplay demonstration (default: 150 frames)
@@ -1792,7 +2178,8 @@ Controls in Interactive Mode:
     Z                   Rotate Counter-Clockwise
     Down Arrow / S      Soft Drop (1 pt / row)
     Spacebar            Hard Drop (2 pts / row, instant lock)
-    C / H               Hold current piece
+    C                   Hold current piece
+    H                   Toggle Hall of Fame leaderboard modal
     P / Escape          Pause / Resume
     R                   Restart game
     Q / Ctrl+C          Quit game
@@ -1820,6 +2207,9 @@ if is_main then
     if arg1 == "--help" or arg1 == "-h" then
         print_help()
         os.exit(0)
+    elseif arg1 == "--scores" or arg1 == "-s" or arg1 == "--leaderboard" then
+        print_cli_leaderboard(options)
+        os.exit(0)
     elseif arg1 == "--test" then
         local success = run_self_tests()
         os.exit(success and 0 or 1)
@@ -1844,5 +2234,10 @@ return {
     BOARD_ROWS = BOARD_ROWS,
     TOTAL_ROWS = TOTAL_ROWS,
     utf8_visible_width = utf8_visible_width,
-    run_self_tests = run_self_tests
+    run_self_tests = run_self_tests,
+    save_game_record = save_game_record,
+    get_top_scores = get_top_scores,
+    get_db_summary = get_db_summary,
+    print_cli_leaderboard = print_cli_leaderboard,
+    DB_FILE = DB_FILE
 }

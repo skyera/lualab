@@ -38,6 +38,21 @@ local tests = {
         name = "AI Bot autoplay demonstration (--demo 15)",
         cmd = "luajit ffi_tetris.lua --demo 15",
         expect = "[AI Demo Complete]"
+    },
+    {
+        name = "CLI Leaderboard flag (ffi_tetris.lua --scores)",
+        cmd = "luajit ffi_tetris.lua --scores",
+        expect = "ALL-TIME HALL OF FAME"
+    },
+    {
+        name = "Launcher Leaderboard flag (tetris.lua --scores)",
+        cmd = "luajit tetris.lua --scores",
+        expect = "ALL-TIME HALL OF FAME"
+    },
+    {
+        name = "Launcher Leaderboard short flag (tetris.lua -s)",
+        cmd = "luajit tetris.lua -s",
+        expect = "ALL-TIME HALL OF FAME"
     }
 }
 
@@ -206,6 +221,45 @@ assert_test("get_next_event_timeout adjusts to fast rate when grounded", t_lock 
 
 local frame_str = g_uni:render_frame()
 assert_test("Rendered frame contains 3-piece upcoming QUEUE box", frame_str:find("QUEUE") ~= nil and frame_str:find("#2:") ~= nil and frame_str:find("#3:") ~= nil)
+
+-- 6. SQLite Database & Leaderboard Verification
+local g_board_uni = TetrisGame.new()
+g_board_uni.showing_leaderboard = true
+assert_test("Leaderboard frame layout width is strictly 59 columns (Unicode)", verify_frame_layout(g_board_uni))
+
+local g_board_ascii = TetrisGame.new({ ascii_mode = true })
+g_board_ascii.showing_leaderboard = true
+assert_test("Leaderboard frame layout width is strictly 59 columns (ASCII)", verify_frame_layout(g_board_ascii))
+
+-- Test SQLite session recording & retrieval
+local init_summary = rb.get_db_summary()
+local test_score = 42100
+local test_lines = 16
+local test_level = 2
+local test_pieces = 35
+local test_combo = 3
+local test_dur = 95
+local save_ok = rb.save_game_record(test_score, test_lines, test_level, test_pieces, test_combo, test_dur)
+assert_test("save_game_record successfully executed", save_ok == true)
+
+local after_summary = rb.get_db_summary()
+assert_test("get_db_summary increments game count and total lines",
+    after_summary.count == init_summary.count + 1 and after_summary.total_lines >= init_summary.total_lines + test_lines)
+
+local top_scores = rb.get_top_scores(10)
+assert_test("get_top_scores returns valid record in descending score order",
+    #top_scores >= 1 and top_scores[1].score >= test_score)
+
+-- Verify Leaderboard layout width with populated database records
+assert_test("Populated Leaderboard frame layout width is strictly 59 columns (Unicode)", verify_frame_layout(g_board_uni))
+assert_test("Populated Leaderboard frame layout width is strictly 59 columns (ASCII)", verify_frame_layout(g_board_ascii))
+
+-- 7. Non-interactive pipeline sanity check (simulate keystrokes: 'h', 'h', 'q')
+local pipe = io.popen("printf 'hhq' | luajit tetris.lua 2>&1")
+local pipe_out = pipe:read("*a")
+pipe:close()
+assert_test("Interactive pipeline toggles Hall of Fame and exits cleanly",
+    pipe_out:find("Thanks for playing Tetris", 1, true) ~= nil)
 
 print(string.format("\nTest Summary: %d / %d tests passed.", passed, total_cli))
 if passed == total_cli then

@@ -12,6 +12,7 @@ portraits/portrait_*_lady.*
 *.bmp
 .russian_block_score
 .tetris_score
+.tetris.db
 downloads/
 .codefind.db
 *.codefind.db
