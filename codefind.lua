@@ -2095,7 +2095,101 @@ end
 -- 6. Highlighting & Terminal Formatting
 --------------------------------------------------------------------------------
 
-local function extract_file_matches(filepath, query_tokens, max_matches_per_file)
+local function parse_query_items(query_input)
+    local items = {}
+    if not query_input then return items end
+
+    if type(query_input) == "table" then
+        for _, elem in ipairs(query_input) do
+            if type(elem) == "string" then
+                if #elem > 0 then
+                    local text_lower = elem:lower()
+                    local ci_parts = {}
+                    for ch in text_lower:gmatch(".") do
+                        local lo, up = ch:lower(), ch:upper()
+                        if lo ~= up then
+                            ci_parts[#ci_parts + 1] = "[" .. lo .. up .. "]"
+                        else
+                            ci_parts[#ci_parts + 1] = (lo:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1"))
+                        end
+                    end
+                    table.insert(items, { text = elem, text_lower = text_lower, ci_pattern = table.concat(ci_parts), is_phrase = false })
+                end
+            elseif type(elem) == "table" and elem.text then
+                table.insert(items, elem)
+            end
+        end
+        return items
+    end
+
+    local str = tostring(query_input or "")
+    if #str == 0 then return items end
+
+    -- Strip inline filters like @ext and files:...
+    local clean = str:gsub("@%w+", ""):gsub("files:%S+", "")
+
+    local pos = 1
+    local len = #clean
+
+    local function add_item(text, is_phrase)
+        if #text == 0 then return end
+        local text_lower = text:lower()
+        local ci_parts = {}
+        for ch in text_lower:gmatch(".") do
+            local lo, up = ch:lower(), ch:upper()
+            if lo ~= up then
+                ci_parts[#ci_parts + 1] = "[" .. lo .. up .. "]"
+            else
+                ci_parts[#ci_parts + 1] = (lo:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1"))
+            end
+        end
+        table.insert(items, {
+            text = text,
+            text_lower = text_lower,
+            ci_pattern = table.concat(ci_parts),
+            is_phrase = is_phrase
+        })
+    end
+
+    while pos <= len do
+        local q_start = clean:find('"', pos)
+        if not q_start then
+            local unquoted = clean:sub(pos)
+            for t in unquoted:gmatch("[%w_%-]+") do
+                if t ~= "AND" and t ~= "OR" and t ~= "NOT" then
+                    local clean_w = t:gsub("%*$", "")
+                    if #clean_w > 0 then add_item(clean_w, false) end
+                end
+            end
+            break
+        else
+            if q_start > pos then
+                local unquoted = clean:sub(pos, q_start - 1)
+                for t in unquoted:gmatch("[%w_%-]+") do
+                    if t ~= "AND" and t ~= "OR" and t ~= "NOT" then
+                        local clean_w = t:gsub("%*$", "")
+                        if #clean_w > 0 then add_item(clean_w, false) end
+                    end
+                end
+            end
+
+            local q_end = clean:find('"', q_start + 1)
+            if q_end then
+                local phrase = clean:sub(q_start + 1, q_end - 1)
+                add_item(phrase, true)
+                pos = q_end + 1
+            else
+                local phrase = clean:sub(q_start + 1)
+                add_item(phrase, true)
+                break
+            end
+        end
+    end
+
+    return items
+end
+
+local function extract_file_matches(filepath, query_or_tokens, max_matches_per_file)
     max_matches_per_file = max_matches_per_file or 3
     local f = io.open(filepath, "r")
     if not f then return nil end
@@ -2106,17 +2200,16 @@ local function extract_file_matches(filepath, query_tokens, max_matches_per_file
     end
     f:close()
 
+    local items = parse_query_items(query_or_tokens)
+    if #items == 0 then return nil end
+
     local matching_line_indices = {}
-    local lower_tokens = {}
-    for _, tok in ipairs(query_tokens) do
-        if #tok > 0 then table.insert(lower_tokens, tok:lower()) end
-    end
 
     for idx, line in ipairs(lines) do
         local l_lower = line:lower()
         local matched = false
-        for _, tok in ipairs(lower_tokens) do
-            if l_lower:find(tok, 1, true) then
+        for _, item in ipairs(items) do
+            if l_lower:find(item.text_lower, 1, true) then
                 matched = true
                 break
             end
@@ -2150,10 +2243,8 @@ local function extract_file_matches(filepath, query_tokens, max_matches_per_file
                 
                 -- Highlight query tokens on the hit line
                 if is_hit then
-                    for _, tok in ipairs(lower_tokens) do
-                        local pat = tok:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1")
-                        -- Case-insensitive replacement in pure Lua
-                        content = content:gsub("(" .. pat .. ")", "\27[1;33m%1\27[0m")
+                    for _, item in ipairs(items) do
+                        content = content:gsub("(" .. item.ci_pattern .. ")", "\27[1;33m%1\27[0m")
                     end
                 end
 
@@ -2206,29 +2297,14 @@ end
 --------------------------------------------------------------------------------
 -- Preview highlighting patterns
 --------------------------------------------------------------------------------
--- One case-insensitive Lua pattern per term in the query, used to highlight
+-- One case-insensitive Lua pattern per item in the query, used to highlight
 -- matches in the TUI preview pane.
---
--- gsub returns (string, substitutions). As the final argument to table.insert
--- that second value expands into insert's optional `pos` parameter, so
--- table.insert(parts, ch:gsub(...)) is really insert(parts, str, count) and
--- raises "bad argument #2 (number expected, got string)" for every non-letter
--- character in the query -- which is why searching "job_", "log2024" or
--- "user.name" crashed the preview. Parentheses truncate it to one value.
 local function build_preview_patterns(query_str)
+    local items = parse_query_items(query_str)
     local terms, patterns = {}, {}
-    for term in tostring(query_str or ""):gmatch("[%w_%-]+") do
-        terms[#terms + 1] = term:lower()
-        local ci_parts = {}
-        for ch in term:gmatch(".") do
-            local lo, up = ch:lower(), ch:upper()
-            if lo ~= up then
-                ci_parts[#ci_parts + 1] = "[" .. lo .. up .. "]"
-            else
-                ci_parts[#ci_parts + 1] = (lo:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1"))
-            end
-        end
-        patterns[#patterns + 1] = table.concat(ci_parts)
+    for _, item in ipairs(items) do
+        terms[#terms + 1] = item.text_lower
+        patterns[#patterns + 1] = item.ci_pattern
     end
     return terms, patterns
 end
@@ -4728,14 +4804,8 @@ local function main(args)
                 else
                     print(string.format("\27[1;36m🔍 Results for '%s' (%d matching files in %.2fms):\27[0m\n", query, #results, elapsed))
 
-                    -- Extract query search terms for token highlighting
-                    local terms = {}
-                    for t in query:gmatch("[%w_%-]+") do
-                        table.insert(terms, t)
-                    end
-
                     for idx, res in ipairs(results) do
-                        local ctx = extract_file_matches(res.filepath, terms, 3)
+                        local ctx = extract_file_matches(res.filepath, query, 3)
                         if ctx then
                             local loc_str = string.format("%s:%d", res.filepath, ctx.first_line)
                             print(string.format("  \27[1;34m📄 %s\27[0m  \27[90m(score: %.2f)\27[0m", loc_str, res.rank))
@@ -4809,6 +4879,8 @@ if pcall(debug.getlocal, 4, 1) then
         get_empty_state_right_lines = get_empty_state_right_lines,
         visual_len = visual_len,
         truncate = truncate,
+        parse_query_items = parse_query_items,
+        extract_file_matches = extract_file_matches,
         -- exposed for tests: console-independent selection logic
         choose_candidate = choose_candidate,
         classify_source = classify_source,

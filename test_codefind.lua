@@ -1458,6 +1458,43 @@ TestRunner.describe("12. Performance Regression Benchmarks", function()
     end)
 end)
 
+TestRunner.describe("13. Exact Phrase Line Matching & Highlight Extraction", function()
+    TestRunner.it("should parse quoted phrases into single phrase query items", function()
+        local items = codefind.parse_query_items('"exact phrase" foo')
+        assert_eq(#items, 2, "Expected 2 items (1 phrase, 1 word)")
+        assert_eq(items[1].text, "exact phrase", "First item should be exact phrase")
+        assert_true(items[1].is_phrase, "First item should be flagged as phrase")
+        assert_eq(items[2].text, "foo", "Second item should be foo")
+        assert_false(items[2].is_phrase, "Second item should not be flagged as phrase")
+    end)
+
+    TestRunner.it("should match lines with full exact phrase and ignore lines with single words", function()
+        local tmpdir = make_tmpdir("_test_cf_phrase_" .. os.time())
+        local sample_path = tmpdir .. "/sample.txt"
+        local f = io.open(sample_path, "w")
+        f:write("Line 1: exact word here\n")
+        f:write("Line 2: phrase word here\n")
+        f:write("Line 3: exact phrase match here\n")
+        f:close()
+
+        local ctx = codefind.extract_file_matches(sample_path, '"exact phrase"', 3)
+        assert_true(ctx ~= nil, "Match context should not be nil")
+        assert_eq(ctx.first_line, 3, "Only line 3 should match exact phrase, got line " .. tostring(ctx.first_line))
+        assert_eq(ctx.total_hits, 1, "Expected exactly 1 hit for phrase search")
+        assert_true(ctx.formatted:find("exact phrase") ~= nil, "Formatted output should highlight exact phrase")
+
+        rm_tmpdir(tmpdir)
+    end)
+
+    TestRunner.it("should construct contiguous case-insensitive patterns in build_preview_patterns for exact phrases", function()
+        local terms, patterns = codefind.build_preview_patterns('"exact phrase"')
+        assert_eq(#terms, 1, "Expected 1 term for exact phrase")
+        assert_eq(terms[1], "exact phrase", "Term should be exact phrase")
+        assert_true(patterns[1]:find("%[eE%]%[xX%]%[aA%]%[cC%]%[tT%] %[pP%]%[hH%]%[rR%]%[aA%]%[sS%]%[eE%]") ~= nil,
+            "Pattern should match case-insensitive exact phrase")
+    end)
+end)
+
 db:close()
 os.remove(test_db_path)
 os.remove(test_db_path .. "-wal")
