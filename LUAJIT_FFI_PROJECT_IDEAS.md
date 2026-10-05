@@ -194,7 +194,7 @@ Why are these projects uniquely suited for LuaJIT FFI instead of standard interp
 
 ## 🛠️ Recommended Project Structure in `lualab`
 
-To maintain consistency with repository conventions (e.g., [`ffi_chinese_chess.lua`](file:///home/zliu/test/lualab/ffi_chinese_chess.lua), [`ffi_russian_block.lua`](file:///home/zliu/test/lualab/ffi_russian_block.lua)):
+To maintain consistency with repository conventions (e.g., [`ffi_chinese_chess.lua`](file:///home/zliu/test/lualab/ffi_chinese_chess.lua), [`ffi_tetris.lua`](file:///home/zliu/test/lualab/ffi_tetris.lua)):
 
 1. **Single-file Self-Contained Script**:
    - `ffi_<project_name>.lua` (Contains FFI C-declarations, simulation logic, and terminal UI).

@@ -1,7 +1,7 @@
 #!/usr/bin/env luajit
 --[[
-    ffi_russian_block.lua
-    A full-featured, cross-platform Russian Block (Tetris / 俄罗斯方块) game
+    ffi_tetris.lua
+    A full-featured, cross-platform Tetris (Russian Block / 俄罗斯方块) game
     built entirely with LuaJIT FFI for both Windows and Linux.
 
     Features & FFI Highlights:
@@ -20,13 +20,13 @@
        - Super Rotation System (SRS) wall kicks (left, right, floor kick resilience).
        - Real-time Ghost Piece shadow projection.
        - Hold Piece swapping (C / H key, once per drop).
-       - Next Queue preview (upcoming pieces).
+       - 3-Piece Next & Upcoming Queue preview.
        - Hard Drop (instant lock with drop score bonus, Spacebar).
        - Soft Drop (accelerated fall with score bonus, Down / S).
-       - Lock Delay (500ms grace period with move/rotate resets).
-       - Line Clears with flash animation, Back-to-Back Tetris bonus, and Combos.
+       - Dynamic Lock Delay (500ms grace period with real-time drain meter).
+       - Line Clears with 45ms flash animation, Back-to-Back Tetris bonus, and Combos.
        - Level progression with accelerating gravity.
-       - High score tracking saved to disk (.russian_block_score).
+       - High score tracking saved to disk (.tetris_score).
        - Built-in heuristic AI Bot autoplay (--demo mode).
        - Headless snapshot (--snapshot) and test verification (--test).
        - Unicode box-drawing or ASCII fallback (--ascii).
@@ -116,15 +116,15 @@ if is_windows then
         ffi.C.SetConsoleMode(hIn, new_mode)
         in_raw_mode = true
 
-        -- Switch to alternate screen buffer, hide cursor, clear screen
-        io.write("\27[?1049h\27[?25l\27[2J\27[H")
+        -- Switch to alternate screen buffer, hide cursor, disable line wrap, clear screen
+        io.write("\27[?1049h\27[?25l\27[?7l\27[2J\27[H")
         io.flush()
         return true
     end
 
     disable_raw_mode = function()
         if in_raw_mode then
-            io.write("\27[?1049l\27[?25h\27[0m")
+            io.write("\27[?7h\27[?1049l\27[?25h\27[0m")
             io.flush()
             local hIn = ffi.C.GetStdHandle(STD_INPUT_HANDLE)
             ffi.C.SetConsoleMode(hIn, orig_in_mode[0])
@@ -262,15 +262,15 @@ ffi.cdef(posix_termios_cdef[[
         ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
         in_raw_mode = true
 
-        -- Switch to alternate screen buffer, hide cursor, clear screen
-        io.write("\27[?1049h\27[?25l\27[2J\27[H")
+        -- Switch to alternate screen buffer, hide cursor, disable line wrap, clear screen
+        io.write("\27[?1049h\27[?25l\27[?7l\27[2J\27[H")
         io.flush()
         return true
     end
 
     disable_raw_mode = function()
         if in_raw_mode then
-            io.write("\27[?1049l\27[?25h\27[0m")
+            io.write("\27[?7h\27[?1049l\27[?25h\27[0m")
             io.flush()
             ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
             in_raw_mode = false
@@ -465,10 +465,11 @@ end
 -- =========================================================================
 -- 4. High Score File Management
 -- =========================================================================
-local SCORE_FILE = ".russian_block_score"
+local SCORE_FILE = ".tetris_score"
+local LEGACY_SCORE_FILE = ".russian_block_score"
 
 local function load_high_score()
-    local f = io.open(SCORE_FILE, "r")
+    local f = io.open(SCORE_FILE, "r") or io.open(LEGACY_SCORE_FILE, "r")
     if f then
         local val = tonumber(f:read("*a")) or 0
         f:close()
@@ -518,6 +519,10 @@ function TetrisGame.new(options)
 
     self.clearing_lines = nil
     self.flash_timer = 0
+    self.dirty = true
+    self.banner_text = nil
+    self.banner_color = nil
+    self.banner_until = 0
 
     self:reset()
     return self
@@ -561,6 +566,10 @@ function TetrisGame:reset()
     self.last_was_tetris = false
     self.lock_timer_start = nil
     self.clearing_lines = nil
+    self.banner_text = nil
+    self.banner_color = nil
+    self.banner_until = 0
+    self.dirty = true
 
     self:fill_bag_if_needed()
     self:spawn_piece()
@@ -572,6 +581,18 @@ function TetrisGame:update_gravity()
     local lvl = self.stats.level
     -- Standard exponential gravity acceleration curve
     self.gravity_ms = math.max(50, math.floor(800 * (0.86 ^ (lvl - 1))))
+end
+
+function TetrisGame:get_next_event_timeout(now)
+    if self.game_over or self.paused or not self.active_piece then
+        return 50
+    end
+    local time_to_gravity = math.max(1, self.gravity_ms - (now - self.last_fall_time))
+    if self.lock_timer_start then
+        local time_to_lock = math.max(1, self.lock_delay_ms - (now - self.lock_timer_start))
+        return math.min(time_to_gravity, time_to_lock, 33)
+    end
+    return math.min(time_to_gravity, 50)
 end
 
 -- 7-Bag Randomizer (guarantees fair piece distribution)
@@ -678,10 +699,12 @@ function TetrisGame:spawn_piece(piece_type)
 
     if not self:can_place(self.active_piece.matrix, self.active_piece.x, self.active_piece.y) then
         self.game_over = true
+        self.dirty = true
         return false
     end
 
     self:update_ghost_y()
+    self.dirty = true
     return true
 end
 
@@ -720,6 +743,7 @@ function TetrisGame:try_rotate(clockwise)
             ap.y = test_y
             self:update_ghost_y()
             self:reset_lock_delay_on_move()
+            self.dirty = true
             return true
         end
     end
@@ -732,6 +756,7 @@ function TetrisGame:move_left()
         self.active_piece.x = self.active_piece.x - 1
         self:update_ghost_y()
         self:reset_lock_delay_on_move()
+        self.dirty = true
         return true
     end
     return false
@@ -743,6 +768,7 @@ function TetrisGame:move_right()
         self.active_piece.x = self.active_piece.x + 1
         self:update_ghost_y()
         self:reset_lock_delay_on_move()
+        self.dirty = true
         return true
     end
     return false
@@ -757,9 +783,11 @@ function TetrisGame:soft_drop()
             self.stats.high_score = self.stats.score
         end
         self:update_ghost_y()
+        self.dirty = true
         return true
     else
         self:lock_active_piece()
+        self.dirty = true
         return false
     end
 end
@@ -773,6 +801,7 @@ function TetrisGame:hard_drop()
     end
     self.active_piece.y = self.active_piece.ghost_y
     self:lock_active_piece()
+    self.dirty = true
     return true
 end
 
@@ -788,6 +817,7 @@ function TetrisGame:hold_piece()
         self:spawn_piece(prev_held)
     end
     self.can_hold = false
+    self.dirty = true
     return true
 end
 
@@ -797,6 +827,7 @@ function TetrisGame:reset_lock_delay_on_move()
     if on_ground and self.lock_moves_count < self.max_lock_resets then
         self.lock_timer_start = get_time_ms()
         self.lock_moves_count = self.lock_moves_count + 1
+        self.dirty = true
     end
 end
 
@@ -825,6 +856,7 @@ function TetrisGame:lock_active_piece()
             local cell = self:get_cell(br, bc)
             if cell and cell.locked == 1 then
                 self.game_over = true
+                self.dirty = true
                 if self.stats.score > self.stats.high_score then
                     save_high_score(self.stats.score)
                 end
@@ -850,11 +882,37 @@ function TetrisGame:lock_active_piece()
     end
 
     if #full_lines > 0 then
+        -- Set banner notifications
+        if #full_lines == 4 then
+            self.banner_text = self.last_was_tetris and "B2B TETRIS!" or "TETRIS!"
+            self.banner_color = "\27[1;33m"
+        elseif self.stats.combos >= 1 then
+            self.banner_text = string.format("COMBO x%d!", self.stats.combos + 1)
+            self.banner_color = "\27[1;35m"
+        else
+            self.banner_text = nil
+        end
+        if self.banner_text then
+            self.banner_until = get_time_ms() + 1500
+        end
+
+        if self.animate_clears then
+            for _, r in ipairs(full_lines) do
+                for c = 1, BOARD_COLS do
+                    self:set_cell(r, c, 9, true) -- Color 9 = flash
+                end
+            end
+            io.write("\27[?2026h" .. self:render_frame() .. "\27[?2026l")
+            io.flush()
+            sleep_ms(45)
+        end
+
         self:collapse_lines(full_lines)
     else
         self.stats.combos = 0
         self:spawn_piece()
     end
+    self.dirty = true
 end
 
 function TetrisGame:collapse_lines(full_lines)
@@ -911,6 +969,7 @@ function TetrisGame:collapse_lines(full_lines)
     end
 
     self:spawn_piece()
+    self.dirty = true
 end
 
 function TetrisGame:tick(current_time)
@@ -922,12 +981,20 @@ function TetrisGame:tick(current_time)
     if on_ground then
         if not self.lock_timer_start then
             self.lock_timer_start = current_time
+            self.dirty = true
         elseif (current_time - self.lock_timer_start) >= self.lock_delay_ms then
             self:lock_active_piece()
+            self.dirty = true
             return
+        else
+            -- Lock meter drains smoothly while on ground
+            self.dirty = true
         end
     else
-        self.lock_timer_start = nil
+        if self.lock_timer_start ~= nil then
+            self.lock_timer_start = nil
+            self.dirty = true
+        end
     end
 
     -- Gravity step
@@ -936,7 +1003,12 @@ function TetrisGame:tick(current_time)
         if self:can_place(ap.matrix, ap.x, ap.y + 1) then
             ap.y = ap.y + 1
             self:update_ghost_y()
+            self.dirty = true
         end
+    end
+
+    if self.banner_text and current_time < (self.banner_until or 0) then
+        self.dirty = true
     end
 end
 
@@ -1128,7 +1200,7 @@ local UI_CHARS = {
 }
 
 local function utf8_visible_width(s)
-    local clean = s:gsub("\27%[[0-9;]*[a-zA-Z]", "")
+    local clean = s:gsub("\27%[[0-9;?]*[a-zA-Z]", "")
     local w = 0
     local i = 1
     local len = #clean
@@ -1178,20 +1250,19 @@ local function fmt_num_5(val)
     end
 end
 
-function TetrisGame:render_frame()
+function TetrisGame:render_frame(now)
+    now = now or get_time_ms()
     local U = self.ascii_mode and UI_CHARS.ascii or UI_CHARS.unicode
     local out = { "\27[H" } -- Move cursor home
 
-    -- Build active piece coordinate set for fast overlay lookup
+    -- Build active piece coordinate set for fast overlay lookup (1D integer index)
     local active_cells = {}
     if self.active_piece then
         local ap = self.active_piece
         for r = 1, ap.size do
             for c = 1, ap.size do
                 if ap.matrix[r][c] ~= 0 then
-                    local br = ap.y + (r - 1)
-                    local bc = ap.x + (c - 1)
-                    active_cells[br .. ":" .. bc] = ap.id
+                    active_cells[(ap.y + r - 2) * BOARD_COLS + (ap.x + c - 1)] = ap.id
                 end
             end
         end
@@ -1204,10 +1275,9 @@ function TetrisGame:render_frame()
         for r = 1, ap.size do
             for c = 1, ap.size do
                 if ap.matrix[r][c] ~= 0 then
-                    local br = ap.ghost_y + (r - 1)
-                    local bc = ap.x + (c - 1)
-                    if not active_cells[br .. ":" .. bc] then
-                        ghost_cells[br .. ":" .. bc] = true
+                    local idx = (ap.ghost_y + r - 2) * BOARD_COLS + (ap.x + c - 1)
+                    if not active_cells[idx] then
+                        ghost_cells[idx] = true
                     end
                 end
             end
@@ -1217,8 +1287,8 @@ function TetrisGame:render_frame()
     -- Header Banner (width: 59 columns = 1 space + 1 corner + 56 h_lines + 1 corner)
     table.insert(out, " \27[1;36m" .. U.tl .. string.rep(U.h_line, 56) .. U.tr .. "\27[0m\n")
     local title_str = self.ascii_mode
-        and "          RUSSIAN BLOCK (TETRIS) - LUAJIT FFI           "
-        or  "    🎮  RUSSIAN BLOCK (俄罗斯方块) - LUAJIT FFI  🎮     "
+        and "             TETRIS (RUSSIAN BLOCK) - LUAJIT FFI        "
+        or  "        🎮  TETRIS (俄罗斯方块) - LUAJIT FFI  🎮        "
     table.insert(out, string.format(" \27[1;36m%s\27[1;33m%s\27[1;36m%s\27[0m\n", U.v_line, title_str, U.v_line))
     table.insert(out, " \27[1;36m" .. U.bl .. string.rep(U.h_line, 56) .. U.br .. "\27[0m\n")
 
@@ -1265,7 +1335,9 @@ function TetrisGame:render_frame()
     table.insert(left_lines, string.format("\27[1;35m%s\27[0m Q    : Quit \27[1;35m%s\27[0m", U.b_box_v, U.b_box_v))
     table.insert(left_lines, string.format("\27[1;35m%s%s%s\27[0m", U.b_bl, string.rep(U.b_box_h, 13), U.b_br))
 
-    -- Left panel footer (rows 19..20): FFI OS centered in 15 columns
+    -- Left panel footer (rows 19..20): Pieces counter & FFI OS centered in 15 columns
+    local pieces_str = string.format("  PIECES: %-5d", math.min(self.stats.pieces_dropped, 99999))
+    table.insert(left_lines, pad_right(pieces_str, 15))
     local os_tag = string.format("(FFI %s)", ffi.os)
     local os_tag_len = #os_tag
     local l_pad = math.max(0, math.floor((15 - os_tag_len) / 2))
@@ -1275,7 +1347,7 @@ function TetrisGame:render_frame()
         table.insert(left_lines, string.rep(" ", 15))
     end
 
-    -- Next queue box (rows 1..6)
+    -- Next primary queue box (rows 1..6)
     table.insert(right_lines, string.format("\27[1;32m%s%s NEXT %s%s\27[0m", U.b_tl, string.rep(U.b_box_h, 3), string.rep(U.b_box_h, 4), U.b_tr))
     local next_piece_key = self.bag[1] or "I"
     local next_def = PIECES[next_piece_key]
@@ -1296,7 +1368,27 @@ function TetrisGame:render_frame()
     end
     table.insert(right_lines, string.format("\27[1;32m%s%s%s\27[0m", U.b_bl, string.rep(U.b_box_h, 13), U.b_br))
 
-    -- Stats box (rows 7..20)
+    -- Upcoming Queue box for Next #2 and #3 (rows 7..10)
+    table.insert(right_lines, string.format("\27[1;36m%s%s QUEUE %s%s\27[0m", U.b_tl, string.rep(U.b_box_h, 2), string.rep(U.b_box_h, 4), U.b_tr))
+    local p2_key = self.bag[2] or " "
+    local p2_def = PIECES[p2_key]
+    if p2_def then
+        table.insert(right_lines, string.format("\27[1;36m%s\27[0m #2: %s%s\27[0m \27[1;37m[%s]\27[0m  \27[1;36m%s\27[0m",
+            U.b_box_v, p2_def.ansi, U.block, p2_key, U.b_box_v))
+    else
+        table.insert(right_lines, string.format("\27[1;36m%s\27[0m             \27[1;36m%s\27[0m", U.b_box_v, U.b_box_v))
+    end
+    local p3_key = self.bag[3] or " "
+    local p3_def = PIECES[p3_key]
+    if p3_def then
+        table.insert(right_lines, string.format("\27[1;36m%s\27[0m #3: %s%s\27[0m \27[1;37m[%s]\27[0m  \27[1;36m%s\27[0m",
+            U.b_box_v, p3_def.ansi, U.block, p3_key, U.b_box_v))
+    else
+        table.insert(right_lines, string.format("\27[1;36m%s\27[0m             \27[1;36m%s\27[0m", U.b_box_v, U.b_box_v))
+    end
+    table.insert(right_lines, string.format("\27[1;36m%s%s%s\27[0m", U.b_bl, string.rep(U.b_box_h, 13), U.b_br))
+
+    -- Stats box (rows 11..18)
     table.insert(right_lines, string.format("\27[1;33m%s%s STATS %s%s\27[0m", U.b_tl, string.rep(U.b_box_h, 3), string.rep(U.b_box_h, 3), U.b_tr))
     table.insert(right_lines, string.format("\27[1;33m%s\27[0m SCORE: \27[1;32m%s\27[0m\27[1;33m%s\27[0m", U.b_box_v, fmt_num_5(self.stats.score), U.b_box_v))
     table.insert(right_lines, string.format("\27[1;33m%s\27[0m LEVEL: \27[1;33m%-5d\27[0m\27[1;33m%s\27[0m", U.b_box_v, self.stats.level, U.b_box_v))
@@ -1306,6 +1398,7 @@ function TetrisGame:render_frame()
     table.insert(right_lines, string.format("\27[1;33m%s\27[0m SPEED: \27[90m%3dms\27[0m\27[1;33m%s\27[0m", U.b_box_v, math.min(self.gravity_ms, 999), U.b_box_v))
     table.insert(right_lines, string.format("\27[1;33m%s%s%s\27[0m", U.b_bl, string.rep(U.b_box_h, 13), U.b_br))
 
+    -- Status / Milestone banner (row 19)
     local status_text = "PLAYING"
     local status_color = "\27[32m"
     if self.game_over then
@@ -1314,12 +1407,33 @@ function TetrisGame:render_frame()
     elseif self.paused then
         status_text = "PAUSED"
         status_color = "\27[1;33m"
+    elseif self.banner_text and now < (self.banner_until or 0) then
+        status_text = self.banner_text
+        status_color = self.banner_color or "\27[1;35m"
     end
     local tag_len = #status_text + 2
-    local s_l_pad = math.floor((15 - tag_len) / 2)
-    local s_r_pad = 15 - tag_len - s_l_pad
+    local s_l_pad = math.max(0, math.floor((15 - tag_len) / 2))
+    local s_r_pad = math.max(0, 15 - tag_len - s_l_pad)
     table.insert(right_lines, string.format("%s[%s%s\27[0m]%s",
         string.rep(" ", s_l_pad), status_color, status_text, string.rep(" ", s_r_pad)))
+
+    -- Real-time Lock Delay progress indicator (row 20)
+    local lock_line
+    if self.game_over or self.paused or not self.active_piece then
+        lock_line = "  LOCK [----]  "
+    elseif self.lock_timer_start then
+        local elapsed = math.max(0, now - self.lock_timer_start)
+        local remain_frac = math.max(0, 1 - (elapsed / self.lock_delay_ms))
+        local n_blocks = math.min(4, math.max(0, math.ceil(remain_frac * 4)))
+        local bar_char = self.ascii_mode and "#" or "■"
+        local bar = string.rep(bar_char, n_blocks) .. string.rep(" ", 4 - n_blocks)
+        local bar_color = (remain_frac > 0.4) and "\27[1;33m" or "\27[1;31m"
+        lock_line = string.format("  LOCK [%s%s\27[0m]  ", bar_color, bar)
+    else
+        local dot_char = self.ascii_mode and "-" or "·"
+        lock_line = string.format("\27[90m  LOCK [%s%s%s%s]  \27[0m", dot_char, dot_char, dot_char, dot_char)
+    end
+    table.insert(right_lines, lock_line)
 
     while #right_lines < BOARD_ROWS do
         table.insert(right_lines, string.rep(" ", 15))
@@ -1335,22 +1449,26 @@ function TetrisGame:render_frame()
         local row_buf = {}
 
         for bc = 1, BOARD_COLS do
-            local key = br .. ":" .. bc
-            local active_id = active_cells[key]
+            local cell_idx = (br - 1) * BOARD_COLS + bc
+            local active_id = active_cells[cell_idx]
 
             if active_id then
                 local def = PIECE_ID_MAP[active_id]
                 table.insert(row_buf, def.ansi .. U.block .. "\27[0m")
-            elseif ghost_cells[key] then
+            elseif ghost_cells[cell_idx] then
                 table.insert(row_buf, "\27[38;2;110;125;145m" .. U.ghost .. "\27[0m")
             else
                 local cell = self:get_cell(br, bc)
                 if cell and cell.locked == 1 then
-                    local def = PIECE_ID_MAP[cell.color]
-                    if def then
-                        table.insert(row_buf, def.ansi .. U.block .. "\27[0m")
+                    if cell.color == 9 then
+                        table.insert(row_buf, self.ascii_mode and "\27[7m==\27[0m" or "\27[1;97;107m██\27[0m")
                     else
-                        table.insert(row_buf, "\27[37m" .. U.block .. "\27[0m")
+                        local def = PIECE_ID_MAP[cell.color]
+                        if def then
+                            table.insert(row_buf, def.ansi .. U.block .. "\27[0m")
+                        else
+                            table.insert(row_buf, "\27[37m" .. U.block .. "\27[0m")
+                        end
                     end
                 else
                     table.insert(row_buf, "\27[38;2;55;65;85m" .. U.empty .. "\27[0m")
@@ -1387,6 +1505,8 @@ end
 -- =========================================================================
 local function run_interactive_game(options)
     local game = TetrisGame.new(options)
+    game.interactive = true
+    game.animate_clears = true
     math.randomseed(os.time())
 
     local raw_ok = enable_raw_mode()
@@ -1402,14 +1522,17 @@ local function run_interactive_game(options)
         while true do
             local now = get_time_ms()
 
-            -- 1. Input Processing
-            local key = read_key(0)
+            -- 1. Input Processing with dynamic kernel poll timeout
+            local wait_ms = math.max(1, math.min(16, game:get_next_event_timeout(now)))
+            local key = read_key(wait_ms)
             if key == "q" or key == "CTRL_C" then
                 break
             elseif key == "p" or key == "ESC" then
                 game.paused = not game.paused
+                game.dirty = true
             elseif key == "r" then
                 game:reset()
+                game.dirty = true
             elseif not game.paused and not game.game_over then
                 if key == "a" or key == "LEFT" then
                     game:move_left()
@@ -1429,16 +1552,18 @@ local function run_interactive_game(options)
             end
 
             -- 2. Game Logic Tick
-            game:tick(now)
+            game:tick(get_time_ms())
 
-            -- 3. Render Frame at target FPS
-            if now - last_render >= frame_time_ms then
-                io.write(game:render_frame())
-                io.flush()
-                last_render = now
+            -- 3. Render Frame on dirty state or fallback heartbeat
+            local render_now = get_time_ms()
+            if game.dirty or (render_now - last_render >= 200) then
+                if render_now - last_render >= frame_time_ms then
+                    io.write("\27[?2026h" .. game:render_frame(render_now) .. "\27[?2026l")
+                    io.flush()
+                    last_render = render_now
+                    game.dirty = false
+                end
             end
-
-            sleep_ms(8) -- Yield ~8ms to prevent CPU spinning
         end
     end)
 
@@ -1447,7 +1572,7 @@ local function run_interactive_game(options)
     if not ok then
         io.stderr:write("\n\27[31mFatal error in game loop:\27[0m " .. tostring(err) .. "\n")
     else
-        print("\n\27[1;32mThanks for playing Russian Block (Tetris)!\27[0m Final Score: " .. game.stats.score .. "\n")
+        print("\n\27[1;32mThanks for playing Tetris (LuaJIT FFI)!\27[0m Final Score: " .. game.stats.score .. "\n")
     end
 end
 
@@ -1489,7 +1614,7 @@ local function run_ai_demo(max_frames, options)
             end
 
             game:tick(now)
-            io.write(game:render_frame())
+            io.write("\27[?2026h" .. game:render_frame(now) .. "\27[?2026l")
             io.flush()
 
             frame = frame + 1
@@ -1509,7 +1634,7 @@ end
 -- 9. Self-Test Mode (--test)
 -- =========================================================================
 local function run_self_tests()
-    print("=== Running Self-Tests for Russian Block (LuaJIT FFI) ===")
+    print("=== Running Self-Tests for Tetris (LuaJIT FFI) ===")
     local passed = 0
     local total = 0
 
@@ -1634,7 +1759,7 @@ local function run_self_tests()
 
     print(string.format("\nSelf-Test Summary: %d / %d tests passed.", passed, total))
     if passed == total then
-        print("\27[1;32mALL RUSSIAN BLOCK TESTS PASSED SUCCESSFULLY!\27[0m\n")
+        print("\27[1;32mALL TETRIS TESTS PASSED SUCCESSFULLY!\27[0m\n")
         return true
     else
         print("\27[1;31mSOME TESTS FAILED!\27[0m\n")
@@ -1647,10 +1772,11 @@ end
 -- =========================================================================
 local function print_help()
     print([[
-Russian Block (Tetris / 俄罗斯方块) - LuaJIT FFI Cross-Platform Arcade Game
+Tetris (Russian Block / 俄罗斯方块) - LuaJIT FFI Cross-Platform Arcade Game
 
 Usage:
-    luajit ffi_russian_block.lua [options]
+    luajit ffi_tetris.lua [options]
+    luajit tetris.lua [options]
 
 Options:
     --help, -h          Show this help message and exit
@@ -1678,7 +1804,8 @@ Platform Support:
 end
 
 -- If executed directly from command line
-local is_main = (debug.getinfo(3) == nil)
+local base_arg0 = arg and arg[0] and arg[0]:match("([^/]+)$") or ""
+local is_main = (base_arg0 == "tetris.lua" or base_arg0 == "ffi_tetris.lua") or (debug.getinfo(3) == nil)
 
 if is_main then
     local arg1 = arg and arg[1] or ""

@@ -193,10 +193,10 @@ local PROGRAMS = {
   },
   {
     id = "tetris",
-    file = "ffi_russian_block.lua",
-    name = "Russian Block",
+    file = "ffi_tetris.lua",
+    name = "Tetris",
     icon = "🧱",
-    full_title = "Russian Block (Tetris)",
+    full_title = "Tetris (LuaJIT FFI)",
     category = "Game",
     type = "Block Puzzle",
     backend = "LuaJIT FFI + Terminal Matrix Grid",

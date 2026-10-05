@@ -1,37 +1,42 @@
 #!/usr/bin/env luajit
 --[[
-    test_ffi_russian_block.lua
-    Unit, integration, and FFI regression test suite for ffi_russian_block.lua.
+    test_ffi_tetris.lua
+    Unit, integration, and FFI regression test suite for ffi_tetris.lua.
 ]]
 
 local ffi = require("ffi")
 
-print("=== Running Unit Tests for ffi_russian_block.lua (Russian Block) ===")
+print("=== Running Unit Tests for ffi_tetris.lua (Tetris) ===")
 
 local tests = {
     {
         name = "Help flag (--help)",
-        cmd = "luajit ffi_russian_block.lua --help",
-        expect = "Russian Block (Tetris / 俄罗斯方块) - LuaJIT FFI Cross-Platform Arcade Game"
+        cmd = "luajit ffi_tetris.lua --help",
+        expect = "Tetris (Russian Block / 俄罗斯方块) - LuaJIT FFI Cross-Platform Arcade Game"
     },
     {
         name = "CLI self-tests flag (--test)",
-        cmd = "luajit ffi_russian_block.lua --test",
-        expect = "ALL RUSSIAN BLOCK TESTS PASSED SUCCESSFULLY!"
+        cmd = "luajit ffi_tetris.lua --test",
+        expect = "ALL TETRIS TESTS PASSED SUCCESSFULLY!"
     },
     {
         name = "Snapshot non-interactive render (--snapshot)",
-        cmd = "luajit ffi_russian_block.lua --snapshot",
-        expect = "RUSSIAN BLOCK (俄罗斯方块) - LUAJIT FFI"
+        cmd = "luajit ffi_tetris.lua --snapshot",
+        expect = "TETRIS (俄罗斯方块) - LUAJIT FFI"
     },
     {
         name = "ASCII snapshot render (--snapshot --ascii)",
-        cmd = "luajit ffi_russian_block.lua --snapshot --ascii",
+        cmd = "luajit ffi_tetris.lua --snapshot --ascii",
         expect = "+--- STATS ---+"
     },
     {
+        name = "Launcher snapshot render (tetris.lua --snapshot)",
+        cmd = "luajit tetris.lua --snapshot",
+        expect = "TETRIS (俄罗斯方块) - LUAJIT FFI"
+    },
+    {
         name = "AI Bot autoplay demonstration (--demo 15)",
-        cmd = "luajit ffi_russian_block.lua --demo 15",
+        cmd = "luajit ffi_tetris.lua --demo 15",
         expect = "[AI Demo Complete]"
     }
 }
@@ -58,7 +63,7 @@ end
 -- In-Depth Module & FFI API Tests
 -- =========================================================================
 print("\n--- In-Depth FFI Struct & Engine Unit Tests ---")
-local rb = require("ffi_russian_block")
+local rb = require("ffi_tetris")
 local TetrisGame = rb.TetrisGame
 local PIECES = rb.PIECES
 
@@ -172,15 +177,39 @@ local g_high = TetrisGame.new()
 g_high.stats.score = 999999
 g_high.stats.high_score = 1234567
 
+local g_ground = TetrisGame.new()
+g_ground.lock_timer_start = 1000
+
+local g_banner = TetrisGame.new()
+g_banner.banner_text = "B2B TETRIS!"
+g_banner.banner_until = 999999999
+
+local g_flash = TetrisGame.new()
+g_flash:set_cell(rb.TOTAL_ROWS, 1, 9, true)
+
 assert_test("Layout width is uniform 59 columns in Unicode mode", verify_frame_layout(g_uni))
 assert_test("Layout width is uniform 59 columns in ASCII mode", verify_frame_layout(g_ascii))
 assert_test("Layout borders remain aligned during Game Over overlay", verify_frame_layout(g_over))
 assert_test("Layout borders remain aligned during Paused overlay", verify_frame_layout(g_pause))
 assert_test("Layout borders remain aligned with 6+ digit high scores", verify_frame_layout(g_high))
+assert_test("Layout borders remain aligned with grounded lock progress indicator", verify_frame_layout(g_ground))
+assert_test("Layout borders remain aligned with active dynamic banner", verify_frame_layout(g_banner))
+assert_test("Layout borders remain aligned during line clear flash animation", verify_frame_layout(g_flash))
+
+-- 5. Engine Features & Timeout Logic Tests
+local t_out = g_uni:get_next_event_timeout(os.clock() * 1000)
+assert_test("get_next_event_timeout returns valid positive millisecond window", t_out > 0 and t_out <= 50)
+
+g_uni.lock_timer_start = os.clock() * 1000
+local t_lock = g_uni:get_next_event_timeout(os.clock() * 1000)
+assert_test("get_next_event_timeout adjusts to fast rate when grounded", t_lock > 0 and t_lock <= 33)
+
+local frame_str = g_uni:render_frame()
+assert_test("Rendered frame contains 3-piece upcoming QUEUE box", frame_str:find("QUEUE") ~= nil and frame_str:find("#2:") ~= nil and frame_str:find("#3:") ~= nil)
 
 print(string.format("\nTest Summary: %d / %d tests passed.", passed, total_cli))
 if passed == total_cli then
-    print("\27[1;32mALL RUSSIAN BLOCK TESTS PASSED SUCCESSFULLY!\27[0m\n")
+    print("\27[1;32mALL TETRIS TESTS PASSED SUCCESSFULLY!\27[0m\n")
     os.exit(0)
 else
     print("\27[1;31mSOME TESTS FAILED!\27[0m\n")
