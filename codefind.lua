@@ -602,6 +602,152 @@ do
     if not resolved then wall_now = os.clock end   -- last resort
 end
 
+local function init_console()
+    if is_windows and kernel32 then
+        local hOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        local orig_mode = ffi.new("uint32_t[1]")
+        if kernel32.GetConsoleMode(hOut, orig_mode) ~= 0 then
+            local ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+            kernel32.SetConsoleMode(hOut, bit.bor(orig_mode[0], ENABLE_VIRTUAL_TERMINAL_PROCESSING))
+        end
+        kernel32.SetConsoleOutputCP(65001)
+    end
+end
+
+local function get_term_size(fallback_w, fallback_h)
+    fallback_w = fallback_w or 100
+    fallback_h = fallback_h or 30
+    if is_windows then
+        if kernel32 then
+            local hOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+            local csbi = ffi.new("CONSOLE_SCREEN_BUFFER_INFO")
+            if kernel32.GetConsoleScreenBufferInfo(hOut, csbi) ~= 0 then
+                local w = csbi.srWindow.Right - csbi.srWindow.Left + 1
+                local h = csbi.srWindow.Bottom - csbi.srWindow.Top + 1
+                if w > 0 and h > 0 then return tonumber(w), tonumber(h) end
+            end
+        end
+    else
+        local ws = ffi.new("struct winsize")
+        if ffi.C.ioctl(1, (ffi.os == "OSX" or ffi.os == "BSD") and 0x40087468 or 0x5413, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
+            return tonumber(ws.ws_col), tonumber(ws.ws_row)
+        end
+    end
+    return fallback_w, fallback_h
+end
+
+local function visual_len(str)
+    local clean = tostring(str):gsub("\27%[[%d;]*[mK]", "")
+    local w = 0
+    for c in clean:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+        if #c == 1 then
+            w = w + 1
+        elseif (c >= "─" and c <= "╿") or (c >= "┌" and c <= "▟") or c == "▶" then
+            w = w + 1
+        else
+            w = w + 2
+        end
+    end
+    return w
+end
+
+local function truncate(str, max_w)
+    local len = visual_len(str)
+    if len <= max_w then return str end
+    if max_w <= 3 then return string.rep(".", math.max(0, max_w)) end
+
+    local out = {}
+    local curr = 0
+    local pos = 1
+    local raw = tostring(str)
+    while pos <= #raw and curr < max_w - 3 do
+        local ansi = raw:match("^\27%[[%d;]*[mK]", pos)
+        if ansi then
+            table.insert(out, ansi)
+            pos = pos + #ansi
+        else
+            local c = raw:match("^[%z\1-\127\194-\244][\128-\191]*", pos)
+            if c then
+                local cw = 1
+                if #c > 1 and not ((c >= "─" and c <= "╿") or (c >= "┌" and c <= "▟") or c == "▶") then
+                    cw = 2
+                end
+                if curr + cw > max_w - 3 then break end
+                table.insert(out, c)
+                curr = curr + cw
+                pos = pos + #c
+            else
+                break
+            end
+        end
+    end
+    local has_ansi = (raw:find("\27[", 1, true) ~= nil)
+    return table.concat(out) .. "..." .. (has_ansi and "\27[0m" or "")
+end
+
+local function format_indexer_progress(current_idx, total_files, total_bytes, elapsed, term_cols)
+    total_files = math.max(1, total_files or 1)
+    current_idx = math.max(0, math.min(current_idx or 0, total_files))
+    elapsed = math.max(0.001, elapsed or 0.001)
+    total_bytes = total_bytes or 0
+    term_cols = term_cols or 80
+
+    local progress_ratio = current_idx / total_files
+    local pct = math.floor(progress_ratio * 100)
+    local rate = current_idx / elapsed
+
+    local elap_m, elap_s = math.floor(elapsed / 60), math.floor(elapsed % 60)
+    local elapsed_str = string.format("%02d:%02d", elap_m, elap_s)
+
+    local remaining_files = total_files - current_idx
+    local eta_seconds = (rate > 0) and math.max(0, math.floor(remaining_files / rate)) or 0
+    local eta_str
+    if current_idx >= total_files then
+        eta_str = "Done"
+    elseif eta_seconds >= 60 then
+        eta_str = string.format("ETA: %02dm%02ds", math.floor(eta_seconds / 60), eta_seconds % 60)
+    else
+        eta_str = string.format("ETA: %02ds", eta_seconds)
+    end
+
+    local max_w = math.max(38, term_cols - 1)
+    local mb = total_bytes / (1024 * 1024)
+
+    local info
+    if max_w >= 100 then
+        local time_full = (current_idx >= total_files) and string.format("Elapsed: %s │ Done", elapsed_str)
+            or string.format("Elapsed: %s │ %s", elapsed_str, eta_str)
+        info = string.format("%3d%% │ %d/%d files │ %.1f MB │ %d f/s │ %s",
+            pct, current_idx, total_files, mb, math.floor(rate), time_full)
+    end
+
+    if not info or visual_len(info) + 13 > max_w then
+        info = string.format("%3d%% │ %d/%d files │ %.1f MB │ %d f/s │ %s",
+            pct, current_idx, total_files, mb, math.floor(rate), eta_str)
+    end
+
+    if visual_len(info) + 13 > max_w then
+        info = string.format("%3d%% │ %d/%d files │ %.1f MB │ %s",
+            pct, current_idx, total_files, mb, eta_str)
+    end
+
+    if visual_len(info) + 13 > max_w then
+        info = string.format("%3d%% │ %d/%d files │ %s",
+            pct, current_idx, total_files, eta_str)
+    end
+
+    if visual_len(info) + 9 > max_w then
+        info = string.format("%3d%% │ %d/%d files", pct, current_idx, total_files)
+    end
+
+    local available_bar = max_w - visual_len(info) - 3
+    local bar_w = math.max(6, math.min(24, available_bar))
+    local filled = math.min(bar_w, math.floor(progress_ratio * bar_w))
+    local bar = "\27[32m" .. string.rep("█", filled) .. "\27[90m" .. string.rep("░", bar_w - filled) .. "\27[0m"
+
+    return string.format("[%s] %s", bar, info)
+end
+
 local function format_duration(sec)
     if sec < 60 then return string.format("%.2fs", sec) end
     if sec < 3600 then return string.format("%dm%02ds", math.floor(sec / 60), math.floor(sec % 60)) end
@@ -1947,33 +2093,9 @@ function Indexer.run(db, root_dir, verbose, allow_all, finder_mode)
         last_progress_time = now
 
         local elapsed = math.max(0.001, now - t_start)
-        local progress_ratio = current_idx / total_files
-        local pct = math.floor(progress_ratio * 100)
-        local rate = current_idx / elapsed
-
-        local elap_m, elap_s = math.floor(elapsed / 60), math.floor(elapsed % 60)
-        local elapsed_str = string.format("%02d:%02d", elap_m, elap_s)
-
-        -- Estimate time remaining (ETA)
-        local remaining_files = total_files - current_idx
-        local eta_seconds = (rate > 0) and math.max(0, math.floor(remaining_files / rate)) or 0
-        local time_str
-        if current_idx >= total_files then
-            time_str = string.format("Elapsed: %s │ Done", elapsed_str)
-        elseif eta_seconds >= 60 then
-            time_str = string.format("Elapsed: %s │ ETA: %02dm%02ds", elapsed_str, math.floor(eta_seconds / 60), eta_seconds % 60)
-        else
-            time_str = string.format("Elapsed: %s │ ETA: %02ds", elapsed_str, eta_seconds)
-        end
-
-        -- Progress bar with 24 blocks
-        local bar_w = 24
-        local filled = math.min(bar_w, math.floor(progress_ratio * bar_w))
-        local bar = "\27[32m" .. string.rep("█", filled) .. "\27[90m" .. string.rep("░", bar_w - filled) .. "\27[0m"
-
-        local status_line = string.format("\r\27[2K[%s] %3d%% │ %d/%d files │ %.1f MB │ %d f/s │ %s",
-            bar, pct, current_idx, total_files, total_bytes / (1024 * 1024), math.floor(rate), time_str)
-        io.write(status_line)
+        local term_cols = get_term_size(80, 24)
+        local status_line = format_indexer_progress(current_idx, total_files, total_bytes, elapsed, term_cols)
+        io.write("\r\27[2K" .. status_line)
         io.flush()
     end
 
@@ -2451,55 +2573,6 @@ local function make_preview_reader(window_size, max_cached_files)
     }
 end
 
-local function visual_len(str)
-    local clean = tostring(str):gsub("\27%[[%d;]*[mK]", "")
-    local w = 0
-    for c in clean:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
-        if #c == 1 then
-            w = w + 1
-        elseif (c >= "─" and c <= "╿") or (c >= "┌" and c <= "▟") or c == "▶" then
-            w = w + 1
-        else
-            w = w + 2
-        end
-    end
-    return w
-end
-
-local function truncate(str, max_w)
-    local len = visual_len(str)
-    if len <= max_w then return str end
-    if max_w <= 3 then return string.rep(".", math.max(0, max_w)) end
-
-    local out = {}
-    local curr = 0
-    local pos = 1
-    local raw = tostring(str)
-    while pos <= #raw and curr < max_w - 3 do
-        local ansi = raw:match("^\27%[[%d;]*[mK]", pos)
-        if ansi then
-            table.insert(out, ansi)
-            pos = pos + #ansi
-        else
-            local c = raw:match("^[%z\1-\127\194-\244][\128-\191]*", pos)
-            if c then
-                local cw = 1
-                if #c > 1 and not ((c >= "─" and c <= "╿") or (c >= "┌" and c <= "▟") or c == "▶") then
-                    cw = 2
-                end
-                if curr + cw > max_w - 3 then break end
-                table.insert(out, c)
-                curr = curr + cw
-                pos = pos + #c
-            else
-                break
-            end
-        end
-    end
-    local has_ansi = (raw:find("\27[", 1, true) ~= nil)
-    return table.concat(out) .. "..." .. (has_ansi and "\27[0m" or "")
-end
-
 local function pad_to(str, target_width)
     local s = truncate(str, target_width)
     local vlen = visual_len(s)
@@ -2916,26 +2989,6 @@ function TUI.run(db, initial_query, tui_limit)
     if not enable_raw() then
         print("Error: Failed to initialize raw terminal mode.")
         return false
-    end
-
-    local function get_term_size()
-        if is_windows then
-            if kernel32 then
-                local hOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
-                local csbi = ffi.new("CONSOLE_SCREEN_BUFFER_INFO")
-                if kernel32.GetConsoleScreenBufferInfo(hOut, csbi) ~= 0 then
-                    local w = csbi.srWindow.Right - csbi.srWindow.Left + 1
-                    local h = csbi.srWindow.Bottom - csbi.srWindow.Top + 1
-                    if w > 0 and h > 0 then return tonumber(w), tonumber(h) end
-                end
-            end
-        else
-            local ws = ffi.new("struct winsize")
-            if ffi.C.ioctl(1, (ffi.os == "OSX" or ffi.os == "BSD") and 0x40087468 or 0x5413, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
-                return tonumber(ws.ws_col), tonumber(ws.ws_row)
-            end
-        end
-        return 100, 30
     end
 
     local pfd = not is_windows and ffi.new("struct pollfd", { fd = 0, events = 1, revents = 0 }) or nil
@@ -4338,7 +4391,8 @@ local function run_self_tests()
     print("  Running Unit & Integration Tests for codefind.lua")
     print("================================================================================")
 
-    local test_db_path = "/tmp/_test_codefind_" .. os.time() .. ".db"
+    local tmp_base = is_windows and (os.getenv("TEMP") or "C:\\temp"):gsub("\\", "/") or "/tmp"
+    local test_db_path = tmp_base .. "/_test_codefind_" .. os.time() .. ".db"
     os.remove(test_db_path)
 
     -- Test 1: Database creation & FTS5 initialization
@@ -4454,6 +4508,7 @@ local function run_self_tests()
 end
 
 local function main(args)
+    init_console()
     if args[1] == "--help" or args[1] == "-h" or args[1] == "help" then
         print_help()
         return
@@ -4902,6 +4957,9 @@ if pcall(debug.getlocal, 4, 1) then
         normalize_path = normalize_path,
         get_filename = get_filename,
         IGNORED_DIRS = IGNORED_DIRS,
+        format_indexer_progress = format_indexer_progress,
+        get_term_size = get_term_size,
+        init_console = init_console,
     }
 else
     main(arg)

@@ -1495,6 +1495,50 @@ TestRunner.describe("13. Exact Phrase Line Matching & Highlight Extraction", fun
     end)
 end)
 
+TestRunner.describe("14. Responsive Indexer Progress Bar Clamping & UTF-8 Formatter", function()
+    TestRunner.it("should clamp progress status within terminal width minus one across multiple viewports", function()
+        local test_widths = { 40, 60, 80, 100, 120, 160 }
+        for _, cols in ipairs(test_widths) do
+            local max_allowed = math.max(38, cols - 1)
+            -- Mid-progress
+            local s_mid = codefind.format_indexer_progress(1218, 5279, 18 * 1024 * 1024, 28, cols)
+            local v_mid = codefind.visual_len(s_mid)
+            assert_true(v_mid <= max_allowed, string.format("Cols %d: mid visual length %d exceeded max_allowed %d: %s", cols, v_mid, max_allowed, s_mid))
+
+            -- Start (0 items, 0.001 elapsed)
+            local s_start = codefind.format_indexer_progress(0, 5279, 0, 0.001, cols)
+            local v_start = codefind.visual_len(s_start)
+            assert_true(v_start <= max_allowed, string.format("Cols %d: start visual length %d exceeded max_allowed %d", cols, v_start, max_allowed))
+
+            -- Completion (all items, Done)
+            local s_done = codefind.format_indexer_progress(5279, 5279, 50 * 1024 * 1024, 65, cols)
+            local v_done = codefind.visual_len(s_done)
+            assert_true(v_done <= max_allowed, string.format("Cols %d: done visual length %d exceeded max_allowed %d", cols, v_done, max_allowed))
+
+            -- High file counts (6 digits)
+            local s_huge = codefind.format_indexer_progress(123456, 999999, 500 * 1024 * 1024, 120, cols)
+            local v_huge = codefind.visual_len(s_huge)
+            assert_true(v_huge <= max_allowed, string.format("Cols %d: huge visual length %d exceeded max_allowed %d", cols, v_huge, max_allowed))
+        end
+    end)
+
+    TestRunner.it("should include UTF-8 progress bar and status pills on standard 80-column terminal", function()
+        local line = codefind.format_indexer_progress(1218, 5279, 18 * 1024 * 1024, 28, 80)
+        assert_true(codefind.visual_len(line) <= 79, "Line should not exceed 79 columns in 80-col mode")
+        assert_true(line:find("1218/5279 files") ~= nil, "Line should include file counts")
+        assert_true(line:find("18.0 MB") ~= nil, "Line should include megabytes")
+        assert_true(line:find("f/s") ~= nil, "Line should include transfer rate")
+        assert_true(line:find("ETA:") ~= nil, "Line should include ETA")
+    end)
+
+    TestRunner.it("should include Elapsed and Done on wide terminal upon completion", function()
+        local line = codefind.format_indexer_progress(500, 500, 10 * 1024 * 1024, 12, 120)
+        assert_true(codefind.visual_len(line) <= 119, "Line should not exceed 119 columns")
+        assert_true(line:find("Elapsed: 00:12") ~= nil, "Line should include elapsed time")
+        assert_true(line:find("Done") ~= nil, "Line should show Done on completion")
+    end)
+end)
+
 db:close()
 os.remove(test_db_path)
 os.remove(test_db_path .. "-wal")
