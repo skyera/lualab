@@ -1021,6 +1021,7 @@ end
 -- 3. YouTube Search & Extraction Engine
 -- =========================================================================
 local function scrape_youtube_search(query, max_results, proxy, insecure)
+    query = tostring(query or "")
     max_results = max_results or 20
     local encoded = query:gsub("([^%w%-%_%.%~])", function(c)
         return string.format("%%%02X", string.byte(c))
@@ -1211,11 +1212,11 @@ local function fetch_youtube_results(query, mode, browser, cookies_file, max_res
 
     -- Automatic Fallback: Direct Web Scrape via curl (works even if yt-dlp is blocked or broken)
     if site == "youtube" and not is_liked and not is_direct_url then
-        local fallback_items = scrape_youtube_search(term, max_results, proxy, insecure)
+        local fallback_items = scrape_youtube_search(query, max_results, proxy, insecure)
         if fallback_items and #fallback_items > 0 then
             return fallback_items, nil, insecure
         elseif not insecure then
-            local fallback_insecure = scrape_youtube_search(term, max_results, proxy, true)
+            local fallback_insecure = scrape_youtube_search(query, max_results, proxy, true)
             if fallback_insecure and #fallback_insecure > 0 then
                 io.stderr:write("\n\27[33m[yt] Corporate SSL inspection detected (curl) -- retrying in insecure mode...\27[0m\n")
                 return fallback_insecure, nil, true
@@ -3115,6 +3116,13 @@ local function run_self_tests()
     local yt_style_cyan = build_test_yt_style("cyan")
     assert(yt_style_cyan:find('sub%-color="#00FFFFFF"') ~= nil, "Cyan CC color missing")
     print("  [✓] Standalone window (-w) YouTube-identical & high-contrast subtitle styling validated")
+
+    -- 21. scrape_youtube_search query parameter handling & fallback validation
+    local ok_nil_scrape = pcall(function() return scrape_youtube_search(nil, 1) end)
+    assert(ok_nil_scrape, "scrape_youtube_search must safely handle nil query without error")
+    local ok_empty_scrape = pcall(function() return scrape_youtube_search("", 1) end)
+    assert(ok_empty_scrape, "scrape_youtube_search must safely handle empty query")
+    print("  [✓] scrape_youtube_search query parameter & fallback robustness passed")
 
     print("=== All Internal Self-Tests Passed Successfully ===")
     return true
