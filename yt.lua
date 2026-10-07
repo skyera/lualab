@@ -41,6 +41,31 @@ local safe_popen = io.popen
 local safe_execute = os.execute
 local kernel32
 local msvcrt
+local pending_keys = {}
+local enqueue_pending_bytes
+
+enqueue_pending_bytes = function(buf, start_idx, len)
+    for i = start_idx, len - 1 do
+        local b
+        if type(buf) == "string" then
+            b = buf:byte(i + 1)
+        else
+            b = bit.band(buf[i], 0xFF)
+        end
+        if b == 10 or b == 13 then
+            table.insert(pending_keys, "ENTER")
+        elseif b == 9 then
+            table.insert(pending_keys, "TAB")
+        elseif b == 127 or b == 8 then
+            table.insert(pending_keys, "BACKSPACE")
+        elseif b == 21 then
+            table.insert(pending_keys, "CTRL_U")
+        elseif (b >= 32 and b <= 126) or b >= 128 then
+            table.insert(pending_keys, string.char(b))
+        end
+    end
+end
+
 
 if is_windows then
     ffi.cdef[[
@@ -243,6 +268,9 @@ if is_windows then
     end
 
     read_key = function(timeout_ms)
+        if #pending_keys > 0 then
+            return table.remove(pending_keys, 1)
+        end
         timeout_ms = timeout_ms or -1
         local start = kernel32.GetTickCount()
         while true do
@@ -271,7 +299,7 @@ if is_windows then
                     return "CTRL_D"
                 elseif ch == 21 then
                     return "CTRL_U"
-                elseif ch >= 32 and ch <= 126 then
+                elseif (ch >= 32 and ch <= 126) or ch >= 128 then
                     return string.char(ch)
                 end
             end
@@ -426,6 +454,9 @@ ffi.cdef(posix_termios_cdef[[
     local key_buf = ffi.new("char[16]")
 
     read_key = function(timeout_ms)
+        if #pending_keys > 0 then
+            return table.remove(pending_keys, 1)
+        end
         timeout_ms = timeout_ms or -1
         local ret = ffi.C.poll(pfd, 1, timeout_ms)
         if ret > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
@@ -435,28 +466,34 @@ ffi.cdef(posix_termios_cdef[[
                 if c0 == 27 then
                     if n >= 3 and key_buf[1] == 91 then
                         local c2 = key_buf[2]
-                        if c2 == 65 then return "UP" end
-                        if c2 == 66 then return "DOWN" end
-                        if c2 == 67 then return "RIGHT" end
-                        if c2 == 68 then return "LEFT" end
-                        if c2 == 72 then return "HOME" end
-                        if c2 == 70 then return "END" end
-                        if c2 == 53 and n >= 4 and key_buf[3] == 126 then return "PAGE_UP" end
-                        if c2 == 54 and n >= 4 and key_buf[3] == 126 then return "PAGE_DOWN" end
+                        if c2 == 65 then enqueue_pending_bytes(key_buf, 3, n); return "UP" end
+                        if c2 == 66 then enqueue_pending_bytes(key_buf, 3, n); return "DOWN" end
+                        if c2 == 67 then enqueue_pending_bytes(key_buf, 3, n); return "RIGHT" end
+                        if c2 == 68 then enqueue_pending_bytes(key_buf, 3, n); return "LEFT" end
+                        if c2 == 72 then enqueue_pending_bytes(key_buf, 3, n); return "HOME" end
+                        if c2 == 70 then enqueue_pending_bytes(key_buf, 3, n); return "END" end
+                        if c2 == 53 and n >= 4 and key_buf[3] == 126 then enqueue_pending_bytes(key_buf, 4, n); return "PAGE_UP" end
+                        if c2 == 54 and n >= 4 and key_buf[3] == 126 then enqueue_pending_bytes(key_buf, 4, n); return "PAGE_DOWN" end
                     elseif n == 1 then
                         return "ESC"
                     end
                 elseif c0 == 10 or c0 == 13 then
+                    enqueue_pending_bytes(key_buf, 1, n)
                     return "ENTER"
                 elseif c0 == 9 then
+                    enqueue_pending_bytes(key_buf, 1, n)
                     return "TAB"
                 elseif c0 == 127 or c0 == 8 then
+                    enqueue_pending_bytes(key_buf, 1, n)
                     return "BACKSPACE"
                 elseif c0 == 4 then
+                    enqueue_pending_bytes(key_buf, 1, n)
                     return "CTRL_D"
                 elseif c0 == 21 then
+                    enqueue_pending_bytes(key_buf, 1, n)
                     return "CTRL_U"
-                elseif c0 >= 32 and c0 <= 126 then
+                elseif (c0 >= 32 and c0 <= 126) or c0 >= 128 then
+                    enqueue_pending_bytes(key_buf, 1, n)
                     return string.char(c0)
                 end
             end
@@ -3129,6 +3166,30 @@ local function run_self_tests()
     local ok_empty_scrape = pcall(function() return scrape_youtube_search("", 1) end)
     assert(ok_empty_scrape, "scrape_youtube_search must safely handle empty query")
     print("  [✓] scrape_youtube_search query parameter & fallback robustness passed")
+
+    -- 22. Multi-byte pasted input FIFO queueing (Issue 3.5)
+    local sample_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    for k in pairs(pending_keys) do pending_keys[k] = nil end
+    local sim_buf = ffi.new("char[?]", #sample_url + 1, sample_url)
+    enqueue_pending_bytes(sim_buf, 0, #sample_url)
+    local recovered = {}
+    while true do
+        local k = read_key(0)
+        if not k then break end
+        table.insert(recovered, k)
+    end
+    assert(table.concat(recovered) == sample_url, "Pending keys queue failed to recover complete pasted string: got " .. table.concat(recovered))
+
+    for k in pairs(pending_keys) do pending_keys[k] = nil end
+    local chunk1 = "abc\n"
+    local sim_c1 = ffi.new("char[?]", #chunk1 + 1, chunk1)
+    enqueue_pending_bytes(sim_c1, 0, #chunk1)
+    assert(read_key(0) == "a", "First key mismatch")
+    assert(read_key(0) == "b", "Second key mismatch")
+    assert(read_key(0) == "c", "Third key mismatch")
+    assert(read_key(0) == "ENTER", "Enter translation mismatch")
+    assert(read_key(0) == nil, "Queue should be empty after draining")
+    print("  [✓] Multi-byte pasted input FIFO queueing & token normalization validated")
 
     print("=== All Internal Self-Tests Passed Successfully ===")
     return true

@@ -155,6 +155,7 @@ p_test11:close()
 assert(t11_out:find("Download directory validation passed", 1, true), "Self-test missing download dir validation")
 assert(t11_out:find("Up-Next Playback Queue FIFO logic passed", 1, true), "Self-test missing queue validation")
 assert(t11_out:find("Search Filters & Sorting validation passed", 1, true), "Self-test missing search filters validation")
+assert(t11_out:find("Multi-byte pasted input FIFO queueing & token normalization validated", 1, true), "Self-test missing pasted input FIFO queueing validation")
 if is_win then
     assert(t11_out:find("Win32 Named Pipe FFI bindings validated", 1, true), "Self-test missing pipe bindings validation")
 end
