@@ -19,7 +19,7 @@ A systematic audit identified critical bugs, security vulnerabilities, and oppor
 | **1.3** | Shell Metacharacter Injection in Search Spec Commands | **High / Security** | Proposed | [`yt.lua:1093, 1108`](file:///home/zliu/test/lualab/yt.lua#L1093) | `$VAR`, `$(cmd)`, and backticks evaluated by shell |
 | **1.4** | Missing Signal Handlers & Terminal Restoration on Interrupt | **High / Stability** | Proposed | [`yt.lua:398-424, 2251`](file:///home/zliu/test/lualab/yt.lua#L398) | Leaves terminal frozen/invisible on `Ctrl+C` |
 | **1.5** | Multi-Byte Pasted Input Truncation in POSIX `read_key` | **Medium / Usability** | ✅ **Fixed** | [`yt.lua:43-67, 456-499`](file:///home/zliu/test/lualab/yt.lua#L456) | Pasting URLs drops up to 15 characters per chunk |
-| **1.6** | Search Query Prompt Discards Active Search on Refinement | **Medium / UX Polish** | Proposed | [`yt.lua:2128`](file:///home/zliu/test/lualab/yt.lua#L2128) | Forces user to retype query from scratch on `[/]` |
+| **1.6** | Search Query Prompt Discards Active Search on Refinement | **Medium / UX Polish** | ✅ **Fixed** | [`yt.lua:2160-2212`](file:///home/zliu/test/lualab/yt.lua#L2160) | Forces user to retype query from scratch on `[/]` |
 | **1.7** | Terminal Autowrap Shift & Missing Synchronized Updates | **Medium / TUI Standard** | Proposed | [`yt.lua:411, 2365`](file:///home/zliu/test/lualab/yt.lua#L411) | Layout shift on narrow terminals, tearing during redraws |
 | **1.8** | Test Suite `LUA_PATH` Subshell Resolution & Offline Fallback | **Medium / Test Suite** | Proposed | [`test_yt.lua:164-185`](file:///home/zliu/test/lualab/test_yt.lua#L164) | Bytecode global checks fail without module paths |
 
@@ -182,6 +182,7 @@ A systematic audit identified critical bugs, security vulnerabilities, and oppor
 ---
 
 ### 3.6 Search Query Modal Discards Active Search on Refinement
+- **Status**: ✅ **FIXED** ([`yt.lua`](file:///home/zliu/test/lualab/yt.lua#L2160))
 - **Severity**: Medium (UX Polish)
 - **Problem**:
   Function `prompt_search_query(current_query)` declares:

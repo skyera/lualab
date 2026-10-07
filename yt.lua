@@ -2163,7 +2163,7 @@ local function prompt_search_query(current_query)
     local box_x = math.max(1, math.floor((term_w - box_w) / 2))
     local box_y = math.max(2, math.floor(term_h / 3))
 
-    local input_str = ""
+    local input_str = current_query or ""
 
     local function draw_modal()
         io.write(string.format("\27[%d;%dH\27[1;36m+%s+\27[0m", box_y, box_x, string.rep("-", box_w - 2)))
@@ -2177,8 +2177,10 @@ local function prompt_search_query(current_query)
         local pad = math.max(0, box_w - 6 - #display_input)
         io.write(string.format("\27[%d;%dH\27[1;36m| \27[93m> %s\27[7m \27[0m%s\27[1;36m|\27[0m",
             box_y + 2, box_x, display_input, string.rep(" ", pad)))
-        io.write(string.format("\27[%d;%dH\27[1;36m| \27[90m[Enter] Search   [Esc] Cancel\27[0m%s\27[1;36m|\27[0m",
-            box_y + 3, box_x, string.rep(" ", box_w - 32)))
+        local help_str = (box_w >= 54) and "[Enter] Search   [Ctrl+U] Clear   [Esc] Cancel" or "[Enter] Search   [Esc] Cancel"
+        local help_pad = math.max(0, box_w - 3 - #help_str)
+        io.write(string.format("\27[%d;%dH\27[1;36m| \27[90m%s\27[0m%s\27[1;36m|\27[0m",
+            box_y + 3, box_x, help_str, string.rep(" ", help_pad)))
         io.write(string.format("\27[%d;%dH\27[1;36m+%s+\27[0m", box_y + 4, box_x, string.rep("-", box_w - 2)))
         io.flush()
     end
@@ -2198,6 +2200,11 @@ local function prompt_search_query(current_query)
         elseif k == "BACKSPACE" then
             if #input_str > 0 then
                 input_str = input_str:sub(1, #input_str - 1)
+                draw_modal()
+            end
+        elseif k == "CTRL_U" then
+            if #input_str > 0 then
+                input_str = ""
                 draw_modal()
             end
         elseif k and #k == 1 then
@@ -3190,6 +3197,29 @@ local function run_self_tests()
     assert(read_key(0) == "ENTER", "Enter translation mismatch")
     assert(read_key(0) == nil, "Queue should be empty after draining")
     print("  [✓] Multi-byte pasted input FIFO queueing & token normalization validated")
+
+    -- 23. Search query prompt pre-fill & Ctrl+U fast clear (Issue 3.6)
+    for k in pairs(pending_keys) do pending_keys[k] = nil end
+    table.insert(pending_keys, "ENTER")
+    local preserved = prompt_search_query("lofi beats")
+    assert(preserved == "lofi beats", "prompt_search_query must preserve active query on ENTER: got " .. tostring(preserved))
+
+    for k in pairs(pending_keys) do pending_keys[k] = nil end
+    table.insert(pending_keys, "CTRL_U")
+    table.insert(pending_keys, "s")
+    table.insert(pending_keys, "y")
+    table.insert(pending_keys, "n")
+    table.insert(pending_keys, "t")
+    table.insert(pending_keys, "h")
+    table.insert(pending_keys, "ENTER")
+    local replaced = prompt_search_query("lofi beats")
+    assert(replaced == "synth", "prompt_search_query must clear via CTRL_U and accept new input: got " .. tostring(replaced))
+
+    for k in pairs(pending_keys) do pending_keys[k] = nil end
+    table.insert(pending_keys, "ESC")
+    local cancelled = prompt_search_query("lofi beats")
+    assert(cancelled == nil, "prompt_search_query must return nil on ESC")
+    print("  [✓] Search query modal pre-fill, Ctrl+U clear & interactive simulation validated")
 
     print("=== All Internal Self-Tests Passed Successfully ===")
     return true
