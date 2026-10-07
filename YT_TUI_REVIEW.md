@@ -15,7 +15,7 @@ A systematic audit identified critical bugs, security vulnerabilities, and oppor
 | ID | Issue / Feature | Severity / Type | Status | File & Line Range | Impact |
 |:---|:---|:---|:---|:---|:---|
 | **1.1** | Undefined Global `term` Crashes Curl Web Fallback | **Critical / Correctness** | ✅ **Fixed** | [`yt.lua:1215, 1219`](file:///home/zliu/test/lualab/yt.lua#L1215) | Crashes web scraping when yt-dlp fails |
-| **1.2** | Search Sort Filters (`--sort views/date/rating`) Shadowed / Dead Code | **High / Correctness** | Proposed | [`yt.lua:1092-1109`](file:///home/zliu/test/lualab/yt.lua#L1092-L1109) | Sort options in `[f]` modal have zero effect |
+| **1.2** | Search Sort Filters (`--sort views/date/rating`) Shadowed / Dead Code | **High / Correctness** | ✅ **Fixed** | [`yt.lua:1093-1108`](file:///home/zliu/test/lualab/yt.lua#L1093) | Sort options in `[f]` modal have zero effect |
 | **1.3** | Shell Metacharacter Injection in Search Spec Commands | **High / Security** | Proposed | [`yt.lua:1093, 1108`](file:///home/zliu/test/lualab/yt.lua#L1093) | `$VAR`, `$(cmd)`, and backticks evaluated by shell |
 | **1.4** | Missing Signal Handlers & Terminal Restoration on Interrupt | **High / Stability** | Proposed | [`yt.lua:398-424, 2251`](file:///home/zliu/test/lualab/yt.lua#L398) | Leaves terminal frozen/invisible on `Ctrl+C` |
 | **1.5** | Multi-Byte Pasted Input Truncation in POSIX `read_key` | **Medium / Usability** | Proposed | [`yt.lua:432-463`](file:///home/zliu/test/lualab/yt.lua#L432) | Pasting URLs drops up to 15 characters per chunk |
@@ -74,6 +74,7 @@ A systematic audit identified critical bugs, security vulnerabilities, and oppor
 ---
 
 ### 3.2 Search Sort Filters (`--sort views/date/rating`) Shadowed
+- **Status**: ✅ **FIXED** ([`yt.lua`](file:///home/zliu/test/lualab/yt.lua#L1093))
 - **Severity**: High (Severity 2)
 - **Problem**:
   In `build_search_spec(query, mode, max_results, is_liked, filters, site)`:

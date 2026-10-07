@@ -1090,9 +1090,7 @@ local function build_search_spec(query, mode, max_results, is_liked, filters, si
         end
     elseif is_direct_url then
         return string.format("%q", query)
-    elseif SITE_SEARCH_PREFIXES[site] then
-        return string.format('"%s%d:%s"', SITE_SEARCH_PREFIXES[site], max_results, query:gsub('"', '\\"'))
-    elseif filters and filters.sort and filters.sort ~= "relevance" then
+    elseif site == "youtube" and filters and filters.sort and filters.sort ~= "relevance" then
         local sp_map = {
             views = "CAM%253D",
             date = "CAI%253D",
@@ -1105,6 +1103,8 @@ local function build_search_spec(query, mode, max_results, is_liked, filters, si
         else
             return string.format('"ytsearch%d:%s"', max_results, query:gsub('"', '\\"'))
         end
+    elseif SITE_SEARCH_PREFIXES[site] then
+        return string.format('"%s%d:%s"', SITE_SEARCH_PREFIXES[site], max_results, query:gsub('"', '\\"'))
     else
         return string.format('"ytsearch%d:%s"', max_results, query:gsub('"', '\\"'))
     end
@@ -2939,6 +2939,12 @@ local function run_self_tests()
         "Liked video favorites spec failed")
     assert(build_search_spec("chillhop", "music", 10, false, nil, "soundcloud") == '"scsearch10:chillhop"',
         "Soundcloud site adapter failed")
+    assert(build_search_spec("piano relax", "music", 20, false, { sort = "views" }, "youtube") == '"https://www.youtube.com/results?search_query=piano+relax&sp=CAM%253D"',
+        "Search spec sort by views failed")
+    assert(build_search_spec("piano relax", "music", 20, false, { sort = "date" }, "youtube") == '"https://www.youtube.com/results?search_query=piano+relax&sp=CAI%253D"',
+        "Search spec sort by date failed")
+    assert(build_search_spec("piano relax", "music", 20, false, { sort = "rating" }, "youtube") == '"https://www.youtube.com/results?search_query=piano+relax&sp=CAE%253D"',
+        "Search spec sort by rating failed")
     print("  [✓] Search spec generation & audio-mode video search query preservation passed")
 
     -- 16. Mini-player dedicated CC layout & renderer invariant tests
