@@ -83,6 +83,7 @@ make
   ./LuaJIT/src/luajit codefind.lua index .        # High-performance local code & document search engine (SQLite FTS5)
   ./LuaJIT/src/luajit luatop.lua                  # Professional terminal system & process monitor (CPU, GPU, Net, Tree)
   ./LuaJIT/src/luajit enigma.lua                  # WWII Enigma cipher machine simulator & glowing lampboard TUI
+  ./LuaJIT/src/luajit yt.lua [query]              # YouTube & music terminal player (CC/lyrics, EQ, radio, favorites)
   ```
 
 - **Run Unit Tests:**

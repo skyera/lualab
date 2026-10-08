@@ -44,6 +44,8 @@ Adopts the industry-standard YouTube keyboard shortcuts for instantaneous track 
 
 ### F-2: Real-Time Playback Speed Control (`[` / `]`)
 
+**Status**: ✅ **Implemented & Verified** (CLI `--speed <mult>`, Hotkeys `[` / `]`, `{` / `}`, Unit Test 26, IPC property 9 observer).
+
 #### Overview
 Allows variable speed playback (0.5x, 0.75x, 1.0x, 1.25x, 1.5x, 1.75x, 2.0x) with pitch preservation via mpv's `scaletempo2` filter. Indispensable for podcasts, educational content, interviews, and speed-listening.
 
@@ -51,11 +53,12 @@ Allows variable speed playback (0.5x, 0.75x, 1.0x, 1.25x, 1.5x, 1.75x, 2.0x) wit
 - `[`: Decrease speed by `0.25x` (clamped to minimum `0.5x`).
 - `]`: Increase speed by `0.25x` (clamped to maximum `2.5x`).
 - `Backspace` (in speed modal) or `{`: Reset speed to `1.0x`.
+- `--speed <mult>`: CLI option to launch with custom initial speed.
 
 #### Mini-Player & Header Display
 ```text
  ==============================================================================
-  YouTube Terminal Viewer | [MUSIC] | [AUTO: ON] | [SPEED: 1.25x] | Guest
+  YouTube Terminal Viewer | [MUSIC] | [AUTO: ON] | [1.25x] | Guest
   Search: "lex fridman podcast"  (Playing: Lex Fridman #400)
  ------------------------------------------------------------------------------
   [▶] Playing: Lex Fridman #400 (Resumed 14:20) [1.25x]
@@ -65,6 +68,8 @@ Allows variable speed playback (0.5x, 0.75x, 1.0x, 1.25x, 1.5x, 1.75x, 2.0x) wit
 ---
 
 ### F-3: Infinite YouTube Mix / Radio Mode (`[r]` / `--radio`)
+
+**Status**: ✅ **Implemented & Verified** (CLI `--radio`, Hotkey `[r]`, Mix URL `RD<id>`, Auto-replenishment on EOF, Unit Test 29).
 
 #### Overview
 Currently, auto-play (`[a]`) only advances down the static 25 search results. When the list ends, playback stops.
@@ -126,13 +131,15 @@ Countdown timer that pauses playback (and optionally terminates the player) afte
 
 ### F-5: Audio Equalizer & Loudness Normalization (`[e]` / `--eq`)
 
+**Status**: ✅ **Implemented & Verified** (CLI `--eq <preset>`, Hotkey `[e]`, 5 presets `flat`/`night`/`bass`/`vocal`/`lofi`, Unit Tests 27 & 30).
+
 #### Overview
 Dynamic DSP audio filter switching using mpv's `af` chain via IPC without interrupting playback:
 - **Night Mode / Loudness Normalizer** (`dynaudnorm=f=150:g=15` or `loudnorm`):
   Eliminates volume spikes between quiet indie music and loud production tracks.
 - **Bass Boost** (`equalizer=f=64:t=q:w=1:g=6:f=125:t=q:w=1:g=4`):
   Punchy low-end enhancement for electronic and hip-hop.
-- **Vocal Clarity / Podcast** (`equalizer=f=1000:t=q:w=1:g=3:f=3000:t=q:w=1:g=4`):
+- **Vocal Clarity / Podcast** (`equalizer=f=1000:t=q:w=1:g=3:f=3000:t=q:w=1:g=4:f=100:t=q:w=1:g=-4`):
   Cuts harsh rumble and enhances spoken voice frequencies.
 - **Lo-Fi / Vinyl Warmth**: Subtle high-cut filter (`lowpass=f=4500`).
 
@@ -155,12 +162,15 @@ Dynamic DSP audio filter switching using mpv's `af` chain via IPC without interr
 
 ### F-6: Local Starred Favorites & Saved Playlists (`[*]`, `[F]`)
 
+**Status**: ✅ **Implemented & Verified** (CLI `--favorites`, Hotkeys `[*]` star/unstar, `[F]` view favorites, persistent `<cache_dir>/favorites.json`, gold `★` list indicator, Unit Test 28, Test 13).
+
 #### Overview
 Allows users to save favorite tracks locally without needing a YouTube account or browser session cookies:
 - `[*]`: Star / un-star selected track or currently playing track.
 - `[F]`: Toggle view mode between **Search Results**, **Playback History**, and **Starred Favorites**.
 - Saves persistently in `<cache_dir>/favorites.json`.
 - Exportable to standard `.m3u8` playlist files.
+- Non-interactive batch export: `luajit yt.lua --favorites --no-interactive`.
 
 #### Starred Track List Indicator
 ```text
