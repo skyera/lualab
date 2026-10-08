@@ -474,6 +474,8 @@ ffi.cdef(posix_termios_cdef[[
                         if c2 == 70 then enqueue_pending_bytes(key_buf, 3, n); return "END" end
                         if c2 == 53 and n >= 4 and key_buf[3] == 126 then enqueue_pending_bytes(key_buf, 4, n); return "PAGE_UP" end
                         if c2 == 54 and n >= 4 and key_buf[3] == 126 then enqueue_pending_bytes(key_buf, 4, n); return "PAGE_DOWN" end
+                    elseif n == 2 and (key_buf[1] == 122 or key_buf[1] == 90) then
+                        return "ALT_z"
                     elseif n == 1 then
                         return "ESC"
                     end
@@ -572,7 +574,8 @@ end
 
 -- Resume playback position: mpv's native watch-later store, kept in our cache dir.
 -- Each file holds "# <url>" and "start=<seconds>", so positions can be looked up by URL.
-local resume_cfg = { enabled = true, opts = nil }
+-- Default is false (opt-in via --resume) to guarantee fresh playback starts from 00:00 without PTS drift.
+local resume_cfg = { enabled = false, opts = nil }
 local RESUME_MIN_SEC = 5
 
 local function get_resume_dir()
@@ -1680,7 +1683,7 @@ local function to_mpv_slang(sub_lang)
     return #parts > 0 and table.concat(parts, ",") or "en-orig,en,eng,en-US,en-GB"
 end
 
-local function render_mini_player_lines(cur, is_paused, volume, pos, dur, sub_text, show_cc, term_w, track_idx, total_tracks, has_sub_track, last_sub_text, speed, eq_preset)
+local function render_mini_player_lines(cur, is_paused, volume, pos, dur, sub_text, show_cc, term_w, track_idx, total_tracks, has_sub_track, last_sub_text, speed, eq_preset, sub_delay)
     term_w = math.max(30, term_w or 80)
     dur = (dur and dur > 0) and dur or (cur and cur.duration or 0)
     pos = pos or 0
@@ -1715,17 +1718,19 @@ local function render_mini_player_lines(cur, is_paused, volume, pos, dur, sub_te
     -- Dedicated CC / Subtitles Row (Row 3)
     if show_cc then
         local max_cc_w = math.max(10, term_w - 14)
+        local sync_badge = (sub_delay and sub_delay ~= 0.0) and string.format(" \27[90m(%+.2fs)\27[0m", sub_delay) or ""
+        local sync_w = display_width(strip_ansi(sync_badge))
         local cc_content
         if has_sub_track == false then
-            cc_content = "\27[90m[CC] (No subtitles available for this track)\27[0m"
+            cc_content = string.format("\27[90m[CC]%s (No subtitles available for this track)\27[0m", sync_badge)
         elseif #sub_text > 0 then
             local clean_sub = sanitize_display_text(sub_text)
-            cc_content = string.format("\27[1;93m[CC]\27[0m \27[1;97m\"%s\"\27[0m", utf8_truncate(clean_sub, max_cc_w))
+            cc_content = string.format("\27[1;93m[CC]%s\27[0m \27[1;97m\"%s\"\27[0m", sync_badge, utf8_truncate(clean_sub, max_cc_w - sync_w))
         elseif #last_sub_text > 0 then
             local clean_sub = sanitize_display_text(last_sub_text)
-            cc_content = string.format("\27[1;93m[CC]\27[0m \27[90m\"%s\"\27[0m", utf8_truncate(clean_sub, max_cc_w))
+            cc_content = string.format("\27[1;93m[CC]%s\27[0m \27[90m\"%s\"\27[0m", sync_badge, utf8_truncate(clean_sub, max_cc_w - sync_w))
         else
-            cc_content = "\27[90m[CC] (Listening for speech / instrumental...)\27[0m"
+            cc_content = string.format("\27[90m[CC]%s (Listening for speech / instrumental...)\27[0m", sync_badge)
         end
         local cc_line = string.format(" \27[1;36m|\27[0m %s", cc_content)
         local pad_cc = math.max(0, term_w - display_width(strip_ansi(cc_line)) - 1)
@@ -1733,13 +1738,15 @@ local function render_mini_player_lines(cur, is_paused, volume, pos, dur, sub_te
     end
 
     -- Border 2 (Controls / Bottom Border)
-    local ctrl_hint_text = (term_w >= 96)
-        and "[Space] Pause  [c] CC  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol  [[/]] Spd  [e] EQ"
-        or ((term_w >= 85)
-            and "[Space] Pause  [c] CC  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol  [[/]] Spd"
-            or ((term_w >= 70)
-                and "[Space] Pause  [c] CC  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol"
-                or "[Space] Pause  [c] CC  [s] Skip  [x] Stop"))
+    local ctrl_hint_text = (term_w >= 105)
+        and "[Space] Pause  [c] CC  [z/Z] Sync  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol  [[/]] Spd  [e] EQ"
+        or ((term_w >= 96)
+            and "[Space] Pause  [c] CC  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol  [[/]] Spd  [e] EQ"
+            or ((term_w >= 85)
+                and "[Space] Pause  [c] CC  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol  [[/]] Spd"
+                or ((term_w >= 70)
+                    and "[Space] Pause  [c] CC  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol"
+                    or "[Space] Pause  [c] CC  [s] Skip  [x] Stop")))
     local max_hint_w = math.max(10, term_w - 6)
     if display_width(ctrl_hint_text) > max_hint_w then
         ctrl_hint_text = utf8_truncate(ctrl_hint_text, max_hint_w)
@@ -1784,6 +1791,7 @@ local MpvController = {
     cc_state = { prev_last_line = "", prev_displayed = "" },
     speed = 1.0,
     eq_preset = "flat",
+    sub_delay = 0.0,
 }
 
 function MpvController:init_observers()
@@ -1796,6 +1804,7 @@ function MpvController:init_observers()
     self:send_command('{"command": ["observe_property", 7, "sub"]}')
     self:send_command('{"command": ["observe_property", 8, "track-list"]}')
     self:send_command('{"command": ["observe_property", 9, "speed"]}')
+    self:send_command('{"command": ["observe_property", 10, "sub-delay"]}')
 end
 
 function MpvController:send_command(json_str)
@@ -1852,6 +1861,9 @@ function MpvController:start(item, show_cc, sub_lang, browser, cookies_file, pro
         if #af_filter > 0 then
             extra_mpv_opts = extra_mpv_opts .. string.format(" --af=%q", af_filter)
         end
+    end
+    if self.sub_delay and self.sub_delay ~= 0.0 then
+        extra_mpv_opts = extra_mpv_opts .. string.format(" --sub-delay=%.2f", self.sub_delay)
     end
 
     local cmd
@@ -1981,6 +1993,9 @@ function MpvController:poll()
         elseif prop == "speed" then
             local sp = parse_json_field(line, "data")
             if sp and tonumber(sp) then self.speed = tonumber(sp) end
+        elseif prop == "sub-delay" then
+            local sd = parse_json_field(line, "data")
+            if sd and tonumber(sd) then self.sub_delay = tonumber(sd) end
         elseif prop == "sub-text" then
             local s = parse_json_field(line, "data") or ""
             if #s > 0 then
@@ -2030,6 +2045,7 @@ function MpvController:poll()
         volume = self.volume,
         is_paused = self.is_paused,
         sub_text = self.sub_text,
+        sub_delay = self.sub_delay,
         is_eof = self.is_eof
     }
 end
@@ -2071,6 +2087,18 @@ function MpvController:set_eq(preset_key)
     self.eq_preset = preset_key or "flat"
     local filter = get_eq_filter(self.eq_preset)
     self:send_command(string.format('{"command": ["set_property", "af", %q]}', filter))
+end
+
+function MpvController:adjust_sub_delay(delta)
+    local cur = self.sub_delay or 0.0
+    local new_val = math.max(-60.0, math.min(60.0, math.floor((cur + delta) * 100 + 0.5) / 100))
+    self.sub_delay = new_val
+    self:send_command(string.format('{"command": ["set_property", "sub-delay", %.2f]}', new_val))
+end
+
+function MpvController:reset_sub_delay()
+    self.sub_delay = 0.0
+    self:send_command('{"command": ["set_property", "sub-delay", 0]}')
 end
 
 function MpvController:quit_command()
@@ -2188,6 +2216,9 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
         if #af_filter > 0 then
             extra_mpv_opts = extra_mpv_opts .. string.format(" --af=%q", af_filter)
         end
+    end
+    if MpvController.sub_delay and MpvController.sub_delay ~= 0.0 then
+        extra_mpv_opts = extra_mpv_opts .. string.format(" --sub-delay=%.2f", MpvController.sub_delay)
     end
     local resume_pos = get_resume_position(item.url)
     local status_msg = build_mpv_status_msg(mode, (show_cc or mode == "video") and not use_native_window_subtitles)
@@ -2768,6 +2799,7 @@ local function show_help_modal()
         line_pad("\27[1;36m|    \27[93m[[] / []]\27[0m     Adjust playback speed (-/+0.25x)  [{] Reset"),
         line_pad("\27[1;36m|    \27[93m[c]\27[0m           Toggle Closed Captions (CC / Lyrics)"),
         line_pad("\27[1;36m|    \27[93m[C]\27[0m           Cycle subtitle track (Mini-Player)"),
+        line_pad("\27[1;36m|    \27[93m[z / Z]\27[0m       Adjust CC sync delay (+/-0.25s)  \27[93m[Alt+z]\27[0m Reset"),
         line_pad("\27[1;36m|    \27[93m[+ / -]\27[0m       Increase / Decrease CC font size (+/-5 pt)"),
         line_pad("\27[1;36m|    \27[93m[h]\27[0m           Toggle Playback History (recent tracks)"),
         line_pad("\27[1;36m|    \27[93m[m]\27[0m           Toggle between Music and Video mode"),
@@ -2803,7 +2835,7 @@ end
 -- =========================================================================
 -- 7. Main Interactive TUI Application
 -- =========================================================================
-local function run_app(init_query, init_mode, browser, cookies_file, is_liked, use_window, proxy, insecure, init_show_cc, init_sub_lang, init_filters, init_site, init_sub_font_size, init_sub_color, init_radio, init_speed, init_eq, init_favorites)
+local function run_app(init_query, init_mode, browser, cookies_file, is_liked, use_window, proxy, insecure, init_show_cc, init_sub_lang, init_filters, init_site, init_sub_font_size, init_sub_color, init_radio, init_speed, init_eq, init_favorites, init_sub_delay)
     local current_query = init_query or ""
     local mode = init_mode or "music"
     local show_cc = (init_show_cc ~= nil) and init_show_cc or true
@@ -2811,6 +2843,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
     local cc_font_size = (init_sub_font_size and init_sub_font_size > 0) and math.max(10, math.min(120, init_sub_font_size)) or 55
     local sub_color = init_sub_color or "white"
     local site = normalize_site(init_site)
+    if init_sub_delay then MpvController.sub_delay = init_sub_delay end
     local selected_idx = 1
     local scroll_offset = 0
     local auto_play = false
@@ -2921,6 +2954,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
     local last_rendered_pause = nil
     local last_rendered_has_sub = nil
     local last_rendered_last_sub = ""
+    local last_rendered_sub_delay = 0.0
     local max_list_h = 10
     local last_term_w, last_term_h = get_terminal_size()
 
@@ -3039,7 +3073,8 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                 MpvController.has_sub_track,
                 MpvController.last_sub_text,
                 MpvController.speed,
-                MpvController.eq_preset
+                MpvController.eq_preset,
+                MpvController.sub_delay
             )
             for _, l in ipairs(p_lines) do
                 table.insert(buf, l)
@@ -3063,6 +3098,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         last_rendered_pause = MpvController.is_paused
         last_rendered_has_sub = MpvController.has_sub_track
         last_rendered_last_sub = MpvController.last_sub_text
+        last_rendered_sub_delay = MpvController.sub_delay or 0.0
     end
 
     draw_tui()
@@ -3120,7 +3156,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                     MpvController:stop()
                     draw_tui()
                 end
-            elseif (st.time_pos ~= last_rendered_pos or st.sub_text ~= last_rendered_sub or st.is_paused ~= last_rendered_pause or MpvController.has_sub_track ~= last_rendered_has_sub or MpvController.last_sub_text ~= last_rendered_last_sub) then
+            elseif (st.time_pos ~= last_rendered_pos or st.sub_text ~= last_rendered_sub or st.is_paused ~= last_rendered_pause or MpvController.has_sub_track ~= last_rendered_has_sub or MpvController.last_sub_text ~= last_rendered_last_sub or (st.sub_delay or 0.0) ~= last_rendered_sub_delay) then
                 draw_tui()
             end
         end
@@ -3359,6 +3395,24 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                 if MpvController.is_playing then
                     MpvController:cycle_sub()
                     status_msg = "Cycled subtitle track"
+                    draw_tui()
+                end
+            elseif k == "z" then
+                if MpvController.is_playing then
+                    MpvController:adjust_sub_delay(0.25)
+                    status_msg = string.format("CC delayed by +250ms (Sync offset: %+.2fs)", MpvController.sub_delay)
+                    draw_tui()
+                end
+            elseif k == "Z" then
+                if MpvController.is_playing then
+                    MpvController:adjust_sub_delay(-0.25)
+                    status_msg = string.format("CC advanced by -250ms (Sync offset: %+.2fs)", MpvController.sub_delay)
+                    draw_tui()
+                end
+            elseif k == "ALT_z" or k == "ALT_Z" then
+                if MpvController.is_playing then
+                    MpvController:reset_sub_delay()
+                    status_msg = "CC sync delay reset to 0.00s"
                     draw_tui()
                 end
             elseif k == "+" or k == "=" then
@@ -3923,7 +3977,14 @@ local function run_self_tests()
     fw:write("start=127.450000\n")
     fw:write("volume=80.000000\n")
     fw:close()
+    -- Default behavior: resume is disabled (opt-in via --resume)
+    assert(resume_cfg.enabled == false, "resume_cfg.enabled must be false by default")
+    assert(get_resume_position(test_track_url) == nil, "get_resume_position must return nil when disabled")
+    assert(get_resume_mpv_opts() == " --no-resume-playback", "get_resume_mpv_opts must return --no-resume-playback by default")
 
+    -- Enable resume to validate watch-later parsing logic
+    resume_cfg.enabled = true
+    resume_cfg.opts = nil
     local pos = get_resume_position(test_track_url)
     assert(pos == 127, "get_resume_position must extract floor(127.45) = 127: got " .. tostring(pos))
 
@@ -3974,6 +4035,8 @@ local function run_self_tests()
     MpvController.time_pos = 0
     MpvController.duration = 0
     MpvController.current_item = nil
+    resume_cfg.enabled = false
+    resume_cfg.opts = nil
 
     print("  [✓] Playback resume position helpers, watch-later config parsing & quit logic validated")
 
@@ -4100,6 +4163,34 @@ local function run_self_tests()
     assert(eq_bass == "bass", "show_eq_modal numeric key 3 must select bass preset: got " .. tostring(eq_bass))
     print("  [✓] Audio Equalizer modal headless interaction & key navigation validated")
 
+    -- 31. Closed captions sync delay adjustment, clamping, reset & mini-player badge
+    MpvController:reset_sub_delay()
+    assert(MpvController.sub_delay == 0.0, "sub_delay reset failed")
+    MpvController:adjust_sub_delay(0.25)
+    assert(math.abs(MpvController.sub_delay - 0.25) < 0.001, "adjust_sub_delay +0.25 failed: got " .. tostring(MpvController.sub_delay))
+    MpvController:adjust_sub_delay(0.25)
+    assert(math.abs(MpvController.sub_delay - 0.50) < 0.001, "adjust_sub_delay second +0.25 failed: got " .. tostring(MpvController.sub_delay))
+    MpvController:adjust_sub_delay(-1.0)
+    assert(math.abs(MpvController.sub_delay - (-0.50)) < 0.001, "adjust_sub_delay -1.0 failed: got " .. tostring(MpvController.sub_delay))
+    MpvController:adjust_sub_delay(-100.0)
+    assert(MpvController.sub_delay == -60.0, "adjust_sub_delay min clamp failed: got " .. tostring(MpvController.sub_delay))
+    MpvController:adjust_sub_delay(200.0)
+    assert(MpvController.sub_delay == 60.0, "adjust_sub_delay max clamp failed: got " .. tostring(MpvController.sub_delay))
+    MpvController:reset_sub_delay()
+    assert(MpvController.sub_delay == 0.0, "reset_sub_delay failed after clamping")
+
+    local cc_test_item = { title = "CC Sync Test", duration = 120 }
+    local cc_sync_lines = render_mini_player_lines(cc_test_item, false, 100, 30, 120, "Hello World", true, 90, 1, 1, true, "", 1.0, "flat", 0.50)
+    assert(cc_sync_lines[3]:find("%(%+0%.50s%)") ~= nil, "Mini-player CC row must display sync delay badge (+0.50s): got " .. tostring(cc_sync_lines[3]))
+    assert(display_width(strip_ansi(cc_sync_lines[3]):gsub("\n", "")) <= 90, "CC row width must not overflow terminal width")
+
+    local cc_neg_sync_lines = render_mini_player_lines(cc_test_item, false, 100, 30, 120, "Hello World", true, 90, 1, 1, true, "", 1.0, "flat", -0.25)
+    assert(cc_neg_sync_lines[3]:find("%(%-0%.25s%)") ~= nil, "Mini-player CC row must display negative sync delay badge (-0.25s): got " .. tostring(cc_neg_sync_lines[3]))
+
+    local cc_zero_sync_lines = render_mini_player_lines(cc_test_item, false, 100, 30, 120, "Hello World", true, 90, 1, 1, true, "", 1.0, "flat", 0.0)
+    assert(cc_zero_sync_lines[3]:find("%(%+0%.00s%)") == nil and cc_zero_sync_lines[3]:find("%(%-0%.00s%)") == nil, "Mini-player CC row should omit badge when delay is 0")
+    print("  [✓] Closed captions sync delay adjustment, clamping, reset & mini-player badges validated")
+
     print("=== All Internal Self-Tests Passed Successfully ===")
     return true
 end
@@ -4118,7 +4209,10 @@ local function print_help()
     print("  --site <name>         Search site: youtube, soundcloud, or twitch (default: youtube)")
     print("  -c, --cc, --lyrics    Show Closed Captions (CC) / lyrics (enabled by default)")
     print("  --no-cc               Disable Closed Captions (CC) / lyrics")
-    print("  --no-resume           Do not resume playback from last saved position")
+    print("  --resume              Resume playback from last saved position (opt-in)")
+    print("  --no-resume           Do not resume playback from last saved position (default)")
+    print("  --sub-delay <sec>     Adjust subtitle/CC sync delay offset in seconds (e.g. 0.5 or -0.5)")
+    print("  --cc-delay <sec>      Alias for --sub-delay")
     print("  --radio               Start directly in infinite Radio mode (YouTube Mix)")
     print("  --speed <mult>        Initial playback speed (0.5 to 2.5, default: 1.0)")
     print("  --eq <preset>         Initial audio equalizer preset (flat, night, bass, vocal, lofi)")
@@ -4159,6 +4253,7 @@ local function print_help()
     print("  [a]           Toggle Auto-Play")
     print("  [c]           Toggle Closed Captions (CC / Lyrics)")
     print("  [C]           Cycle subtitle track (Mini-Player)")
+    print("  [z / Z]       Adjust CC sync delay (+/-0.25s)  [Alt+z] Reset")
     print("  [+ / -]       Increase / Decrease CC font size (+/-5 pt)")
     print("  [Alt+c]       Cycle CC style: White, Yellow, Cyan (in MPV GUI window)")
     print("  [m]           Toggle Music / Video mode")
@@ -4204,6 +4299,7 @@ local function main()
     local initial_speed = 1.0
     local initial_eq = "flat"
     local is_favorites = false
+    local initial_sub_delay = 0.0
 
     local env_proxy = os.getenv("YT_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")
     local proxy = (env_proxy and #env_proxy > 0) and env_proxy or nil
@@ -4267,6 +4363,12 @@ local function main()
             local c = (arg[i] or "white"):lower()
             if c == "yellow" or c == "cyan" or c == "white" then
                 sub_color = c
+            end
+        elseif a == "--sub-delay" or a == "--cc-delay" then
+            i = i + 1
+            local sd = tonumber(arg[i])
+            if sd then
+                initial_sub_delay = math.max(-60.0, math.min(60.0, sd))
             end
         elseif a == "-d" or a == "--download" then
             i = i + 1
@@ -4364,7 +4466,7 @@ local function main()
         return
     end
 
-    run_app(query, mode, browser, cookies_file, is_liked, use_window, proxy, insecure, show_cc, sub_lang, active_filters, site, sub_font_size, sub_color, is_radio, initial_speed, initial_eq, is_favorites)
+    run_app(query, mode, browser, cookies_file, is_liked, use_window, proxy, insecure, show_cc, sub_lang, active_filters, site, sub_font_size, sub_color, is_radio, initial_speed, initial_eq, is_favorites, initial_sub_delay)
 end
 
 main()
