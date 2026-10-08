@@ -157,6 +157,7 @@ assert(t11_out:find("Up-Next Playback Queue FIFO logic passed", 1, true), "Self-
 assert(t11_out:find("Search Filters & Sorting validation passed", 1, true), "Self-test missing search filters validation")
 assert(t11_out:find("Multi-byte pasted input FIFO queueing & token normalization validated", 1, true), "Self-test missing pasted input FIFO queueing validation")
 assert(t11_out:find("Search query modal pre-fill, Ctrl+U clear & interactive simulation validated", 1, true), "Self-test missing search query modal validation")
+assert(t11_out:find("Persistent search history & Readline-style UP/DOWN cycling validated", 1, true), "Self-test missing search history validation")
 if is_win then
     assert(t11_out:find("Win32 Named Pipe FFI bindings validated", 1, true), "Self-test missing pipe bindings validation")
 end

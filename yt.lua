@@ -566,6 +566,10 @@ local function get_history_file()
     return get_cache_dir() .. (is_windows and "\\" or "/") .. "history.json"
 end
 
+local function get_search_history_file()
+    return get_cache_dir() .. (is_windows and "\\" or "/") .. "search_history.json"
+end
+
 local function normalize_caption_token(w)
     return (w or ""):lower():gsub("[%p%c%s]", "")
 end
@@ -1039,6 +1043,53 @@ local function load_history_items()
     end
     f:close()
     return items
+end
+
+local function save_search_history(query)
+    if not query or type(query) ~= "string" then return false end
+    query = query:match("^%s*(.-)%s*$")
+    if #query == 0 then return false end
+
+    local sfile = get_search_history_file()
+    local existing = {}
+    local f = io.open(sfile, "r")
+    if f then
+        for line in f:lines() do
+            local q = parse_json_field(line, "query")
+            if q and #q > 0 and q ~= query then
+                table.insert(existing, q)
+                if #existing >= 50 then break end
+            end
+        end
+        f:close()
+    end
+
+    local out = io.open(sfile, "w")
+    if out then
+        local function esc(s) return (s or ""):gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', ' ') end
+        out:write(string.format('{"query":%q}\n', esc(query)))
+        for _, q in ipairs(existing) do
+            out:write(string.format('{"query":%q}\n', esc(q)))
+        end
+        out:close()
+        return true
+    end
+    return false
+end
+
+local function load_search_history()
+    local sfile = get_search_history_file()
+    local f = io.open(sfile, "r")
+    if not f then return {} end
+    local queries = {}
+    for line in f:lines() do
+        local q = parse_json_field(line, "query")
+        if q and #q > 0 then
+            table.insert(queries, q)
+        end
+    end
+    f:close()
+    return queries
 end
 
 local function format_duration(sec)
@@ -2159,16 +2210,24 @@ end
 
 local function prompt_search_query(current_query)
     local term_w, term_h = get_terminal_size()
-    local box_w = math.min(60, term_w - 4)
+    local box_w = math.min(64, term_w - 4)
     local box_x = math.max(1, math.floor((term_w - box_w) / 2))
     local box_y = math.max(2, math.floor(term_h / 3))
 
     local input_str = current_query or ""
+    local search_history = load_search_history()
+    local history_idx = 0
+    local draft_input = input_str
 
     local function draw_modal()
         io.write(string.format("\27[%d;%dH\27[1;36m+%s+\27[0m", box_y, box_x, string.rep("-", box_w - 2)))
-        io.write(string.format("\27[%d;%dH\27[1;36m| \27[1;37mSearch YouTube / URL:\27[0m%s\27[1;36m|\27[0m",
-            box_y + 1, box_x, string.rep(" ", box_w - 24)))
+        
+        local title_str = (history_idx > 0)
+            and string.format("Search YouTube / URL [Hist %d/%d]:", history_idx, #search_history)
+            or "Search YouTube / URL:"
+        local title_pad = math.max(0, box_w - 3 - #title_str)
+        io.write(string.format("\27[%d;%dH\27[1;36m| \27[1;37m%s\27[0m%s\27[1;36m|\27[0m",
+            box_y + 1, box_x, title_str, string.rep(" ", title_pad)))
         
         local display_input = input_str
         if #display_input > box_w - 6 then
@@ -2177,11 +2236,32 @@ local function prompt_search_query(current_query)
         local pad = math.max(0, box_w - 6 - #display_input)
         io.write(string.format("\27[%d;%dH\27[1;36m| \27[93m> %s\27[7m \27[0m%s\27[1;36m|\27[0m",
             box_y + 2, box_x, display_input, string.rep(" ", pad)))
-        local help_str = (box_w >= 54) and "[Enter] Search   [Ctrl+U] Clear   [Esc] Cancel" or "[Enter] Search   [Esc] Cancel"
+        
+        local hint_str
+        if history_idx > 0 then
+            hint_str = string.format("History %d of %d (press [Down] to return)", history_idx, #search_history)
+        elseif #search_history > 0 then
+            local recents = {}
+            for idx = 1, math.min(3, #search_history) do
+                table.insert(recents, search_history[idx])
+            end
+            hint_str = "Recent: " .. table.concat(recents, " | ")
+        else
+            hint_str = "Type a search term, song title, or video URL"
+        end
+        if #hint_str > box_w - 4 then
+            hint_str = hint_str:sub(1, box_w - 7) .. "..."
+        end
+        local hint_pad = math.max(0, box_w - 3 - #hint_str)
+        io.write(string.format("\27[%d;%dH\27[1;36m| \27[90m%s\27[0m%s\27[1;36m|\27[0m",
+            box_y + 3, box_x, hint_str, string.rep(" ", hint_pad)))
+
+        local help_str = (box_w >= 56) and "[Enter] Search  [Up/Dn] Hist  [Ctrl+U] Clear  [Esc] Cancel"
+            or ((box_w >= 44) and "[Enter] Search  [Up/Dn] Hist  [Esc] Cancel" or "[Enter] OK  [Esc] Cancel")
         local help_pad = math.max(0, box_w - 3 - #help_str)
         io.write(string.format("\27[%d;%dH\27[1;36m| \27[90m%s\27[0m%s\27[1;36m|\27[0m",
-            box_y + 3, box_x, help_str, string.rep(" ", help_pad)))
-        io.write(string.format("\27[%d;%dH\27[1;36m+%s+\27[0m", box_y + 4, box_x, string.rep("-", box_w - 2)))
+            box_y + 4, box_x, help_str, string.rep(" ", help_pad)))
+        io.write(string.format("\27[%d;%dH\27[1;36m+%s+\27[0m", box_y + 5, box_x, string.rep("-", box_w - 2)))
         io.flush()
     end
 
@@ -2197,17 +2277,39 @@ local function prompt_search_query(current_query)
             else
                 return nil
             end
+        elseif k == "UP" then
+            if #search_history > 0 and history_idx < #search_history then
+                if history_idx == 0 then
+                    draft_input = input_str
+                end
+                history_idx = history_idx + 1
+                input_str = search_history[history_idx]
+                draw_modal()
+            end
+        elseif k == "DOWN" then
+            if history_idx > 1 then
+                history_idx = history_idx - 1
+                input_str = search_history[history_idx]
+                draw_modal()
+            elseif history_idx == 1 then
+                history_idx = 0
+                input_str = draft_input
+                draw_modal()
+            end
         elseif k == "BACKSPACE" then
+            history_idx = 0
             if #input_str > 0 then
                 input_str = input_str:sub(1, #input_str - 1)
                 draw_modal()
             end
         elseif k == "CTRL_U" then
+            history_idx = 0
             if #input_str > 0 then
                 input_str = ""
                 draw_modal()
             end
         elseif k and #k == 1 then
+            history_idx = 0
             input_str = input_str .. k
             draw_modal()
         end
@@ -2326,6 +2428,9 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         end
         is_loading = false
         if res and #res > 0 then
+            if not is_liked and not is_history and current_query and #current_query > 0 then
+                save_search_history(current_query)
+            end
             if load_more then
                 local seen = {}
                 for _, item in ipairs(items) do
@@ -2739,6 +2844,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                 local new_q = prompt_search_query(current_query)
                 if new_q and #new_q > 0 then
                     current_query = new_q
+                    save_search_history(new_q)
                     is_liked = false
                     is_history = false
                     refresh_results()
@@ -3220,6 +3326,43 @@ local function run_self_tests()
     local cancelled = prompt_search_query("lofi beats")
     assert(cancelled == nil, "prompt_search_query must return nil on ESC")
     print("  [✓] Search query modal pre-fill, Ctrl+U clear & interactive simulation validated")
+
+    -- 24. Search query persistence & Readline-style history cycling
+    local sfile = get_search_history_file()
+    os.remove(sfile)
+    assert(save_search_history("lofi beats") == true, "save_search_history failed")
+    assert(save_search_history("synthwave radio") == true, "save_search_history failed")
+    assert(save_search_history("lofi beats") == true, "save_search_history re-save failed")
+    local sh_list = load_search_history()
+    assert(#sh_list == 2, "Expected 2 deduplicated history items, got " .. #sh_list)
+    assert(sh_list[1] == "lofi beats", "Most recent search must be at index 1")
+    assert(sh_list[2] == "synthwave radio", "Previous search must be at index 2")
+
+    for k in pairs(pending_keys) do pending_keys[k] = nil end
+    table.insert(pending_keys, "UP")
+    table.insert(pending_keys, "ENTER")
+    local recalled = prompt_search_query("")
+    assert(recalled == "lofi beats", "UP arrow failed to recall most recent search: got " .. tostring(recalled))
+
+    for k in pairs(pending_keys) do pending_keys[k] = nil end
+    table.insert(pending_keys, "UP")
+    table.insert(pending_keys, "UP")
+    table.insert(pending_keys, "ENTER")
+    local older = prompt_search_query("")
+    assert(older == "synthwave radio", "UP arrow twice failed to recall older search: got " .. tostring(older))
+
+    for k in pairs(pending_keys) do pending_keys[k] = nil end
+    table.insert(pending_keys, "d")
+    table.insert(pending_keys, "r")
+    table.insert(pending_keys, "a")
+    table.insert(pending_keys, "f")
+    table.insert(pending_keys, "t")
+    table.insert(pending_keys, "UP")
+    table.insert(pending_keys, "DOWN")
+    table.insert(pending_keys, "ENTER")
+    local draft_restored = prompt_search_query("")
+    assert(draft_restored == "draft", "DOWN arrow failed to restore draft input: got " .. tostring(draft_restored))
+    print("  [✓] Persistent search history & Readline-style UP/DOWN cycling validated")
 
     print("=== All Internal Self-Tests Passed Successfully ===")
     return true
