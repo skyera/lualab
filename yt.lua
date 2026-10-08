@@ -570,6 +570,102 @@ local function get_search_history_file()
     return get_cache_dir() .. (is_windows and "\\" or "/") .. "search_history.json"
 end
 
+-- Resume playback position: mpv's native watch-later store, kept in our cache dir.
+-- Each file holds "# <url>" and "start=<seconds>", so positions can be looked up by URL.
+local resume_cfg = { enabled = true, opts = nil }
+local RESUME_MIN_SEC = 5
+
+local function get_resume_dir()
+    local dir = get_cache_dir() .. (is_windows and "\\" or "/") .. "watch_later"
+    if is_windows then
+        os.execute('if not exist "' .. dir .. '" mkdir "' .. dir .. '" 2>nul')
+    else
+        os.execute('mkdir -p "' .. dir .. '" 2>/dev/null')
+    end
+    return dir
+end
+
+local function get_resume_mpv_opts()
+    if not resume_cfg.enabled then
+        return " --no-resume-playback"
+    end
+    if not resume_cfg.opts then
+        local opts = string.format(' --resume-playback --save-position-on-quit --write-filename-in-watch-later-config --watch-later-directory="%s"', get_resume_dir())
+        -- Restore only the position (not sid/aid/volume), when this mpv supports the option.
+        local p = safe_popen("mpv --list-options", POPEN_READ_BIN)
+        if p then
+            local listing = p:read("*a") or ""
+            p:close()
+            if listing:find("watch-later-options", 1, true) then
+                opts = opts .. " --watch-later-options=start"
+            end
+        end
+        resume_cfg.opts = opts
+    end
+    return resume_cfg.opts
+end
+
+local function get_resume_position(url)
+    if not resume_cfg.enabled or not url or #url == 0 then return nil end
+    local dir = get_resume_dir()
+    local list_cmd = is_windows and ('dir /b "' .. dir .. '" 2>nul') or ('ls -1 "' .. dir .. '" 2>/dev/null')
+    local p = safe_popen(list_cmd, POPEN_READ_BIN)
+    if not p then return nil end
+    local names = {}
+    for name in p:lines() do
+        name = name:gsub("%s+$", "")
+        if #name > 0 then table.insert(names, name) end
+        if #names >= 500 then break end
+    end
+    p:close()
+    for _, name in ipairs(names) do
+        local f = io.open(dir .. (is_windows and "\\" or "/") .. name, "r")
+        if f then
+            local first = (f:read("*l") or ""):gsub("\r$", "")
+            if first == "# " .. url then
+                local body = f:read("*a") or ""
+                f:close()
+                local start = body:match("start=([%d%.]+)")
+                local secs = start and tonumber(start)
+                if secs and secs >= RESUME_MIN_SEC then
+                    return math.floor(secs)
+                end
+                return nil
+            end
+            f:close()
+        end
+    end
+    return nil
+end
+
+local function delete_resume_position(url)
+    if not url or #url == 0 then return false end
+    local dir = get_resume_dir()
+    local list_cmd = is_windows and ('dir /b "' .. dir .. '" 2>nul') or ('ls -1 "' .. dir .. '" 2>/dev/null')
+    local p = safe_popen(list_cmd, POPEN_READ_BIN)
+    if not p then return false end
+    local names = {}
+    for name in p:lines() do
+        name = name:gsub("%s+$", "")
+        if #name > 0 then table.insert(names, name) end
+        if #names >= 500 then break end
+    end
+    p:close()
+    for _, name in ipairs(names) do
+        local path = dir .. (is_windows and "\\" or "/") .. name
+        local f = io.open(path, "r")
+        if f then
+            local first = (f:read("*l") or ""):gsub("\r$", "")
+            f:close()
+            if first == "# " .. url then
+                os.remove(path)
+                return true
+            end
+        end
+    end
+    return false
+end
+
 local function normalize_caption_token(w)
     return (w or ""):lower():gsub("[%p%c%s]", "")
 end
@@ -1557,6 +1653,7 @@ function MpvController:start(item, show_cc, sub_lang, browser, cookies_file, pro
     end
     local font_opt = (sub_font_size and sub_font_size > 0) and string.format(" --sub-font-size=%d", sub_font_size) or ""
     extra_mpv_opts = extra_mpv_opts .. string.format(" --subs-fallback=yes --sub-auto=all --sub-visibility=yes%s --slang=%s", font_opt, to_mpv_slang(sub_lang))
+    extra_mpv_opts = extra_mpv_opts .. get_resume_mpv_opts()
 
     local cmd
     if is_windows then
@@ -1762,14 +1859,30 @@ function MpvController:cycle_sub()
     self.last_sub_text = ""
 end
 
+function MpvController:quit_command()
+    -- Save the position when stopped mid-track; drop a stale entry when stopped near the end.
+    if resume_cfg.enabled and self.is_playing and not self.is_eof and (self.time_pos or 0) > 0 then
+        local dur = (self.duration and self.duration > 0) and self.duration or (self.current_item and self.current_item.duration or 0)
+        if dur > 0 and self.time_pos >= dur - 10 then
+            if self.current_item and self.current_item.url then
+                delete_resume_position(self.current_item.url)
+            end
+            self:send_command('{"command": ["delete-watch-later-config"]}')
+            return '{"command": ["quit"]}'
+        end
+        return '{"command": ["quit-watch-later"]}'
+    end
+    return '{"command": ["quit"]}'
+end
+
 function MpvController:stop()
     if is_windows and self.pipe_handle then
-        self:send_command('{"command": ["quit"]}')
+        self:send_command(self:quit_command())
         sleep_ms(50)
         kernel32.CloseHandle(self.pipe_handle)
         self.pipe_handle = nil
     elseif not is_windows and self.sock_fd then
-        self:send_command('{"command": ["quit"]}')
+        self:send_command(self:quit_command())
         sleep_ms(50)
         ffi.C.close(self.sock_fd)
         self.sock_fd = nil
@@ -1852,6 +1965,8 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     end
 
     local term_w, term_h = get_terminal_size()
+    extra_mpv_opts = extra_mpv_opts .. get_resume_mpv_opts()
+    local resume_pos = get_resume_position(item.url)
     local status_msg = build_mpv_status_msg(mode, (show_cc or mode == "video") and not use_native_window_subtitles)
     -- Unix shells expand ${...} before mpv sees it; preserve MPV property syntax.
     local command_status_msg = is_windows and status_msg or status_msg:gsub("%$", "\\$")
@@ -1889,7 +2004,11 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     end
 
     disable_raw_mode()
-    io.write("\27[H\27[2J\27[1;36m> Connecting to YouTube stream: \27[1;33m" .. item.title .. "\27[0m\n\n")
+    io.write("\27[H\27[2J\27[1;36m> Connecting to YouTube stream: \27[1;33m" .. item.title .. "\27[0m\n")
+    if resume_pos then
+        io.write(string.format("\27[1;92m> Resuming from %s\27[0m\n", format_duration(resume_pos)))
+    end
+    io.write("\n")
     io.flush()
 
     local exit_code = safe_execute(mpv_cmd)
@@ -2460,6 +2579,14 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         end
     end
 
+    local function make_playing_status(item)
+        local pos = get_resume_position(item and item.url)
+        if pos then
+            return string.format("Playing (resumed from %s): %s", format_duration(pos), utf8_truncate(item and item.title or "", 25))
+        end
+        return "Playing: " .. utf8_truncate(item and item.title or "", 30)
+    end
+
     if #current_query > 0 or is_liked then
         refresh_results()
     else
@@ -2622,19 +2749,23 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         local st = MpvController:poll()
         if st then
             if st.is_eof then
+                -- Track finished playing: purge any saved resume position so replay starts from beginning
+                if MpvController.current_item and MpvController.current_item.url then
+                    delete_resume_position(MpvController.current_item.url)
+                end
                 -- Track finished playing: advance queue or auto-play
                 if #queue > 0 then
                     local next_item = table.remove(queue, 1)
                     save_history_item(next_item)
                     MpvController:start(next_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure, cc_font_size)
-                    status_msg = "Playing: " .. utf8_truncate(next_item.title, 30)
+                    status_msg = make_playing_status(next_item)
                     draw_tui()
                 elseif auto_play and selected_idx < #items then
                     selected_idx = selected_idx + 1
                     local next_item = items[selected_idx]
                     save_history_item(next_item)
                     MpvController:start(next_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure, cc_font_size)
-                    status_msg = "Playing: " .. utf8_truncate(next_item.title, 30)
+                    status_msg = make_playing_status(next_item)
                     draw_tui()
                 else
                     MpvController:stop()
@@ -2691,7 +2822,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                     save_history_item(chosen_item)
                     if mode == "music" then
                         MpvController:start(chosen_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure, cc_font_size)
-                        status_msg = "Playing: " .. utf8_truncate(chosen_item.title, 30)
+                        status_msg = make_playing_status(chosen_item)
                     else
                         MpvController:stop()
                         play_item(chosen_item, mode, browser, cookies_file, use_window, proxy, insecure, show_cc, sub_lang, cc_font_size)
@@ -2744,13 +2875,13 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                         local next_item = table.remove(queue, 1)
                         save_history_item(next_item)
                         MpvController:start(next_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure, cc_font_size)
-                        status_msg = "Playing: " .. utf8_truncate(next_item.title, 30)
+                        status_msg = make_playing_status(next_item)
                     elseif auto_play and selected_idx < #items then
                         selected_idx = selected_idx + 1
                         local next_item = items[selected_idx]
                         save_history_item(next_item)
                         MpvController:start(next_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure, cc_font_size)
-                        status_msg = "Playing: " .. utf8_truncate(next_item.title, 30)
+                        status_msg = make_playing_status(next_item)
                     else
                         MpvController:stop()
                         status_msg = "Playback stopped"
@@ -2856,7 +2987,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                     save_history_item(sel)
                     if mode == "music" then
                         MpvController:start(sel, show_cc, sub_lang, browser, cookies_file, proxy, insecure, cc_font_size)
-                        status_msg = "Playing: " .. utf8_truncate(sel.title, 30)
+                        status_msg = make_playing_status(sel)
                         draw_tui()
                     else
                         MpvController:stop()
@@ -3364,6 +3495,73 @@ local function run_self_tests()
     assert(draft_restored == "draft", "DOWN arrow failed to restore draft input: got " .. tostring(draft_restored))
     print("  [✓] Persistent search history & Readline-style UP/DOWN cycling validated")
 
+    -- 25. Resume playback position helpers, watch-later config parsing & quit logic
+    local resume_test_dir = get_resume_dir()
+    assert(resume_test_dir ~= nil and #resume_test_dir > 0, "get_resume_dir must return valid directory path")
+    local test_track_url = "https://www.youtube.com/watch?v=TESTRESUME123"
+    local dummy_conf = resume_test_dir .. (is_windows and "\\" or "/") .. "TESTRESUME123"
+
+    -- Write a mock watch-later entry
+    local fw = io.open(dummy_conf, "w")
+    assert(fw ~= nil, "Failed to create mock watch-later config file")
+    fw:write("# " .. test_track_url .. "\n")
+    fw:write("start=127.450000\n")
+    fw:write("volume=80.000000\n")
+    fw:close()
+
+    local pos = get_resume_position(test_track_url)
+    assert(pos == 127, "get_resume_position must extract floor(127.45) = 127: got " .. tostring(pos))
+
+    -- Positions below threshold (RESUME_MIN_SEC = 5) should be ignored
+    fw = io.open(dummy_conf, "w")
+    assert(fw ~= nil, "Failed to re-open mock watch-later config file")
+    fw:write("# " .. test_track_url .. "\nstart=3.200000\n")
+    fw:close()
+    assert(get_resume_position(test_track_url) == nil, "get_resume_position must return nil for positions < 5 seconds")
+
+    -- Check --no-resume disable flag behavior
+    resume_cfg.enabled = false
+    assert(get_resume_position(test_track_url) == nil, "get_resume_position must return nil when resume_cfg.enabled is false")
+    assert(get_resume_mpv_opts() == " --no-resume-playback", "get_resume_mpv_opts must return --no-resume-playback when disabled")
+    resume_cfg.enabled = true
+    resume_cfg.opts = nil -- reset cached opts
+
+    -- Direct delete_resume_position test
+    fw = io.open(dummy_conf, "w")
+    assert(fw ~= nil, "Failed to create mock watch-later config file")
+    fw:write("# " .. test_track_url .. "\nstart=60.000000\n")
+    fw:close()
+    assert(get_resume_position(test_track_url) == 60, "Expected resume position of 60")
+    local deleted = delete_resume_position(test_track_url)
+    assert(deleted == true, "delete_resume_position must return true when matching file is removed")
+    assert(get_resume_position(test_track_url) == nil, "get_resume_position must return nil after delete_resume_position")
+    assert(delete_resume_position(test_track_url) == false, "delete_resume_position must return false when no entry exists")
+
+    -- Test MpvController:quit_command() logic
+    MpvController.is_playing = true
+    MpvController.is_eof = false
+    MpvController.time_pos = 45
+    MpvController.duration = 180
+    MpvController.current_item = { url = test_track_url, title = "Test Resume Track", duration = 180 }
+    assert(MpvController:quit_command() == '{"command": ["quit-watch-later"]}', "MpvController:quit_command must return quit-watch-later mid-track")
+
+    -- Stopped within 10s of track end should delete config rather than saving near-end
+    fw = io.open(dummy_conf, "w")
+    assert(fw ~= nil, "Failed to create mock watch-later config file")
+    fw:write("# " .. test_track_url .. "\nstart=175.000000\n")
+    fw:close()
+    MpvController.time_pos = 175
+    MpvController.duration = 180
+    assert(MpvController:quit_command() == '{"command": ["quit"]}', "MpvController:quit_command must return quit near end of track")
+    assert(get_resume_position(test_track_url) == nil, "Resume position must be cleared after quit near end of track")
+
+    MpvController.is_playing = false
+    MpvController.time_pos = 0
+    MpvController.duration = 0
+    MpvController.current_item = nil
+
+    print("  [✓] Playback resume position helpers, watch-later config parsing & quit logic validated")
+
     print("=== All Internal Self-Tests Passed Successfully ===")
     return true
 end
@@ -3382,6 +3580,7 @@ local function print_help()
     print("  --site <name>         Search site: youtube, soundcloud, or twitch (default: youtube)")
     print("  -c, --cc, --lyrics    Show Closed Captions (CC) / lyrics (enabled by default)")
     print("  --no-cc               Disable Closed Captions (CC) / lyrics")
+    print("  --no-resume           Do not resume playback from last saved position")
     print("  --sub-lang <lang>     Preferred subtitle/lyrics language pattern (default: en.*)")
     print("  --sub-font-size <pts> Font size for subtitles / CC (default: 55, range: 10-120)")
     print("  --cc-font-size <pts>  Alias for --sub-font-size")
@@ -3483,6 +3682,10 @@ local function main()
             show_cc = true
         elseif a == "--no-cc" or a == "--no-lyrics" or a == "--no-subtitles" then
             show_cc = false
+        elseif a == "--no-resume" then
+            resume_cfg.enabled = false
+        elseif a == "--resume" then
+            resume_cfg.enabled = true
         elseif a == "--sub-lang" or a == "--sub-langs" or a == "--slang" then
             i = i + 1
             sub_lang = arg[i]

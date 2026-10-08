@@ -22,6 +22,7 @@ assert(help_out:find("yt.lua", 1, true), "Help output missing header")
 assert(help_out:find("System Status:", 1, true), "Help output missing status")
 assert(help_out:find("--proxy", 1, true), "Help output missing --proxy option")
 assert(help_out:find("--insecure", 1, true), "Help output missing --insecure option")
+assert(help_out:find("--no-resume", 1, true), "Help output missing --no-resume option")
 assert(help_out:find("deno:", 1, true), "Help output missing deno status")
 print("  [✓] Test 1 passed: yt.lua --help renders properly.")
 
@@ -158,6 +159,7 @@ assert(t11_out:find("Search Filters & Sorting validation passed", 1, true), "Sel
 assert(t11_out:find("Multi-byte pasted input FIFO queueing & token normalization validated", 1, true), "Self-test missing pasted input FIFO queueing validation")
 assert(t11_out:find("Search query modal pre-fill, Ctrl+U clear & interactive simulation validated", 1, true), "Self-test missing search query modal validation")
 assert(t11_out:find("Persistent search history & Readline-style UP/DOWN cycling validated", 1, true), "Self-test missing search history validation")
+assert(t11_out:find("Playback resume position helpers, watch-later config parsing & quit logic validated", 1, true), "Self-test missing playback resume validation")
 if is_win then
     assert(t11_out:find("Win32 Named Pipe FFI bindings validated", 1, true), "Self-test missing pipe bindings validation")
 end
