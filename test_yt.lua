@@ -22,10 +22,6 @@ assert(help_out:find("yt.lua", 1, true), "Help output missing header")
 assert(help_out:find("System Status:", 1, true), "Help output missing status")
 assert(help_out:find("--proxy", 1, true), "Help output missing --proxy option")
 assert(help_out:find("--insecure", 1, true), "Help output missing --insecure option")
-assert(help_out:find("--radio", 1, true), "Help output missing --radio option")
-assert(help_out:find("--speed", 1, true), "Help output missing --speed option")
-assert(help_out:find("--eq", 1, true), "Help output missing --eq option")
-assert(help_out:find("--favorites", 1, true), "Help output missing --favorites option")
 assert(help_out:find("deno:", 1, true), "Help output missing deno status")
 print("  [✓] Test 1 passed: yt.lua --help renders properly.")
 
@@ -159,18 +155,10 @@ p_test11:close()
 assert(t11_out:find("Download directory validation passed", 1, true), "Self-test missing download dir validation")
 assert(t11_out:find("Up-Next Playback Queue FIFO logic passed", 1, true), "Self-test missing queue validation")
 assert(t11_out:find("Search Filters & Sorting validation passed", 1, true), "Self-test missing search filters validation")
-assert(t11_out:find("Multi-byte pasted input FIFO queueing & token normalization validated", 1, true), "Self-test missing pasted input FIFO queueing validation")
-assert(t11_out:find("Search query modal pre-fill, Ctrl+U clear & interactive simulation validated", 1, true), "Self-test missing search query modal validation")
-assert(t11_out:find("Persistent search history & Readline-style UP/DOWN cycling validated", 1, true), "Self-test missing search history validation")
-assert(t11_out:find("Playback speed multiplier, clamping & mini-player badges validated", 1, true), "Self-test missing speed validation")
-assert(t11_out:find("Audio Equalizer presets, dynamic lavfi filter generation & badges validated", 1, true), "Self-test missing EQ validation")
-assert(t11_out:find("Starred favorites persistence, toggle logic & deduplication validated", 1, true), "Self-test missing favorites validation")
-assert(t11_out:find("Infinite YouTube Mix / Radio recommendations deduplication validated", 1, true), "Self-test missing radio validation")
-assert(t11_out:find("Audio Equalizer modal headless interaction & key navigation validated", 1, true), "Self-test missing EQ modal validation")
 if is_win then
     assert(t11_out:find("Win32 Named Pipe FFI bindings validated", 1, true), "Self-test missing pipe bindings validation")
 end
-print("  [✓] Test 11 passed: Mini-Player, Playback Queue, Offline Download, Search Filters, Speed, EQ, and Favorites verified.")
+print("  [✓] Test 11 passed: Mini-Player, Playback Queue, Offline Download, and Search Filters verified.")
 
 -- Test 12: Bytecode Scoping & Global Integrity Check (ensures max_list_h and other locals are not global)
 local p_bc = io.popen(luajit .. " -bl yt.lua", "r")
@@ -195,14 +183,6 @@ assert(next(bad_globals) == nil, "Undefined global accesses detected in yt.lua: 
     return t
 end)(), ", "))
 print("  [✓] Test 12 passed: Bytecode scoping verified (0 undeclared globals in yt.lua).")
-
--- Test 13: Non-interactive Starred Favorites & CLI options validation
-local p_fav = io.popen(luajit .. " yt.lua --favorites --no-interactive", "r")
-assert(p_fav, "Failed to run yt.lua with --favorites --no-interactive")
-local fav_out = p_fav:read("*a")
-p_fav:close()
-assert(fav_out:find("Starred Favorites", 1, true), "Non-interactive favorites header missing")
-print("  [✓] Test 13 passed: --favorites non-interactive query and display verified.")
 
 print("=== All Backend Verification Tests Completed Successfully ===")
 

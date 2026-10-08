@@ -41,31 +41,6 @@ local safe_popen = io.popen
 local safe_execute = os.execute
 local kernel32
 local msvcrt
-local pending_keys = {}
-local enqueue_pending_bytes
-
-enqueue_pending_bytes = function(buf, start_idx, len)
-    for i = start_idx, len - 1 do
-        local b
-        if type(buf) == "string" then
-            b = buf:byte(i + 1)
-        else
-            b = bit.band(buf[i], 0xFF)
-        end
-        if b == 10 or b == 13 then
-            table.insert(pending_keys, "ENTER")
-        elseif b == 9 then
-            table.insert(pending_keys, "TAB")
-        elseif b == 127 or b == 8 then
-            table.insert(pending_keys, "BACKSPACE")
-        elseif b == 21 then
-            table.insert(pending_keys, "CTRL_U")
-        elseif (b >= 32 and b <= 126) or b >= 128 then
-            table.insert(pending_keys, string.char(b))
-        end
-    end
-end
-
 
 if is_windows then
     ffi.cdef[[
@@ -268,9 +243,6 @@ if is_windows then
     end
 
     read_key = function(timeout_ms)
-        if #pending_keys > 0 then
-            return table.remove(pending_keys, 1)
-        end
         timeout_ms = timeout_ms or -1
         local start = kernel32.GetTickCount()
         while true do
@@ -299,7 +271,7 @@ if is_windows then
                     return "CTRL_D"
                 elseif ch == 21 then
                     return "CTRL_U"
-                elseif (ch >= 32 and ch <= 126) or ch >= 128 then
+                elseif ch >= 32 and ch <= 126 then
                     return string.char(ch)
                 end
             end
@@ -454,9 +426,6 @@ ffi.cdef(posix_termios_cdef[[
     local key_buf = ffi.new("char[16]")
 
     read_key = function(timeout_ms)
-        if #pending_keys > 0 then
-            return table.remove(pending_keys, 1)
-        end
         timeout_ms = timeout_ms or -1
         local ret = ffi.C.poll(pfd, 1, timeout_ms)
         if ret > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
@@ -466,34 +435,28 @@ ffi.cdef(posix_termios_cdef[[
                 if c0 == 27 then
                     if n >= 3 and key_buf[1] == 91 then
                         local c2 = key_buf[2]
-                        if c2 == 65 then enqueue_pending_bytes(key_buf, 3, n); return "UP" end
-                        if c2 == 66 then enqueue_pending_bytes(key_buf, 3, n); return "DOWN" end
-                        if c2 == 67 then enqueue_pending_bytes(key_buf, 3, n); return "RIGHT" end
-                        if c2 == 68 then enqueue_pending_bytes(key_buf, 3, n); return "LEFT" end
-                        if c2 == 72 then enqueue_pending_bytes(key_buf, 3, n); return "HOME" end
-                        if c2 == 70 then enqueue_pending_bytes(key_buf, 3, n); return "END" end
-                        if c2 == 53 and n >= 4 and key_buf[3] == 126 then enqueue_pending_bytes(key_buf, 4, n); return "PAGE_UP" end
-                        if c2 == 54 and n >= 4 and key_buf[3] == 126 then enqueue_pending_bytes(key_buf, 4, n); return "PAGE_DOWN" end
+                        if c2 == 65 then return "UP" end
+                        if c2 == 66 then return "DOWN" end
+                        if c2 == 67 then return "RIGHT" end
+                        if c2 == 68 then return "LEFT" end
+                        if c2 == 72 then return "HOME" end
+                        if c2 == 70 then return "END" end
+                        if c2 == 53 and n >= 4 and key_buf[3] == 126 then return "PAGE_UP" end
+                        if c2 == 54 and n >= 4 and key_buf[3] == 126 then return "PAGE_DOWN" end
                     elseif n == 1 then
                         return "ESC"
                     end
                 elseif c0 == 10 or c0 == 13 then
-                    enqueue_pending_bytes(key_buf, 1, n)
                     return "ENTER"
                 elseif c0 == 9 then
-                    enqueue_pending_bytes(key_buf, 1, n)
                     return "TAB"
                 elseif c0 == 127 or c0 == 8 then
-                    enqueue_pending_bytes(key_buf, 1, n)
                     return "BACKSPACE"
                 elseif c0 == 4 then
-                    enqueue_pending_bytes(key_buf, 1, n)
                     return "CTRL_D"
                 elseif c0 == 21 then
-                    enqueue_pending_bytes(key_buf, 1, n)
                     return "CTRL_U"
-                elseif (c0 >= 32 and c0 <= 126) or c0 >= 128 then
-                    enqueue_pending_bytes(key_buf, 1, n)
+                elseif c0 >= 32 and c0 <= 126 then
                     return string.char(c0)
                 end
             end
@@ -564,10 +527,6 @@ end
 
 local function get_history_file()
     return get_cache_dir() .. (is_windows and "\\" or "/") .. "history.json"
-end
-
-local function get_search_history_file()
-    return get_cache_dir() .. (is_windows and "\\" or "/") .. "search_history.json"
 end
 
 local function normalize_caption_token(w)
@@ -1045,198 +1004,6 @@ local function load_history_items()
     return items
 end
 
--- =========================================================================
--- Local Starred Favorites & Audio EQ Presets
--- =========================================================================
-local function get_favorites_file()
-    return get_cache_dir() .. (is_windows and "\\" or "/") .. "favorites.json"
-end
-
-local function load_favorites()
-    local fav_file = get_favorites_file()
-    local f = io.open(fav_file, "r")
-    if not f then return {} end
-    local items = {}
-    for line in f:lines() do
-        local id = parse_json_field(line, "id")
-        local title = parse_json_field(line, "title")
-        if (id or line:find('"url"')) and title then
-            local uploader = parse_json_field(line, "uploader") or "YouTube"
-            local duration = parse_json_field(line, "duration") or 0
-            local duration_str = parse_json_field(line, "duration_str") or "--:--"
-            local url = parse_json_field(line, "url") or (id and ("https://www.youtube.com/watch?v=" .. id))
-            table.insert(items, {
-                id = id or url,
-                url = url,
-                title = title,
-                uploader = uploader,
-                duration = duration,
-                duration_str = duration_str,
-            })
-        end
-    end
-    f:close()
-    return items
-end
-
-local function is_favorite(item_or_id)
-    if not item_or_id then return false end
-    local key = type(item_or_id) == "table" and (item_or_id.id or item_or_id.url) or item_or_id
-    if not key or #key == 0 then return false end
-    local favs = load_favorites()
-    for _, it in ipairs(favs) do
-        if it.id == key or it.url == key then return true end
-    end
-    return false
-end
-
-local function save_favorite_item(item)
-    if not item or not (item.id or item.url) then return false end
-    local fav_file = get_favorites_file()
-    local existing = load_favorites()
-    local key = item.id or item.url
-    local filtered = {}
-    for _, it in ipairs(existing) do
-        if it.id ~= key and it.url ~= key then
-            table.insert(filtered, it)
-        end
-    end
-    table.insert(filtered, 1, item)
-    if #filtered > 500 then table.remove(filtered) end
-    local out = io.open(fav_file, "w")
-    if out then
-        local function esc(s) return (s or ""):gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', ' ') end
-        for _, it in ipairs(filtered) do
-            local item_id = it.id or it.url
-            local item_url = it.url or (it.id and ("https://www.youtube.com/watch?v=" .. it.id))
-            out:write(string.format('{"id":%q,"url":%q,"title":%q,"uploader":%q,"duration":%d,"duration_str":%q}\n',
-                item_id, item_url, esc(it.title), esc(it.uploader), it.duration or 0, esc(it.duration_str)))
-        end
-        out:close()
-        return true
-    end
-    return false
-end
-
-local function remove_favorite_item(item_or_id)
-    if not item_or_id then return false end
-    local key = type(item_or_id) == "table" and (item_or_id.id or item_or_id.url) or item_or_id
-    if not key or #key == 0 then return false end
-    local fav_file = get_favorites_file()
-    local existing = load_favorites()
-    local filtered = {}
-    local removed = false
-    for _, it in ipairs(existing) do
-        if it.id == key or it.url == key then
-            removed = true
-        else
-            table.insert(filtered, it)
-        end
-    end
-    if removed then
-        local out = io.open(fav_file, "w")
-        if out then
-            local function esc(s) return (s or ""):gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', ' ') end
-            for _, it in ipairs(filtered) do
-                local item_id = it.id or it.url
-                local item_url = it.url or (it.id and ("https://www.youtube.com/watch?v=" .. it.id))
-                out:write(string.format('{"id":%q,"url":%q,"title":%q,"uploader":%q,"duration":%d,"duration_str":%q}\n',
-                    item_id, item_url, esc(it.title), esc(it.uploader), it.duration or 0, esc(it.duration_str)))
-            end
-            out:close()
-        end
-    end
-    return removed
-end
-
-local function toggle_favorite_item(item)
-    if not item or not (item.id or item.url) then return false end
-    if is_favorite(item) then
-        remove_favorite_item(item)
-        return false
-    else
-        save_favorite_item(item)
-        return true
-    end
-end
-
-local EQ_PRESETS = {
-    { key = "flat",  name = "Flat / Bypass (Original Audio)",             filter = "" },
-    { key = "night", name = "Night Mode (Dynamic Range Normalizer)",      filter = "dynaudnorm=f=150:g=15" },
-    { key = "bass",  name = "Bass Boost (+6dB Low End)",                  filter = "equalizer=f=64:t=q:w=1:g=6:f=125:t=q:w=1:g=4" },
-    { key = "vocal", name = "Vocal Clarity (Podcasts & Interviews)",      filter = "equalizer=f=1000:t=q:w=1:g=3:f=3000:t=q:w=1:g=4:f=100:t=q:w=1:g=-4" },
-    { key = "lofi",  name = "Lo-Fi Warmth (Analog High-Cut)",             filter = "lowpass=f=4500" },
-}
-
-local function get_eq_filter(key)
-    for _, p in ipairs(EQ_PRESETS) do
-        if p.key == key then return p.filter end
-    end
-    return ""
-end
-
-local function get_eq_name(key)
-    for _, p in ipairs(EQ_PRESETS) do
-        if p.key == key then return p.name end
-    end
-    return "Flat / Bypass"
-end
-
-local function is_valid_eq_preset(key)
-    if not key then return false end
-    for _, p in ipairs(EQ_PRESETS) do
-        if p.key == key then return true end
-    end
-    return false
-end
-
-local function save_search_history(query)
-    if not query or type(query) ~= "string" then return false end
-    query = query:match("^%s*(.-)%s*$")
-    if #query == 0 then return false end
-
-    local sfile = get_search_history_file()
-    local existing = {}
-    local f = io.open(sfile, "r")
-    if f then
-        for line in f:lines() do
-            local q = parse_json_field(line, "query")
-            if q and #q > 0 and q ~= query then
-                table.insert(existing, q)
-                if #existing >= 50 then break end
-            end
-        end
-        f:close()
-    end
-
-    local out = io.open(sfile, "w")
-    if out then
-        local function esc(s) return (s or ""):gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', ' ') end
-        out:write(string.format('{"query":%q}\n', esc(query)))
-        for _, q in ipairs(existing) do
-            out:write(string.format('{"query":%q}\n', esc(q)))
-        end
-        out:close()
-        return true
-    end
-    return false
-end
-
-local function load_search_history()
-    local sfile = get_search_history_file()
-    local f = io.open(sfile, "r")
-    if not f then return {} end
-    local queries = {}
-    for line in f:lines() do
-        local q = parse_json_field(line, "query")
-        if q and #q > 0 then
-            table.insert(queries, q)
-        end
-    end
-    f:close()
-    return queries
-end
-
 local function format_duration(sec)
     if not sec or sec <= 0 then return "--:--" end
     sec = math.floor(sec)
@@ -1254,7 +1021,6 @@ end
 -- 3. YouTube Search & Extraction Engine
 -- =========================================================================
 local function scrape_youtube_search(query, max_results, proxy, insecure)
-    query = tostring(query or "")
     max_results = max_results or 20
     local encoded = query:gsub("([^%w%-%_%.%~])", function(c)
         return string.format("%%%02X", string.byte(c))
@@ -1323,7 +1089,9 @@ local function build_search_spec(query, mode, max_results, is_liked, filters, si
         end
     elseif is_direct_url then
         return string.format("%q", query)
-    elseif site == "youtube" and filters and filters.sort and filters.sort ~= "relevance" then
+    elseif SITE_SEARCH_PREFIXES[site] then
+        return string.format('"%s%d:%s"', SITE_SEARCH_PREFIXES[site], max_results, query:gsub('"', '\\"'))
+    elseif filters and filters.sort and filters.sort ~= "relevance" then
         local sp_map = {
             views = "CAM%253D",
             date = "CAI%253D",
@@ -1336,8 +1104,6 @@ local function build_search_spec(query, mode, max_results, is_liked, filters, si
         else
             return string.format('"ytsearch%d:%s"', max_results, query:gsub('"', '\\"'))
         end
-    elseif SITE_SEARCH_PREFIXES[site] then
-        return string.format('"%s%d:%s"', SITE_SEARCH_PREFIXES[site], max_results, query:gsub('"', '\\"'))
     else
         return string.format('"ytsearch%d:%s"', max_results, query:gsub('"', '\\"'))
     end
@@ -1445,11 +1211,11 @@ local function fetch_youtube_results(query, mode, browser, cookies_file, max_res
 
     -- Automatic Fallback: Direct Web Scrape via curl (works even if yt-dlp is blocked or broken)
     if site == "youtube" and not is_liked and not is_direct_url then
-        local fallback_items = scrape_youtube_search(query, max_results, proxy, insecure)
+        local fallback_items = scrape_youtube_search(term, max_results, proxy, insecure)
         if fallback_items and #fallback_items > 0 then
             return fallback_items, nil, insecure
         elseif not insecure then
-            local fallback_insecure = scrape_youtube_search(query, max_results, proxy, true)
+            local fallback_insecure = scrape_youtube_search(term, max_results, proxy, true)
             if fallback_insecure and #fallback_insecure > 0 then
                 io.stderr:write("\n\27[33m[yt] Corporate SSL inspection detected (curl) -- retrying in insecure mode...\27[0m\n")
                 return fallback_insecure, nil, true
@@ -1476,40 +1242,6 @@ local function fetch_youtube_results(query, mode, browser, cookies_file, max_res
     end
 
     return nil, "No results found for '" .. query .. "'.", insecure
-end
-
-local function fetch_radio_recommendations(item, browser, cookies_file, proxy, insecure)
-    if not item then return {} end
-    local vid = item.id
-    if not vid and item.url then
-        vid = item.url:match("v=([%w_%-]+)") or item.url:match("youtu%.be/([%w_%-]+)")
-    end
-    local recs = {}
-    if vid and #vid > 0 then
-        local mix_url = string.format("https://www.youtube.com/watch?v=%s&list=RD%s", vid, vid)
-        local results = fetch_youtube_results(mix_url, "music", browser, cookies_file, 8, false, proxy, insecure, { sort = "relevance", duration = "all" }, "youtube")
-        if results and #results > 0 then
-            for _, r in ipairs(results) do
-                if r.id ~= vid and (not item.url or r.url ~= item.url) then
-                    table.insert(recs, r)
-                    if #recs >= 5 then break end
-                end
-            end
-        end
-    end
-    if #recs == 0 and item.uploader and #item.uploader > 0 and item.uploader ~= "YouTube" then
-        local search_term = item.uploader .. " music"
-        local results = fetch_youtube_results(search_term, "music", browser, cookies_file, 6, false, proxy, insecure, { sort = "relevance", duration = "all" }, "youtube")
-        if results and #results > 0 then
-            for _, r in ipairs(results) do
-                if r.id ~= vid and (not item.url or r.url ~= item.url) then
-                    table.insert(recs, r)
-                    if #recs >= 5 then break end
-                end
-            end
-        end
-    end
-    return recs
 end
 
 -- =========================================================================
@@ -1584,7 +1316,7 @@ local function to_mpv_slang(sub_lang)
     return #parts > 0 and table.concat(parts, ",") or "en-orig,en,eng,en-US,en-GB"
 end
 
-local function render_mini_player_lines(cur, is_paused, volume, pos, dur, sub_text, show_cc, term_w, track_idx, total_tracks, has_sub_track, last_sub_text, speed, eq_preset)
+local function render_mini_player_lines(cur, is_paused, volume, pos, dur, sub_text, show_cc, term_w, track_idx, total_tracks, has_sub_track, last_sub_text)
     term_w = math.max(30, term_w or 80)
     dur = (dur and dur > 0) and dur or (cur and cur.duration or 0)
     pos = pos or 0
@@ -1594,13 +1326,11 @@ local function render_mini_player_lines(cur, is_paused, volume, pos, dur, sub_te
 
     local st_badge = is_paused and "\27[1;93m[PAUSED]\27[0m" or "\27[1;92m[PLAYING]\27[0m"
     local vol_str = string.format("\27[96mVol: %d%%\27[0m", volume or 100)
-    local spd_badge = (speed and speed ~= 1.0) and string.format(" \27[1;36m[%.2fx]\27[0m", speed) or ""
-    local eq_badge = (eq_preset and eq_preset ~= "flat") and string.format(" \27[1;35m[%s]\27[0m", eq_preset:upper()) or ""
     local title = cur and cur.title or "Unknown"
-    local title_part = utf8_truncate(title, math.max(10, term_w - 52))
+    local title_part = utf8_truncate(title, math.max(10, term_w - 48))
     
     -- Border 1 (Top Border)
-    local prefix1 = string.format("+-- > Now Playing: %s --- %s%s%s --- %s ", title_part, vol_str, spd_badge, eq_badge, st_badge)
+    local prefix1 = string.format("+-- > Now Playing: %s --- %s --- %s ", title_part, vol_str, st_badge)
     local pad1 = math.max(0, term_w - display_width(strip_ansi(prefix1)) - 1)
     table.insert(lines, string.format("\27[1;36m%s%s+\27[0m\27[K\n", prefix1, string.rep("-", pad1)))
 
@@ -1637,17 +1367,11 @@ local function render_mini_player_lines(cur, is_paused, volume, pos, dur, sub_te
     end
 
     -- Border 2 (Controls / Bottom Border)
-    local ctrl_hint_text = (term_w >= 96)
-        and "[Space] Pause  [c] CC  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol  [[/]] Spd  [e] EQ"
-        or ((term_w >= 85)
-            and "[Space] Pause  [c] CC  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol  [[/]] Spd"
-            or ((term_w >= 70)
-                and "[Space] Pause  [c] CC  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol"
-                or "[Space] Pause  [c] CC  [s] Skip  [x] Stop"))
-    local max_hint_w = math.max(10, term_w - 6)
-    if display_width(ctrl_hint_text) > max_hint_w then
-        ctrl_hint_text = utf8_truncate(ctrl_hint_text, max_hint_w)
-    end
+    local ctrl_hint_text = (term_w >= 85)
+        and "[Space] Pause  [c] CC  [C] Trk  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol"
+        or ((term_w >= 75)
+            and "[Space] Pause  [c] CC  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol"
+            or "[Space] Pause  [c] CC  [s] Skip  [x] Stop")
     local ctrl_hint = "\27[90m" .. ctrl_hint_text .. "\27[0m"
     local prefix2 = string.format("+-- %s ", ctrl_hint)
     local pad2 = math.max(0, term_w - display_width(strip_ansi(prefix2)) - 1)
@@ -1686,8 +1410,6 @@ local MpvController = {
     pipe_name = nil,
     read_buf = "",
     cc_state = { prev_last_line = "", prev_displayed = "" },
-    speed = 1.0,
-    eq_preset = "flat",
 }
 
 function MpvController:init_observers()
@@ -1699,7 +1421,6 @@ function MpvController:init_observers()
     self:send_command('{"command": ["observe_property", 6, "eof-reached"]}')
     self:send_command('{"command": ["observe_property", 7, "sub"]}')
     self:send_command('{"command": ["observe_property", 8, "track-list"]}')
-    self:send_command('{"command": ["observe_property", 9, "speed"]}')
 end
 
 function MpvController:send_command(json_str)
@@ -1747,15 +1468,6 @@ function MpvController:start(item, show_cc, sub_lang, browser, cookies_file, pro
     end
     local font_opt = (sub_font_size and sub_font_size > 0) and string.format(" --sub-font-size=%d", sub_font_size) or ""
     extra_mpv_opts = extra_mpv_opts .. string.format(" --subs-fallback=yes --sub-auto=all --sub-visibility=yes%s --slang=%s", font_opt, to_mpv_slang(sub_lang))
-    if self.speed and self.speed ~= 1.0 then
-        extra_mpv_opts = extra_mpv_opts .. string.format(" --speed=%.2f", self.speed)
-    end
-    if self.eq_preset and self.eq_preset ~= "flat" then
-        local af_filter = get_eq_filter(self.eq_preset)
-        if #af_filter > 0 then
-            extra_mpv_opts = extra_mpv_opts .. string.format(" --af=%q", af_filter)
-        end
-    end
 
     local cmd
     if is_windows then
@@ -1881,9 +1593,6 @@ function MpvController:poll()
         elseif prop == "volume" then
             local v = parse_json_field(line, "data")
             if v then self.volume = math.floor(v) end
-        elseif prop == "speed" then
-            local sp = parse_json_field(line, "data")
-            if sp and tonumber(sp) then self.speed = tonumber(sp) end
         elseif prop == "sub-text" then
             local s = parse_json_field(line, "data") or ""
             if #s > 0 then
@@ -1962,18 +1671,6 @@ function MpvController:cycle_sub()
     self.cc_state = { prev_last_line = "", prev_displayed = "" }
     self.sub_text = ""
     self.last_sub_text = ""
-end
-
-function MpvController:set_speed(speed)
-    speed = math.max(0.5, math.min(2.5, speed))
-    self.speed = speed
-    self:send_command(string.format('{"command": ["set_property", "speed", %.2f]}', speed))
-end
-
-function MpvController:set_eq(preset_key)
-    self.eq_preset = preset_key or "flat"
-    local filter = get_eq_filter(self.eq_preset)
-    self:send_command(string.format('{"command": ["set_property", "af", %q]}', filter))
 end
 
 function MpvController:stop()
@@ -2066,15 +1763,6 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     end
 
     local term_w, term_h = get_terminal_size()
-    if MpvController.speed and MpvController.speed ~= 1.0 then
-        extra_mpv_opts = extra_mpv_opts .. string.format(" --speed=%.2f", MpvController.speed)
-    end
-    if MpvController.eq_preset and MpvController.eq_preset ~= "flat" then
-        local af_filter = get_eq_filter(MpvController.eq_preset)
-        if #af_filter > 0 then
-            extra_mpv_opts = extra_mpv_opts .. string.format(" --af=%q", af_filter)
-        end
-    end
     local status_msg = build_mpv_status_msg(mode, (show_cc or mode == "video") and not use_native_window_subtitles)
     -- Unix shells expand ${...} before mpv sees it; preserve MPV property syntax.
     local command_status_msg = is_windows and status_msg or status_msg:gsub("%$", "\\$")
@@ -2431,103 +2119,18 @@ local function show_filter_modal(filters)
     return changed
 end
 
-local function show_eq_modal(current_preset)
-    local term_w, term_h = get_terminal_size()
-    local box_w = math.min(66, term_w - 4)
-    local box_h = #EQ_PRESETS + 6
-    local box_x = math.max(1, math.floor((term_w - box_w) / 2))
-    local box_y = math.max(2, math.floor((term_h - box_h) / 2))
-
-    local selected_idx = 1
-    for i, p in ipairs(EQ_PRESETS) do
-        if p.key == current_preset then
-            selected_idx = i
-            break
-        end
-    end
-
-    local function line_pad(text)
-        local vis_len = display_width(strip_ansi(text))
-        local pad = math.max(0, box_w - 2 - vis_len)
-        return text .. string.rep(" ", pad) .. "\27[1;36m|\27[0m"
-    end
-
-    local function draw_modal()
-        local lines = {
-            string.format("\27[1;36m+%s+\27[0m", string.rep("-", box_w - 2)),
-            line_pad("\27[1;36m|  \27[1;37mAudio Equalizer & Sound Enhancement\27[0m"),
-            string.format("\27[1;36m+%s+\27[0m", string.rep("-", box_w - 2)),
-        }
-
-        for i, p in ipairs(EQ_PRESETS) do
-            local is_active = (p.key == current_preset)
-            local is_cursor = (i == selected_idx)
-            local radio = is_active and "\27[1;92m(*)\27[0m" or "\27[90m( )\27[0m"
-            local cursor = is_cursor and "\27[1;93m> \27[0m" or "  "
-            local num_key = string.format("\27[93m[%d]\27[0m", i)
-            local name_str = is_cursor and ("\27[1;37;44m " .. p.name .. " \27[0m") or p.name
-            local item_text = string.format("\27[1;36m| %s%s %s %s", cursor, num_key, radio, name_str)
-            table.insert(lines, line_pad(item_text))
-        end
-
-        table.insert(lines, string.format("\27[1;36m+%s+\27[0m", string.rep("-", box_w - 2)))
-        table.insert(lines, line_pad("\27[1;36m|  \27[90m[1-5/Up/Dn] Select   [Enter] Apply   [Esc] Dismiss\27[0m"))
-        table.insert(lines, string.format("\27[1;36m+%s+\27[0m", string.rep("-", box_w - 2)))
-
-        for idx, line in ipairs(lines) do
-            io.write(string.format("\27[%d;%dH%s", box_y + idx - 1, box_x, line))
-        end
-        io.flush()
-    end
-
-    draw_modal()
-
-    while true do
-        local k = read_key(50)
-        if k == "ESC" or k == "q" then
-            return nil
-        elseif k == "ENTER" then
-            return EQ_PRESETS[selected_idx].key
-        elseif k == "UP" or k == "k" then
-            if selected_idx > 1 then
-                selected_idx = selected_idx - 1
-                draw_modal()
-            end
-        elseif k == "DOWN" or k == "j" then
-            if selected_idx < #EQ_PRESETS then
-                selected_idx = selected_idx + 1
-                draw_modal()
-            end
-        else
-            local n = tonumber(k)
-            if n and n >= 1 and n <= #EQ_PRESETS then
-                selected_idx = n
-                return EQ_PRESETS[selected_idx].key
-            end
-        end
-    end
-end
-
 local function prompt_search_query(current_query)
     local term_w, term_h = get_terminal_size()
-    local box_w = math.min(64, term_w - 4)
+    local box_w = math.min(60, term_w - 4)
     local box_x = math.max(1, math.floor((term_w - box_w) / 2))
     local box_y = math.max(2, math.floor(term_h / 3))
 
-    local input_str = current_query or ""
-    local search_history = load_search_history()
-    local history_idx = 0
-    local draft_input = input_str
+    local input_str = ""
 
     local function draw_modal()
         io.write(string.format("\27[%d;%dH\27[1;36m+%s+\27[0m", box_y, box_x, string.rep("-", box_w - 2)))
-        
-        local title_str = (history_idx > 0)
-            and string.format("Search YouTube / URL [Hist %d/%d]:", history_idx, #search_history)
-            or "Search YouTube / URL:"
-        local title_pad = math.max(0, box_w - 3 - #title_str)
-        io.write(string.format("\27[%d;%dH\27[1;36m| \27[1;37m%s\27[0m%s\27[1;36m|\27[0m",
-            box_y + 1, box_x, title_str, string.rep(" ", title_pad)))
+        io.write(string.format("\27[%d;%dH\27[1;36m| \27[1;37mSearch YouTube / URL:\27[0m%s\27[1;36m|\27[0m",
+            box_y + 1, box_x, string.rep(" ", box_w - 24)))
         
         local display_input = input_str
         if #display_input > box_w - 6 then
@@ -2536,32 +2139,9 @@ local function prompt_search_query(current_query)
         local pad = math.max(0, box_w - 6 - #display_input)
         io.write(string.format("\27[%d;%dH\27[1;36m| \27[93m> %s\27[7m \27[0m%s\27[1;36m|\27[0m",
             box_y + 2, box_x, display_input, string.rep(" ", pad)))
-        
-        local hint_str
-        if history_idx > 0 then
-            hint_str = string.format("History %d of %d (press [Down] to return)", history_idx, #search_history)
-        elseif #search_history > 0 then
-            local recents = {}
-            for idx = 1, math.min(3, #search_history) do
-                table.insert(recents, search_history[idx])
-            end
-            hint_str = "Recent: " .. table.concat(recents, " | ")
-        else
-            hint_str = "Type a search term, song title, or video URL"
-        end
-        if #hint_str > box_w - 4 then
-            hint_str = hint_str:sub(1, box_w - 7) .. "..."
-        end
-        local hint_pad = math.max(0, box_w - 3 - #hint_str)
-        io.write(string.format("\27[%d;%dH\27[1;36m| \27[90m%s\27[0m%s\27[1;36m|\27[0m",
-            box_y + 3, box_x, hint_str, string.rep(" ", hint_pad)))
-
-        local help_str = (box_w >= 56) and "[Enter] Search  [Up/Dn] Hist  [Ctrl+U] Clear  [Esc] Cancel"
-            or ((box_w >= 44) and "[Enter] Search  [Up/Dn] Hist  [Esc] Cancel" or "[Enter] OK  [Esc] Cancel")
-        local help_pad = math.max(0, box_w - 3 - #help_str)
-        io.write(string.format("\27[%d;%dH\27[1;36m| \27[90m%s\27[0m%s\27[1;36m|\27[0m",
-            box_y + 4, box_x, help_str, string.rep(" ", help_pad)))
-        io.write(string.format("\27[%d;%dH\27[1;36m+%s+\27[0m", box_y + 5, box_x, string.rep("-", box_w - 2)))
+        io.write(string.format("\27[%d;%dH\27[1;36m| \27[90m[Enter] Search   [Esc] Cancel\27[0m%s\27[1;36m|\27[0m",
+            box_y + 3, box_x, string.rep(" ", box_w - 32)))
+        io.write(string.format("\27[%d;%dH\27[1;36m+%s+\27[0m", box_y + 4, box_x, string.rep("-", box_w - 2)))
         io.flush()
     end
 
@@ -2577,39 +2157,12 @@ local function prompt_search_query(current_query)
             else
                 return nil
             end
-        elseif k == "UP" then
-            if #search_history > 0 and history_idx < #search_history then
-                if history_idx == 0 then
-                    draft_input = input_str
-                end
-                history_idx = history_idx + 1
-                input_str = search_history[history_idx]
-                draw_modal()
-            end
-        elseif k == "DOWN" then
-            if history_idx > 1 then
-                history_idx = history_idx - 1
-                input_str = search_history[history_idx]
-                draw_modal()
-            elseif history_idx == 1 then
-                history_idx = 0
-                input_str = draft_input
-                draw_modal()
-            end
         elseif k == "BACKSPACE" then
-            history_idx = 0
             if #input_str > 0 then
                 input_str = input_str:sub(1, #input_str - 1)
                 draw_modal()
             end
-        elseif k == "CTRL_U" then
-            history_idx = 0
-            if #input_str > 0 then
-                input_str = ""
-                draw_modal()
-            end
         elseif k and #k == 1 then
-            history_idx = 0
             input_str = input_str .. k
             draw_modal()
         end
@@ -2641,12 +2194,7 @@ local function show_help_modal()
         line_pad("\27[1;36m|    \27[93m[y]\27[0m           Yank (copy) video URL to clipboard"),
         line_pad("\27[1;36m|    \27[93m[f]\27[0m           Search filters (Sort by Views/Date, Duration)"),
         line_pad("\27[1;36m|    \27[93m[/]\27[0m           Open search modal or paste direct URL"),
-        line_pad("\27[1;36m|    \27[93m[a]\27[0m           Toggle continuous Auto-Play"),
-        line_pad("\27[1;36m|    \27[93m[r]\27[0m           Toggle infinite Radio mode (YouTube Mix)"),
-        line_pad("\27[1;36m|    \27[93m[e]\27[0m           Open Audio Equalizer & Sound Enhancements"),
-        line_pad("\27[1;36m|    \27[93m[*]\27[0m           Toggle Favorite (Star / Un-star track)"),
-        line_pad("\27[1;36m|    \27[93m[F]\27[0m           Toggle Starred Favorites playlist"),
-        line_pad("\27[1;36m|    \27[93m[[] / []]\27[0m     Adjust playback speed (-/+0.25x)  [{] Reset"),
+        line_pad("\27[1;36m|    \27[93m[a]\27[0m           Toggle continuous Auto-Play (Radio mode)"),
         line_pad("\27[1;36m|    \27[93m[c]\27[0m           Toggle Closed Captions (CC / Lyrics)"),
         line_pad("\27[1;36m|    \27[93m[C]\27[0m           Cycle subtitle track (Mini-Player)"),
         line_pad("\27[1;36m|    \27[93m[+ / -]\27[0m       Increase / Decrease CC font size (+/-5 pt)"),
@@ -2684,7 +2232,7 @@ end
 -- =========================================================================
 -- 7. Main Interactive TUI Application
 -- =========================================================================
-local function run_app(init_query, init_mode, browser, cookies_file, is_liked, use_window, proxy, insecure, init_show_cc, init_sub_lang, init_filters, init_site, init_sub_font_size, init_sub_color, init_radio, init_speed, init_eq, init_favorites)
+local function run_app(init_query, init_mode, browser, cookies_file, is_liked, use_window, proxy, insecure, init_show_cc, init_sub_lang, init_filters, init_site, init_sub_font_size, init_sub_color)
     local current_query = init_query or ""
     local mode = init_mode or "music"
     local show_cc = (init_show_cc ~= nil) and init_show_cc or true
@@ -2695,19 +2243,10 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
     local selected_idx = 1
     local scroll_offset = 0
     local auto_play = false
-    local radio_mode = (init_radio == true)
     local is_history = false
-    local is_favorites_view = (init_favorites == true)
     local queue = {}
     local active_filters = init_filters or { sort = "relevance", duration = "all" }
     local result_limit = 25
-
-    if init_speed and tonumber(init_speed) then
-        MpvController:set_speed(tonumber(init_speed))
-    end
-    if init_eq and #init_eq > 0 then
-        MpvController:set_eq(init_eq)
-    end
 
     enable_raw_mode()
 
@@ -2742,9 +2281,6 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         end
         is_loading = false
         if res and #res > 0 then
-            if not is_liked and not is_history and current_query and #current_query > 0 then
-                save_search_history(current_query)
-            end
             if load_more then
                 local seen = {}
                 for _, item in ipairs(items) do
@@ -2774,10 +2310,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         end
     end
 
-    if is_favorites_view then
-        items = load_favorites()
-        status_msg = string.format("Loaded %d starred favorites", #items)
-    elseif #current_query > 0 or is_liked then
+    if #current_query > 0 or is_liked then
         refresh_results()
     else
         current_query = prompt_search_query(current_query)
@@ -2823,29 +2356,18 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         -- 1. Header Bar
         local auth_label = browser and ("Logged in: " .. browser) or (cookies_file and "Cookies file" or "Guest / Public")
         local mode_badge = (mode == "music") and "\27[1;92m[MUSIC / AUDIO]\27[0m" or "\27[1;93m[VIDEO]\27[0m"
-        local auto_badge
-        if radio_mode then
-            auto_badge = "\27[1;92m[RADIO: ON]\27[0m"
-        elseif auto_play then
-            auto_badge = "\27[1;92m[AUTO: ON]\27[0m"
-        else
-            auto_badge = "\27[90m[AUTO: OFF]\27[0m"
-        end
+        local auto_badge = auto_play and "\27[1;92m[AUTO: ON]\27[0m" or "\27[90m[AUTO: OFF]\27[0m"
         local cc_badge = show_cc and "\27[1;92m[CC: ON]\27[0m" or "\27[90m[CC: OFF]\27[0m"
         local q_badge = (#queue > 0) and string.format("\27[1;95m[QUEUE: %d]\27[0m", #queue) or "\27[90m[QUEUE: 0]\27[0m"
-        local spd_badge = (MpvController.speed and MpvController.speed ~= 1.0) and string.format(" | \27[1;36m[%.2fx]\27[0m", MpvController.speed) or ""
-        local eq_badge = (MpvController.eq_preset and MpvController.eq_preset ~= "flat") and string.format(" | \27[1;35m[EQ: %s]\27[0m", MpvController.eq_preset:upper()) or ""
         local sec_badge = insecure and " | \27[1;33m[CORP SSL]\27[0m" or ""
-        local header = string.format(" \27[1;36mYouTube Terminal Viewer\27[0m | %s | %s | %s | %s%s%s | \27[90m%s\27[0m%s",
-            mode_badge, auto_badge, cc_badge, q_badge, spd_badge, eq_badge, auth_label, sec_badge)
+        local header = string.format(" \27[1;36mYouTube Terminal Viewer\27[0m | %s | %s | %s | %s | \27[90m%s\27[0m%s",
+            mode_badge, auto_badge, cc_badge, q_badge, auth_label, sec_badge)
         table.insert(buf, "\27[1;34m" .. string.rep("=", term_w) .. "\27[0m\n")
         table.insert(buf, header .. "\27[K\n")
 
         -- 2. Query / Search Subheader with active filters
         local q_display
-        if is_favorites_view then
-            q_display = "\27[1;93m[Favorites] Starred Tracks (" .. #items .. ")\27[0m"
-        elseif is_history then
+        if is_history then
             q_display = "\27[1;95m[History] Playback History\27[0m"
         elseif is_liked then
             q_display = "\27[1;95m[Liked] Liked Songs Playlist\27[0m"
@@ -2871,9 +2393,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                     local is_sel = (idx == selected_idx)
                     local cursor = is_sel and "\27[1;92m> " or "  "
                     
-                    local is_fav = is_favorite(it)
-                    local fav_star = is_fav and "\27[1;93m★ \27[0m" or ""
-                    local max_title_w = math.max(15, term_w - (is_fav and 40 or 38))
+                    local max_title_w = math.max(15, term_w - 38)
                     local t = utf8_truncate(it.title, max_title_w)
                     local title_pad = string.rep(" ", math.max(0, max_title_w - display_width(t)))
 
@@ -2883,11 +2403,11 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
 
                     local row_str
                     if is_sel then
-                        row_str = string.format("%s\27[1;37;44m%02d. %s%s%s \27[1;96;44m%s%s \27[1;93;44m%s\27[0m\27[K\n",
-                            cursor, idx, fav_star, t, title_pad, up, up_pad, it.duration_str)
+                        row_str = string.format("%s\27[1;37;44m%02d. %s%s \27[1;96;44m%s%s \27[1;93;44m%s\27[0m\27[K\n",
+                            cursor, idx, t, title_pad, up, up_pad, it.duration_str)
                     else
-                        row_str = string.format("%s\27[90m%02d.\27[0m %s\27[37m%s%s\27[0m \27[90m%s%s\27[0m \27[33m%s\27[0m\27[K\n",
-                            cursor, idx, fav_star, t, title_pad, up, up_pad, it.duration_str)
+                        row_str = string.format("%s\27[90m%02d.\27[0m \27[37m%s%s\27[0m \27[90m%s%s\27[0m \27[33m%s\27[0m\27[K\n",
+                            cursor, idx, t, title_pad, up, up_pad, it.duration_str)
                     end
                     table.insert(buf, row_str)
                 else
@@ -2910,9 +2430,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                 selected_idx,
                 #items,
                 MpvController.has_sub_track,
-                MpvController.last_sub_text,
-                MpvController.speed,
-                MpvController.eq_preset
+                MpvController.last_sub_text
             )
             for _, l in ipairs(p_lines) do
                 table.insert(buf, l)
@@ -2926,7 +2444,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         if not (MpvController.is_playing and MpvController.current_item) then
             table.insert(buf, "\27[1;34m" .. string.rep("-", term_w) .. "\27[0m\n")
         end
-        table.insert(buf, string.format(" \27[93m[Enter]\27[0m Play  %s  \27[93m[r]\27[0m Radio  \27[93m[e]\27[0m EQ  \27[93m[*]\27[0m Fav  \27[93m[F]\27[0m Favs  \27[93m[[]/[]]\27[0m Spd  \27[93m[f]\27[0m Filter  \27[93m[/]\27[0m Find  \27[93m[?]\27[0m Help  \27[91m[q]\27[0m Quit\27[K\27[J", q_footer))
+        table.insert(buf, string.format(" \27[93m[Enter]\27[0m Play  %s  \27[93m[o]\27[0m Open  \27[93m[y]\27[0m Copy  \27[93m[d]\27[0m DL  \27[93m[f]\27[0m Filter  \27[93m[/]\27[0m Find  \27[93m[M]\27[0m More  \27[93m[m]\27[0m Mode  \27[93m[?]\27[0m Help  \27[91m[q]\27[0m Quit\27[K\27[J", q_footer))
         
         io.write(table.concat(buf))
         io.flush()
@@ -2954,30 +2472,13 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         local st = MpvController:poll()
         if st then
             if st.is_eof then
-                local finished_item = MpvController.current_item
-                -- Track finished playing: advance queue, replenish radio, or auto-play
+                -- Track finished playing: advance queue or auto-play
                 if #queue > 0 then
                     local next_item = table.remove(queue, 1)
                     save_history_item(next_item)
                     MpvController:start(next_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure, cc_font_size)
                     status_msg = "Playing: " .. utf8_truncate(next_item.title, 30)
                     draw_tui()
-                elseif radio_mode and finished_item then
-                    status_msg = "\27[1;92m* Radio: Discovering next tracks...\27[0m"
-                    draw_tui()
-                    local recs = fetch_radio_recommendations(finished_item, browser, cookies_file, proxy, insecure)
-                    if recs and #recs > 0 then
-                        local next_item = table.remove(recs, 1)
-                        for _, r in ipairs(recs) do table.insert(queue, r) end
-                        save_history_item(next_item)
-                        MpvController:start(next_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure, cc_font_size)
-                        status_msg = string.format("Radio playing: %s (+%d queued)", utf8_truncate(next_item.title, 25), #queue)
-                        draw_tui()
-                    else
-                        MpvController:stop()
-                        status_msg = "Radio: End of playlist"
-                        draw_tui()
-                    end
                 elseif auto_play and selected_idx < #items then
                     selected_idx = selected_idx + 1
                     local next_item = items[selected_idx]
@@ -3076,76 +2577,10 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                     download_item(sel, mode, browser, cookies_file, proxy, insecure)
                     draw_tui()
                 end
-            elseif k == "f" then
+            elseif k == "f" or k == "F" then
                 local changed = show_filter_modal(active_filters)
                 if changed then
                     refresh_results()
-                end
-                draw_tui()
-            elseif k == "F" then
-                is_favorites_view = not is_favorites_view
-                if is_favorites_view then
-                    is_history = false
-                    is_liked = false
-                    items = load_favorites()
-                    selected_idx = 1
-                    scroll_offset = 0
-                    status_msg = string.format("Loaded %d starred favorites", #items)
-                else
-                    refresh_results()
-                end
-                draw_tui()
-            elseif k == "*" then
-                local sel = (#items > 0 and selected_idx >= 1 and selected_idx <= #items and items[selected_idx])
-                    or (MpvController.is_playing and MpvController.current_item)
-                if sel then
-                    local added = toggle_favorite_item(sel)
-                    if is_favorites_view and not added then
-                        items = load_favorites()
-                        selected_idx = math.max(1, math.min(#items, selected_idx))
-                    end
-                    status_msg = added and ("\27[1;93m★ Starred: \27[0m" .. utf8_truncate(sel.title, 25))
-                        or ("\27[90m☆ Unstarred: \27[0m" .. utf8_truncate(sel.title, 25))
-                    draw_tui()
-                end
-            elseif k == "[" then
-                local cur_spd = MpvController.speed or 1.0
-                local new_spd = math.max(0.5, cur_spd - 0.25)
-                MpvController:set_speed(new_spd)
-                status_msg = string.format("Playback Speed: %.2fx", new_spd)
-                draw_tui()
-            elseif k == "]" then
-                local cur_spd = MpvController.speed or 1.0
-                local new_spd = math.min(2.5, cur_spd + 0.25)
-                MpvController:set_speed(new_spd)
-                status_msg = string.format("Playback Speed: %.2fx", new_spd)
-                draw_tui()
-            elseif k == "{" or k == "}" then
-                MpvController:set_speed(1.0)
-                status_msg = "Playback Speed: 1.00x (Reset)"
-                draw_tui()
-            elseif k == "e" or k == "E" then
-                local chosen_eq = show_eq_modal(MpvController.eq_preset or "flat")
-                if chosen_eq then
-                    MpvController:set_eq(chosen_eq)
-                    status_msg = string.format("EQ Applied: %s", get_eq_name(chosen_eq))
-                end
-                draw_tui()
-            elseif k == "r" or k == "R" then
-                radio_mode = not radio_mode
-                if radio_mode then
-                    auto_play = true
-                    status_msg = "\27[1;92m✓ Radio Mode: ON (Infinite YouTube Mix)\27[0m"
-                    if MpvController.is_playing and MpvController.current_item and #queue == 0 then
-                        draw_tui()
-                        local recs = fetch_radio_recommendations(MpvController.current_item, browser, cookies_file, proxy, insecure)
-                        if recs and #recs > 0 then
-                            for _, r in ipairs(recs) do table.insert(queue, r) end
-                            status_msg = string.format("Radio: Queued %d similar tracks", #recs)
-                        end
-                    end
-                else
-                    status_msg = "\27[90mRadio Mode: OFF\27[0m"
                 end
                 draw_tui()
             elseif k == " " then
@@ -3259,7 +2694,6 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                 local new_q = prompt_search_query(current_query)
                 if new_q and #new_q > 0 then
                     current_query = new_q
-                    save_search_history(new_q)
                     is_liked = false
                     is_history = false
                     refresh_results()
@@ -3504,12 +2938,6 @@ local function run_self_tests()
         "Liked video favorites spec failed")
     assert(build_search_spec("chillhop", "music", 10, false, nil, "soundcloud") == '"scsearch10:chillhop"',
         "Soundcloud site adapter failed")
-    assert(build_search_spec("piano relax", "music", 20, false, { sort = "views" }, "youtube") == '"https://www.youtube.com/results?search_query=piano+relax&sp=CAM%253D"',
-        "Search spec sort by views failed")
-    assert(build_search_spec("piano relax", "music", 20, false, { sort = "date" }, "youtube") == '"https://www.youtube.com/results?search_query=piano+relax&sp=CAI%253D"',
-        "Search spec sort by date failed")
-    assert(build_search_spec("piano relax", "music", 20, false, { sort = "rating" }, "youtube") == '"https://www.youtube.com/results?search_query=piano+relax&sp=CAE%253D"',
-        "Search spec sort by rating failed")
     print("  [✓] Search spec generation & audio-mode video search query preservation passed")
 
     -- 16. Mini-player dedicated CC layout & renderer invariant tests
@@ -3688,220 +3116,6 @@ local function run_self_tests()
     assert(yt_style_cyan:find('sub%-color="#00FFFFFF"') ~= nil, "Cyan CC color missing")
     print("  [✓] Standalone window (-w) YouTube-identical & high-contrast subtitle styling validated")
 
-    -- 21. scrape_youtube_search query parameter handling & fallback validation
-    local ok_nil_scrape = pcall(function() return scrape_youtube_search(nil, 1) end)
-    assert(ok_nil_scrape, "scrape_youtube_search must safely handle nil query without error")
-    local ok_empty_scrape = pcall(function() return scrape_youtube_search("", 1) end)
-    assert(ok_empty_scrape, "scrape_youtube_search must safely handle empty query")
-    print("  [✓] scrape_youtube_search query parameter & fallback robustness passed")
-
-    -- 22. Multi-byte pasted input FIFO queueing (Issue 3.5)
-    local sample_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-    for k in pairs(pending_keys) do pending_keys[k] = nil end
-    local sim_buf = ffi.new("char[?]", #sample_url + 1, sample_url)
-    enqueue_pending_bytes(sim_buf, 0, #sample_url)
-    local recovered = {}
-    while true do
-        local k = read_key(0)
-        if not k then break end
-        table.insert(recovered, k)
-    end
-    assert(table.concat(recovered) == sample_url, "Pending keys queue failed to recover complete pasted string: got " .. table.concat(recovered))
-
-    for k in pairs(pending_keys) do pending_keys[k] = nil end
-    local chunk1 = "abc\n"
-    local sim_c1 = ffi.new("char[?]", #chunk1 + 1, chunk1)
-    enqueue_pending_bytes(sim_c1, 0, #chunk1)
-    assert(read_key(0) == "a", "First key mismatch")
-    assert(read_key(0) == "b", "Second key mismatch")
-    assert(read_key(0) == "c", "Third key mismatch")
-    assert(read_key(0) == "ENTER", "Enter translation mismatch")
-    assert(read_key(0) == nil, "Queue should be empty after draining")
-    print("  [✓] Multi-byte pasted input FIFO queueing & token normalization validated")
-
-    -- 23. Search query prompt pre-fill & Ctrl+U fast clear (Issue 3.6)
-    for k in pairs(pending_keys) do pending_keys[k] = nil end
-    table.insert(pending_keys, "ENTER")
-    local preserved = prompt_search_query("lofi beats")
-    assert(preserved == "lofi beats", "prompt_search_query must preserve active query on ENTER: got " .. tostring(preserved))
-
-    for k in pairs(pending_keys) do pending_keys[k] = nil end
-    table.insert(pending_keys, "CTRL_U")
-    table.insert(pending_keys, "s")
-    table.insert(pending_keys, "y")
-    table.insert(pending_keys, "n")
-    table.insert(pending_keys, "t")
-    table.insert(pending_keys, "h")
-    table.insert(pending_keys, "ENTER")
-    local replaced = prompt_search_query("lofi beats")
-    assert(replaced == "synth", "prompt_search_query must clear via CTRL_U and accept new input: got " .. tostring(replaced))
-
-    for k in pairs(pending_keys) do pending_keys[k] = nil end
-    table.insert(pending_keys, "ESC")
-    local cancelled = prompt_search_query("lofi beats")
-    assert(cancelled == nil, "prompt_search_query must return nil on ESC")
-    print("  [✓] Search query modal pre-fill, Ctrl+U clear & interactive simulation validated")
-
-    -- 24. Search query persistence & Readline-style history cycling
-    local sfile = get_search_history_file()
-    os.remove(sfile)
-    assert(save_search_history("lofi beats") == true, "save_search_history failed")
-    assert(save_search_history("synthwave radio") == true, "save_search_history failed")
-    assert(save_search_history("lofi beats") == true, "save_search_history re-save failed")
-    local sh_list = load_search_history()
-    assert(#sh_list == 2, "Expected 2 deduplicated history items, got " .. #sh_list)
-    assert(sh_list[1] == "lofi beats", "Most recent search must be at index 1")
-    assert(sh_list[2] == "synthwave radio", "Previous search must be at index 2")
-
-    for k in pairs(pending_keys) do pending_keys[k] = nil end
-    table.insert(pending_keys, "UP")
-    table.insert(pending_keys, "ENTER")
-    local recalled = prompt_search_query("")
-    assert(recalled == "lofi beats", "UP arrow failed to recall most recent search: got " .. tostring(recalled))
-
-    for k in pairs(pending_keys) do pending_keys[k] = nil end
-    table.insert(pending_keys, "UP")
-    table.insert(pending_keys, "UP")
-    table.insert(pending_keys, "ENTER")
-    local older = prompt_search_query("")
-    assert(older == "synthwave radio", "UP arrow twice failed to recall older search: got " .. tostring(older))
-
-    for k in pairs(pending_keys) do pending_keys[k] = nil end
-    table.insert(pending_keys, "d")
-    table.insert(pending_keys, "r")
-    table.insert(pending_keys, "a")
-    table.insert(pending_keys, "f")
-    table.insert(pending_keys, "t")
-    table.insert(pending_keys, "UP")
-    table.insert(pending_keys, "DOWN")
-    table.insert(pending_keys, "ENTER")
-    local draft_restored = prompt_search_query("")
-    assert(draft_restored == "draft", "DOWN arrow failed to restore draft input: got " .. tostring(draft_restored))
-    print("  [✓] Persistent search history & Readline-style UP/DOWN cycling validated")
-
-    -- 25. Playback speed multiplier & clamping logic
-    MpvController:set_speed(1.5)
-    assert(MpvController.speed == 1.5, "MpvController speed must be 1.5: got " .. tostring(MpvController.speed))
-    MpvController:set_speed(0.2)
-    assert(MpvController.speed == 0.5, "MpvController speed must clamp minimum to 0.5: got " .. tostring(MpvController.speed))
-    MpvController:set_speed(3.5)
-    assert(MpvController.speed == 2.5, "MpvController speed must clamp maximum to 2.5: got " .. tostring(MpvController.speed))
-    MpvController:set_speed(1.0)
-    assert(MpvController.speed == 1.0, "MpvController speed reset to 1.0 failed")
-
-    local sample_spd_item = { title = "Speed Test Track", duration = 200 }
-    local spd_lines = render_mini_player_lines(sample_spd_item, false, 100, 50, 200, "", false, 90, 1, 1, false, "", 1.5, "flat")
-    assert(spd_lines[1]:find("%[1%.50x%]") ~= nil, "Mini-player header must show [1.50x] speed badge")
-    local normal_spd_lines = render_mini_player_lines(sample_spd_item, false, 100, 50, 200, "", false, 90, 1, 1, false, "", 1.0, "flat")
-    assert(normal_spd_lines[1]:find("%[1%.00x%]") == nil, "Mini-player header should omit speed badge at 1.0x")
-    print("  [✓] Playback speed multiplier, clamping & mini-player badges validated")
-
-    -- 26. Audio Equalizer presets & lavfi / af string generation
-    assert(is_valid_eq_preset("flat") == true, "Missing flat EQ preset")
-    assert(is_valid_eq_preset("night") == true, "Missing night EQ preset")
-    assert(is_valid_eq_preset("bass") == true, "Missing bass EQ preset")
-    assert(is_valid_eq_preset("vocal") == true, "Missing vocal EQ preset")
-    assert(is_valid_eq_preset("lofi") == true, "Missing lofi EQ preset")
-    assert(is_valid_eq_preset("nonexistent") == false, "Nonexistent EQ preset must be invalid")
-
-    assert(get_eq_filter("bass"):find("equalizer") ~= nil and get_eq_filter("bass"):find("f=64") ~= nil, "Bass EQ filter string invalid: " .. tostring(get_eq_filter("bass")))
-    assert(get_eq_filter("night"):find("dynaudnorm") ~= nil, "Night EQ filter string invalid: " .. tostring(get_eq_filter("night")))
-    assert(get_eq_filter("vocal"):find("equalizer") ~= nil, "Vocal EQ filter string invalid: " .. tostring(get_eq_filter("vocal")))
-    assert(get_eq_filter("lofi"):find("lowpass") ~= nil, "Lofi EQ filter string invalid: " .. tostring(get_eq_filter("lofi")))
-    assert(get_eq_filter("flat") == "", "Flat EQ preset must produce empty filter")
-    assert(get_eq_filter("unknown_preset") == "", "Unknown preset must produce empty filter")
-
-    MpvController:set_eq("bass")
-    assert(MpvController.eq_preset == "bass", "MpvController:set_eq failed")
-    local bass_lines = render_mini_player_lines(sample_spd_item, false, 100, 50, 200, "", false, 90, 1, 1, false, "", 1.0, "bass")
-    assert(bass_lines[1]:find("%[BASS%]") ~= nil, "Mini-player header must show [BASS] EQ badge")
-    MpvController:set_eq("flat")
-    assert(MpvController.eq_preset == "flat", "MpvController:set_eq flat failed")
-    print("  [✓] Audio Equalizer presets, dynamic lavfi filter generation & badges validated")
-
-    -- 27. Starred favorites persistence, deduplication, and toggling
-    local fav_file = get_favorites_file()
-    assert(fav_file ~= nil and #fav_file > 0, "get_favorites_file must return non-empty path")
-    local fav_test_item = {
-        id = "TESTFAV999",
-        url = "https://www.youtube.com/watch?v=TESTFAV999",
-        title = "My Starred Track",
-        uploader = "Starred Artist",
-        duration = 185,
-        duration_str = "03:05",
-    }
-    remove_favorite_item(fav_test_item)
-    assert(is_favorite(fav_test_item) == false, "Item should not be favorite initially")
-    assert(save_favorite_item(fav_test_item) == true, "save_favorite_item must return true")
-    assert(is_favorite(fav_test_item) == true, "Item must be marked as favorite after saving")
-
-    save_favorite_item(fav_test_item)
-    local all_favs = load_favorites()
-    local count_fav = 0
-    for _, f_it in ipairs(all_favs) do
-        if f_it.url == fav_test_item.url or f_it.id == fav_test_item.id then
-            count_fav = count_fav + 1
-        end
-    end
-    assert(count_fav == 1, "Expected exactly 1 entry for saved favorite in list, got " .. count_fav)
-
-    local toggled_off = toggle_favorite_item(fav_test_item)
-    assert(toggled_off == false, "toggle_favorite_item should return false when un-starred")
-    assert(is_favorite(fav_test_item) == false, "Item must not be favorite after toggle off")
-
-    local toggled_on = toggle_favorite_item(fav_test_item)
-    assert(toggled_on == true, "toggle_favorite_item should return true when starred")
-    assert(is_favorite(fav_test_item) == true, "Item must be favorite after toggle on")
-
-    remove_favorite_item(fav_test_item)
-    assert(is_favorite(fav_test_item) == false, "Item must not be favorite after remove_favorite_item")
-    print("  [✓] Starred favorites persistence, toggle logic & deduplication validated")
-
-    -- 28. Infinite YouTube Mix / Radio recommendations formatting & deduplication
-    local existing_queue = {
-        { url = "https://www.youtube.com/watch?v=DUP001" },
-        { url = "https://www.youtube.com/watch?v=SEEDVID001" },
-    }
-    local raw_radio_candidates = {
-        { id = "DUP001", url = "https://www.youtube.com/watch?v=DUP001", title = "Duplicate 1" },
-        { id = "SEEDVID001", url = "https://www.youtube.com/watch?v=SEEDVID001", title = "Original Seed" },
-        { id = "NEW001", url = "https://www.youtube.com/watch?v=NEW001", title = "Fresh Radio Track 1" },
-        { id = "NEW002", url = "https://www.youtube.com/watch?v=NEW002", title = "Fresh Radio Track 2" },
-    }
-    local seen_radio = {}
-    for _, q in ipairs(existing_queue) do
-        seen_radio[q.url or q.id] = true
-    end
-    local filtered_radio = {}
-    for _, c in ipairs(raw_radio_candidates) do
-        local key = c.url or c.id
-        if not seen_radio[key] then
-            seen_radio[key] = true
-            table.insert(filtered_radio, c)
-        end
-    end
-    assert(#filtered_radio == 2, "Radio deduplication must yield exactly 2 fresh tracks, got " .. #filtered_radio)
-    assert(filtered_radio[1].id == "NEW001", "First fresh radio track mismatch")
-    assert(filtered_radio[2].id == "NEW002", "Second fresh radio track mismatch")
-    print("  [✓] Infinite YouTube Mix / Radio recommendations deduplication validated")
-
-    -- 29. Audio Equalizer modal headless interaction & key navigation
-    for k in pairs(pending_keys) do pending_keys[k] = nil end
-    table.insert(pending_keys, "ESC")
-    local eq_esc = show_eq_modal("flat")
-    assert(eq_esc == nil, "show_eq_modal must return nil on ESC: got " .. tostring(eq_esc))
-
-    for k in pairs(pending_keys) do pending_keys[k] = nil end
-    table.insert(pending_keys, "2")
-    local eq_selected = show_eq_modal("flat")
-    assert(eq_selected == "night", "show_eq_modal numeric key 2 must select night preset: got " .. tostring(eq_selected))
-
-    for k in pairs(pending_keys) do pending_keys[k] = nil end
-    table.insert(pending_keys, "3")
-    local eq_bass = show_eq_modal("flat")
-    assert(eq_bass == "bass", "show_eq_modal numeric key 3 must select bass preset: got " .. tostring(eq_bass))
-    print("  [✓] Audio Equalizer modal headless interaction & key navigation validated")
-
     print("=== All Internal Self-Tests Passed Successfully ===")
     return true
 end
@@ -3920,10 +3134,6 @@ local function print_help()
     print("  --site <name>         Search site: youtube, soundcloud, or twitch (default: youtube)")
     print("  -c, --cc, --lyrics    Show Closed Captions (CC) / lyrics (enabled by default)")
     print("  --no-cc               Disable Closed Captions (CC) / lyrics")
-    print("  --radio               Start directly in infinite Radio mode (YouTube Mix)")
-    print("  --speed <mult>        Initial playback speed (0.5 to 2.5, default: 1.0)")
-    print("  --eq <preset>         Initial audio equalizer preset (flat, night, bass, vocal, lofi)")
-    print("  --favorites           Open directly to Starred Favorites playlist")
     print("  --sub-lang <lang>     Preferred subtitle/lyrics language pattern (default: en.*)")
     print("  --sub-font-size <pts> Font size for subtitles / CC (default: 55, range: 10-120)")
     print("  --cc-font-size <pts>  Alias for --sub-font-size")
@@ -3946,18 +3156,13 @@ local function print_help()
     print("  [o]           Open selected track in default web browser")
     print("  [y]           Copy selected track URL to clipboard")
     print("  [f]           Open Search Filters & Sorting modal")
-    print("  [r]           Toggle infinite Radio mode (YouTube Mix)")
-    print("  [e]           Open Audio Equalizer & Sound Enhancement modal")
-    print("  [*]           Star / Un-star selected track as Favorite")
-    print("  [F]           Toggle Starred Favorites playlist view")
-    print("  [[ / ]]       Decrease / Increase playback speed (-/+0.25x)  [{] Reset")
     print("  [Space]       Pause / Resume background mini-player")
     print("  [s]           Skip to next track in queue")
     print("  [x]           Stop background mini-player")
     print("  [<- / ->]     Seek backward / forward 5 seconds")
     print("  [9 / 0]       Volume down / up (-/+10%)")
     print("  [/]           Open search modal or paste URL")
-    print("  [a]           Toggle Auto-Play")
+    print("  [a]           Toggle Auto-Play (Radio mode)")
     print("  [c]           Toggle Closed Captions (CC / Lyrics)")
     print("  [C]           Cycle subtitle track (Mini-Player)")
     print("  [+ / -]       Increase / Decrease CC font size (+/-5 pt)")
@@ -4001,10 +3206,6 @@ local function main()
     local download_target = nil
     local active_filters = { sort = "relevance", duration = "all" }
     local site = "youtube"
-    local is_radio = false
-    local initial_speed = 1.0
-    local initial_eq = "flat"
-    local is_favorites = false
 
     local env_proxy = os.getenv("YT_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")
     local proxy = (env_proxy and #env_proxy > 0) and env_proxy or nil
@@ -4034,22 +3235,6 @@ local function main()
             show_cc = true
         elseif a == "--no-cc" or a == "--no-lyrics" or a == "--no-subtitles" then
             show_cc = false
-        elseif a == "-r" or a == "--radio" then
-            is_radio = true
-        elseif a == "--speed" then
-            i = i + 1
-            local sp = tonumber(arg[i])
-            if sp then
-                initial_speed = math.max(0.5, math.min(2.5, sp))
-            end
-        elseif a == "--eq" then
-            i = i + 1
-            local eq = (arg[i] or "flat"):lower()
-            if is_valid_eq_preset(eq) then
-                initial_eq = eq
-            end
-        elseif a == "--fav" or a == "--favorites" or a == "--starred" then
-            is_favorites = true
         elseif a == "--sub-lang" or a == "--sub-langs" or a == "--slang" then
             i = i + 1
             sub_lang = arg[i]
@@ -4129,19 +3314,6 @@ local function main()
     end
 
     if non_interactive or (not is_stdin_tty()) then
-        if is_favorites then
-            local res = load_favorites()
-            print(string.format("\27[1;36m=== Starred Favorites (%d tracks) ===\27[0m", #res))
-            for idx, item in ipairs(res) do
-                local t_disp = utf8_truncate(item.title or "Unknown", 50)
-                local t_pad = string.rep(" ", math.max(0, 50 - display_width(t_disp)))
-                local up_disp = utf8_truncate(item.uploader or "Unknown", 22)
-                local up_pad = string.rep(" ", math.max(0, 22 - display_width(up_disp)))
-                print(string.format("  %02d. %s%s | %s%s | %s", idx, t_disp, t_pad, up_disp, up_pad, item.duration_str or "--:--"))
-            end
-            return
-        end
-
         local q = query or "lofi hip hop"
         local res, err, used_insecure = fetch_youtube_results(q, mode, browser, cookies_file, max_results, is_liked, proxy, insecure, active_filters, site)
         if not res then
@@ -4161,7 +3333,7 @@ local function main()
         return
     end
 
-    run_app(query, mode, browser, cookies_file, is_liked, use_window, proxy, insecure, show_cc, sub_lang, active_filters, site, sub_font_size, sub_color, is_radio, initial_speed, initial_eq, is_favorites)
+    run_app(query, mode, browser, cookies_file, is_liked, use_window, proxy, insecure, show_cc, sub_lang, active_filters, site, sub_font_size, sub_color)
 end
 
 main()
