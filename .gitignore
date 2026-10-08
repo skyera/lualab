@@ -16,3 +16,4 @@ portraits/portrait_*_lady.*
 downloads/
 .codefind.db
 *.codefind.db
+.devin/
