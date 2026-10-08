@@ -474,8 +474,6 @@ ffi.cdef(posix_termios_cdef[[
                         if c2 == 70 then enqueue_pending_bytes(key_buf, 3, n); return "END" end
                         if c2 == 53 and n >= 4 and key_buf[3] == 126 then enqueue_pending_bytes(key_buf, 4, n); return "PAGE_UP" end
                         if c2 == 54 and n >= 4 and key_buf[3] == 126 then enqueue_pending_bytes(key_buf, 4, n); return "PAGE_DOWN" end
-                    elseif n == 2 and (key_buf[1] == 122 or key_buf[1] == 90) then
-                        return "ALT_z"
                     elseif n == 1 then
                         return "ESC"
                     end
@@ -570,103 +568,6 @@ end
 
 local function get_search_history_file()
     return get_cache_dir() .. (is_windows and "\\" or "/") .. "search_history.json"
-end
-
--- Resume playback position: mpv's native watch-later store, kept in our cache dir.
--- Each file holds "# <url>" and "start=<seconds>", so positions can be looked up by URL.
--- Default is false (opt-in via --resume) to guarantee fresh playback starts from 00:00 without PTS drift.
-local resume_cfg = { enabled = false, opts = nil }
-local RESUME_MIN_SEC = 5
-
-local function get_resume_dir()
-    local dir = get_cache_dir() .. (is_windows and "\\" or "/") .. "watch_later"
-    if is_windows then
-        os.execute('if not exist "' .. dir .. '" mkdir "' .. dir .. '" 2>nul')
-    else
-        os.execute('mkdir -p "' .. dir .. '" 2>/dev/null')
-    end
-    return dir
-end
-
-local function get_resume_mpv_opts()
-    if not resume_cfg.enabled then
-        return " --no-resume-playback"
-    end
-    if not resume_cfg.opts then
-        local opts = string.format(' --resume-playback --save-position-on-quit --write-filename-in-watch-later-config --watch-later-directory="%s"', get_resume_dir())
-        -- Restore only the position (not sid/aid/volume), when this mpv supports the option.
-        local p = safe_popen("mpv --list-options", POPEN_READ_BIN)
-        if p then
-            local listing = p:read("*a") or ""
-            p:close()
-            if listing:find("watch-later-options", 1, true) then
-                opts = opts .. " --watch-later-options=start"
-            end
-        end
-        resume_cfg.opts = opts
-    end
-    return resume_cfg.opts
-end
-
-local function get_resume_position(url)
-    if not resume_cfg.enabled or not url or #url == 0 then return nil end
-    local dir = get_resume_dir()
-    local list_cmd = is_windows and ('dir /b "' .. dir .. '" 2>nul') or ('ls -1 "' .. dir .. '" 2>/dev/null')
-    local p = safe_popen(list_cmd, POPEN_READ_BIN)
-    if not p then return nil end
-    local names = {}
-    for name in p:lines() do
-        name = name:gsub("%s+$", "")
-        if #name > 0 then table.insert(names, name) end
-        if #names >= 500 then break end
-    end
-    p:close()
-    for _, name in ipairs(names) do
-        local f = io.open(dir .. (is_windows and "\\" or "/") .. name, "r")
-        if f then
-            local first = (f:read("*l") or ""):gsub("\r$", "")
-            if first == "# " .. url then
-                local body = f:read("*a") or ""
-                f:close()
-                local start = body:match("start=([%d%.]+)")
-                local secs = start and tonumber(start)
-                if secs and secs >= RESUME_MIN_SEC then
-                    return math.floor(secs)
-                end
-                return nil
-            end
-            f:close()
-        end
-    end
-    return nil
-end
-
-local function delete_resume_position(url)
-    if not url or #url == 0 then return false end
-    local dir = get_resume_dir()
-    local list_cmd = is_windows and ('dir /b "' .. dir .. '" 2>nul') or ('ls -1 "' .. dir .. '" 2>/dev/null')
-    local p = safe_popen(list_cmd, POPEN_READ_BIN)
-    if not p then return false end
-    local names = {}
-    for name in p:lines() do
-        name = name:gsub("%s+$", "")
-        if #name > 0 then table.insert(names, name) end
-        if #names >= 500 then break end
-    end
-    p:close()
-    for _, name in ipairs(names) do
-        local path = dir .. (is_windows and "\\" or "/") .. name
-        local f = io.open(path, "r")
-        if f then
-            local first = (f:read("*l") or ""):gsub("\r$", "")
-            f:close()
-            if first == "# " .. url then
-                os.remove(path)
-                return true
-            end
-        end
-    end
-    return false
 end
 
 local function normalize_caption_token(w)
@@ -1683,7 +1584,7 @@ local function to_mpv_slang(sub_lang)
     return #parts > 0 and table.concat(parts, ",") or "en-orig,en,eng,en-US,en-GB"
 end
 
-local function render_mini_player_lines(cur, is_paused, volume, pos, dur, sub_text, show_cc, term_w, track_idx, total_tracks, has_sub_track, last_sub_text, speed, eq_preset, sub_delay)
+local function render_mini_player_lines(cur, is_paused, volume, pos, dur, sub_text, show_cc, term_w, track_idx, total_tracks, has_sub_track, last_sub_text, speed, eq_preset)
     term_w = math.max(30, term_w or 80)
     dur = (dur and dur > 0) and dur or (cur and cur.duration or 0)
     pos = pos or 0
@@ -1718,19 +1619,17 @@ local function render_mini_player_lines(cur, is_paused, volume, pos, dur, sub_te
     -- Dedicated CC / Subtitles Row (Row 3)
     if show_cc then
         local max_cc_w = math.max(10, term_w - 14)
-        local sync_badge = (sub_delay and sub_delay ~= 0.0) and string.format(" \27[90m(%+.2fs)\27[0m", sub_delay) or ""
-        local sync_w = display_width(strip_ansi(sync_badge))
         local cc_content
         if has_sub_track == false then
-            cc_content = string.format("\27[90m[CC]%s (No subtitles available for this track)\27[0m", sync_badge)
+            cc_content = "\27[90m[CC] (No subtitles available for this track)\27[0m"
         elseif #sub_text > 0 then
             local clean_sub = sanitize_display_text(sub_text)
-            cc_content = string.format("\27[1;93m[CC]%s\27[0m \27[1;97m\"%s\"\27[0m", sync_badge, utf8_truncate(clean_sub, max_cc_w - sync_w))
+            cc_content = string.format("\27[1;93m[CC]\27[0m \27[1;97m\"%s\"\27[0m", utf8_truncate(clean_sub, max_cc_w))
         elseif #last_sub_text > 0 then
             local clean_sub = sanitize_display_text(last_sub_text)
-            cc_content = string.format("\27[1;93m[CC]%s\27[0m \27[90m\"%s\"\27[0m", sync_badge, utf8_truncate(clean_sub, max_cc_w - sync_w))
+            cc_content = string.format("\27[1;93m[CC]\27[0m \27[90m\"%s\"\27[0m", utf8_truncate(clean_sub, max_cc_w))
         else
-            cc_content = string.format("\27[90m[CC]%s (Listening for speech / instrumental...)\27[0m", sync_badge)
+            cc_content = "\27[90m[CC] (Listening for speech / instrumental...)\27[0m"
         end
         local cc_line = string.format(" \27[1;36m|\27[0m %s", cc_content)
         local pad_cc = math.max(0, term_w - display_width(strip_ansi(cc_line)) - 1)
@@ -1738,15 +1637,13 @@ local function render_mini_player_lines(cur, is_paused, volume, pos, dur, sub_te
     end
 
     -- Border 2 (Controls / Bottom Border)
-    local ctrl_hint_text = (term_w >= 105)
-        and "[Space] Pause  [c] CC  [z/Z] Sync  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol  [[/]] Spd  [e] EQ"
-        or ((term_w >= 96)
-            and "[Space] Pause  [c] CC  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol  [[/]] Spd  [e] EQ"
-            or ((term_w >= 85)
-                and "[Space] Pause  [c] CC  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol  [[/]] Spd"
-                or ((term_w >= 70)
-                    and "[Space] Pause  [c] CC  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol"
-                    or "[Space] Pause  [c] CC  [s] Skip  [x] Stop")))
+    local ctrl_hint_text = (term_w >= 96)
+        and "[Space] Pause  [c] CC  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol  [[/]] Spd  [e] EQ"
+        or ((term_w >= 85)
+            and "[Space] Pause  [c] CC  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol  [[/]] Spd"
+            or ((term_w >= 70)
+                and "[Space] Pause  [c] CC  [s] Skip  [x] Stop  [<-/->] Seek  [9/0] Vol"
+                or "[Space] Pause  [c] CC  [s] Skip  [x] Stop"))
     local max_hint_w = math.max(10, term_w - 6)
     if display_width(ctrl_hint_text) > max_hint_w then
         ctrl_hint_text = utf8_truncate(ctrl_hint_text, max_hint_w)
@@ -1791,7 +1688,6 @@ local MpvController = {
     cc_state = { prev_last_line = "", prev_displayed = "" },
     speed = 1.0,
     eq_preset = "flat",
-    sub_delay = 0.0,
 }
 
 function MpvController:init_observers()
@@ -1804,7 +1700,6 @@ function MpvController:init_observers()
     self:send_command('{"command": ["observe_property", 7, "sub"]}')
     self:send_command('{"command": ["observe_property", 8, "track-list"]}')
     self:send_command('{"command": ["observe_property", 9, "speed"]}')
-    self:send_command('{"command": ["observe_property", 10, "sub-delay"]}')
 end
 
 function MpvController:send_command(json_str)
@@ -1852,7 +1747,6 @@ function MpvController:start(item, show_cc, sub_lang, browser, cookies_file, pro
     end
     local font_opt = (sub_font_size and sub_font_size > 0) and string.format(" --sub-font-size=%d", sub_font_size) or ""
     extra_mpv_opts = extra_mpv_opts .. string.format(" --subs-fallback=yes --sub-auto=all --sub-visibility=yes%s --slang=%s", font_opt, to_mpv_slang(sub_lang))
-    extra_mpv_opts = extra_mpv_opts .. get_resume_mpv_opts()
     if self.speed and self.speed ~= 1.0 then
         extra_mpv_opts = extra_mpv_opts .. string.format(" --speed=%.2f", self.speed)
     end
@@ -1861,9 +1755,6 @@ function MpvController:start(item, show_cc, sub_lang, browser, cookies_file, pro
         if #af_filter > 0 then
             extra_mpv_opts = extra_mpv_opts .. string.format(" --af=%q", af_filter)
         end
-    end
-    if self.sub_delay and self.sub_delay ~= 0.0 then
-        extra_mpv_opts = extra_mpv_opts .. string.format(" --sub-delay=%.2f", self.sub_delay)
     end
 
     local cmd
@@ -1993,9 +1884,6 @@ function MpvController:poll()
         elseif prop == "speed" then
             local sp = parse_json_field(line, "data")
             if sp and tonumber(sp) then self.speed = tonumber(sp) end
-        elseif prop == "sub-delay" then
-            local sd = parse_json_field(line, "data")
-            if sd and tonumber(sd) then self.sub_delay = tonumber(sd) end
         elseif prop == "sub-text" then
             local s = parse_json_field(line, "data") or ""
             if #s > 0 then
@@ -2045,7 +1933,6 @@ function MpvController:poll()
         volume = self.volume,
         is_paused = self.is_paused,
         sub_text = self.sub_text,
-        sub_delay = self.sub_delay,
         is_eof = self.is_eof
     }
 end
@@ -2089,42 +1976,14 @@ function MpvController:set_eq(preset_key)
     self:send_command(string.format('{"command": ["set_property", "af", %q]}', filter))
 end
 
-function MpvController:adjust_sub_delay(delta)
-    local cur = self.sub_delay or 0.0
-    local new_val = math.max(-60.0, math.min(60.0, math.floor((cur + delta) * 100 + 0.5) / 100))
-    self.sub_delay = new_val
-    self:send_command(string.format('{"command": ["set_property", "sub-delay", %.2f]}', new_val))
-end
-
-function MpvController:reset_sub_delay()
-    self.sub_delay = 0.0
-    self:send_command('{"command": ["set_property", "sub-delay", 0]}')
-end
-
-function MpvController:quit_command()
-    -- Save the position when stopped mid-track; drop a stale entry when stopped near the end.
-    if resume_cfg.enabled and self.is_playing and not self.is_eof and (self.time_pos or 0) > 0 then
-        local dur = (self.duration and self.duration > 0) and self.duration or (self.current_item and self.current_item.duration or 0)
-        if dur > 0 and self.time_pos >= dur - 10 then
-            if self.current_item and self.current_item.url then
-                delete_resume_position(self.current_item.url)
-            end
-            self:send_command('{"command": ["delete-watch-later-config"]}')
-            return '{"command": ["quit"]}'
-        end
-        return '{"command": ["quit-watch-later"]}'
-    end
-    return '{"command": ["quit"]}'
-end
-
 function MpvController:stop()
     if is_windows and self.pipe_handle then
-        self:send_command(self:quit_command())
+        self:send_command('{"command": ["quit"]}')
         sleep_ms(50)
         kernel32.CloseHandle(self.pipe_handle)
         self.pipe_handle = nil
     elseif not is_windows and self.sock_fd then
-        self:send_command(self:quit_command())
+        self:send_command('{"command": ["quit"]}')
         sleep_ms(50)
         ffi.C.close(self.sock_fd)
         self.sock_fd = nil
@@ -2207,7 +2066,6 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     end
 
     local term_w, term_h = get_terminal_size()
-    extra_mpv_opts = extra_mpv_opts .. get_resume_mpv_opts()
     if MpvController.speed and MpvController.speed ~= 1.0 then
         extra_mpv_opts = extra_mpv_opts .. string.format(" --speed=%.2f", MpvController.speed)
     end
@@ -2217,10 +2075,6 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
             extra_mpv_opts = extra_mpv_opts .. string.format(" --af=%q", af_filter)
         end
     end
-    if MpvController.sub_delay and MpvController.sub_delay ~= 0.0 then
-        extra_mpv_opts = extra_mpv_opts .. string.format(" --sub-delay=%.2f", MpvController.sub_delay)
-    end
-    local resume_pos = get_resume_position(item.url)
     local status_msg = build_mpv_status_msg(mode, (show_cc or mode == "video") and not use_native_window_subtitles)
     -- Unix shells expand ${...} before mpv sees it; preserve MPV property syntax.
     local command_status_msg = is_windows and status_msg or status_msg:gsub("%$", "\\$")
@@ -2258,11 +2112,7 @@ local function play_item(item, mode, browser, cookies_file, use_external_window,
     end
 
     disable_raw_mode()
-    io.write("\27[H\27[2J\27[1;36m> Connecting to YouTube stream: \27[1;33m" .. item.title .. "\27[0m\n")
-    if resume_pos then
-        io.write(string.format("\27[1;92m> Resuming from %s\27[0m\n", format_duration(resume_pos)))
-    end
-    io.write("\n")
+    io.write("\27[H\27[2J\27[1;36m> Connecting to YouTube stream: \27[1;33m" .. item.title .. "\27[0m\n\n")
     io.flush()
 
     local exit_code = safe_execute(mpv_cmd)
@@ -2799,7 +2649,6 @@ local function show_help_modal()
         line_pad("\27[1;36m|    \27[93m[[] / []]\27[0m     Adjust playback speed (-/+0.25x)  [{] Reset"),
         line_pad("\27[1;36m|    \27[93m[c]\27[0m           Toggle Closed Captions (CC / Lyrics)"),
         line_pad("\27[1;36m|    \27[93m[C]\27[0m           Cycle subtitle track (Mini-Player)"),
-        line_pad("\27[1;36m|    \27[93m[z / Z]\27[0m       Adjust CC sync delay (+/-0.25s)  \27[93m[Alt+z]\27[0m Reset"),
         line_pad("\27[1;36m|    \27[93m[+ / -]\27[0m       Increase / Decrease CC font size (+/-5 pt)"),
         line_pad("\27[1;36m|    \27[93m[h]\27[0m           Toggle Playback History (recent tracks)"),
         line_pad("\27[1;36m|    \27[93m[m]\27[0m           Toggle between Music and Video mode"),
@@ -2835,7 +2684,7 @@ end
 -- =========================================================================
 -- 7. Main Interactive TUI Application
 -- =========================================================================
-local function run_app(init_query, init_mode, browser, cookies_file, is_liked, use_window, proxy, insecure, init_show_cc, init_sub_lang, init_filters, init_site, init_sub_font_size, init_sub_color, init_radio, init_speed, init_eq, init_favorites, init_sub_delay)
+local function run_app(init_query, init_mode, browser, cookies_file, is_liked, use_window, proxy, insecure, init_show_cc, init_sub_lang, init_filters, init_site, init_sub_font_size, init_sub_color, init_radio, init_speed, init_eq, init_favorites)
     local current_query = init_query or ""
     local mode = init_mode or "music"
     local show_cc = (init_show_cc ~= nil) and init_show_cc or true
@@ -2843,7 +2692,6 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
     local cc_font_size = (init_sub_font_size and init_sub_font_size > 0) and math.max(10, math.min(120, init_sub_font_size)) or 55
     local sub_color = init_sub_color or "white"
     local site = normalize_site(init_site)
-    if init_sub_delay then MpvController.sub_delay = init_sub_delay end
     local selected_idx = 1
     local scroll_offset = 0
     local auto_play = false
@@ -2926,14 +2774,6 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         end
     end
 
-    local function make_playing_status(item)
-        local pos = get_resume_position(item and item.url)
-        if pos then
-            return string.format("Playing (resumed from %s): %s", format_duration(pos), utf8_truncate(item and item.title or "", 25))
-        end
-        return "Playing: " .. utf8_truncate(item and item.title or "", 30)
-    end
-
     if is_favorites_view then
         items = load_favorites()
         status_msg = string.format("Loaded %d starred favorites", #items)
@@ -2954,7 +2794,6 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
     local last_rendered_pause = nil
     local last_rendered_has_sub = nil
     local last_rendered_last_sub = ""
-    local last_rendered_sub_delay = 0.0
     local max_list_h = 10
     local last_term_w, last_term_h = get_terminal_size()
 
@@ -3073,8 +2912,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                 MpvController.has_sub_track,
                 MpvController.last_sub_text,
                 MpvController.speed,
-                MpvController.eq_preset,
-                MpvController.sub_delay
+                MpvController.eq_preset
             )
             for _, l in ipairs(p_lines) do
                 table.insert(buf, l)
@@ -3098,7 +2936,6 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         last_rendered_pause = MpvController.is_paused
         last_rendered_has_sub = MpvController.has_sub_track
         last_rendered_last_sub = MpvController.last_sub_text
-        last_rendered_sub_delay = MpvController.sub_delay or 0.0
     end
 
     draw_tui()
@@ -3117,17 +2954,13 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         local st = MpvController:poll()
         if st then
             if st.is_eof then
-                -- Track finished playing: purge any saved resume position so replay starts from beginning
                 local finished_item = MpvController.current_item
-                if finished_item and finished_item.url then
-                    delete_resume_position(finished_item.url)
-                end
                 -- Track finished playing: advance queue, replenish radio, or auto-play
                 if #queue > 0 then
                     local next_item = table.remove(queue, 1)
                     save_history_item(next_item)
                     MpvController:start(next_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure, cc_font_size)
-                    status_msg = make_playing_status(next_item)
+                    status_msg = "Playing: " .. utf8_truncate(next_item.title, 30)
                     draw_tui()
                 elseif radio_mode and finished_item then
                     status_msg = "\27[1;92m* Radio: Discovering next tracks...\27[0m"
@@ -3150,13 +2983,13 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                     local next_item = items[selected_idx]
                     save_history_item(next_item)
                     MpvController:start(next_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure, cc_font_size)
-                    status_msg = make_playing_status(next_item)
+                    status_msg = "Playing: " .. utf8_truncate(next_item.title, 30)
                     draw_tui()
                 else
                     MpvController:stop()
                     draw_tui()
                 end
-            elseif (st.time_pos ~= last_rendered_pos or st.sub_text ~= last_rendered_sub or st.is_paused ~= last_rendered_pause or MpvController.has_sub_track ~= last_rendered_has_sub or MpvController.last_sub_text ~= last_rendered_last_sub or (st.sub_delay or 0.0) ~= last_rendered_sub_delay) then
+            elseif (st.time_pos ~= last_rendered_pos or st.sub_text ~= last_rendered_sub or st.is_paused ~= last_rendered_pause or MpvController.has_sub_track ~= last_rendered_has_sub or MpvController.last_sub_text ~= last_rendered_last_sub) then
                 draw_tui()
             end
         end
@@ -3207,7 +3040,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                     save_history_item(chosen_item)
                     if mode == "music" then
                         MpvController:start(chosen_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure, cc_font_size)
-                        status_msg = make_playing_status(chosen_item)
+                        status_msg = "Playing: " .. utf8_truncate(chosen_item.title, 30)
                     else
                         MpvController:stop()
                         play_item(chosen_item, mode, browser, cookies_file, use_window, proxy, insecure, show_cc, sub_lang, cc_font_size)
@@ -3326,13 +3159,13 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                         local next_item = table.remove(queue, 1)
                         save_history_item(next_item)
                         MpvController:start(next_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure, cc_font_size)
-                        status_msg = make_playing_status(next_item)
+                        status_msg = "Playing: " .. utf8_truncate(next_item.title, 30)
                     elseif auto_play and selected_idx < #items then
                         selected_idx = selected_idx + 1
                         local next_item = items[selected_idx]
                         save_history_item(next_item)
                         MpvController:start(next_item, show_cc, sub_lang, browser, cookies_file, proxy, insecure, cc_font_size)
-                        status_msg = make_playing_status(next_item)
+                        status_msg = "Playing: " .. utf8_truncate(next_item.title, 30)
                     else
                         MpvController:stop()
                         status_msg = "Playback stopped"
@@ -3397,24 +3230,6 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                     status_msg = "Cycled subtitle track"
                     draw_tui()
                 end
-            elseif k == "z" then
-                if MpvController.is_playing then
-                    MpvController:adjust_sub_delay(0.25)
-                    status_msg = string.format("CC delayed by +250ms (Sync offset: %+.2fs)", MpvController.sub_delay)
-                    draw_tui()
-                end
-            elseif k == "Z" then
-                if MpvController.is_playing then
-                    MpvController:adjust_sub_delay(-0.25)
-                    status_msg = string.format("CC advanced by -250ms (Sync offset: %+.2fs)", MpvController.sub_delay)
-                    draw_tui()
-                end
-            elseif k == "ALT_z" or k == "ALT_Z" then
-                if MpvController.is_playing then
-                    MpvController:reset_sub_delay()
-                    status_msg = "CC sync delay reset to 0.00s"
-                    draw_tui()
-                end
             elseif k == "+" or k == "=" then
                 cc_font_size = math.min(120, cc_font_size + 5)
                 MpvController:set_sub_font_size(cc_font_size)
@@ -3456,7 +3271,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                     save_history_item(sel)
                     if mode == "music" then
                         MpvController:start(sel, show_cc, sub_lang, browser, cookies_file, proxy, insecure, cc_font_size)
-                        status_msg = make_playing_status(sel)
+                        status_msg = "Playing: " .. utf8_truncate(sel.title, 30)
                         draw_tui()
                     else
                         MpvController:stop()
@@ -3964,83 +3779,7 @@ local function run_self_tests()
     assert(draft_restored == "draft", "DOWN arrow failed to restore draft input: got " .. tostring(draft_restored))
     print("  [✓] Persistent search history & Readline-style UP/DOWN cycling validated")
 
-    -- 25. Resume playback position helpers, watch-later config parsing & quit logic
-    local resume_test_dir = get_resume_dir()
-    assert(resume_test_dir ~= nil and #resume_test_dir > 0, "get_resume_dir must return valid directory path")
-    local test_track_url = "https://www.youtube.com/watch?v=TESTRESUME123"
-    local dummy_conf = resume_test_dir .. (is_windows and "\\" or "/") .. "TESTRESUME123"
-
-    -- Write a mock watch-later entry
-    local fw = io.open(dummy_conf, "w")
-    assert(fw ~= nil, "Failed to create mock watch-later config file")
-    fw:write("# " .. test_track_url .. "\n")
-    fw:write("start=127.450000\n")
-    fw:write("volume=80.000000\n")
-    fw:close()
-    -- Default behavior: resume is disabled (opt-in via --resume)
-    assert(resume_cfg.enabled == false, "resume_cfg.enabled must be false by default")
-    assert(get_resume_position(test_track_url) == nil, "get_resume_position must return nil when disabled")
-    assert(get_resume_mpv_opts() == " --no-resume-playback", "get_resume_mpv_opts must return --no-resume-playback by default")
-
-    -- Enable resume to validate watch-later parsing logic
-    resume_cfg.enabled = true
-    resume_cfg.opts = nil
-    local pos = get_resume_position(test_track_url)
-    assert(pos == 127, "get_resume_position must extract floor(127.45) = 127: got " .. tostring(pos))
-
-    -- Positions below threshold (RESUME_MIN_SEC = 5) should be ignored
-    fw = io.open(dummy_conf, "w")
-    assert(fw ~= nil, "Failed to re-open mock watch-later config file")
-    fw:write("# " .. test_track_url .. "\nstart=3.200000\n")
-    fw:close()
-    assert(get_resume_position(test_track_url) == nil, "get_resume_position must return nil for positions < 5 seconds")
-
-    -- Check --no-resume disable flag behavior
-    resume_cfg.enabled = false
-    assert(get_resume_position(test_track_url) == nil, "get_resume_position must return nil when resume_cfg.enabled is false")
-    assert(get_resume_mpv_opts() == " --no-resume-playback", "get_resume_mpv_opts must return --no-resume-playback when disabled")
-    resume_cfg.enabled = true
-    resume_cfg.opts = nil -- reset cached opts
-
-    -- Direct delete_resume_position test
-    fw = io.open(dummy_conf, "w")
-    assert(fw ~= nil, "Failed to create mock watch-later config file")
-    fw:write("# " .. test_track_url .. "\nstart=60.000000\n")
-    fw:close()
-    assert(get_resume_position(test_track_url) == 60, "Expected resume position of 60")
-    local deleted = delete_resume_position(test_track_url)
-    assert(deleted == true, "delete_resume_position must return true when matching file is removed")
-    assert(get_resume_position(test_track_url) == nil, "get_resume_position must return nil after delete_resume_position")
-    assert(delete_resume_position(test_track_url) == false, "delete_resume_position must return false when no entry exists")
-
-    -- Test MpvController:quit_command() logic
-    MpvController.is_playing = true
-    MpvController.is_eof = false
-    MpvController.time_pos = 45
-    MpvController.duration = 180
-    MpvController.current_item = { url = test_track_url, title = "Test Resume Track", duration = 180 }
-    assert(MpvController:quit_command() == '{"command": ["quit-watch-later"]}', "MpvController:quit_command must return quit-watch-later mid-track")
-
-    -- Stopped within 10s of track end should delete config rather than saving near-end
-    fw = io.open(dummy_conf, "w")
-    assert(fw ~= nil, "Failed to create mock watch-later config file")
-    fw:write("# " .. test_track_url .. "\nstart=175.000000\n")
-    fw:close()
-    MpvController.time_pos = 175
-    MpvController.duration = 180
-    assert(MpvController:quit_command() == '{"command": ["quit"]}', "MpvController:quit_command must return quit near end of track")
-    assert(get_resume_position(test_track_url) == nil, "Resume position must be cleared after quit near end of track")
-
-    MpvController.is_playing = false
-    MpvController.time_pos = 0
-    MpvController.duration = 0
-    MpvController.current_item = nil
-    resume_cfg.enabled = false
-    resume_cfg.opts = nil
-
-    print("  [✓] Playback resume position helpers, watch-later config parsing & quit logic validated")
-
-    -- 26. Playback speed multiplier & clamping logic
+    -- 25. Playback speed multiplier & clamping logic
     MpvController:set_speed(1.5)
     assert(MpvController.speed == 1.5, "MpvController speed must be 1.5: got " .. tostring(MpvController.speed))
     MpvController:set_speed(0.2)
@@ -4057,7 +3796,7 @@ local function run_self_tests()
     assert(normal_spd_lines[1]:find("%[1%.00x%]") == nil, "Mini-player header should omit speed badge at 1.0x")
     print("  [✓] Playback speed multiplier, clamping & mini-player badges validated")
 
-    -- 27. Audio Equalizer presets & lavfi / af string generation
+    -- 26. Audio Equalizer presets & lavfi / af string generation
     assert(is_valid_eq_preset("flat") == true, "Missing flat EQ preset")
     assert(is_valid_eq_preset("night") == true, "Missing night EQ preset")
     assert(is_valid_eq_preset("bass") == true, "Missing bass EQ preset")
@@ -4080,7 +3819,7 @@ local function run_self_tests()
     assert(MpvController.eq_preset == "flat", "MpvController:set_eq flat failed")
     print("  [✓] Audio Equalizer presets, dynamic lavfi filter generation & badges validated")
 
-    -- 28. Starred favorites persistence, deduplication, and toggling
+    -- 27. Starred favorites persistence, deduplication, and toggling
     local fav_file = get_favorites_file()
     assert(fav_file ~= nil and #fav_file > 0, "get_favorites_file must return non-empty path")
     local fav_test_item = {
@@ -4118,7 +3857,7 @@ local function run_self_tests()
     assert(is_favorite(fav_test_item) == false, "Item must not be favorite after remove_favorite_item")
     print("  [✓] Starred favorites persistence, toggle logic & deduplication validated")
 
-    -- 29. Infinite YouTube Mix / Radio recommendations formatting & deduplication
+    -- 28. Infinite YouTube Mix / Radio recommendations formatting & deduplication
     local existing_queue = {
         { url = "https://www.youtube.com/watch?v=DUP001" },
         { url = "https://www.youtube.com/watch?v=SEEDVID001" },
@@ -4146,7 +3885,7 @@ local function run_self_tests()
     assert(filtered_radio[2].id == "NEW002", "Second fresh radio track mismatch")
     print("  [✓] Infinite YouTube Mix / Radio recommendations deduplication validated")
 
-    -- 30. Audio Equalizer modal headless interaction & key navigation
+    -- 29. Audio Equalizer modal headless interaction & key navigation
     for k in pairs(pending_keys) do pending_keys[k] = nil end
     table.insert(pending_keys, "ESC")
     local eq_esc = show_eq_modal("flat")
@@ -4162,34 +3901,6 @@ local function run_self_tests()
     local eq_bass = show_eq_modal("flat")
     assert(eq_bass == "bass", "show_eq_modal numeric key 3 must select bass preset: got " .. tostring(eq_bass))
     print("  [✓] Audio Equalizer modal headless interaction & key navigation validated")
-
-    -- 31. Closed captions sync delay adjustment, clamping, reset & mini-player badge
-    MpvController:reset_sub_delay()
-    assert(MpvController.sub_delay == 0.0, "sub_delay reset failed")
-    MpvController:adjust_sub_delay(0.25)
-    assert(math.abs(MpvController.sub_delay - 0.25) < 0.001, "adjust_sub_delay +0.25 failed: got " .. tostring(MpvController.sub_delay))
-    MpvController:adjust_sub_delay(0.25)
-    assert(math.abs(MpvController.sub_delay - 0.50) < 0.001, "adjust_sub_delay second +0.25 failed: got " .. tostring(MpvController.sub_delay))
-    MpvController:adjust_sub_delay(-1.0)
-    assert(math.abs(MpvController.sub_delay - (-0.50)) < 0.001, "adjust_sub_delay -1.0 failed: got " .. tostring(MpvController.sub_delay))
-    MpvController:adjust_sub_delay(-100.0)
-    assert(MpvController.sub_delay == -60.0, "adjust_sub_delay min clamp failed: got " .. tostring(MpvController.sub_delay))
-    MpvController:adjust_sub_delay(200.0)
-    assert(MpvController.sub_delay == 60.0, "adjust_sub_delay max clamp failed: got " .. tostring(MpvController.sub_delay))
-    MpvController:reset_sub_delay()
-    assert(MpvController.sub_delay == 0.0, "reset_sub_delay failed after clamping")
-
-    local cc_test_item = { title = "CC Sync Test", duration = 120 }
-    local cc_sync_lines = render_mini_player_lines(cc_test_item, false, 100, 30, 120, "Hello World", true, 90, 1, 1, true, "", 1.0, "flat", 0.50)
-    assert(cc_sync_lines[3]:find("%(%+0%.50s%)") ~= nil, "Mini-player CC row must display sync delay badge (+0.50s): got " .. tostring(cc_sync_lines[3]))
-    assert(display_width(strip_ansi(cc_sync_lines[3]):gsub("\n", "")) <= 90, "CC row width must not overflow terminal width")
-
-    local cc_neg_sync_lines = render_mini_player_lines(cc_test_item, false, 100, 30, 120, "Hello World", true, 90, 1, 1, true, "", 1.0, "flat", -0.25)
-    assert(cc_neg_sync_lines[3]:find("%(%-0%.25s%)") ~= nil, "Mini-player CC row must display negative sync delay badge (-0.25s): got " .. tostring(cc_neg_sync_lines[3]))
-
-    local cc_zero_sync_lines = render_mini_player_lines(cc_test_item, false, 100, 30, 120, "Hello World", true, 90, 1, 1, true, "", 1.0, "flat", 0.0)
-    assert(cc_zero_sync_lines[3]:find("%(%+0%.00s%)") == nil and cc_zero_sync_lines[3]:find("%(%-0%.00s%)") == nil, "Mini-player CC row should omit badge when delay is 0")
-    print("  [✓] Closed captions sync delay adjustment, clamping, reset & mini-player badges validated")
 
     print("=== All Internal Self-Tests Passed Successfully ===")
     return true
@@ -4209,10 +3920,6 @@ local function print_help()
     print("  --site <name>         Search site: youtube, soundcloud, or twitch (default: youtube)")
     print("  -c, --cc, --lyrics    Show Closed Captions (CC) / lyrics (enabled by default)")
     print("  --no-cc               Disable Closed Captions (CC) / lyrics")
-    print("  --resume              Resume playback from last saved position (opt-in)")
-    print("  --no-resume           Do not resume playback from last saved position (default)")
-    print("  --sub-delay <sec>     Adjust subtitle/CC sync delay offset in seconds (e.g. 0.5 or -0.5)")
-    print("  --cc-delay <sec>      Alias for --sub-delay")
     print("  --radio               Start directly in infinite Radio mode (YouTube Mix)")
     print("  --speed <mult>        Initial playback speed (0.5 to 2.5, default: 1.0)")
     print("  --eq <preset>         Initial audio equalizer preset (flat, night, bass, vocal, lofi)")
@@ -4253,7 +3960,6 @@ local function print_help()
     print("  [a]           Toggle Auto-Play")
     print("  [c]           Toggle Closed Captions (CC / Lyrics)")
     print("  [C]           Cycle subtitle track (Mini-Player)")
-    print("  [z / Z]       Adjust CC sync delay (+/-0.25s)  [Alt+z] Reset")
     print("  [+ / -]       Increase / Decrease CC font size (+/-5 pt)")
     print("  [Alt+c]       Cycle CC style: White, Yellow, Cyan (in MPV GUI window)")
     print("  [m]           Toggle Music / Video mode")
@@ -4299,7 +4005,6 @@ local function main()
     local initial_speed = 1.0
     local initial_eq = "flat"
     local is_favorites = false
-    local initial_sub_delay = 0.0
 
     local env_proxy = os.getenv("YT_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")
     local proxy = (env_proxy and #env_proxy > 0) and env_proxy or nil
@@ -4329,10 +4034,6 @@ local function main()
             show_cc = true
         elseif a == "--no-cc" or a == "--no-lyrics" or a == "--no-subtitles" then
             show_cc = false
-        elseif a == "--no-resume" then
-            resume_cfg.enabled = false
-        elseif a == "--resume" then
-            resume_cfg.enabled = true
         elseif a == "-r" or a == "--radio" then
             is_radio = true
         elseif a == "--speed" then
@@ -4363,12 +4064,6 @@ local function main()
             local c = (arg[i] or "white"):lower()
             if c == "yellow" or c == "cyan" or c == "white" then
                 sub_color = c
-            end
-        elseif a == "--sub-delay" or a == "--cc-delay" then
-            i = i + 1
-            local sd = tonumber(arg[i])
-            if sd then
-                initial_sub_delay = math.max(-60.0, math.min(60.0, sd))
             end
         elseif a == "-d" or a == "--download" then
             i = i + 1
@@ -4466,7 +4161,7 @@ local function main()
         return
     end
 
-    run_app(query, mode, browser, cookies_file, is_liked, use_window, proxy, insecure, show_cc, sub_lang, active_filters, site, sub_font_size, sub_color, is_radio, initial_speed, initial_eq, is_favorites, initial_sub_delay)
+    run_app(query, mode, browser, cookies_file, is_liked, use_window, proxy, insecure, show_cc, sub_lang, active_filters, site, sub_font_size, sub_color, is_radio, initial_speed, initial_eq, is_favorites)
 end
 
 main()
