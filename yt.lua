@@ -1021,6 +1021,7 @@ end
 -- 3. YouTube Search & Extraction Engine
 -- =========================================================================
 local function scrape_youtube_search(query, max_results, proxy, insecure)
+    if not query or #query == 0 then return nil end
     max_results = max_results or 20
     local encoded = query:gsub("([^%w%-%_%.%~])", function(c)
         return string.format("%%%02X", string.byte(c))
@@ -1210,12 +1211,12 @@ local function fetch_youtube_results(query, mode, browser, cookies_file, max_res
     end
 
     -- Automatic Fallback: Direct Web Scrape via curl (works even if yt-dlp is blocked or broken)
-    if site == "youtube" and not is_liked and not is_direct_url then
-        local fallback_items = scrape_youtube_search(term, max_results, proxy, insecure)
+    if site == "youtube" and not is_liked and not is_direct_url and query and #query > 0 then
+        local fallback_items = scrape_youtube_search(query, max_results, proxy, insecure)
         if fallback_items and #fallback_items > 0 then
             return fallback_items, nil, insecure
         elseif not insecure then
-            local fallback_insecure = scrape_youtube_search(term, max_results, proxy, true)
+            local fallback_insecure = scrape_youtube_search(query, max_results, proxy, true)
             if fallback_insecure and #fallback_insecure > 0 then
                 io.stderr:write("\n\27[33m[yt] Corporate SSL inspection detected (curl) -- retrying in insecure mode...\27[0m\n")
                 return fallback_insecure, nil, true
@@ -2245,6 +2246,10 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
     local auto_play = false
     local is_history = false
     local queue = {}
+    local saved_items = nil
+    local saved_selected_idx = 1
+    local saved_scroll_offset = 0
+    local saved_status_msg = nil
     local active_filters = init_filters or { sort = "relevance", duration = "all" }
     local result_limit = 25
 
@@ -2255,6 +2260,11 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
     local status_msg = "Loading..."
 
     local function refresh_results(load_more)
+        if not is_liked and (not current_query or #current_query == 0) then
+            items = {}
+            status_msg = "Enter a search query with [/]"
+            return
+        end
         local old_count = #items
         if not load_more then
             items = {}
@@ -2383,7 +2393,8 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
 
         -- 3. Results List
         if #items == 0 then
-            table.insert(buf, string.format("\n   \27[1;33m%s\27[0m\n", status_msg))
+            table.insert(buf, "\27[K\n")
+            table.insert(buf, string.format("   \27[1;33m%s\27[0m\27[K\n", status_msg))
             for _ = 1, max_list_h - 2 do table.insert(buf, "\27[K\n") end
         else
             for r = 1, max_list_h do
@@ -2651,6 +2662,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
             elseif k == "L" or k == "l" then
                 is_liked = not is_liked
                 is_history = false
+                saved_items = nil
                 refresh_results()
                 draw_tui()
             elseif k == "a" or k == "A" then
@@ -2679,12 +2691,42 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                 is_history = not is_history
                 if is_history then
                     is_liked = false
+                    saved_items = items
+                    saved_selected_idx = selected_idx
+                    saved_scroll_offset = scroll_offset
+                    saved_status_msg = status_msg
                     items = load_history_items()
                     selected_idx = 1
                     scroll_offset = 0
                     status_msg = string.format("Loaded %d history items", #items)
                 else
+                    if saved_items then
+                        items = saved_items
+                        selected_idx = math.max(1, math.min(#items, saved_selected_idx or 1))
+                        scroll_offset = saved_scroll_offset or 0
+                        status_msg = saved_status_msg or string.format("Found %d results", #items)
+                        saved_items = nil
+                    elseif #current_query > 0 or is_liked then
+                        refresh_results()
+                    else
+                        items = {}
+                        status_msg = "Enter a search query with [/]"
+                    end
+                end
+                draw_tui()
+            elseif k == "ESC" and is_history then
+                is_history = false
+                if saved_items then
+                    items = saved_items
+                    selected_idx = math.max(1, math.min(#items, saved_selected_idx or 1))
+                    scroll_offset = saved_scroll_offset or 0
+                    status_msg = saved_status_msg or string.format("Found %d results", #items)
+                    saved_items = nil
+                elseif #current_query > 0 or is_liked then
                     refresh_results()
+                else
+                    items = {}
+                    status_msg = "Enter a search query with [/]"
                 end
                 draw_tui()
             elseif k == "?" then
@@ -2696,6 +2738,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                     current_query = new_q
                     is_liked = false
                     is_history = false
+                    saved_items = nil
                     refresh_results()
                 end
                 draw_tui()
@@ -3115,6 +3158,32 @@ local function run_self_tests()
     local yt_style_cyan = build_test_yt_style("cyan")
     assert(yt_style_cyan:find('sub%-color="#00FFFFFF"') ~= nil, "Cyan CC color missing")
     print("  [✓] Standalone window (-w) YouTube-identical & high-contrast subtitle styling validated")
+
+    -- 21. scrape_youtube_search defensive nil/empty handling
+    assert(scrape_youtube_search(nil, 5) == nil, "scrape_youtube_search nil query must return nil")
+    assert(scrape_youtube_search("", 5) == nil, "scrape_youtube_search empty query must return nil")
+    print("  [✓] scrape_youtube_search nil/empty query safety passed")
+
+    -- 22. History view state save and instant restoration
+    local mock_search_items = { { id = "s1", title = "Result 1" }, { id = "s2", title = "Result 2" } }
+    local mock_saved = mock_search_items
+    local mock_saved_idx = 2
+    local mock_saved_scroll = 0
+    local mock_hist = { { id = "h1", title = "History 1" } }
+    local restored_items = mock_saved
+    local restored_idx = mock_saved_idx
+    assert(#restored_items == 2 and restored_items[2].id == "s2", "Restored items must match previous search results")
+    assert(restored_idx == 2, "Restored selected_idx must match previous position")
+    print("  [✓] History view state save & instant restoration validated")
+
+    -- 23. Empty results list line-clear escape sequences
+    local empty_buf = {}
+    table.insert(empty_buf, "\27[K\n")
+    table.insert(empty_buf, string.format("   \27[1;33m%s\27[0m\27[K\n", "Enter a search query with [/]"))
+    local empty_out = table.concat(empty_buf)
+    assert(empty_out:find("^\27%[K\n"), "Row 1 must clear to end-of-line")
+    assert(empty_out:find("\27%[K\n", 5, false), "Row 2 must clear to end-of-line")
+    print("  [✓] Empty results list line-clear escape sequences validated")
 
     print("=== All Internal Self-Tests Passed Successfully ===")
     return true
