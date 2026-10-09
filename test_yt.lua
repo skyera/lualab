@@ -22,6 +22,8 @@ assert(help_out:find("yt.lua", 1, true), "Help output missing header")
 assert(help_out:find("System Status:", 1, true), "Help output missing status")
 assert(help_out:find("--proxy", 1, true), "Help output missing --proxy option")
 assert(help_out:find("--insecure", 1, true), "Help output missing --insecure option")
+assert(help_out:find("--fav", 1, true), "Help output missing --fav option")
+assert(help_out:find("--favorites", 1, true), "Help output missing --favorites option")
 assert(help_out:find("deno:", 1, true), "Help output missing deno status")
 print("  [✓] Test 1 passed: yt.lua --help renders properly.")
 
@@ -113,10 +115,11 @@ assert(test_out:find("parse_json_field passed", 1, true), "parse_json_field unit
 assert(test_out:find("sanitize_display_text passed", 1, true), "sanitize_display_text unit test failed")
 assert(test_out:find("display_width & utf8_truncate passed", 1, true), "display_width & utf8_truncate unit test failed")
 assert(test_out:find("save_history_item & load_history_items passed", 1, true), "History save/load test failed")
+assert(test_out:find("Favorites persistence, star toggle & instant restoration validated", 1, true), "Favorites self-test failed")
 assert(test_out:find("CC / Lyrics status formatting passed", 1, true), "CC/Lyrics status formatting unit test failed")
 assert(test_out:find("CC rolling caption deduplication passed", 1, true), "CC rolling caption deduplication unit test failed")
 assert(test_out:find("All Internal Self-Tests Passed Successfully", 1, true), "Self-tests summary missing")
-print("  [✓] Test 9 passed: yt.lua --test verified JSON parsing, CJK width, history, and CC deduplication without errors.")
+print("  [✓] Test 9 passed: yt.lua --test verified JSON parsing, CJK width, history, favorites, and CC deduplication without errors.")
 
 -- Test 10: CC / Lyrics CLI Options & Help verification
 local p_help = io.popen(luajit .. " yt.lua --help", "r")
@@ -184,5 +187,14 @@ assert(next(bad_globals) == nil, "Undefined global accesses detected in yt.lua: 
 end)(), ", "))
 print("  [✓] Test 12 passed: Bytecode scoping verified (0 undeclared globals in yt.lua).")
 
+-- Test 13: Local Favorites CLI list mode
+local p_fav = io.popen(luajit .. " yt.lua --fav --no-interactive", "r")
+assert(p_fav, "Failed to run yt.lua --fav --no-interactive")
+local fav_out = p_fav:read("*a")
+p_fav:close()
+assert(fav_out:find("Local Favorites", 1, true), "Expected Local Favorites header in non-interactive --fav output")
+print("  [✓] Test 13 passed: yt.lua --fav --no-interactive successfully renders local favorites list.")
+
 print("=== All Backend Verification Tests Completed Successfully ===")
+
 

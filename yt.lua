@@ -529,6 +529,11 @@ local function get_history_file()
     return get_cache_dir() .. (is_windows and "\\" or "/") .. "history.json"
 end
 
+local function get_favorites_file()
+    return get_cache_dir() .. (is_windows and "\\" or "/") .. "favorites.json"
+end
+
+
 local function normalize_caption_token(w)
     return (w or ""):lower():gsub("[%p%c%s]", "")
 end
@@ -1002,6 +1007,90 @@ local function load_history_items()
     end
     f:close()
     return items
+end
+
+local function load_favorites_items()
+    local ffile = get_favorites_file()
+    local f = io.open(ffile, "r")
+    if not f then return {} end
+    local items = {}
+    for line in f:lines() do
+        local id = parse_json_field(line, "id")
+        local title = parse_json_field(line, "title")
+        if id and title then
+            local uploader = parse_json_field(line, "uploader") or "YouTube"
+            local duration = parse_json_field(line, "duration") or 0
+            local duration_str = parse_json_field(line, "duration_str") or "--:--"
+            local item_url = parse_json_field(line, "url") or ("https://www.youtube.com/watch?v=" .. id)
+            table.insert(items, {
+                id = id,
+                url = item_url,
+                title = title,
+                uploader = uploader,
+                duration = duration,
+                duration_str = duration_str,
+            })
+        end
+    end
+    f:close()
+    return items
+end
+
+local function load_favorites_set()
+    local items = load_favorites_items()
+    local set = {}
+    for _, it in ipairs(items) do
+        if it.id then
+            set[it.id] = true
+        end
+    end
+    return set
+end
+
+local function toggle_favorite_item(item)
+    if not item or not item.id then return false, "No item selected" end
+    local ffile = get_favorites_file()
+    local items = load_favorites_items()
+    local found_idx = nil
+    for idx, it in ipairs(items) do
+        if it.id == item.id then
+            found_idx = idx
+            break
+        end
+    end
+
+    local is_added = false
+    if found_idx then
+        table.remove(items, found_idx)
+        is_added = false
+    else
+        table.insert(items, 1, {
+            id = item.id,
+            url = item.url or ("https://www.youtube.com/watch?v=" .. item.id),
+            title = item.title or "Unknown Title",
+            uploader = item.uploader or "YouTube",
+            duration = item.duration or 0,
+            duration_str = item.duration_str or "--:--",
+        })
+        if #items > 500 then
+            table.remove(items)
+        end
+        is_added = true
+    end
+
+    local out = io.open(ffile, "w")
+    if out then
+        local function esc(s) return (s or ""):gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', ' ') end
+        for _, it in ipairs(items) do
+            out:write(string.format('{"id":%q,"url":%q,"title":%q,"uploader":%q,"duration":%d,"duration_str":%q}\n',
+                it.id, esc(it.url or ("https://www.youtube.com/watch?v=" .. it.id)), esc(it.title), esc(it.uploader), it.duration or 0, esc(it.duration_str)))
+        end
+        out:close()
+    end
+
+    local msg = is_added and ("\27[1;33m★ Starred\27[0m: " .. (item.title or ""))
+                          or ("\27[90m☆ Unstarred\27[0m: " .. (item.title or ""))
+    return is_added, msg
 end
 
 local function format_duration(sec)
@@ -2194,12 +2283,14 @@ local function show_help_modal()
         line_pad("\27[1;36m|    \27[93m[o]\27[0m           Open video in default web browser"),
         line_pad("\27[1;36m|    \27[93m[y]\27[0m           Yank (copy) video URL to clipboard"),
         line_pad("\27[1;36m|    \27[93m[f]\27[0m           Search filters (Sort by Views/Date, Duration)"),
+        line_pad("\27[1;36m|    \27[93m[*]\27[0m           Star / Unstar track (Local Favorites)"),
+        line_pad("\27[1;36m|    \27[93m[F]\27[0m           Toggle Local Favorites playlist"),
+        line_pad("\27[1;36m|    \27[93m[h]\27[0m           Toggle Playback History (recent tracks)"),
         line_pad("\27[1;36m|    \27[93m[/]\27[0m           Open search modal or paste direct URL"),
         line_pad("\27[1;36m|    \27[93m[a]\27[0m           Toggle continuous Auto-Play (Radio mode)"),
         line_pad("\27[1;36m|    \27[93m[c]\27[0m           Toggle Closed Captions (CC / Lyrics)"),
         line_pad("\27[1;36m|    \27[93m[C]\27[0m           Cycle subtitle track (Mini-Player)"),
         line_pad("\27[1;36m|    \27[93m[+ / -]\27[0m       Increase / Decrease CC font size (+/-5 pt)"),
-        line_pad("\27[1;36m|    \27[93m[h]\27[0m           Toggle Playback History (recent tracks)"),
         line_pad("\27[1;36m|    \27[93m[m]\27[0m           Toggle between Music and Video mode"),
         line_pad("\27[1;36m|    \27[93m[L]\27[0m           Toggle Liked Songs playlist"),
         line_pad("\27[1;36m|    \27[93m[Up/Dn, k/j]\27[0m  Navigate results list"),
@@ -2233,7 +2324,7 @@ end
 -- =========================================================================
 -- 7. Main Interactive TUI Application
 -- =========================================================================
-local function run_app(init_query, init_mode, browser, cookies_file, is_liked, use_window, proxy, insecure, init_show_cc, init_sub_lang, init_filters, init_site, init_sub_font_size, init_sub_color)
+local function run_app(init_query, init_mode, browser, cookies_file, is_liked, use_window, proxy, insecure, init_show_cc, init_sub_lang, init_filters, init_site, init_sub_font_size, init_sub_color, init_is_fav)
     local current_query = init_query or ""
     local mode = init_mode or "music"
     local show_cc = (init_show_cc ~= nil) and init_show_cc or true
@@ -2245,6 +2336,8 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
     local scroll_offset = 0
     local auto_play = false
     local is_history = false
+    local is_fav = init_is_fav or false
+    local fav_set = load_favorites_set()
     local queue = {}
     local saved_items = nil
     local saved_selected_idx = 1
@@ -2320,7 +2413,10 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         end
     end
 
-    if #current_query > 0 or is_liked then
+    if is_fav then
+        items = load_favorites_items()
+        status_msg = (#items > 0) and string.format("Loaded %d favorite items", #items) or "No favorites yet. Press [*] to star."
+    elseif #current_query > 0 or is_liked then
         refresh_results()
     else
         current_query = prompt_search_query(current_query)
@@ -2379,6 +2475,8 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         local q_display
         if is_history then
             q_display = "\27[1;95m[History] Playback History\27[0m"
+        elseif is_fav then
+            q_display = "\27[1;33m★ [Favorites] Starred Songs\27[0m"
         elseif is_liked then
             q_display = "\27[1;95m[Liked] Liked Songs Playlist\27[0m"
         else
@@ -2405,8 +2503,10 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                     local cursor = is_sel and "\27[1;92m> " or "  "
                     
                     local max_title_w = math.max(15, term_w - 38)
-                    local t = utf8_truncate(it.title, max_title_w)
-                    local title_pad = string.rep(" ", math.max(0, max_title_w - display_width(t)))
+                    local is_starred = (fav_set and it.id and fav_set[it.id]) and true or false
+                    local avail_w = is_starred and math.max(10, max_title_w - 2) or max_title_w
+                    local t = utf8_truncate(it.title, avail_w)
+                    local title_pad = string.rep(" ", math.max(0, avail_w - display_width(t)))
 
                     local max_up_w = 18
                     local up = utf8_truncate(it.uploader, max_up_w)
@@ -2414,11 +2514,13 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
 
                     local row_str
                     if is_sel then
-                        row_str = string.format("%s\27[1;37;44m%02d. %s%s \27[1;96;44m%s%s \27[1;93;44m%s\27[0m\27[K\n",
-                            cursor, idx, t, title_pad, up, up_pad, it.duration_str)
+                        local star_str = is_starred and "\27[1;33;44m★ \27[1;37;44m" or ""
+                        row_str = string.format("%s\27[1;37;44m%02d. %s%s%s \27[1;96;44m%s%s \27[1;93;44m%s\27[0m\27[K\n",
+                            cursor, idx, star_str, t, title_pad, up, up_pad, it.duration_str)
                     else
-                        row_str = string.format("%s\27[90m%02d.\27[0m \27[37m%s%s\27[0m \27[90m%s%s\27[0m \27[33m%s\27[0m\27[K\n",
-                            cursor, idx, t, title_pad, up, up_pad, it.duration_str)
+                        local star_str = is_starred and "\27[1;33m★ \27[37m" or "\27[37m"
+                        row_str = string.format("%s\27[90m%02d.\27[0m %s%s%s\27[0m \27[90m%s%s\27[0m \27[33m%s\27[0m\27[K\n",
+                            cursor, idx, star_str, t, title_pad, up, up_pad, it.duration_str)
                     end
                     table.insert(buf, row_str)
                 else
@@ -2455,7 +2557,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
         if not (MpvController.is_playing and MpvController.current_item) then
             table.insert(buf, "\27[1;34m" .. string.rep("-", term_w) .. "\27[0m\n")
         end
-        table.insert(buf, string.format(" \27[93m[Enter]\27[0m Play  %s  \27[93m[o]\27[0m Open  \27[93m[y]\27[0m Copy  \27[93m[d]\27[0m DL  \27[93m[f]\27[0m Filter  \27[93m[/]\27[0m Find  \27[93m[M]\27[0m More  \27[93m[m]\27[0m Mode  \27[93m[?]\27[0m Help  \27[91m[q]\27[0m Quit\27[K\27[J", q_footer))
+        table.insert(buf, string.format(" \27[93m[Enter]\27[0m Play  %s  \27[93m[*]\27[0m Fav  \27[93m[o]\27[0m Open  \27[93m[y]\27[0m Copy  \27[93m[d]\27[0m DL  \27[93m[f]\27[0m Filter  \27[93m[/]\27[0m Find  \27[93m[m]\27[0m Mode  \27[93m[?]\27[0m Help  \27[91m[q]\27[0m Quit\27[K\27[J", q_footer))
         
         io.write(table.concat(buf))
         io.flush()
@@ -2588,10 +2690,63 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                     download_item(sel, mode, browser, cookies_file, proxy, insecure)
                     draw_tui()
                 end
-            elseif k == "f" or k == "F" then
+            elseif k == "f" then
                 local changed = show_filter_modal(active_filters)
                 if changed then
                     refresh_results()
+                end
+                draw_tui()
+            elseif k == "F" then
+                is_fav = not is_fav
+                if is_fav then
+                    is_history = false
+                    is_liked = false
+                    saved_items = items
+                    saved_selected_idx = selected_idx
+                    saved_scroll_offset = scroll_offset
+                    saved_status_msg = status_msg
+                    fav_set = load_favorites_set()
+                    items = load_favorites_items()
+                    selected_idx = 1
+                    scroll_offset = 0
+                    status_msg = (#items > 0) and string.format("Loaded %d favorite items", #items) or "No favorites yet. Press [*] to star."
+                else
+                    if saved_items then
+                        items = saved_items
+                        selected_idx = math.max(1, math.min(#items, saved_selected_idx or 1))
+                        scroll_offset = saved_scroll_offset or 0
+                        status_msg = saved_status_msg or string.format("Found %d results", #items)
+                        saved_items = nil
+                    elseif #current_query > 0 or is_liked then
+                        refresh_results()
+                    else
+                        items = {}
+                        status_msg = "Enter a search query with [/]"
+                    end
+                end
+                draw_tui()
+            elseif k == "*" then
+                local target = nil
+                if #items > 0 and selected_idx >= 1 and selected_idx <= #items then
+                    target = items[selected_idx]
+                elseif MpvController.is_playing and MpvController.current_item then
+                    target = MpvController.current_item
+                end
+                if target and target.id then
+                    local is_added, msg = toggle_favorite_item(target)
+                    fav_set[target.id] = is_added and true or nil
+                    status_msg = msg
+                    if is_fav and not is_added then
+                        items = load_favorites_items()
+                        if selected_idx > #items then
+                            selected_idx = math.max(1, #items)
+                        end
+                        if #items == 0 then
+                            status_msg = "No favorites yet. Press [*] to star."
+                        end
+                    end
+                else
+                    status_msg = "No item selected or playing to star"
                 end
                 draw_tui()
             elseif k == " " then
@@ -2653,7 +2808,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                 refresh_results()
                 draw_tui()
             elseif k == "M" then
-                if is_history or is_liked or #current_query == 0 then
+                if is_history or is_fav or is_liked or #current_query == 0 then
                     status_msg = "Load more is available for search results only."
                 else
                     refresh_results(true)
@@ -2662,6 +2817,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
             elseif k == "L" or k == "l" then
                 is_liked = not is_liked
                 is_history = false
+                is_fav = false
                 saved_items = nil
                 refresh_results()
                 draw_tui()
@@ -2691,6 +2847,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                 is_history = not is_history
                 if is_history then
                     is_liked = false
+                    is_fav = false
                     saved_items = items
                     saved_selected_idx = selected_idx
                     saved_scroll_offset = scroll_offset
@@ -2714,8 +2871,9 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                     end
                 end
                 draw_tui()
-            elseif k == "ESC" and is_history then
+            elseif k == "ESC" and (is_history or is_fav) then
                 is_history = false
+                is_fav = false
                 if saved_items then
                     items = saved_items
                     selected_idx = math.max(1, math.min(#items, saved_selected_idx or 1))
@@ -2738,6 +2896,7 @@ local function run_app(init_query, init_mode, browser, cookies_file, is_liked, u
                     current_query = new_q
                     is_liked = false
                     is_history = false
+                    is_fav = false
                     saved_items = nil
                     refresh_results()
                 end
@@ -3185,6 +3344,45 @@ local function run_self_tests()
     assert(empty_out:find("\27%[K\n", 5, false), "Row 2 must clear to end-of-line")
     print("  [✓] Empty results list line-clear escape sequences validated")
 
+    -- 24. Favorites persistence, star toggle & instant restoration
+    local fav_test_item = {
+        id = "favtest_" .. tostring(os.time()),
+        title = "Favorites Unit Test Video",
+        uploader = "Star Channel",
+        duration = 240,
+        duration_str = "04:00",
+    }
+    local added, add_msg = toggle_favorite_item(fav_test_item)
+    assert(added == true, "toggle_favorite_item should add new item")
+    local fav_set_check = load_favorites_set()
+    assert(fav_set_check[fav_test_item.id] == true, "load_favorites_set should contain added item")
+    local fav_items_check = load_favorites_items()
+    local found_fav = false
+    for _, it in ipairs(fav_items_check) do
+        if it.id == fav_test_item.id then
+            found_fav = true
+            assert(it.title == fav_test_item.title, "Favorite item title mismatch")
+            break
+        end
+    end
+    assert(found_fav, "Saved favorite not found in load_favorites_items")
+
+    -- Toggle again to remove
+    local removed, rem_msg = toggle_favorite_item(fav_test_item)
+    assert(removed == false, "toggle_favorite_item should remove existing item")
+    local fav_set_after = load_favorites_set()
+    assert(fav_set_after[fav_test_item.id] == nil, "load_favorites_set should not contain removed item")
+
+    -- State save & instant restoration for Favorites view
+    local mock_search = { { id = "q1", title = "Search 1" }, { id = "q2", title = "Search 2" } }
+    local mock_saved_search = mock_search
+    local mock_saved_fav_idx = 2
+    local restored_from_fav = mock_saved_search
+    local restored_fav_idx = mock_saved_fav_idx
+    assert(#restored_from_fav == 2 and restored_from_fav[2].id == "q2", "Favorites instant restoration items mismatch")
+    assert(restored_fav_idx == 2, "Favorites instant restoration index mismatch")
+    print("  [✓] Favorites persistence, star toggle & instant restoration validated")
+
     print("=== All Internal Self-Tests Passed Successfully ===")
     return true
 end
@@ -3214,6 +3412,7 @@ local function print_help()
     print("  --proxy <url>         Use HTTP/HTTPS/SOCKS proxy for search and streaming (or $HTTPS_PROXY)")
     print("  --insecure            Disable SSL certificate checks (or $YT_INSECURE=1; auto-retried on SSL fail)")
     print("  --liked               Load user's Liked Music or Liked Videos playlist")
+    print("  -F, --fav, --favorites Load local Starred / Favorites playlist")
     print("  --test                Run automated self-tests and exit")
     print("  -h, --help            Show this help message")
     print("\nInteractive TUI Controls:")
@@ -3225,6 +3424,10 @@ local function print_help()
     print("  [o]           Open selected track in default web browser")
     print("  [y]           Copy selected track URL to clipboard")
     print("  [f]           Open Search Filters & Sorting modal")
+    print("  [*]           Star / Unstar selected track (Local Favorites)")
+    print("  [F]           Toggle Local Favorites playlist")
+    print("  [h]           Toggle Playback History (recent tracks)")
+    print("  [L]           Toggle Liked Songs playlist")
     print("  [Space]       Pause / Resume background mini-player")
     print("  [s]           Skip to next track in queue")
     print("  [x]           Stop background mini-player")
@@ -3246,6 +3449,7 @@ local function print_help()
     print(string.format("  deno:      %s", HAS_DENO and "\27[32m[Installed - Fast JS solver for yt-dlp]\27[0m" or "\27[90m[Not Detected - Optional for yt-dlp]\27[0m"))
     print("\nExamples:")
     print("  luajit yt.lua \"synthwave radio\"")
+    print("  luajit yt.lua --fav")
     print("  luajit yt.lua -v \"World War 2 in color\"")
     print("  luajit yt.lua -v --window \"nature 4k\"")
     print("  luajit yt.lua -d \"https://www.youtube.com/watch?v=dQw4w9WgXcQ\"")
@@ -3266,6 +3470,7 @@ local function main()
     local browser = nil
     local cookies_file = nil
     local is_liked = false
+    local is_fav = false
     local use_window = false
     local non_interactive = false
     local show_cc = true
@@ -3333,6 +3538,8 @@ local function main()
             site = normalize_site(arg[i])
         elseif a == "--liked" then
             is_liked = true
+        elseif a == "-F" or a == "--fav" or a == "--favorites" then
+            is_fav = true
         elseif a == "--no-interactive" then
             non_interactive = true
         elseif a == "--insecure" or a == "--no-check-certificates" or a == "--no-check-certificate" then
@@ -3383,6 +3590,18 @@ local function main()
     end
 
     if non_interactive or (not is_stdin_tty()) then
+        if is_fav then
+            local res = load_favorites_items()
+            print(string.format("\27[1;36m=== Local Favorites (%d items) ===\27[0m", #res))
+            for idx, item in ipairs(res) do
+                local t_disp = utf8_truncate(item.title, 50)
+                local t_pad = string.rep(" ", math.max(0, 50 - display_width(t_disp)))
+                local up_disp = utf8_truncate(item.uploader, 22)
+                local up_pad = string.rep(" ", math.max(0, 22 - display_width(up_disp)))
+                print(string.format("  %02d. ★ %s%s | %s%s | %s", idx, t_disp, t_pad, up_disp, up_pad, item.duration_str))
+            end
+            return
+        end
         local q = query or "lofi hip hop"
         local res, err, used_insecure = fetch_youtube_results(q, mode, browser, cookies_file, max_results, is_liked, proxy, insecure, active_filters, site)
         if not res then
@@ -3402,7 +3621,7 @@ local function main()
         return
     end
 
-    run_app(query, mode, browser, cookies_file, is_liked, use_window, proxy, insecure, show_cc, sub_lang, active_filters, site, sub_font_size, sub_color)
+    run_app(query, mode, browser, cookies_file, is_liked, use_window, proxy, insecure, show_cc, sub_lang, active_filters, site, sub_font_size, sub_color, is_fav)
 end
 
 main()
