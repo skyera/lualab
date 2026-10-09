@@ -26,6 +26,8 @@ For every change, consider how to prove correctness before concluding:
 *   **Keystroke Simulation Testing**: Never test text input using only pre-composed strings. Test interactive input loops by feeding actual token sequences emitted by the key reader (including symbolic tokens like `"SPACE"`, `"BACKSPACE"`, `"ENTER"`, `"ESC"`).
 *   **Subprocess & External Command Validation**: Any feature invoking shell commands or external tools must be verified end-to-end to ensure standard output/error is visible to the user and terminal state (raw mode, screen buffer) transitions correctly.
 *   **Headless Pipeline Sanity Checks**: For interactive terminal utilities, run a non-interactive pipeline test (e.g. `printf ":\x1b" | luajit app.lua`) or mock driver to verify that invocation, key dispatch, and clean exit complete without runtime crashes.
+*   **Bytecode Scoping & Undeclared Global Check**: Always run LuaJIT bytecode analysis (`luajit -bl <script.lua>`) or the scoping test suite (`test_yt.lua` Test 12) to assert 0 undeclared globals (`GGET`). In Lua, undefined variable typos (like `term` instead of `query`) silently evaluate to `nil` and can hide undetected in unexercised fallback branches.
+*   **State-Machine Round-Trip Testing**: Test interactive utilities through multi-step view transitions (e.g. `Empty State -> History [h] -> Exit History [h]`, `Search Results -> History [h] -> Restore Search Results`). Verify that transitioning from a populated view to a shorter or empty view cleanly overwrites all rows with zero visual ghosting.
 
 ## Request & Issue Workflow
 
@@ -51,12 +53,14 @@ For any TUI application or terminal utility in the repository, the agent MUST ad
    *   **Differential Updates on Local Movement**: When moving between items within the visible viewport page, update **only the changed rows** (e.g., un-highlight the previous row, highlight the new row) instead of rebuilding and redrawing the entire screen.
    *   **Atomic Synchronized Frame Emission**: Wrap frame buffer output in synchronized update escapes (`\27[?2026h` ... `\27[?2026l`) and flush in a single atomic `io.write()`. Never emit piecemeal terminal writes across multiple unbuffered calls.
    *   **Prevent Auto-Wrap Shift**: Disable line wrapping (`\27[?7l`) on startup and clamp layout width to `raw_cols - 1` to prevent wide strings from pushing the cursor to the next line and breaking coordinate-based row addressing (`\27[Y;XH`).
+   *   **Universal Row-Clear Invariant (`\27[K`)**: Every row emitted during differential redraws (including blank spacing lines, empty list placeholders, and status messages) MUST terminate with `\27[K\n` (clear to end of line). Never emit a bare `\n` without `\27[K`, ensuring transitions from longer to shorter or empty views never leave ghost text, stale item titles, or trailing duration digits bleeding through.
 
 2. **Responsiveness & Edge Cases**:
    *   **Zero-Latency Prompt Echo**: For search inputs and typing modes, provide immediate 0ms visual echo for the query prompt row without waiting for asynchronous searches or redrawing unrelated panes. Drain burst keystrokes from input queues cleanly.
    *   **Strict Viewport Bounds & Invariants**: Enforce `1 <= selected_idx <= #items` and ensure `selected_idx` is always visible within `[scroll_offset + 1, scroll_offset + viewport_height]`.
    *   **Boundary Transitions**: Seamlessly handle first-item, last-item, and scroll-boundary crossings. Falling back from differential updates to full viewport scrolling must be robust and error-free.
    *   **Closure Scoping & Forward Declarations**: Always forward-declare all rendering functions (`render_full_screen`, `render_selection_differential`, etc.) at the top of TUI closures so boundary transitions and cross-calls never encounter uninitialized nil references.
+   *   **Secondary View State Preservation**: Toggling temporary views (like History `[h]` or Queue `[Q]`) must preserve the active search results, cursor index, and scroll offset. Exiting via the toggle key or `[Esc]` must instantly restore the previous screen with 0ms latency, zero screen flicker, and zero network re-queries.
    *   **Graceful Terminal Restoration**: Always register signal traps (`SIGINT`, `SIGTERM`, `EXIT`) and protected exit paths to guarantee alternate buffer exit (`\27[?1049l`), cursor restore (`\27[?25h`), and terminal raw mode reset.
 
 3. **Component Render Decoupling & Format Safety**:
