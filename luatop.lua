@@ -265,7 +265,88 @@ if is_windows then
                     elseif ch2 == 79 then return "END"
                     elseif ch2 == 15 then return "SHIFT_TAB"
                     end
-                elseif ch == 27 then return "ESC"
+                elseif ch == 27 then
+                    -- Parse VT sequences emitted when ENABLE_VIRTUAL_TERMINAL_INPUT (0x0200) is enabled on Windows Console/Terminal
+                    local wait_seq = 0
+                    while ffi.C._kbhit() == 0 and wait_seq < 25 do
+                        kernel32.Sleep(5)
+                        wait_seq = wait_seq + 5
+                    end
+                    if ffi.C._kbhit() ~= 0 then
+                        local ch2 = ffi.C._getch()
+                        if ch2 == 91 then -- '[' (CSI)
+                            local wait_c3 = 0
+                            while ffi.C._kbhit() == 0 and wait_c3 < 25 do
+                                kernel32.Sleep(5)
+                                wait_c3 = wait_c3 + 5
+                            end
+                            if ffi.C._kbhit() ~= 0 then
+                                local ch3 = ffi.C._getch()
+                                if ch3 == 65 then return "UP"
+                                elseif ch3 == 66 then return "DOWN"
+                                elseif ch3 == 67 then return "RIGHT"
+                                elseif ch3 == 68 then return "LEFT"
+                                elseif ch3 == 90 then return "SHIFT_TAB"
+                                elseif ch3 == 72 then return "HOME"
+                                elseif ch3 == 70 then return "END"
+                                elseif ch3 == 53 then -- PAGE_UP: \27[5~
+                                    if ffi.C._kbhit() ~= 0 and ffi.C._getch() == 126 then return "PAGE_UP" end
+                                    return "PAGE_UP"
+                                elseif ch3 == 54 then -- PAGE_DOWN: \27[6~
+                                    if ffi.C._kbhit() ~= 0 and ffi.C._getch() == 126 then return "PAGE_DOWN" end
+                                    return "PAGE_DOWN"
+                                elseif ch3 == 49 then -- F5: \27[15~
+                                    if ffi.C._kbhit() ~= 0 then
+                                        local ch4 = ffi.C._getch()
+                                        if ch4 == 53 then
+                                            if ffi.C._kbhit() ~= 0 and ffi.C._getch() == 126 then return "F5" end
+                                            return "F5"
+                                        end
+                                    end
+                                elseif ch3 == 60 then -- SGR mouse: \27[<btn;x;yM/m
+                                    local mseq = ""
+                                    local mwait = 0
+                                    while mwait < 50 do
+                                        if ffi.C._kbhit() ~= 0 then
+                                            local mc = ffi.C._getch()
+                                            mseq = mseq .. string.char(mc)
+                                            if mc == 77 or mc == 109 then break end -- 'M' or 'm'
+                                        else
+                                            kernel32.Sleep(2)
+                                            mwait = mwait + 2
+                                        end
+                                    end
+                                    local b, x, y, act = mseq:match("^(%d+);(%d+);(%d+)([Mm])")
+                                    if b and x and y and act then
+                                        return {
+                                            type = "mouse",
+                                            btn = tonumber(b),
+                                            x = tonumber(x),
+                                            y = tonumber(y),
+                                            release = (act == "m"),
+                                        }
+                                    end
+                                end
+                            end
+                        elseif ch2 == 79 then -- 'O' (SS3)
+                            local wait_c3 = 0
+                            while ffi.C._kbhit() == 0 and wait_c3 < 25 do
+                                kernel32.Sleep(5)
+                                wait_c3 = wait_c3 + 5
+                            end
+                            if ffi.C._kbhit() ~= 0 then
+                                local ch3 = ffi.C._getch()
+                                if ch3 == 72 then return "HOME"
+                                elseif ch3 == 70 then return "END"
+                                elseif ch3 == 65 then return "UP"
+                                elseif ch3 == 66 then return "DOWN"
+                                elseif ch3 == 67 then return "RIGHT"
+                                elseif ch3 == 68 then return "LEFT"
+                                end
+                            end
+                        end
+                    end
+                    return "ESC"
                 elseif ch == 13 or ch == 10 then return "ENTER"
                 elseif ch == 8 then return "BACKSPACE"
                 elseif ch == 32 then return "SPACE"
@@ -5212,6 +5293,7 @@ local M = {
     render_diagnostic_modal_frame = render_diagnostic_modal_frame,
     suspend_raw_mode              = suspend_raw_mode,
     resume_raw_mode               = resume_raw_mode,
+    read_key                      = read_key,
     main                          = main,
     run_self_test                 = run_self_test,
 }

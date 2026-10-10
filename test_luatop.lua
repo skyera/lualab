@@ -743,9 +743,10 @@ TestRunner.describe("10. Process Diagnostic Command Runner Modal (Proposal 3)", 
         assert_eq(cmd, "lsof -p", "Backspace deleted 3 characters")
     end)
 
-    TestRunner.it("should safely export suspend_raw_mode and resume_raw_mode functions", function()
+    TestRunner.it("should safely export suspend_raw_mode, resume_raw_mode, and read_key functions", function()
         assert_true(type(btop.suspend_raw_mode) == "function", "suspend_raw_mode must be exported as a function")
         assert_true(type(btop.resume_raw_mode) == "function", "resume_raw_mode must be exported as a function")
+        assert_true(type(btop.read_key) == "function", "read_key must be exported as a function")
 
         -- Calling when not in raw mode must be safe no-op
         local ok1 = pcall(btop.suspend_raw_mode)
