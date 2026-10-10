@@ -1,0 +1,16 @@
+local ports = require("lan_ports")
+local first = assert(ports.parse("5000-6000"))
+assert(#first == 1001 and first[1].port == 5000 and first[#first].port == 6000)
+local second = assert(ports.parse("8000-9000"))
+assert(#second == 1001 and second[1].port == 8000 and second[#second].port == 9000)
+local both = assert(ports.parse("5000-6000,8000-9000"))
+assert(#both == 2002 and both[1001].port == 6000 and both[1002].port == 8000 and both[2002].port == 9000)
+assert(#assert(ports.parse("5000-6000,5999-6000,8000-9000,8080")) == 2002)
+local boundaries = assert(ports.parse(" 1 , 65535 , 80-81 "))
+assert(#boundaries == 4 and boundaries[2].port == 65535)
+assert(#assert(ports.parse("1-4096")) == ports.MAX_PORTS)
+for _, invalid in ipairs({"", "80,", ",80", "80,,81", "0", "65536", "90-80", "1-4097", "1-65535", "x", "80foo", "1.5", "80-%GG"}) do
+    local parsed, err = ports.parse(invalid)
+    assert(not parsed and type(err) == "string", "Accepted invalid ports: " .. invalid)
+end
+print("Port ranges: complete inclusive scopes, overlap deduplication, boundaries, and explicit limits PASS")

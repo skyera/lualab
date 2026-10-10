@@ -143,13 +143,15 @@ local function new(options)
         active = nil
     end
 
-    function manager:start()
+    function manager:start(input_override)
         self:poll()
         if active then return false, self.status end
         local path = os.tmpname()
-        local ok, err = write_update(path, options.input())
+        local input = input_override or options.input()
+        local ok, err = write_update(path, input)
         self.status = {id = self.status.id + 1, state = "running", phase = "starting", completed = 0,
-            total = 0, started_at = os.time()}
+            total = type(input.ports) == "table" and #input.ports or 0,
+            started_at = os.time(), target_ip = input.ip, device_id = input.device_id}
         if not ok then
             os.remove(path)
             self.status.state, self.status.error = "failed", tostring(err)

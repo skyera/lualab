@@ -61,6 +61,13 @@ assert(jobs.write_update(path .. ".result", {devices = {{ip = "127.0.0.1", mac =
             port_socket.bind(("127.0.0.1", 0))
             port = port_socket.getsockname()[1]
         driver = root / "server.lua"
+        port_worker = root / "port worker.lua"
+        port_worker.write_text(lua_path + '''
+local ffi = require("ffi")
+ffi.cdef[[int usleep(unsigned int);]]
+ffi.C.usleep(300000) -- Keep the native worker pending long enough to test cancellation.
+assert(loadfile(SCRIPT))("--scan-worker", ...)
+'''.replace("SCRIPT", json.dumps(str(repo / "lan_dashboard.lua"))))
         driver.write_text(lua_path + '''
 local real_time = os.time
 os.time = function(value)
@@ -70,8 +77,8 @@ os.time = function(value)
     return timestamp
 end
 '''.replace("CLOCK", json.dumps(str(clock))) + 'local lan = require("lan_dashboard")\nlan.run_web_server(PORT, '
-                          '{worker_command = {"luajit", WORKER}})\n'
-                          .replace("PORT", str(port)).replace("WORKER", json.dumps(str(worker))))
+                          '{worker_command = {"luajit", WORKER}, probe_worker_command = {"luajit", PROBE_WORKER}})\n'
+                          .replace("PORT", str(port)).replace("PROBE_WORKER", json.dumps(str(port_worker))).replace("WORKER", json.dumps(str(worker))))
         env = dict(os.environ, LAN_INVENTORY_FILE=str(inventory))
         output = root / "server.log"
         with output.open("w") as log:
@@ -152,6 +159,68 @@ end
                 invalid_metadata({"id": device_id, "trusted": "true", "tags": []}, 400)
                 invalid_metadata({"id": device_id, "trusted": True, "tags": ["bad\nlabel"]}, 400)
                 invalid_metadata({"id": "mac:00:11:22:33:44:55", "trusted": True, "tags": []}, 404)
+
+                def wait_probe(states):
+                    deadline = time.monotonic() + 8
+                    while time.monotonic() < deadline:
+                        status = request("/api/probe/status")[1]["probe"]
+                        if status["state"] in states:
+                            return status
+                        time.sleep(0.02)
+                    raise AssertionError(f"Port probe did not reach {states}: {status}")
+
+                scope = "5000-6000%2C8000-9000"
+                before_probe = inventory.read_text()
+                code, accepted = request(f"/api/probe?ip=127.0.0.1&ports={scope}")
+                assert code == 202 and accepted["probe"]["total"] == 2002
+                request("/api/devices"); request("/api/stats")
+                request("/api/probe/cancel", "POST")
+                assert wait_probe({"cancelled"})["state"] == "cancelled"
+                assert inventory.read_text() == before_probe
+
+                listeners = []
+                try:
+                    for candidate in [5000, 6000, 8000, 8500, 9000]:
+                        listener = socket.socket()
+                        try:
+                            listener.bind(("127.0.0.1", candidate)); listener.listen(4)
+                            listeners.append(listener)
+                        except OSError:
+                            listener.close()  # Existing services are left alone.
+                    expected_ports = {listener.getsockname()[1] for listener in listeners}
+                    assert expected_ports.intersection({6000, 8500, 9000}), "No test service available beyond the old range cap"
+                    request("/api/scan", "POST")
+                    code, accepted = request(f"/api/probe?ip=127.0.0.1&ports={scope}")
+                    assert code == 202
+                    try:
+                        request(f"/api/probe?ip=127.0.0.1&ports={scope}")
+                    except urllib.error.HTTPError as error:
+                        assert error.code == 409
+                        error.read()
+                    else:
+                        raise AssertionError("Concurrent range probe was accepted")
+                    request("/api/stats")
+                    done = wait_probe({"completed", "failed"})
+                    assert done["state"] == "completed", done
+                    assert done["completed"] == done["total"] == 2002
+                    assert expected_ports.issubset({p["port"] for p in done["ports"]})
+                    assert wait_state({"completed", "failed"})["state"] == "completed"
+                    current_ports = request("/api/devices")[1]["devices"][0]["ports"]
+                    assert expected_ports.issubset({p["port"] for p in current_ports})
+                finally:
+                    for listener in listeners:
+                        listener.close()
+
+                for invalid in ["65536", "9000-8000", "1-65535", "80foo"]:
+                    before_invalid = inventory.read_text()
+                    try:
+                        request(f"/api/probe?ip=127.0.0.1&ports={invalid}")
+                    except urllib.error.HTTPError as error:
+                        assert error.code == 400
+                        assert json.loads(error.read())["status"] == "error"
+                    else:
+                        raise AssertionError("Invalid ports were accepted")
+                    assert inventory.read_text() == before_invalid
 
                 # Rename and probe remain usable, and their updates survive publication.
                 request("/api/scan", "POST")
@@ -235,7 +304,7 @@ end
                 except subprocess.TimeoutExpired:
                     server.kill()
                     server.wait()
-        print("Live HTTP: scan lifecycle, timeline, trusted tags, validation, fragmented JSON, and restart persistence PASS")
+        print("Live HTTP: full port ranges/cancellation, scan lifecycle, timeline, tags, validation, and persistence PASS")
 
 
 if __name__ == "__main__":

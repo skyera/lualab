@@ -227,7 +227,7 @@ end)
 
 -- Test 10: Undeclared Globals Check via LuaJIT Bytecode
 test("Bytecode Scoping (Assert 0 Undeclared Globals)", function()
-    local p = io.popen("luajit -bl lan_dashboard.lua && luajit -bl lan_inventory.lua && luajit -bl lan_scan_job.lua", "r")
+    local p = io.popen("luajit -bl lan_dashboard.lua && luajit -bl lan_inventory.lua && luajit -bl lan_scan_job.lua && luajit -bl lan_ports.lua", "r")
     assert(p, "Failed to run luajit -bl")
     local bc = p:read("*a")
     p:close()
@@ -237,7 +237,7 @@ test("Bytecode Scoping (Assert 0 Undeclared Globals)", function()
         require = true, ffi = true, bit = true, os = true, io = true,
         string = true, table = true, math = true, tonumber = true,
         tostring = true, type = true, ipairs = true, pairs = true,
-        pcall = true, assert = true, print = true, error = true, arg = true
+        pcall = true, assert = true, print = true, error = true, arg = true, debug = true
     }
 
     for line in bc:gmatch("[^\r\n]+") do
@@ -317,6 +317,10 @@ end)
 
 test("Change timeline and trusted-device metadata", function()
     dofile("test_lan_inventory_features.lua")
+end)
+
+test("Complete custom port ranges and validation", function()
+    dofile("test_lan_ports.lua")
 end)
 
 test("Background scan worker lifecycle regression tests", function()

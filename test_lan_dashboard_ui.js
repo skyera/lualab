@@ -204,7 +204,7 @@ async function main() {
     await vm.runInContext('triggerScan()', context);
     response = {scan: completed, devices: [], scanned_at: '12:00:00'};
     await vm.runInContext('pollScan()', context);
-    assert.equal(requests.at(-1).url, '/api/devices');
+    assert(requests.slice(-2).some(request => request.url === '/api/devices'));
     assert.match(elements.get('deviceGrid').innerHTML, /No devices match/);
     assert.equal(elements.get('scanProgress').style.display, 'none');
 
@@ -214,6 +214,36 @@ async function main() {
     assert.equal(elements.get('scanBtn').disabled, false);
     assert.equal(elements.get('scanProgressText').textContent, 'Worker <failed>');
     assert.match(elements.get('toast').textContent, /Worker <failed>/);
-    console.log('Dashboard rendering, timeline, metadata forms/filters, escaping, progress, cancellation, and errors PASS');
+
+    httpOK = true;
+    vm.runInContext("devices = [{...sample, status: 'online'}]; inspectDevice(sample.ip, sample.mac);", context);
+    assert.match(elements.get('modalBody').innerHTML, /5000–6000/);
+    assert.match(elements.get('modalBody').innerHTML, /8000–9000/);
+    const probe = {id: 1, state: 'running', phase: 'ports', completed: 640, total: 2002, target_ip: context.sample.ip, started_at: 100};
+    response = {probe};
+    await vm.runInContext("scanPortPreset(sample.ip, '5000-6000,8000-9000')", context);
+    assert.equal(elements.get('customPortInput').value, '5000-6000,8000-9000');
+    assert.match(requests.at(-1).url, /ports=5000-6000%2C8000-9000/);
+    assert.match(elements.get('portProbeText').textContent, /640 \/ 2002/);
+    assert.equal(elements.get('portRangeBothBtn').disabled, true);
+    failNetwork = true;
+    await vm.runInContext('fetchProbeStatus()', context);
+    assert.match(elements.get('portProbeText').textContent, /retrying/);
+    failNetwork = false;
+    response = {probe: {...probe, state: 'cancelled'}};
+    await vm.runInContext('cancelPortProbe()', context);
+    assert.equal(requests.at(-1).url, '/api/probe/cancel');
+    assert.match(elements.get('portProbeText').textContent, /Previous results kept/);
+    assert.equal(elements.get('customScanBtn').disabled, false);
+    assert.equal(elements.get('portRangeBothBtn').disabled, false);
+    response = {probe: {...probe, id: 2, completed: 0, total: 1001}};
+    await vm.runInContext("scanPortPreset(sample.ip, '5000-6000')", context);
+    const scanned = {...context.sample, status: 'online', ports: [{port: 6000, name: 'Port 6000'}]};
+    response = {probe: {...probe, id: 2, state: 'completed', completed: 1001, total: 1001, ports: scanned.ports}, devices: [scanned]};
+    await vm.runInContext('fetchProbeStatus()', context);
+    assert.equal(elements.get('portProbeProgress').style.display, 'none');
+    assert.match(elements.get('modalBody').innerHTML, /Port 6000/);
+    assert.match(elements.get('toast').textContent, /1 reachable ports/);
+    console.log('Dashboard rendering, timeline, tags, range presets, independent progress/cancellation, and errors PASS');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

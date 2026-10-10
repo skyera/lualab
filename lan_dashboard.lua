@@ -23,6 +23,8 @@
 local ffi = require("ffi")
 local bit = require("bit")
 local json = require("json")
+local port_module = require("lan_ports")
+local SCRIPT_PATH = debug.getinfo(1, "S").source:gsub("^@", "")
 
 local is_windows = (ffi.os == "Windows")
 
@@ -1753,6 +1755,10 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
             <span id="scanProgressText"></span>
             <progress id="scanProgressBar" max="254" value="0" style="width:160px; margin-left:12px;"></progress>
         </div>
+        <div id="portProbeProgress" role="status" aria-live="polite" style="display:none; margin-bottom:18px; color:var(--text-dim);">
+            <span id="portProbeText"></span>
+            <button class="btn-secondary" id="cancelPortProbeBtn" onclick="cancelPortProbe()">Cancel port probe</button>
+        </div>
 
         <div class="stats-grid">
             <div class="stat-card">
@@ -1882,6 +1888,9 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
         let scanTimer = null;
         let scanPollPending = false;
         let scanState = {id: 0, state: 'idle'};
+        let probeState = {id: 0, state: 'idle'};
+        let probeTimer = null;
+        let probePollPending = false;
 
         const CATEGORY_ICONS = {
             camera: '🎥',
@@ -1906,6 +1915,7 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                 renderDevices();
                 if (data.scan) updateScanStatus(data.scan);
                 if (activePane === 'changes') await fetchEvents();
+                await fetchProbeStatus();
             } catch (err) {
                 console.error('Failed to fetch devices:', err);
             }
@@ -2538,7 +2548,9 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
             try {
                 const res = await fetch(`/api/probe?ip=${ip}&ports=${encodeURIComponent(rawVal)}`);
                 const data = await res.json();
+                if (data.probe) updateProbeStatus(data.probe);
                 if (!res.ok) throw new Error(data.message || 'Port probe failed');
+                if (data.probe) return;
                 const probed = data.ports || [];
                 const dev = devices.find(x => x.ip === ip);
                 if (dev && data.device) Object.assign(dev, data.device);
@@ -2571,10 +2583,66 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                 showToast(`Custom port scan failed: ${err.message}`);
             } finally {
                 if (btn) {
-                    btn.disabled = false;
+                    btn.disabled = ['running', 'cancelling'].includes(probeState.state);
                     btn.textContent = '⚡ Scan Custom';
                 }
             }
+        }
+
+        function scanPortPreset(ip, ranges) {
+            const input = document.getElementById('customPortInput');
+            if (!input) return;
+            input.value = ranges;
+            return scanCustomPorts(ip);
+        }
+
+        function updateProbeStatus(job) {
+            if (job.id === probeState.id && job.started_at === probeState.started_at &&
+                ['completed', 'cancelled', 'failed'].includes(probeState.state) && ['running', 'cancelling'].includes(job.state)) return;
+            probeState = job;
+            const active = ['running', 'cancelling'].includes(job.state);
+            document.getElementById('portProbeProgress').style.display = active || job.error || job.state === 'cancelled' ? '' : 'none';
+            document.getElementById('portProbeText').textContent = active ?
+                (job.state === 'cancelling' ? 'Cancelling port probe…' : `Checking ports on ${job.target_ip}… ${job.completed || 0} / ${job.total || 0}`) :
+                (job.error || (job.state === 'cancelled' ? 'Port probe cancelled. Previous results kept.' : ''));
+            const cancel = document.getElementById('cancelPortProbeBtn');
+            cancel.style.display = active ? '' : 'none'; cancel.disabled = job.state === 'cancelling';
+            for (const id of ['customScanBtn', 'portRange5000Btn', 'portRange8000Btn', 'portRangeBothBtn']) {
+                const button = document.getElementById(id);
+                if (button) button.disabled = active;
+            }
+            if (active && !probeTimer) probeTimer = setInterval(fetchProbeStatus, 500);
+            if (!active && probeTimer) { clearInterval(probeTimer); probeTimer = null; }
+        }
+
+        async function fetchProbeStatus() {
+            if (probePollPending) return;
+            probePollPending = true;
+            try {
+                const res = await fetch('/api/probe/status');
+                if (!res.ok) throw new Error('Could not fetch port progress');
+                const data = await res.json();
+                if (!data.probe) return;
+                const completed = data.probe.state === 'completed' &&
+                    (probeState.id !== data.probe.id || probeState.state !== 'completed');
+                updateProbeStatus(data.probe);
+                if (completed) {
+                    await fetchDevices();
+                    if (document.getElementById('inspectModal').style.display === 'flex') inspectDevice(data.probe.target_ip);
+                    showToast(`Port probe complete: ${(data.probe.ports || []).length} reachable ports on ${data.probe.target_ip}`);
+                }
+            } catch (err) {
+                if (['running', 'cancelling'].includes(probeState.state)) document.getElementById('portProbeText').textContent = 'Port progress unavailable; retrying…';
+            } finally { probePollPending = false; }
+        }
+
+        async function cancelPortProbe() {
+            try {
+                const res = await fetch('/api/probe/cancel', {method: 'POST'});
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.message || 'Could not cancel port probe');
+                updateProbeStatus(data.probe);
+            } catch (err) { showToast('Cancel error: ' + err.message); }
         }
 
         async function inspectDevice(ip, mac) {
@@ -2638,6 +2706,11 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                 </div>
 
                 <!-- Custom Port Scan Input -->
+                <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px;">
+                    <button class="btn-secondary" id="portRange5000Btn" onclick="scanPortPreset('${d.ip}', '5000-6000')">5000–6000</button>
+                    <button class="btn-secondary" id="portRange8000Btn" onclick="scanPortPreset('${d.ip}', '8000-9000')">8000–9000</button>
+                    <button class="btn-secondary" id="portRangeBothBtn" onclick="scanPortPreset('${d.ip}', '5000-6000,8000-9000')">Both ranges</button>
+                </div>
                 <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.06); border-radius:8px; padding:8px 10px; margin-bottom:12px;">
                     <div style="display:flex; gap:8px;">
                         <input type="text" id="customPortInput" placeholder="Custom port or range (e.g. 3000, 8000-8010, 11434)" style="flex:1; background:#090d16; border:1px solid var(--border); border-radius:6px; padding:6px 10px; font-size:12px; color:#f8fafc; font-family:monospace;">
@@ -2664,6 +2737,7 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                 </div>` : ''}
             `;
             document.getElementById('inspectModal').style.display = 'flex';
+            updateProbeStatus(probeState);
         }
 
         function closeModal(e) {
@@ -2730,9 +2804,24 @@ local function run_web_server(port, options)
     port = port or 8888
     options = options or {}
     local jobs = scan_job_module.new({
-        command = options.worker_command or {scan_job_module.executable(), arg[0], "--scan-worker"},
+        command = options.worker_command or {scan_job_module.executable(), SCRIPT_PATH, "--scan-worker"},
         input = function() return {devices = STATE.devices, names = CUSTOM_NAMES} end,
         complete = apply_scan_result
+    })
+    local probes
+    probes = scan_job_module.new({
+        command = options.probe_worker_command or {scan_job_module.executable(), SCRIPT_PATH, "--scan-worker"},
+        input = function() return {} end,
+        complete = function(result)
+            local device = result.device_id and INVENTORY:find(result.device_id)
+            if device then
+                if device.ip ~= result.ip then error("Device IP changed during probing; start a new probe") end
+                INVENTORY:update_ports(device, result.ports, result.checked_ports, result.finished_at)
+                local saved, err = save_inventory()
+                if not saved then result.error = "Probe completed but results could not be saved: " .. tostring(err) end
+            end
+            probes.status.ports = result.ports
+        end
     })
     local server_sock = is_windows and ws2.socket(2, 1, 6) or ffi.C.socket(2, 1, 6)
     if server_sock == -1 or server_sock == ffi.cast("SOCKET", -1) then
@@ -2798,6 +2887,7 @@ local function run_web_server(port, options)
 
     while true do
         local job = jobs:poll()
+        probes:poll()
         STATE.scanning = job.state == "running" or job.state == "cancelling"
         if job.id ~= last_reported_job and (job.state == "completed" or job.state == "cancelled" or job.state == "failed") then
             last_reported_job = job.id
@@ -2903,38 +2993,47 @@ local function run_web_server(port, options)
                         end
                         resp_body = to_json({ status = "ok", ip = target_ip, alive = is_alive, rtt = rtt })
                         content_type = "application/json"
-                    elseif path:match("^/api/probe") then
-                        local target_ip = req:match("ip=([%d%.]+)")
-                        local custom_ports_str = req:match("ports=([%d%-,%%]+)")
-                        if custom_ports_str then
-                            custom_ports_str = custom_ports_str:gsub("%%2[cC]", ","):gsub("%%2[dD]", "-")
+                    elseif path == "/api/probe/status" and method == "GET" then
+                        resp_body = to_json({status = "ok", probe = probes.status})
+                        content_type = "application/json"
+                    elseif path == "/api/probe/cancel" and method == "POST" then
+                        local stopped, err = probes:cancel()
+                        if stopped == nil then status_code = "500 Internal Server Error" end
+                        resp_body = to_json({status = stopped == nil and "error" or "ok", message = err, probe = probes.status})
+                        content_type = "application/json"
+                    elseif path == "/api/probe" then
+                        local target_ip = raw_uri:match("[?&]ip=([^&]*)")
+                        if not target_ip or not target_ip:match("^%d+%.%d+%.%d+%.%d+$") then target_ip = nil
+                        else
+                            for octet in target_ip:gmatch("%d+") do if tonumber(octet) > 255 then target_ip = nil; break end end
                         end
+                        local custom_ports_str = raw_uri:match("[?&]ports=([^&]*)")
+                        if custom_ports_str then
+                            custom_ports_str = custom_ports_str:gsub("+", " "):gsub("%%(%x%x)", function(hex) return string.char(tonumber(hex, 16)) end)
+                        end
+                        local port_list, parse_error
+                        if custom_ports_str ~= nil then port_list, parse_error = port_module.parse(custom_ports_str)
+                        else port_list = KNOWN_PORTS end
                         local probed_ports, updated_device = {}, nil
-                        if target_ip then
-                            local port_list = {}
-                            if custom_ports_str and custom_ports_str ~= "" then
-                                for part in custom_ports_str:gmatch("[^,]+") do
-                                    local p1, p2 = part:match("^(%d+)%-(%d+)$")
-                                    if p1 and p2 then
-                                        p1, p2 = tonumber(p1), tonumber(p2)
-                                        if p1 and p2 and p1 <= p2 then
-                                            for p = p1, math.min(p2, p1 + 32) do
-                                                if #port_list < 64 and p >= 1 and p <= 65535 then
-                                                    table.insert(port_list, { port = p, name = "Port " .. p })
-                                                end
-                                            end
-                                        end
-                                    else
-                                        local p = tonumber(part)
-                                        if p and p >= 1 and p <= 65535 and #port_list < 64 then
-                                            table.insert(port_list, { port = p, name = "Port " .. p })
-                                        end
+                        if not port_list or not target_ip then
+                            status_code = "400 Bad Request"
+                            resp_body = to_json({status = "error", message = parse_error or "A valid IPv4 address is required"})
+                        elseif #port_list > 64 then
+                            if probes.status.state == "running" or probes.status.state == "cancelling" then
+                                status_code = "409 Conflict"
+                                resp_body = to_json({status = "error", message = "A port probe is already running", probe = probes.status})
+                            else
+                                local device_id
+                                for _, device in ipairs(STATE.devices) do
+                                    if device.ip == target_ip and (device.status == "online" or device.status == "offline") then
+                                        device_id = inventory_module.identity(device); break
                                     end
                                 end
-                            else
-                                port_list = KNOWN_PORTS
+                                local started = probes:start({kind = "ports", ip = target_ip, device_id = device_id, ports = port_list, subnet = STATE.subnet})
+                                status_code = started and "202 Accepted" or "500 Internal Server Error"
+                                resp_body = to_json({status = started and "ok" or "error", message = probes.status.error, probe = probes.status})
                             end
-
+                        else
                             for _, kp in ipairs(port_list) do
                                 if check_tcp_port(target_ip, kp.port, 25) then
                                     local service_name = kp.name
@@ -2964,11 +3063,11 @@ local function run_web_server(port, options)
                                     break
                                 end
                             end
+                            local saved, save_error = save_inventory()
+                            if not saved then status_code = "500 Internal Server Error" end
+                            resp_body = to_json({ status = saved and "ok" or "error", message = save_error, ip = target_ip,
+                                ports = probed_ports, device = updated_device, custom = (custom_ports_str ~= nil) })
                         end
-                        local saved, save_error = save_inventory()
-                        if not saved then status_code = "500 Internal Server Error" end
-                        resp_body = to_json({ status = saved and "ok" or "error", message = save_error, ip = target_ip,
-                            ports = probed_ports, device = updated_device, custom = (custom_ports_str ~= nil) })
                         content_type = "application/json"
                     elseif path == "/api/rename" and method == "POST" then
                         local target_ip = req:match('["\']?ip["\']?%s*[:=]%s*["\']?([%d%.]+)["\']?')
@@ -3182,8 +3281,27 @@ if mode == "worker" then
             {phase = phase, completed = completed, total = total, current_ip = current_ip})
         if not ok then error(err) end
     end
-    local ok, devices = pcall(run_full_scan, false, {raw = true, progress = progress})
-    local result = ok and {devices = devices, subnet = STATE.subnet, finished_at = os.time()} or {error = tostring(devices)}
+    local ok, output = pcall(function()
+        if input.kind == "ports" then
+            local ports = {}
+            progress("ports", 0, #input.ports, input.ip)
+            for index, target in ipairs(input.ports) do
+                if check_tcp_port(input.ip, target.port, 25) then
+                    local name = target.name
+                    for _, standard in ipairs(KNOWN_PORTS) do
+                        if standard.port == target.port then name = standard.name; break end
+                    end
+                    ports[#ports + 1] = {port = target.port, name = name}
+                end
+                if index % 16 == 0 or index == #input.ports then progress("ports", index, #input.ports, input.ip) end
+            end
+            return {devices = {}, ports = ports, checked_ports = input.ports, device_id = input.device_id,
+                ip = input.ip, subnet = input.subnet, finished_at = os.time()}
+        end
+        local devices = run_full_scan(false, {raw = true, progress = progress})
+        return {devices = devices, subnet = STATE.subnet, finished_at = os.time()}
+    end)
+    local result = ok and output or {error = tostring(output)}
     local written, err = scan_job_module.write_update(worker_path .. ".result", result)
     if not written then io.stderr:write("Scan worker: " .. tostring(err) .. "\n") end
     os.exit(ok and written and 0 or 1)

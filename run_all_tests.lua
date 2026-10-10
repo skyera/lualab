@@ -45,6 +45,7 @@ local test_suites = {
     { file = "test_lan_dashboard.lua", description = "lan_dashboard — High-Performance LAN Device Radar & Web Dashboard Suite" },
     { file = "test_lan_inventory.lua", description = "LAN inventory persistence and scan merging" },
     { file = "test_lan_inventory_features.lua", description = "LAN change timeline, trust, and tags" },
+    { file = "test_lan_ports.lua", description = "Complete TCP port range parsing" },
     { file = "test_lan_scan_job.lua", description = "LAN background scan worker lifecycle" },
 }
 

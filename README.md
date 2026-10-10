@@ -141,6 +141,21 @@ make
   IDs return 404, and persistence failures return 500 without changing metadata.
   Feature checks: `luajit test_lan_inventory_features.lua`.
 
+  Device details include optional **5000–6000**, **8000–9000**, and **Both ranges**
+  TCP probe presets. Endpoints are inclusive: both ranges check 2,002 ports.
+  Custom probes accept up to 4,096 distinct ports, remove duplicates, and reject
+  invalid or oversized ranges instead of silently truncating them. Standard
+  probes keep their existing service list.
+
+  Scopes above 64 ports run in an independent background worker. Its progress and
+  **Cancel port probe** control remain visible when device details are closed;
+  cancellation preserves existing observations. One large port probe can run
+  alongside a LAN scan. `GET /api/probe?ip=...&ports=...` returns **202 Accepted**
+  for large scopes; poll `GET /api/probe/status` and cancel with
+  `POST /api/probe/cancel`. Completed jobs include reachable `ports`, and known
+  device results are saved to inventory and timeline. Conflicting large probes
+  return 409. Parser checks: `luajit test_lan_ports.lua`.
+
 - **Run Unit Tests:**
   ```bash
   make test
