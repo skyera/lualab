@@ -1602,8 +1602,9 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
         }
         .modal {
             background: #111827; border: 1px solid rgba(255,255,255,0.15);
-            border-radius: 16px; width: 90%; max-width: 560px; padding: 24px;
+            border-radius: 16px; width: 90%; max-width: 580px; padding: 24px;
             box-shadow: 0 25px 50px -12px rgba(0,0,0,0.7);
+            max-height: 90vh; overflow-y: auto;
         }
         .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
         .modal-close { background: none; border: none; font-size: 20px; color: var(--text-dim); cursor: pointer; }
@@ -2053,12 +2054,229 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
             }
         }
 
+        let pingTimer = null;
+        let pingTargetIp = null;
+        let pingStats = { history: [], min: Infinity, max: 0, sum: 0, count: 0, lost: 0 };
+
+        function stopPingMonitor() {
+            if (pingTimer) {
+                clearInterval(pingTimer);
+                pingTimer = null;
+            }
+            const btn = document.getElementById('pingMonitorBtn');
+            if (btn) btn.textContent = '▶ Start Live Ping';
+        }
+
+        function togglePingMonitor(ip) {
+            if (pingTimer) {
+                stopPingMonitor();
+            } else {
+                startPingMonitor(ip);
+            }
+        }
+
+        function startPingMonitor(ip) {
+            stopPingMonitor();
+            pingTargetIp = ip;
+            pingStats = { history: [], min: Infinity, max: 0, sum: 0, count: 0, lost: 0 };
+            const btn = document.getElementById('pingMonitorBtn');
+            if (btn) btn.textContent = '⏹ Stop Ping';
+            tickPing();
+            pingTimer = setInterval(tickPing, 650);
+        }
+
+        async function tickPing() {
+            if (!pingTargetIp) return;
+            const ip = pingTargetIp;
+            try {
+                const res = await fetch(`/api/ping?ip=${ip}`);
+                const data = await res.json();
+                const alive = data.alive;
+                const rtt = data.rtt || 0;
+                pingStats.count++;
+
+                if (alive) {
+                    pingStats.history.push(rtt);
+                    if (rtt < pingStats.min) pingStats.min = rtt;
+                    if (rtt > pingStats.max) pingStats.max = rtt;
+                    pingStats.sum += rtt;
+                } else {
+                    pingStats.lost++;
+                    pingStats.history.push(-1);
+                }
+
+                if (pingStats.history.length > 35) {
+                    pingStats.history.shift();
+                }
+
+                updatePingUI(rtt, alive);
+                drawPingCanvas();
+            } catch (err) {
+                pingStats.lost++;
+                pingStats.count++;
+                updatePingUI(0, false);
+            }
+        }
+
+        function updatePingUI(currentRtt, isAlive) {
+            const curEl = document.getElementById('pingCur');
+            const minEl = document.getElementById('pingMin');
+            const avgEl = document.getElementById('pingAvg');
+            const maxEl = document.getElementById('pingMax');
+            const jitEl = document.getElementById('pingJitter');
+            const lossEl = document.getElementById('pingLoss');
+            if (!curEl) return;
+
+            curEl.textContent = isAlive ? `${currentRtt} ms` : 'Loss';
+            curEl.style.color = isAlive ? '#38bdf8' : '#f87171';
+
+            if (pingStats.min !== Infinity) minEl.textContent = `${pingStats.min} ms`;
+            if (pingStats.max !== 0) maxEl.textContent = `${pingStats.max} ms`;
+
+            const validCount = pingStats.count - pingStats.lost;
+            if (validCount > 0) {
+                const avg = (pingStats.sum / validCount).toFixed(1);
+                avgEl.textContent = `${avg} ms`;
+
+                let jitterSum = 0;
+                for (const p of pingStats.history) {
+                    if (p >= 0) jitterSum += Math.abs(p - avg);
+                }
+                const jitter = (jitterSum / validCount).toFixed(1);
+                jitEl.textContent = `${jitter} ms`;
+            }
+
+            const lossRate = ((pingStats.lost / pingStats.count) * 100).toFixed(0);
+            lossEl.textContent = `${lossRate}%`;
+            lossEl.style.color = (lossRate > 0) ? '#f87171' : '#94a3b8';
+        }
+
+        function drawPingCanvas() {
+            const canvas = document.getElementById('pingCanvas');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width;
+            const h = canvas.height;
+            ctx.clearRect(0, 0, w, h);
+
+            const hist = pingStats.history;
+            if (hist.length < 2) return;
+
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2);
+            ctx.stroke();
+
+            let maxVal = 20;
+            for (const v of hist) {
+                if (v > maxVal) maxVal = v;
+            }
+            maxVal = Math.max(maxVal * 1.25, 10);
+
+            const step = w / (hist.length - 1);
+
+            const grad = ctx.createLinearGradient(0, 0, 0, h);
+            grad.addColorStop(0, 'rgba(56, 189, 248, 0.35)');
+            grad.addColorStop(1, 'rgba(56, 189, 248, 0.0)');
+
+            ctx.beginPath();
+            let first = true;
+            for (let i = 0; i < hist.length; i++) {
+                const v = hist[i];
+                const x = i * step;
+                const y = v < 0 ? h - 2 : h - Math.min((v / maxVal) * (h - 10) + 5, h - 2);
+                if (first) { ctx.moveTo(x, y); first = false; }
+                else { ctx.lineTo(x, y); }
+            }
+            ctx.lineTo(w, h);
+            ctx.lineTo(0, h);
+            ctx.closePath();
+            ctx.fillStyle = grad;
+            ctx.fill();
+
+            ctx.beginPath();
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 2;
+            first = true;
+            for (let i = 0; i < hist.length; i++) {
+                const v = hist[i];
+                const x = i * step;
+                const y = v < 0 ? h - 2 : h - Math.min((v / maxVal) * (h - 10) + 5, h - 2);
+                if (first) { ctx.moveTo(x, y); first = false; }
+                else { ctx.lineTo(x, y); }
+            }
+            ctx.stroke();
+
+            const lastVal = hist[hist.length - 1];
+            const lastX = (hist.length - 1) * step;
+            const lastY = lastVal < 0 ? h - 2 : h - Math.min((lastVal / maxVal) * (h - 10) + 5, h - 2);
+            ctx.fillStyle = lastVal < 0 ? '#f87171' : '#38bdf8';
+            ctx.beginPath();
+            ctx.arc(lastX, lastY, 4, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        async function scanCustomPorts(ip) {
+            const input = document.getElementById('customPortInput');
+            if (!input) return;
+            const rawVal = input.value.trim();
+            if (!rawVal) {
+                showToast('Please enter port numbers or ranges (e.g. 3000, 8000-8010)');
+                return;
+            }
+            const btn = document.getElementById('customScanBtn');
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = '⏳ Scanning...';
+            }
+            showToast(`Probing custom ports [${rawVal}] on ${ip}...`);
+            try {
+                const res = await fetch(`/api/probe?ip=${ip}&ports=${encodeURIComponent(rawVal)}`);
+                const data = await res.json();
+                const probed = data.ports || [];
+                const dev = devices.find(x => x.ip === ip);
+                if (dev) {
+                    dev.ports = dev.ports || [];
+                    const existingMap = new Set(dev.ports.map(p => p.port));
+                    probed.forEach(p => {
+                        if (!existingMap.has(p.port)) {
+                            dev.ports.push(p);
+                        }
+                    });
+                }
+                renderDevices();
+                if (document.getElementById('inspectModal').style.display === 'flex') {
+                    const portsListEl = document.getElementById('modalPortsList');
+                    if (portsListEl && dev) {
+                        portsListEl.innerHTML = (dev.ports && dev.ports.length > 0)
+                            ? dev.ports.map(p => `<li><strong>Port ${p.port}</strong>: ${escapeHtml(p.name)}</li>`).join('')
+                            : '<li style="color:var(--text-dim);">No open standard ports detected.</li>';
+                    }
+                }
+                if (probed.length > 0) {
+                    const names = probed.map(p => `${p.name} (${p.port})`).join(', ');
+                    showToast(`Found ${probed.length} open port(s) on ${ip}: ${names}`);
+                } else {
+                    showToast(`No open ports found on ${ip} for [${rawVal}]`);
+                }
+            } catch (err) {
+                showToast(`Custom port scan failed: ${err.message}`);
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = '⚡ Scan Custom';
+                }
+            }
+        }
+
         async function inspectDevice(ip) {
             const d = devices.find(x => x.ip === ip);
             if (!d) return;
+            stopPingMonitor();
             document.getElementById('modalTitle').textContent = `${d.hostname} (${d.ip})`;
             const portsList = (d.ports && d.ports.length > 0)
-                ? d.ports.map(p => `<li><strong>Port ${p.port}</strong>: ${p.name}</li>`).join('')
+                ? d.ports.map(p => `<li><strong>Port ${p.port}</strong>: ${escapeHtml(p.name)}</li>`).join('')
                 : '<li style="color:var(--text-dim);">No open standard ports detected yet. Click "Probe Ports" below to scan.</li>';
 
             document.getElementById('modalBody').innerHTML = `
@@ -2068,6 +2286,26 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                     <p style="color:var(--text-dim); margin-bottom:4px;">Manufacturer: <strong style="color:var(--text-main);">${escapeHtml(d.vendor)}</strong></p>
                     <p style="color:var(--text-dim); margin-bottom:12px;">Ping Latency: <strong style="color:#34d399;">${d.latency_ms} ms</strong> (Status: ${d.status})</p>
                 </div>
+
+                <!-- Live Ping & Jitter Monitor -->
+                <div style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:10px; padding:12px; margin-bottom:16px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                        <h4 style="margin:0; font-size:12px; display:flex; align-items:center; gap:6px;">
+                            <span>📈 Live Latency &amp; Jitter Monitor</span>
+                        </h4>
+                        <button class="btn-secondary" id="pingMonitorBtn" style="padding:3px 8px; font-size:11px;" onclick="togglePingMonitor('${d.ip}')">▶ Start Live Ping</button>
+                    </div>
+                    <canvas id="pingCanvas" width="500" height="65" style="width:100%; height:65px; background:#070a12; border:1px solid rgba(255,255,255,0.05); border-radius:6px; display:block; margin-bottom:8px;"></canvas>
+                    <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--text-dim); font-family:monospace;">
+                        <span>Cur: <strong id="pingCur" style="color:#38bdf8;">-</strong></span>
+                        <span>Min: <strong id="pingMin" style="color:#34d399;">-</strong></span>
+                        <span>Avg: <strong id="pingAvg" style="color:#a78bfa;">-</strong></span>
+                        <span>Max: <strong id="pingMax" style="color:#fb7185;">-</strong></span>
+                        <span>Jitter: <strong id="pingJitter" style="color:#facc15;">-</strong></span>
+                        <span>Loss: <strong id="pingLoss" style="color:#94a3b8;">0%</strong></span>
+                    </div>
+                </div>
+
                 ${d.hardware ? `
                 <h4 style="margin-bottom:8px;">Hardware &amp; System Specs</h4>
                 <div style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.06); border-radius:8px; padding:10px 14px; margin-bottom:16px;">
@@ -2076,11 +2314,22 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                     <p style="margin-bottom:4px; font-size:12px;"><span style="color:var(--text-dim);">Memory / RAM:</span> <strong style="color:#34d399;">${escapeHtml(d.hardware.ram || 'N/A')}</strong></p>
                     ${d.hardware.banner ? `<p style="font-size:12px;"><span style="color:var(--text-dim);">Service Banner:</span> <code style="color:#fcd34d; background:rgba(0,0,0,0.3); padding:2px 6px; border-radius:4px; font-size:11px;">${escapeHtml(d.hardware.banner)}</code></p>` : ''}
                 </div>` : ''}
+
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
                     <h4 style="margin:0;">Detected Ports &amp; Services</h4>
-                    <button class="btn-secondary" style="padding:4px 10px; font-size:11px;" onclick="probeDevicePorts('${d.ip}', this)">⚡ Probe Ports Now</button>
+                    <button class="btn-secondary" style="padding:4px 10px; font-size:11px;" onclick="probeDevicePorts('${d.ip}', this)">⚡ Probe Standard</button>
                 </div>
-                <ul style="margin-left:20px; margin-bottom:16px; line-height:1.6;">${portsList}</ul>
+
+                <!-- Custom Port Scan Input -->
+                <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.06); border-radius:8px; padding:8px 10px; margin-bottom:12px;">
+                    <div style="display:flex; gap:8px;">
+                        <input type="text" id="customPortInput" placeholder="Custom port or range (e.g. 3000, 8000-8010, 11434)" style="flex:1; background:#090d16; border:1px solid var(--border); border-radius:6px; padding:6px 10px; font-size:12px; color:#f8fafc; font-family:monospace;">
+                        <button class="btn-primary" id="customScanBtn" style="padding:6px 12px; font-size:12px; white-space:nowrap;" onclick="scanCustomPorts('${d.ip}')">⚡ Scan Custom</button>
+                    </div>
+                </div>
+
+                <ul id="modalPortsList" style="margin-left:20px; margin-bottom:16px; line-height:1.6;">${portsList}</ul>
+
                 <h4 style="margin-bottom:8px;">Quick Terminal Commands</h4>
                 <div class="code-block">
                     <span>ping -t ${d.ip}</span>
@@ -2101,6 +2350,7 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
         }
 
         function closeModal(e) {
+            stopPingMonitor();
             document.getElementById('inspectModal').style.display = 'none';
         }
 
@@ -2252,22 +2502,73 @@ local function run_web_server(port)
                             devices = updated
                         })
                         content_type = "application/json"
+                    elseif path:match("^/api/ping") then
+                        local target_ip = req:match("ip=([%d%.]+)")
+                        local is_alive, rtt = false, 0
+                        if target_ip then
+                            is_alive, rtt = ping_host(target_ip, 25)
+                        end
+                        resp_body = to_json({ status = "ok", ip = target_ip, alive = is_alive, rtt = rtt })
+                        content_type = "application/json"
                     elseif path:match("^/api/probe") then
                         local target_ip = req:match("ip=([%d%.]+)")
+                        local custom_ports_str = req:match("ports=([%d%-,%%]+)")
+                        if custom_ports_str then
+                            custom_ports_str = custom_ports_str:gsub("%%2[cC]", ","):gsub("%%2[dD]", "-")
+                        end
                         local probed_ports = {}
                         if target_ip then
-                            for _, kp in ipairs(KNOWN_PORTS) do
+                            local port_list = {}
+                            if custom_ports_str and custom_ports_str ~= "" then
+                                for part in custom_ports_str:gmatch("[^,]+") do
+                                    local p1, p2 = part:match("^(%d+)%-(%d+)$")
+                                    if p1 and p2 then
+                                        p1, p2 = tonumber(p1), tonumber(p2)
+                                        if p1 and p2 and p1 <= p2 then
+                                            for p = p1, math.min(p2, p1 + 32) do
+                                                if #port_list < 64 and p >= 1 and p <= 65535 then
+                                                    table.insert(port_list, { port = p, name = "Port " .. p })
+                                                end
+                                            end
+                                        end
+                                    else
+                                        local p = tonumber(part)
+                                        if p and p >= 1 and p <= 65535 and #port_list < 64 then
+                                            table.insert(port_list, { port = p, name = "Port " .. p })
+                                        end
+                                    end
+                                end
+                            else
+                                port_list = KNOWN_PORTS
+                            end
+
+                            for _, kp in ipairs(port_list) do
                                 if check_tcp_port(target_ip, kp.port, 25) then
-                                    table.insert(probed_ports, { port = kp.port, name = kp.name })
+                                    local service_name = kp.name
+                                    for _, standard in ipairs(KNOWN_PORTS) do
+                                        if standard.port == kp.port then service_name = standard.name; break end
+                                    end
+                                    table.insert(probed_ports, { port = kp.port, name = service_name })
                                 end
                             end
                             -- Update device in memory STATE
                             for _, d in ipairs(STATE.devices) do
                                 if d.ip == target_ip then
-                                    d.ports = probed_ports
+                                    if custom_ports_str then
+                                        d.ports = d.ports or {}
+                                        local existing_map = {}
+                                        for _, ep in ipairs(d.ports) do existing_map[ep.port] = true end
+                                        for _, np in ipairs(probed_ports) do
+                                            if not existing_map[np.port] then
+                                                table.insert(d.ports, np)
+                                            end
+                                        end
+                                    else
+                                        d.ports = probed_ports
+                                    end
                                     -- Re-profile hardware banner if port 22 or 80 discovered
                                     if not d.hardware or not d.hardware.banner then
-                                        for _, p in ipairs(probed_ports) do
+                                        for _, p in ipairs(d.ports) do
                                             if p.port == 22 then
                                                 local banner = grab_ssh_banner(target_ip)
                                                 if banner then
@@ -2281,7 +2582,7 @@ local function run_web_server(port)
                                 end
                             end
                         end
-                        resp_body = to_json({ status = "ok", ip = target_ip, ports = probed_ports })
+                        resp_body = to_json({ status = "ok", ip = target_ip, ports = probed_ports, custom = (custom_ports_str ~= nil) })
                         content_type = "application/json"
                     elseif path == "/api/rename" and method == "POST" then
                         local target_ip = req:match('["\']?ip["\']?%s*[:=]%s*["\']?([%d%.]+)["\']?')

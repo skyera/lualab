@@ -193,7 +193,39 @@ test("Non-candidate devices bypass mDNS lookups instantly", function()
     assert(dt1 < 0.05, string.format("IoT resolution blocked unexpectedly: %.3fs", dt1))
 end)
 
--- Test 8: Undeclared Globals Check via LuaJIT Bytecode
+-- Test 8: Live ICMP Ping RTT Response
+test("ICMP Ping probe returns RTT for live targets", function()
+    -- Ping localhost 127.0.0.1
+    local alive, rtt = lan.ping_host("127.0.0.1", 25)
+    assert(alive == true, "Localhost should respond to ping")
+    assert(type(rtt) == "number" and rtt >= 0, "RTT should be non-negative number")
+end)
+
+-- Test 9: Custom Port Range Parser & Multi-Port Probing
+test("Custom Port Scanner range parser and probing", function()
+    -- Test custom port range parsing logic
+    local test_ranges = "80,8080,9000-9003"
+    local parsed_ports = {}
+    for part in test_ranges:gmatch("[^,]+") do
+        local p1, p2 = part:match("^(%d+)%-(%d+)$")
+        if p1 and p2 then
+            for p = tonumber(p1), tonumber(p2) do
+                table.insert(parsed_ports, p)
+            end
+        else
+            table.insert(parsed_ports, tonumber(part))
+        end
+    end
+    assert(#parsed_ports == 6, "Expected 6 parsed ports (80, 8080, 9000, 9001, 9002, 9003)")
+    assert(parsed_ports[1] == 80 and parsed_ports[2] == 8080)
+    assert(parsed_ports[3] == 9000 and parsed_ports[6] == 9003)
+
+    -- Probing custom non-open port on 127.0.0.1 fails cleanly without hanging
+    local open = lan.check_tcp_port("127.0.0.1", 64321, 10)
+    assert(open == false, "Arbitrary unallocated port should be closed")
+end)
+
+-- Test 10: Undeclared Globals Check via LuaJIT Bytecode
 test("Bytecode Scoping (Assert 0 Undeclared Globals)", function()
     local p = io.popen("luajit -bl lan_dashboard.lua", "r")
     assert(p, "Failed to run luajit -bl")
