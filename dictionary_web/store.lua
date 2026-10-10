@@ -198,6 +198,44 @@ function Store:words(query, due, stamp)
     return rows
 end
 
+function Store:suggest(prefix, limit)
+    limit = limit or 6
+    if not prefix or #prefix == 0 then return {} end
+    local results = {}
+    local seen = {}
+    local escaped = (prefix or ''):gsub('\\', '\\\\'):gsub('%%', '\\%%'):gsub('_', '\\_')
+    local pattern = escaped:lower() .. '%'
+
+    if self.shared then
+        local sql = [[SELECT word, pos, definition FROM dict
+            WHERE lower(word) LIKE ? ESCAPE '\'
+            GROUP BY lower(word)
+            ORDER BY length(word) ASC, word ASC LIMIT ?]]
+        local rows = self.shared:query(sql, { pattern, limit })
+        if rows then
+            for _, r in ipairs(rows) do
+                local w_lower = r.word:lower()
+                if not seen[w_lower] then
+                    seen[w_lower] = true
+                    local snippet = (r.pos and r.pos ~= '' and r.pos .. ' · ' or '') .. (r.definition or '')
+                    results[#results + 1] = { word = r.word, snippet = snippet }
+                end
+            end
+        end
+    end
+
+    local web_rows = self.web:suggest(prefix, limit)
+    for _, r in ipairs(web_rows or {}) do
+        local w_lower = r.word:lower()
+        if not seen[w_lower] and #results < limit then
+            seen[w_lower] = true
+            results[#results + 1] = { word = r.word, snippet = r.snippet or '' }
+        end
+    end
+
+    return results
+end
+
 function Store:review(id, remembered, stamp, collection, grade)
     if collection ~= 'tui' then
         return self.web:review(id, remembered, stamp)

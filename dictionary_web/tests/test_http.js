@@ -92,6 +92,9 @@ test('real LuaJIT HTTP server, static UI, SQLite round trip and clean signals', 
     let words = (await (await fetch(url + '/api/words?q=hell')).json()).words;
     assert.equal(words.length, 1); assert.equal(words[0].review_count, 1);
     assert.equal(words[0].note, '你好 <script>alert(1)</script>');
+    let suggestions = (await (await fetch(url + '/api/suggest?q=hel')).json()).suggestions;
+    assert.equal(suggestions.length, 1);
+    assert.equal(suggestions[0].word, 'hello');
     assert.equal((await post(url, '/api/search', { word: '学习', source: 'youdao' })).status, 200);
     assert.equal((await post(url, '/api/search', { word: '', source: 'dict.cn' })).status, 400);
     assert.equal((await post(url, '/api/search', { word: 'hello', source: {} })).status, 400);

@@ -98,6 +98,9 @@ function M.route(db, method, path, params, payload)
         if path == '/api/words' then
             return {words = db:words(params.q, params.due == '1')}, 200
         end
+        if path == '/api/suggest' then
+            return {suggestions = db.suggest and db:suggest(params.q, 6) or {}}, 200
+        end
     elseif method == 'POST' then
         if type(payload) ~= 'table' then
             return {error = 'Expected a JSON object.'}, 400

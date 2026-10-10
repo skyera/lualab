@@ -143,6 +143,19 @@ function DB:words(query, due, stamp)
     return rows
 end
 
+function DB:suggest(prefix, limit)
+    limit = limit or 6
+    if not prefix or #prefix == 0 then return {} end
+    local escaped = (prefix or ''):gsub('\\', '\\\\'):gsub('%%', '\\%%'):gsub('_', '\\_')
+    local sql = "SELECT DISTINCT word, note FROM words WHERE lower(word) LIKE ? ESCAPE '\\' ORDER BY lookup_count DESC, last_seen DESC LIMIT ?"
+    local rows = self:query(sql, { escaped:lower() .. '%', limit })
+    local suggestions = {}
+    for _, row in ipairs(rows) do
+        suggestions[#suggestions + 1] = { word = row.word, snippet = row.note }
+    end
+    return suggestions
+end
+
 function DB:review(id, remembered, stamp)
     stamp = stamp or os.time()
     local row = self:query('SELECT streak FROM words WHERE id=?', {id})[1]

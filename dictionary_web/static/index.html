@@ -24,6 +24,7 @@
       <form id="search-form" class="search-card">
         <label for="query" class="sr-only">Word or phrase to look up</label>
         <div class="search-line"><span aria-hidden="true" class="search-icon">⌕</span><input id="query" name="word" placeholder="What word are you curious about?" maxlength="200" autocomplete="off" required><button class="primary" id="search-button" type="submit">Look it up <span aria-hidden="true">↗</span></button></div>
+        <div id="search-suggest" class="search-suggest" hidden role="listbox" aria-label="Search suggestions"></div>
         <fieldset><legend>Look up with</legend><label><input type="radio" name="source" value="all" checked><span>All dictionaries</span></label><label><input type="radio" name="source" value="local"><span>Local dictionary</span></label><label><input type="radio" name="source" value="dict.cn"><span>dict.cn <small>海词</small></span></label><label><input type="radio" name="source" value="youdao"><span>Youdao <small>有道</small></span></label></fieldset>
         <div class="search-footer"><span class="save-dot" aria-hidden="true"></span>Words with definitions are saved to your journal.</div>
       </form>

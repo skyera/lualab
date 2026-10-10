@@ -9,11 +9,22 @@ function element(tag, text, className) {
   if (className) node.className = className;
   return node;
 }
-function button(text, action, className = 'secondary') {
+function button(text, action, className = 'secondary', kbd = null) {
   const node = element('button', text, className);
   node.type = 'button';
+  if (kbd) {
+    const badge = element('span', kbd, 'kbd-badge');
+    node.append(badge);
+  }
   node.addEventListener('click', action);
   return node;
+}
+function pronounceWord(text) {
+  if (!('speechSynthesis' in window) || !text) return;
+  const speech = new SpeechSynthesisUtterance(text);
+  speech.lang = /[\u3400-\u9fff]/.test(text) ? 'zh-CN' : 'en-US';
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(speech);
 }
 async function api(path, payload) {
   const response = await fetch(path, payload === undefined ? {} : {
@@ -53,11 +64,7 @@ function buildResultCard(data) {
   card.append(top);
   if (data.entry?.via === 'public-page') card.append(element('p', 'Public-page lookup', 'source-tag'));
   if ('speechSynthesis' in window) {
-    card.append(button('Listen to this word ♫', () => {
-      const speech = new SpeechSynthesisUtterance(data.word);
-      speech.lang = /[\u3400-\u9fff]/.test(data.word) ? 'zh-CN' : 'en-US';
-      window.speechSynthesis.cancel(); window.speechSynthesis.speak(speech);
-    }, 'text-button speak'));
+    card.append(button('Listen to this word ♫', () => pronounceWord(data.word), 'text-button speak'));
   }
   if (data.error) card.append(element('p', data.error, 'error'));
   if (data.stale) card.append(element('p', 'Showing an earlier saved definition.', 'source-tag'));
@@ -203,6 +210,26 @@ function renderWords() {
   if (!words.length) fragment.append(empty(filter ? 'No matching words.' : 'Your first word is waiting.', filter ? 'Try a different filter.' : 'Look up something new. It will appear here automatically.', !filter));
   $('word-list').replaceChildren(fragment);
 }
+async function gradeWord(word, remembered, gradeValue) {
+  if (state.grading) return;
+  state.grading = true;
+  const actions = document.querySelector('.review-actions');
+  if (actions) actions.querySelectorAll('button').forEach(node => { node.disabled = true; });
+  try {
+    await api('/api/review', { id: word.id, collection: word.collection, remembered, grade: gradeValue });
+    state.queue.shift();
+    state.reviewed++;
+    state.revealed = false;
+    renderReview();
+    await refreshCounts();
+  } catch (error) {
+    report(error);
+  } finally {
+    state.grading = false;
+    if (actions) actions.querySelectorAll('button').forEach(node => { node.disabled = false; });
+  }
+}
+
 function renderReview() {
   const target = $('review-card'); target.replaceChildren();
   $('review-progress').textContent = `${state.reviewed} of ${state.total} reviewed this session`;
@@ -213,7 +240,8 @@ function renderReview() {
   const word = state.queue[0];
   target.append(element('p', sourceNames[word.source], 'eyebrow'), element('h2', word.word));
   if (!state.revealed) {
-    target.append(element('p', 'What does this word mean?', 'study-answer'), button('Reveal meaning', () => { state.revealed = true; renderReview(); }, 'primary'));
+    target.append(element('p', 'What does this word mean?', 'study-answer'), button('Reveal meaning', () => { state.revealed = true; renderReview(); }, 'primary', 'Space'));
+    target.append(element('p', 'Shortcuts: [Space] reveal · [P] pronounce', 'review-shortcuts-hint'));
     return;
   }
   if (word.note) target.append(element('p', word.note, 'study-answer'));
@@ -222,22 +250,15 @@ function renderReview() {
     target.append(element('p', 'This word has no saved meaning. Look it up and add a study note.', 'study-answer'), button('Look up & add note ↗', () => searchWord(word.word, word.source)));
   }
   const actions = element('div', undefined, 'review-actions');
-  const grades = word.collection === 'tui' ? [['Again · 10 min', false, 'secondary', 0], ['Hard', true, 'secondary', 1], ['Good', true, 'primary', 2], ['Easy', true, 'secondary', 3]] : [['Again · 10 min', false, 'secondary'], ['Remembered ✓', true, 'primary']];
-  for (const [label, remembered, style, gradeValue] of grades) {
-    const grade = button(label, async () => {
-      if (state.grading) return;
-      state.grading = true;
-      actions.querySelectorAll('button').forEach(node => { node.disabled = true; });
-      try {
-        await api('/api/review', { id: word.id, collection: word.collection, remembered, grade: gradeValue });
-        state.queue.shift(); state.reviewed++; state.revealed = false; renderReview();
-        await refreshCounts();
-      } catch (error) { report(error); }
-      finally { state.grading = false; actions.querySelectorAll('button').forEach(node => { node.disabled = false; }); }
-    }, style);
+  const grades = word.collection === 'tui'
+    ? [['Again · 10 min', false, 'secondary', 0, '1'], ['Hard', true, 'secondary', 1, '2'], ['Good', true, 'primary', 2, '3'], ['Easy', true, 'secondary', 3, '4']]
+    : [['Again · 10 min', false, 'secondary', undefined, '1'], ['Remembered ✓', true, 'primary', undefined, '2']];
+  for (const [label, remembered, style, gradeValue, kbd] of grades) {
+    const grade = button(label, () => gradeWord(word, remembered, gradeValue), style, kbd);
     actions.append(grade);
   }
   target.append(actions);
+  target.append(element('p', `Shortcuts: [1–${grades.length}] grade · [Space] confirm · [P] pronounce`, 'review-shortcuts-hint'));
 }
 async function showView(view) {
   if (state.grading) return;
@@ -272,7 +293,152 @@ async function loadDaily() {
   $('daily-proverb').textContent = `“${data.proverb.text}”`; $('daily-chinese').textContent = data.proverb.chinese;
   $('daily-explanation').textContent = data.proverb.explanation;
 }
-$('search-form').addEventListener('submit', event => { event.preventDefault(); searchWord($('query').value); });
+
+let suggestTimer = null;
+state.suggestIndex = -1;
+state.suggestions = [];
+
+function hideSuggestions() {
+  const box = $('search-suggest');
+  if (box) {
+    box.hidden = true;
+    box.replaceChildren();
+  }
+  state.suggestIndex = -1;
+  state.suggestions = [];
+}
+
+function updateSuggestHighlight() {
+  const box = $('search-suggest');
+  if (!box) return;
+  const items = box.querySelectorAll('.suggest-item');
+  items.forEach((item, index) => {
+    item.classList.toggle('active', index === state.suggestIndex);
+    if (index === state.suggestIndex) item.scrollIntoView({ block: 'nearest' });
+  });
+}
+
+function renderSuggestions(list) {
+  const box = $('search-suggest');
+  if (!box) return;
+  state.suggestions = list;
+  state.suggestIndex = -1;
+  if (!list.length) {
+    hideSuggestions();
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  list.forEach((item, index) => {
+    const row = element('div', undefined, 'suggest-item');
+    row.dataset.index = String(index);
+    row.append(element('span', item.word, 'suggest-word'));
+    if (item.snippet) row.append(element('span', item.snippet, 'suggest-snippet'));
+    row.addEventListener('click', () => {
+      hideSuggestions();
+      searchWord(item.word);
+    });
+    fragment.append(row);
+  });
+  box.replaceChildren(fragment);
+  box.hidden = false;
+}
+
+async function fetchSuggestions(query) {
+  query = query.trim();
+  if (!query) {
+    hideSuggestions();
+    return;
+  }
+  try {
+    const data = await api('/api/suggest?q=' + encodeURIComponent(query));
+    renderSuggestions(data.suggestions || []);
+  } catch (_) {
+    hideSuggestions();
+  }
+}
+
+$('query').addEventListener('input', () => {
+  clearTimeout(suggestTimer);
+  suggestTimer = setTimeout(() => fetchSuggestions($('query').value), 120);
+});
+
+$('query').addEventListener('keydown', (event) => {
+  const box = $('search-suggest');
+  if (box && !box.hidden && state.suggestions.length) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      state.suggestIndex = (state.suggestIndex + 1) % state.suggestions.length;
+      updateSuggestHighlight();
+      return;
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      state.suggestIndex = (state.suggestIndex - 1 + state.suggestions.length) % state.suggestions.length;
+      updateSuggestHighlight();
+      return;
+    }
+    if (event.key === 'Enter' && state.suggestIndex >= 0) {
+      event.preventDefault();
+      const chosen = state.suggestions[state.suggestIndex].word;
+      hideSuggestions();
+      searchWord(chosen);
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      hideSuggestions();
+      return;
+    }
+  }
+});
+
+document.addEventListener('click', (event) => {
+  if (!event.target.closest('#search-form')) {
+    hideSuggestions();
+  }
+});
+
+window.addEventListener('keydown', (event) => {
+  if (['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
+  if (state.view !== 'review' || !state.queue.length || state.grading) return;
+  const word = state.queue[0];
+  if (event.key === 'p' || event.key === 'P' || event.key === 'l' || event.key === 'L') {
+    event.preventDefault();
+    pronounceWord(word.word);
+    return;
+  }
+  if (!state.revealed) {
+    if (event.key === ' ' || event.key === 'Enter') {
+      event.preventDefault();
+      state.revealed = true;
+      renderReview();
+    }
+    return;
+  }
+  const isTui = word.collection === 'tui';
+  if (event.key === '1' || event.key === 'a' || event.key === 'A') {
+    event.preventDefault();
+    gradeWord(word, false, isTui ? 0 : undefined);
+  } else if (event.key === '2') {
+    event.preventDefault();
+    gradeWord(word, true, isTui ? 1 : undefined);
+  } else if (event.key === '3' && isTui) {
+    event.preventDefault();
+    gradeWord(word, true, 2);
+  } else if (event.key === '4' && isTui) {
+    event.preventDefault();
+    gradeWord(word, true, 3);
+  } else if (event.key === ' ' || event.key === 'Enter') {
+    event.preventDefault();
+    gradeWord(word, true, isTui ? 2 : undefined);
+  }
+});
+
+$('search-form').addEventListener('submit', event => {
+  event.preventDefault();
+  hideSuggestions();
+  searchWord($('query').value);
+});
 $('word-filter').addEventListener('input', renderWords);
 $('daily-lookup').addEventListener('click', () => { if (state.daily) searchWord(state.daily.word.word, state.daily.word.source || selectedSource()); });
 document.querySelectorAll('.nav-button').forEach(node => node.addEventListener('click', () => showView(node.dataset.view)));

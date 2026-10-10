@@ -214,4 +214,17 @@ test('online deletion with an overlapping ID leaves the shared TUI word untouche
         assert(#store:words() == 1 and store:words()[1].collection == 'tui')
     end)
 end)
+
+test('shared dictionary provides prefix suggestions and merges with web words', function()
+    fixture(function(store, native)
+        native:dict_replace_word('horizon', {{pos = 'noun', definition = 'The line where earth meets sky.'}})
+        native:dict_replace_word('horoscope', {{pos = 'noun', definition = 'An astrological forecast.'}})
+        store.web:save('horse', 'dict.cn', {definitions = {'An animal.'}}, 100)
+        local res = assert(service.route(store, 'GET', '/api/suggest', {q = 'hor'}))
+        assert(#res.suggestions == 3)
+        local words = {}
+        for _, s in ipairs(res.suggestions) do words[s.word] = true end
+        assert(words['horizon'] and words['horoscope'] and words['horse'])
+    end)
+end)
 print('Passed ' .. count .. ' shared-data tests.')
