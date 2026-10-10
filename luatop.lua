@@ -2611,10 +2611,10 @@ end
 -- 5. Smart Process Filter Engine
 -- =========================================================================
 local function parse_bytes_or_num(str)
-    local num, unit = str:match("^(%d+%.?%d*)([kKmMgGtT]?)$")
+    local num, unit = str:match("^(%d+%.?%d*)([kKmMgGtT]?[bB]?)$")
     if not num then return tonumber(str) or 0 end
     local val = tonumber(num) or 0
-    unit = unit:upper()
+    unit = unit:upper():sub(1, 1)
     if unit == "K" then return val * 1024
     elseif unit == "M" then return val * 1024 * 1024
     elseif unit == "G" then return val * 1024 * 1024 * 1024
@@ -2643,7 +2643,8 @@ local function match_smart_filter(pr, query)
         local cpu_lt = token:match("^[cC][pP][uU]<(%d+%.?%d*)$") or token:match("^[cC][pP][uU]<=(%d+%.?%d*)$")
         local mem_gt = token:match("^[mM][eE]?[mM]?>([%d%.%w]+)$") or token:match("^[mM][eE]?[mM]?>=([%d%.%w]+)$")
         local mem_lt = token:match("^[mM][eE]?[mM]?<([%d%.%w]+)$") or token:match("^[mM][eE]?[mM]?<=([%d%.%w]+)$")
-        local io_gt  = token:match("^[iI][oO]>([%d%.%w]+)$")
+        local io_gt  = token:match("^[iI][oO]>([%d%.%w]+)$") or token:match("^[iI][oO]>=([%d%.%w]+)$")
+        local io_lt  = token:match("^[iI][oO]<([%d%.%w]+)$") or token:match("^[iI][oO]<=([%d%.%w]+)$")
         local time_gt = token:match("^[tT][iI]?[mM]?[eE]?>([%d%.%w]+)$")
             or token:match("^[tT][iI]?[mM]?[eE]?>=([%d%.%w]+)$")
             or token:match("^[eE][lL]?[aA]?[pP]?[sS]?[eE]?[dD]?>([%d%.%w]+)$")
@@ -2658,23 +2659,27 @@ local function match_smart_filter(pr, query)
         elseif s_val then
             if (pr.state or ""):upper():find(s_val:upper(), 1, true) then matched = true end
         elseif p_val then
-            if tostring(pr.pid):find(p_val, 1, true) then matched = true end
+            if pr.pid == (tonumber(p_val) or -1) then matched = true end
         elseif cpu_gt then
             if (pr.cpu_pct or 0) >= (tonumber(cpu_gt) or 0) then matched = true end
         elseif cpu_lt then
             if (pr.cpu_pct or 0) <= (tonumber(cpu_lt) or 0) then matched = true end
         elseif mem_gt then
             local thresh_bytes = parse_bytes_or_num(mem_gt)
-            if not mem_gt:match("[kKmMgGtT]$") then thresh_bytes = thresh_bytes * 1024 * 1024 end
+            if not mem_gt:match("[kKmMgGtTbB]$") then thresh_bytes = thresh_bytes * 1024 * 1024 end
             if (pr.res_kb or 0) * 1024 >= thresh_bytes then matched = true end
         elseif mem_lt then
             local thresh_bytes = parse_bytes_or_num(mem_lt)
-            if not mem_lt:match("[kKmMgGtT]$") then thresh_bytes = thresh_bytes * 1024 * 1024 end
+            if not mem_lt:match("[kKmMgGtTbB]$") then thresh_bytes = thresh_bytes * 1024 * 1024 end
             if (pr.res_kb or 0) * 1024 <= thresh_bytes then matched = true end
         elseif io_gt then
             local thresh_bytes = parse_bytes_or_num(io_gt)
-            if not io_gt:match("[kKmMgGtT]$") then thresh_bytes = thresh_bytes * 1024 end
+            if not io_gt:match("[kKmMgGtTbB]$") then thresh_bytes = thresh_bytes * 1024 end
             if (pr.io_total_rate or 0) >= thresh_bytes then matched = true end
+        elseif io_lt then
+            local thresh_bytes = parse_bytes_or_num(io_lt)
+            if not io_lt:match("[kKmMgGtTbB]$") then thresh_bytes = thresh_bytes * 1024 end
+            if (pr.io_total_rate or 0) <= thresh_bytes then matched = true end
         elseif time_gt then
             local thresh_sec = parse_time_sec(time_gt)
             if (pr.elapsed_sec or 0) >= thresh_sec then matched = true end
@@ -2683,8 +2688,8 @@ local function match_smart_filter(pr, query)
             if (pr.elapsed_sec or 0) <= thresh_sec then matched = true end
         else
             local t_low = token:lower()
-            if pr.comm:lower():find(t_low, 1, true) or
-               pr.cmdline:lower():find(t_low, 1, true) or
+            if (pr.comm or ""):lower():find(t_low, 1, true) or
+               (pr.cmdline or ""):lower():find(t_low, 1, true) or
                (pr.username or ""):lower():find(t_low, 1, true) or
                tostring(pr.pid):find(t_low, 1, true) then
                 matched = true
@@ -3425,7 +3430,13 @@ local function render_zoomed_pane(out, pane_idx, state, term_w, term_h)
                     table.insert(out, draw_box_row(1, table_header_y + i, zw, "  " .. row_content))
                 end
             else
-                table.insert(out, draw_box_row(1, table_header_y + i, zw, ""))
+                if i == 2 and #procs == 0 and #filter_query > 0 then
+                    local empty_msg = string.format("  %sNo processes matching filter '/%s'%s  %s[Esc: Clear]%s",
+                        C.dim, truncate(filter_query, 30), C.reset, C.title_col, C.reset)
+                    table.insert(out, draw_box_row(1, table_header_y + i, zw, empty_msg))
+                else
+                    table.insert(out, draw_box_row(1, table_header_y + i, zw, ""))
+                end
             end
         end
     end
@@ -3506,6 +3517,7 @@ Keybindings:
     local cpu_view_mode = "auto" -- "auto", "summary", "detail"
     local sel_proc = 1
     local filter_query = ""
+    local saved_filter_query = ""
     local in_search_mode = false
     local is_paused = false
     local refresh_interval_ms = arg_interval or 1000
@@ -3921,8 +3933,18 @@ Keybindings:
                 end
             elseif in_search_mode then
                 if k == "SPACE" then k = " " end
-                if k == "ENTER" or k == "ESC" then
+                if k == "ENTER" then
                     in_search_mode = false
+                elseif k == "ESC" then
+                    in_search_mode = false
+                    filter_query = saved_filter_query
+                    sel_proc = 1
+                elseif k == "\21" then -- Ctrl+U: clear search query
+                    filter_query = ""
+                    sel_proc = 1
+                elseif k == "\23" then -- Ctrl+W: delete backward word
+                    filter_query = filter_query:gsub("%s*%S*$", "")
+                    sel_proc = 1
                 elseif k == "BACKSPACE" then
                     filter_query = filter_query:sub(1, -2)
                     sel_proc = 1
@@ -4025,6 +4047,7 @@ Keybindings:
                         is_paused = not is_paused
                     end
                 elseif k == "/" then
+                    saved_filter_query = filter_query
                     in_search_mode = true
                 elseif k == "t" or k == "F5" then
                     in_tree_mode = not in_tree_mode
@@ -4655,7 +4678,13 @@ Keybindings:
                         table.insert(out, draw_box_row(1, table_header_y + i, term_w, "  " .. row_content))
                     end
                 else
-                    table.insert(out, draw_box_row(1, table_header_y + i, term_w, ""))
+                    if i == 2 and #procs == 0 and #filter_query > 0 then
+                        local empty_msg = string.format("  %sNo processes matching filter '/%s'%s  %s[Esc: Clear]%s",
+                            C.dim, truncate(filter_query, 24), C.reset, C.title_col, C.reset)
+                        table.insert(out, draw_box_row(1, table_header_y + i, term_w, empty_msg))
+                    else
+                        table.insert(out, draw_box_row(1, table_header_y + i, term_w, ""))
+                    end
                 end
             end
             end
@@ -5018,11 +5047,19 @@ local function run_self_test()
     assert(match_smart_filter(test_proc, "cpu>10") == true, "Smart filter cpu> match")
     assert(match_smart_filter(test_proc, "cpu>20") == false, "Smart filter cpu> mismatch")
     assert(match_smart_filter(test_proc, "m>50M") == true, "Smart filter mem> match")
+    assert(match_smart_filter(test_proc, "m>50MB") == true, "Smart filter mem> 2-letter unit match")
+    assert(match_smart_filter(test_proc, "m<100mb") == true, "Smart filter mem< 2-letter unit match")
+    assert(match_smart_filter(test_proc, "io>=1k") == true, "Smart filter io>= match")
+    assert(match_smart_filter(test_proc, "io<0.5k") == false, "Smart filter io< mismatch")
+    assert(match_smart_filter(test_proc, "io<2k") == true, "Smart filter io< match")
+    assert(match_smart_filter(test_proc, "pid:9999") == true, "Smart filter exact pid match")
+    assert(match_smart_filter(test_proc, "pid:999") == false, "Smart filter non-exact pid mismatch")
+    assert(match_smart_filter({ pid = 1, comm = nil, cmdline = nil }, "test") == false, "Smart filter safe on nil comm/cmdline")
     assert(match_smart_filter(test_proc, "time>10m") == true, "Smart filter time> match")
     assert(match_smart_filter(test_proc, "time>2h") == false, "Smart filter time> mismatch")
     assert(match_smart_filter(test_proc, "elapsed<2h") == true, "Smart filter elapsed< match")
     assert(match_smart_filter(test_proc, "testworker") == true, "Smart filter text match")
-    print("  ✔ Smart Filter Engine: Verified u:<user>, s:<state>, cpu>X, m>XM, time>X, text queries")
+    print("  ✔ Smart Filter Engine: Verified u:<user>, s:<state>, pid:<pid>, cpu>X, m>XM, io<>X, time>X, nil-safety, text queries")
 
     -- Renice test
     assert(type(renice_process) == "function", "renice_process must be a function")

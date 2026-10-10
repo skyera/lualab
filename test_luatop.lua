@@ -824,6 +824,114 @@ TestRunner.describe("11. Process Termination & Safe Signal Dispatcher", function
     end)
 end)
 
+-- 12. Smart Process Filter & Search Input Engine
+TestRunner.describe("12. Smart Process Filter & Search Input Engine", function()
+    local test_proc = {
+        pid = 1234,
+        comm = "node_worker",
+        cmdline = "/usr/bin/node server.js --port=8080",
+        username = "appuser",
+        state = "S",
+        cpu_pct = 25.5,
+        res_kb = 131072, -- 128 MB
+        io_total_rate = 204800, -- 200 KB/s
+        elapsed_sec = 7200, -- 2h
+    }
+
+    TestRunner.it("should parse 2-letter memory units (MB, GB, KB) and bidirectional disk I/O thresholds", function()
+        assert_true(btop.match_smart_filter(test_proc, "m>100MB"), "128MB > 100MB")
+        assert_true(btop.match_smart_filter(test_proc, "m>100mb"), "128MB > 100mb (lowercase)")
+        assert_true(btop.match_smart_filter(test_proc, "m<200MB"), "128MB < 200MB")
+        assert_true(not btop.match_smart_filter(test_proc, "m>1GB"), "128MB not > 1GB")
+
+        assert_true(btop.match_smart_filter(test_proc, "io>=100K"), "200KB/s >= 100KB/s")
+        assert_true(btop.match_smart_filter(test_proc, "io>=100kb"), "200KB/s >= 100kb (lowercase)")
+        assert_true(btop.match_smart_filter(test_proc, "io<500K"), "200KB/s < 500KB/s")
+        assert_true(not btop.match_smart_filter(test_proc, "io<50K"), "200KB/s not < 50KB/s")
+    end)
+
+    TestRunner.it("should match exact PID on p: and pid: tags while keeping substring match in free text", function()
+        assert_true(btop.match_smart_filter(test_proc, "p:1234"), "p:1234 exact match")
+        assert_true(btop.match_smart_filter(test_proc, "pid:1234"), "pid:1234 exact match")
+        assert_true(not btop.match_smart_filter(test_proc, "p:12"), "p:12 should NOT match PID 1234")
+        assert_true(not btop.match_smart_filter(test_proc, "pid:123"), "pid:123 should NOT match PID 1234")
+
+        -- General text query can still match substring
+        assert_true(btop.match_smart_filter(test_proc, "123"), "Free text '123' matches substring in PID 1234")
+    end)
+
+    TestRunner.it("should handle nil comm, cmdline, and username gracefully without runtime crashes", function()
+        local minimal_proc = { pid = 55 }
+        local ok1 = pcall(btop.match_smart_filter, minimal_proc, "u:root")
+        local ok2 = pcall(btop.match_smart_filter, minimal_proc, "s:R")
+        local ok3 = pcall(btop.match_smart_filter, minimal_proc, "randomtext")
+        assert_true(ok1 and ok2 and ok3, "Nil fields must not crash filter engine")
+        assert_true(not btop.match_smart_filter(minimal_proc, "randomtext"), "No match on empty fields")
+    end)
+
+    TestRunner.it("should simulate search keystroke entry, Esc cancellation, and Ctrl+U/Ctrl+W editing", function()
+        local query = ""
+        local saved_query = ""
+
+        -- Simulate entering search mode on '/'
+        local function press_search()
+            saved_query = query
+        end
+
+        local function type_key(k)
+            if k == "ENTER" then
+                -- confirmed
+            elseif k == "ESC" then
+                query = saved_query
+            elseif k == "\21" then
+                query = ""
+            elseif k == "\23" then
+                query = query:gsub("%s*%S*$", "")
+            elseif k == "BACKSPACE" then
+                query = query:sub(1, -2)
+            elseif #k == 1 then
+                query = query .. k
+            end
+        end
+
+        -- Step 1: Initial search
+        press_search()
+        for _, ch in ipairs({ "c", "h", "r", "o", "m", "e" }) do type_key(ch) end
+        assert_eq(query, "chrome", "Query typed as chrome")
+        type_key("ENTER")
+        assert_eq(query, "chrome", "Query retained on Enter")
+
+        -- Step 2: Edit with Ctrl+W and type firefox
+        press_search()
+        type_key("\23")
+        assert_eq(query, "", "Query cleared via Ctrl+W")
+        for _, ch in ipairs({ "f", "i", "r", "e", "f", "o", "x" }) do type_key(ch) end
+        assert_eq(query, "firefox", "Query changed to firefox")
+
+        -- Step 3: Cancel via ESC
+        type_key("ESC")
+        assert_eq(query, "chrome", "Query reverted to saved_query (chrome) on ESC")
+
+        -- Step 4: Clear line via Ctrl+U
+        press_search()
+        type_key("\21")
+        assert_eq(query, "", "Query cleared via Ctrl+U")
+    end)
+
+    TestRunner.it("should render empty state placeholder when filter yields zero matching processes", function()
+        local empty_state = {
+            procs = {},
+            raw_total_procs = 250,
+            filter_query = "nonexistent_proc_xyz",
+            in_tree_mode = false,
+        }
+        local frame = btop.render_zoomed_pane_frame(4, empty_state, 100, 30)
+        assert_true(type(frame) == "string" and #frame > 0, "Zoomed frame rendered")
+        assert_true(frame:find("No processes matching filter", 1, true) ~= nil, "Contains empty state placeholder")
+        assert_true(frame:find("nonexistent_proc_xyz", 1, true) ~= nil, "Contains query in placeholder")
+    end)
+end)
+
 -- Summary
 print("\n--------------------------------------------------")
 local total = TestRunner.passed + TestRunner.failed
