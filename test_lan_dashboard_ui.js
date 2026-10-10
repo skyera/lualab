@@ -12,23 +12,42 @@ function register(markup) {
     }
 }
 function element() {
+    const classes = new Set();
     return {
         style: {}, value: '', textContent: '',
-        classList: { add() {}, remove() {}, toggle() {} },
+        classList: {
+            add(name) { classes.add(name); },
+            remove(name) { classes.delete(name); },
+            toggle(name, active) { if (active) classes.add(name); else classes.delete(name); },
+            contains(name) { return classes.has(name); }
+        },
+        querySelector() { return elements.get('scanIcon'); },
         addEventListener() {},
         set innerHTML(value) { this.markup = value; register(value); },
         get innerHTML() { return this.markup || ''; }
     };
 }
 register(html);
+elements.set('scanIcon', element());
+let response = {devices: []};
+let httpOK = true;
+let failNetwork = false;
+const requests = [];
+const timers = new Map();
+let timerId = 0;
 const context = vm.createContext({
     document: {
         getElementById(id) { return elements.get(id) || null; },
         querySelectorAll() { return []; }
     },
     console,
-    setInterval() { return 1; }, clearInterval() {}, setTimeout() {},
-    fetch: async () => ({ json: async () => ({ devices: [] }) })
+    setInterval(callback, interval) { const id = ++timerId; timers.set(id, {callback, interval}); return id; },
+    clearInterval(id) { timers.delete(id); }, setTimeout() {},
+    fetch: async (url, options) => {
+        requests.push({url, options});
+        if (failNetwork) throw new Error('Offline');
+        return {ok: httpOK, json: async () => response};
+    }
 });
 async function main() {
     vm.runInContext(script, context);
@@ -64,6 +83,58 @@ async function main() {
     vm.runInContext('devices = []; renderGrid(devices); renderTable(devices);', context);
     assert.match(elements.get('deviceGrid').innerHTML, /No devices match/);
     assert.equal(elements.get('deviceTableBody').innerHTML, '');
-    console.log('Dashboard cards, table, details, empty transitions, escaping, and IP reuse PASS');
+
+    // Progress keeps the last inventory and works independently of auto-refresh.
+    vm.runInContext('devices = [sample]; renderDevices();', context);
+    const inventoryMarkup = elements.get('deviceGrid').innerHTML;
+    const job = {id: 1, state: 'running', phase: 'discovery', completed: 128, total: 254, started_at: 100};
+    response = {scan: job};
+    await vm.runInContext('triggerScan()', context);
+    assert.equal(elements.get('deviceGrid').innerHTML, inventoryMarkup);
+    assert.equal(elements.get('scanBtn').disabled, true);
+    assert(elements.get('scanIcon').classList.contains('spinner'));
+    assert.match(elements.get('scanProgressText').textContent, /Scanning addresses… 128 \/ 254/);
+    assert.equal(elements.get('scanProgressBar').value, 128);
+    assert([...timers.values()].some(timer => timer.interval === 500));
+    assert.equal(requests.at(-1).options.method, 'POST');
+
+    response = {scan: {...job, phase: 'devices', completed: 0, total: 0}};
+    await vm.runInContext('pollScan()', context);
+    assert.match(elements.get('scanProgressText').textContent, /Checking devices… 0 \/ 0/);
+    assert.equal(elements.get('scanProgressBar').max, 1);
+    failNetwork = true;
+    await vm.runInContext('pollScan()', context);
+    assert.match(elements.get('scanProgressText').textContent, /retrying/);
+    assert.equal(elements.get('scanBtn').disabled, true);
+    failNetwork = false;
+
+    response = {scan: {...job, state: 'cancelled'}};
+    await vm.runInContext('cancelScan()', context);
+    assert.equal(requests.at(-1).url, '/api/scan/cancel');
+    assert.equal(elements.get('deviceGrid').innerHTML, inventoryMarkup);
+    assert.match(elements.get('scanProgressText').textContent, /Previous inventory kept/);
+    assert.equal(elements.get('scanBtn').disabled, false);
+    assert(!elements.get('scanIcon').classList.contains('spinner'));
+    assert(![...timers.values()].some(timer => timer.interval === 500));
+    context.stale = job;
+    vm.runInContext('updateScanStatus(stale)', context);
+    assert.equal(elements.get('scanBtn').disabled, false); // Late progress cannot undo cancellation.
+
+    const completed = {...job, id: 2, state: 'completed'};
+    response = {scan: {...completed, state: 'running'}};
+    await vm.runInContext('triggerScan()', context);
+    response = {scan: completed, devices: [], scanned_at: '12:00:00'};
+    await vm.runInContext('pollScan()', context);
+    assert.equal(requests.at(-1).url, '/api/devices');
+    assert.match(elements.get('deviceGrid').innerHTML, /No devices match/);
+    assert.equal(elements.get('scanProgress').style.display, 'none');
+
+    response = {scan: {...job, id: 3, state: 'failed', error: 'Worker <failed>'}};
+    httpOK = false;
+    await vm.runInContext('triggerScan()', context);
+    assert.equal(elements.get('scanBtn').disabled, false);
+    assert.equal(elements.get('scanProgressText').textContent, 'Worker <failed>');
+    assert.match(elements.get('toast').textContent, /Worker <failed>/);
+    console.log('Dashboard rendering, progress, cancellation, polling recovery, empty completion, and errors PASS');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

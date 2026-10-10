@@ -227,7 +227,7 @@ end)
 
 -- Test 10: Undeclared Globals Check via LuaJIT Bytecode
 test("Bytecode Scoping (Assert 0 Undeclared Globals)", function()
-    local p = io.popen("luajit -bl lan_dashboard.lua && luajit -bl lan_inventory.lua", "r")
+    local p = io.popen("luajit -bl lan_dashboard.lua && luajit -bl lan_inventory.lua && luajit -bl lan_scan_job.lua", "r")
     assert(p, "Failed to run luajit -bl")
     local bc = p:read("*a")
     p:close()
@@ -237,7 +237,7 @@ test("Bytecode Scoping (Assert 0 Undeclared Globals)", function()
         require = true, ffi = true, bit = true, os = true, io = true,
         string = true, table = true, math = true, tonumber = true,
         tostring = true, type = true, ipairs = true, pairs = true,
-        pcall = true, assert = true, print = true
+        pcall = true, assert = true, print = true, error = true, arg = true
     }
 
     for line in bc:gmatch("[^\r\n]+") do
@@ -274,6 +274,18 @@ test("Embedded HTTP Web Server endpoints respond with 200 OK", function()
     local code = curl_p and curl_p:read("*a")
     if curl_p then curl_p:close() end
 
+    local scan_state
+    for _ = 1, 100 do
+        local progress = io.popen("curl --max-time 2 -s http://127.0.0.1:18889/api/scan", "r")
+        local data = progress and progress:read("*a")
+        if progress then progress:close() end
+        if data and data ~= "" then
+            scan_state = require("json").decode(data).scan
+            if scan_state.state == "completed" or scan_state.state == "failed" then break end
+        end
+        os.execute("sleep 0.1")
+    end
+
     local curl_api = io.popen("curl --max-time 30 -s http://127.0.0.1:18889/api/devices", "r")
     local api_json = curl_api and curl_api:read("*a")
     if curl_api then curl_api:close() end
@@ -287,6 +299,7 @@ test("Embedded HTTP Web Server endpoints respond with 200 OK", function()
 
     assert(code == "200", "Expected 200 OK from GET /, got: " .. tostring(code))
     assert(api_json and api_json:find('"status":"ok"'), "Expected ok status from /api/devices")
+    assert(scan_state and scan_state.state == "completed", "Startup background scan failed or timed out")
     local response = require("json").decode(api_json)
     local historical
     for _, d in ipairs(response.devices) do
@@ -302,8 +315,21 @@ test("Persistent inventory regression tests", function()
     dofile("test_lan_inventory.lua")
 end)
 
+test("Background scan worker lifecycle regression tests", function()
+    dofile("test_lan_scan_job.lua")
+end)
+
+test("Scan exceptions restore the scanning flag", function()
+    local ok = pcall(lan.run_full_scan, false, {progress = function() error("Progress writer failed") end})
+    assert(not ok and lan.STATE.scanning == false, "Scan failure left the scanner busy")
+end)
+
 test("Headless dashboard rendering regression tests", function()
     assert(os.execute("node test_lan_dashboard_ui.js") == 0, "Dashboard renderer checks failed")
+end)
+
+test("Live HTTP responsiveness and scan cancellation", function()
+    assert(os.execute("python3 test_lan_dashboard_scan.py") == 0, "Live background scan checks failed")
 end)
 
 print(string.format("\nResults: %d Passed, %d Failed\n", passed, failed))

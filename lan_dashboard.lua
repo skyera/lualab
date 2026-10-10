@@ -16,6 +16,7 @@
 --    card/table views, live ping latency badges, and 1-click action triggers
 --  * Diagnostic CLI modes: --scan-only, --json, --port <P>, --test
 --  * Persistent JSON inventory with first/last seen times and MAC-based identity
+--  * Background web scans with progress and cancellation (CLI scans stay synchronous)
 --------------------------------------------------------------------------------
 
 local ffi = require("ffi")
@@ -1120,6 +1121,7 @@ local STATE = {
     subnet = "192.168.1.0/24"
 }
 local inventory_module = require("lan_inventory")
+local scan_job_module = require("lan_scan_job")
 local INVENTORY = inventory_module.new(os.getenv("LAN_INVENTORY_FILE") or "lan_inventory.json")
 local inventory_loaded, inventory_error = INVENTORY:load()
 if not inventory_loaded then io.stderr:write("Inventory: " .. tostring(inventory_error) .. "\n") end
@@ -1133,7 +1135,7 @@ end
 
 -- Fast non-blocking UDP sweep to wake up all active devices on the subnet
 -- and force the OS to populate/refresh dynamic ARP table entries
-local function prime_subnet_arp(subnet_prefix)
+local function prime_subnet_arp(subnet_prefix, progress)
     subnet_prefix = subnet_prefix or "192.168.1."
     local s = is_windows and ws2.socket(2, 2, 17) or ffi.C.socket(2, 2, 17) -- AF_INET, SOCK_DGRAM, UDP
     if s == -1 or s == ffi.cast("SOCKET", -1) then return end
@@ -1150,6 +1152,7 @@ local function prime_subnet_arp(subnet_prefix)
         else
             ffi.C.sendto(s, "x", 1, 0, addr, ffi.sizeof(addr))
         end
+        if progress and (i % 16 == 0 or i == 254) then progress("discovery", i, 254, target_ip) end
     end
 
     if is_windows then
@@ -1160,22 +1163,24 @@ local function prime_subnet_arp(subnet_prefix)
     ffi_sleep_ms(150) -- Give OS network stack 150ms to record incoming ARP responses
 end
 
-local function run_full_scan(probe_ports)
-    if STATE.scanning then return STATE.devices end
-    STATE.scanning = true
-
+local function scan_devices(probe_ports, options)
+    local progress = options.progress or function() end
+    progress("discovery", 0, 254)
     -- Pre-seed/prime ARP cache so idle devices (e.g. Linux servers) appear in ARP
     local my_ip = get_local_ip()
     local prefix = my_ip and my_ip:match("^(%d+%.%d+%.%d+%.)") or STATE.subnet:match("^(%d+%.%d+%.%d+%.)") or "192.168.1."
     STATE.subnet = prefix .. "0/24"
-    prime_subnet_arp(prefix)
+    prime_subnet_arp(prefix, progress)
 
+    progress("neighbors", 254, 254)
     local entries = get_arp_entries()
 
-    if INVENTORY:migrate_aliases(entries, CUSTOM_NAMES, HOSTNAME_CACHE) then save_custom_names() end
+    if INVENTORY:migrate_aliases(entries, CUSTOM_NAMES, HOSTNAME_CACHE) and not options.raw then save_custom_names() end
 
+    progress("devices", 0, #entries)
     local list = {}
-    for _, item in ipairs(entries) do
+    for index, item in ipairs(entries) do
+        progress("devices", index - 1, #entries, item.ip)
         local vendor = lookup_vendor(item.mac)
         local is_alive, ping_rtt = ping_host(item.ip, 15)
 
@@ -1314,13 +1319,42 @@ local function run_full_scan(probe_ports)
             hardware = hw_info,
             last_seen = os.time()
         })
+        progress("devices", index, #entries, item.ip)
     end
+    return list
+end
 
+local function run_full_scan(probe_ports, options)
+    if STATE.scanning then return STATE.devices end
+    options = options or {}
+    STATE.scanning = true
+    local ok, list = pcall(scan_devices, probe_ports, options)
+    STATE.scanning = false
+    if not ok then error(list) end
+    if options.raw then return list end
     STATE.last_scanned = os.time()
     STATE.devices = INVENTORY:merge(list, STATE.last_scanned, probe_ports ~= false)
     save_inventory()
-    STATE.scanning = false
     return STATE.devices
+end
+
+local function apply_scan_result(result)
+    -- Edits made while the worker ran take precedence over its starting snapshot.
+    local current = {}
+    for _, device in ipairs(STATE.devices) do current[inventory_module.identity(device)] = device end
+    for _, device in ipairs(result.devices) do
+        local previous = current[inventory_module.identity(device)]
+        if previous and previous.is_custom then device.hostname, device.is_custom = previous.hostname, true end
+    end
+    if INVENTORY:migrate_aliases(result.devices, CUSTOM_NAMES, HOSTNAME_CACHE) then save_custom_names() end
+    for _, device in ipairs(result.devices) do
+        if CUSTOM_NAMES[device.ip] then device.hostname, device.is_custom = CUSTOM_NAMES[device.ip], true end
+    end
+    STATE.subnet = result.subnet
+    STATE.last_scanned = result.finished_at
+    STATE.devices = INVENTORY:merge(result.devices, STATE.last_scanned, false)
+    local ok, err = save_inventory()
+    if not ok then result.error = "Scan completed but inventory could not be saved: " .. tostring(err) end
 end
 
 --------------------------------------------------------------------------------
@@ -1701,8 +1735,14 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                     </svg>
                     <span>Scan Now</span>
                 </button>
+                <button class="btn-secondary" id="cancelScanBtn" style="display:none;" onclick="cancelScan()">Cancel scan</button>
             </div>
         </header>
+
+        <div id="scanProgress" role="status" aria-live="polite" style="display:none; margin-bottom:18px; color:var(--text-dim);">
+            <span id="scanProgressText"></span>
+            <progress id="scanProgressBar" max="254" value="0" style="width:160px; margin-left:12px;"></progress>
+        </div>
 
         <div class="stats-grid">
             <div class="stat-card">
@@ -1801,6 +1841,9 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
         let activeCategory = 'all';
         let currentView = 'cards';
         let refreshTimer = null;
+        let scanTimer = null;
+        let scanPollPending = false;
+        let scanState = {id: 0, state: 'idle'};
 
         const CATEGORY_ICONS = {
             camera: '🎥',
@@ -1815,12 +1858,14 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
         async function fetchDevices() {
             try {
                 const res = await fetch('/api/devices');
+                if (!res.ok) throw new Error('Could not fetch devices');
                 const data = await res.json();
                 devices = data.devices || [];
                 if (data.subnet) document.getElementById('subnetDisplay').textContent = data.subnet;
                 document.getElementById('statusSubtext').textContent = 'Last scanned: ' + (data.scanned_at || 'Not yet') + ' (' + devices.length + ' known devices)';
                 updateCounts();
                 renderDevices();
+                if (data.scan) updateScanStatus(data.scan);
             } catch (err) {
                 console.error('Failed to fetch devices:', err);
             }
@@ -1828,22 +1873,75 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
 
         async function triggerScan() {
             const btn = document.getElementById('scanBtn');
-            const icon = btn.querySelector('.scan-icon');
             btn.disabled = true;
-            icon.classList.add('spinner');
-            showToast('Scanning local network and measuring latency...');
             try {
                 const res = await fetch('/api/scan', { method: 'POST' });
                 const data = await res.json();
-                devices = data.devices || [];
-                updateCounts();
-                renderDevices();
-                showToast(`Scan complete: ${devices.length} known devices`);
+                if (data.scan) updateScanStatus(data.scan);
+                if (!res.ok) throw new Error(data.scan?.error || 'Could not start scan');
             } catch (err) {
                 showToast('Scan error: ' + err.message);
+                updateScanStatus(scanState);
+            }
+        }
+
+        function updateScanStatus(job) {
+            const terminal = ['completed', 'cancelled', 'failed'];
+            if (job.id === scanState.id && job.started_at === scanState.started_at &&
+                terminal.includes(scanState.state) && ['running', 'cancelling'].includes(job.state)) return;
+            scanState = job;
+            const active = job.state === 'running' || job.state === 'cancelling';
+            const button = document.getElementById('scanBtn');
+            button.disabled = active;
+            button.querySelector('.scan-icon').classList.toggle('spinner', active);
+            const cancel = document.getElementById('cancelScanBtn');
+            cancel.style.display = active ? '' : 'none';
+            cancel.disabled = job.state === 'cancelling';
+            const labels = {starting: 'Starting scan', discovery: 'Scanning addresses', neighbors: 'Reading neighbor cache', devices: 'Checking devices'};
+            const text = job.state === 'cancelling' ? 'Cancelling scan…' :
+                (labels[job.phase] || 'Scanning') + '… ' + (job.completed || 0) + ' / ' + (job.total || 0);
+            const status = document.getElementById('scanProgress');
+            status.style.display = active || job.state === 'failed' || job.state === 'cancelled' || job.error ? '' : 'none';
+            document.getElementById('scanProgressText').textContent = active ? text :
+                (job.error || (job.state === 'cancelled' ? 'Scan cancelled. Previous inventory kept.' : ''));
+            const bar = document.getElementById('scanProgressBar');
+            bar.style.display = active ? '' : 'none';
+            bar.max = Math.max(1, job.total || 0);
+            bar.value = Math.max(0, Math.min(job.completed || 0, bar.max));
+            if (active && !scanTimer) scanTimer = setInterval(pollScan, 500);
+            if (!active && scanTimer) { clearInterval(scanTimer); scanTimer = null; }
+        }
+
+        async function pollScan() {
+            if (scanPollPending) return;
+            scanPollPending = true;
+            try {
+                const res = await fetch('/api/scan');
+                if (!res.ok) throw new Error('Could not fetch scan progress');
+                const data = await res.json();
+                updateScanStatus(data.scan);
+                if (data.scan.state === 'completed') {
+                    await fetchDevices();
+                    showToast(`Scan complete: ${devices.length} known devices`);
+                }
+            } catch (err) {
+                document.getElementById('scanProgressText').textContent = 'Progress unavailable; retrying…';
             } finally {
-                btn.disabled = false;
-                icon.classList.remove('spinner');
+                scanPollPending = false;
+            }
+        }
+
+        async function cancelScan() {
+            const button = document.getElementById('cancelScanBtn');
+            button.disabled = true;
+            try {
+                const res = await fetch('/api/scan/cancel', {method: 'POST'});
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.message || 'Could not cancel scan');
+                updateScanStatus(data.scan);
+            } catch (err) {
+                showToast('Cancel error: ' + err.message);
+                updateScanStatus(scanState);
             }
         }
 
@@ -2451,8 +2549,14 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
 --------------------------------------------------------------------------------
 -- 9. Embedded HTTP Web Server
 --------------------------------------------------------------------------------
-local function run_web_server(port)
+local function run_web_server(port, options)
     port = port or 8888
+    options = options or {}
+    local jobs = scan_job_module.new({
+        command = options.worker_command or {scan_job_module.executable(), arg[0], "--scan-worker"},
+        input = function() return {devices = STATE.devices, names = CUSTOM_NAMES} end,
+        complete = apply_scan_result
+    })
     local server_sock = is_windows and ws2.socket(2, 1, 6) or ffi.C.socket(2, 1, 6)
     if server_sock == -1 or server_sock == ffi.cast("SOCKET", -1) then
         io.stderr:write("Failed to create server socket\n")
@@ -2462,6 +2566,7 @@ local function run_web_server(port)
     if not is_windows then
         local opt = ffi.new("int[1]", 1)
         ffi.C.setsockopt(server_sock, 1, 2, opt, ffi.sizeof(opt)) -- SO_REUSEADDR on POSIX
+        ffi.C.fcntl(server_sock, 2, 1) -- FD_CLOEXEC: workers must not inherit the listener.
     end
 
     local server_addr = ffi.new("struct sockaddr_in")
@@ -2505,15 +2610,24 @@ local function run_web_server(port)
     print(string.format("==================================================================\n"))
     io.stdout:flush()
 
-    -- Instant startup initial scan (takes ~40ms)
-    run_full_scan(false)
+    jobs:start()
+    STATE.scanning = jobs.status.state == "running"
 
     local last_auto_rescan = os.time()
+    local last_reported_job = 0
     local client_addr = ffi.new("struct sockaddr_in")
     local addrlen = ffi.new(is_windows and "int[1]" or "unsigned int[1]", ffi.sizeof(client_addr))
     local recv_buf = ffi.new("char[4096]")
 
     while true do
+        local job = jobs:poll()
+        STATE.scanning = job.state == "running" or job.state == "cancelling"
+        if job.id ~= last_reported_job and (job.state == "completed" or job.state == "cancelled" or job.state == "failed") then
+            last_reported_job = job.id
+            print(string.format("[%s] [Scan %d] %s: %d known devices%s", os.date("%H:%M:%S"), job.id,
+                job.state, #STATE.devices, job.error and (" — " .. job.error) or ""))
+            io.stdout:flush()
+        end
         addrlen[0] = ffi.sizeof(client_addr)
         local client_sock
         if is_windows then
@@ -2526,6 +2640,7 @@ local function run_web_server(port)
                                            or (client_sock >= 0)
 
         if is_valid_client then
+            if not is_windows then ffi.C.fcntl(client_sock, 2, 1) end -- FD_CLOEXEC
             if socket_wait_readable(client_sock, 500) then
                 local n_recv = is_windows and ws2.recv(client_sock, recv_buf, 4095, 0)
                                           or ffi.C.recv(client_sock, recv_buf, 4095, 0)
@@ -2557,17 +2672,35 @@ local function run_web_server(port)
                         resp_body = to_json({
                             status = "ok",
                             subnet = STATE.subnet,
-                            scanned_at = os.date("%H:%M:%S", STATE.last_scanned),
-                            devices = STATE.devices
+                            scanned_at = STATE.last_scanned > 0 and os.date("%H:%M:%S", STATE.last_scanned) or "Not yet",
+                            devices = STATE.devices,
+                            scan = jobs.status
                         })
                         content_type = "application/json"
-                    elseif path == "/api/scan" and method == "POST" then
-                        local updated = run_full_scan(false)
+                    elseif path == "/api/scan/cancel" and method == "POST" then
+                        last_auto_rescan = os.time()
+                        local cancelled, cancel_error = jobs:cancel()
+                        if cancelled == nil then
+                            status_code = "500 Internal Server Error"
+                            resp_body = to_json({status = "error", message = cancel_error, scan = jobs.status})
+                        else
+                            resp_body = to_json({status = "ok", scan = jobs.status})
+                        end
+                        content_type = "application/json"
+                    elseif path == "/api/scan" and (method == "POST" or method == "GET") then
+                        local started = true
+                        if method == "POST" then
+                            last_auto_rescan = os.time()
+                            started = jobs:start()
+                        end
+                        if started == nil then
+                            status_code = "500 Internal Server Error"
+                        elseif method == "POST" then
+                            status_code = "202 Accepted"
+                        end
                         resp_body = to_json({
-                            status = "ok",
-                            subnet = STATE.subnet,
-                            scanned_at = os.date("%H:%M:%S", STATE.last_scanned),
-                            devices = updated
+                            status = started == nil and "error" or "ok",
+                            scan = jobs.status
                         })
                         content_type = "application/json"
                     elseif path:match("^/api/ping") then
@@ -2717,11 +2850,10 @@ local function run_web_server(port)
             ffi_sleep_ms(20)
         end
 
-        if os.time() - last_auto_rescan > 60 then
+        if os.time() - last_auto_rescan > 60 and not STATE.scanning then
             last_auto_rescan = os.time()
-            local updated = run_full_scan(false)
-            print(string.format("[%s] [Auto-Rescan] Subnet refresh complete: %d known devices on %s",
-                os.date("%H:%M:%S"), #updated, STATE.subnet))
+            jobs:start()
+            print(string.format("[%s] [Auto-Rescan] Background scan started", os.date("%H:%M:%S")))
             io.stdout:flush()
         end
     end
@@ -2811,7 +2943,9 @@ local M = {
     STATE = STATE,
     INVENTORY = INVENTORY,
     DASHBOARD_HTML = DASHBOARD_HTML,
-    run_self_tests = run_self_tests
+    run_self_tests = run_self_tests,
+    run_web_server = run_web_server,
+    apply_scan_result = apply_scan_result
 }
 
 if ... and ... == "lan_dashboard" then
@@ -2821,6 +2955,7 @@ end
 local args = {...}
 local port = 8888
 local mode = "server"
+local worker_path
 
 local i = 1
 while i <= #args do
@@ -2834,6 +2969,9 @@ while i <= #args do
         mode = "json"
     elseif a == "--test" or a == "-t" then
         mode = "test"
+    elseif a == "--scan-worker" then
+        mode, worker_path = "worker", args[i + 1]
+        i = i + 1
     elseif a == "--help" or a == "-h" then
         print([[
 Usage: luajit lan_dashboard.lua [options]
@@ -2850,7 +2988,23 @@ Options:
     i = i + 1
 end
 
-if mode == "test" then
+if mode == "worker" then
+    local input = worker_path and scan_job_module.read_update(worker_path)
+    if not input then io.stderr:write("Scan worker: missing input snapshot\n"); os.exit(1) end
+    INVENTORY.devices = input.devices or {}
+    for key in pairs(CUSTOM_NAMES) do CUSTOM_NAMES[key] = nil end
+    for key, value in pairs(input.names or {}) do CUSTOM_NAMES[key] = value end
+    local function progress(phase, completed, total, current_ip)
+        local ok, err = scan_job_module.write_update(worker_path .. ".progress",
+            {phase = phase, completed = completed, total = total, current_ip = current_ip})
+        if not ok then error(err) end
+    end
+    local ok, devices = pcall(run_full_scan, false, {raw = true, progress = progress})
+    local result = ok and {devices = devices, subnet = STATE.subnet, finished_at = os.time()} or {error = tostring(devices)}
+    local written, err = scan_job_module.write_update(worker_path .. ".result", result)
+    if not written then io.stderr:write("Scan worker: " .. tostring(err) .. "\n") end
+    os.exit(ok and written and 0 or 1)
+elseif mode == "test" then
     run_self_tests()
     os.exit(0)
 elseif mode == "json" then

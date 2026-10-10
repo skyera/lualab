@@ -100,6 +100,25 @@ make
   Inventory checks: `luajit test_lan_inventory.lua`,
   `luajit test_lan_dashboard.lua`, and `node test_lan_dashboard_ui.js`.
 
+  Web scans run in a separate LuaJIT worker, including startup and automatic
+  scans. The dashboard polls progress every 500 ms and offers **Cancel scan**;
+  the current inventory stays visible until a completed scan replaces it.
+  Cancellation or worker failure preserves the current inventory. Renames and
+  port probes made during a scan survive completion. CLI `--scan-only` and
+  `--json` scans remain synchronous.
+
+  `POST /api/scan` now returns **202 Accepted** with a `scan` job object instead
+  of waiting for device results. Duplicate starts return the current job.
+  Poll `GET /api/scan` for `state`, `phase`, `completed`, and `total`, then fetch
+  `/api/devices` after `state` becomes `completed`. Use
+  `POST /api/scan/cancel` to stop a running job. `/api/devices` also includes
+  the job status. Job states are `idle`, `running`, `cancelling`, `cancelled`,
+  `completed`, and `failed`. The discovery count covers addresses sent an ARP
+  priming packet; the device phase checks entries discovered in the neighbor cache.
+
+  Worker checks: `luajit test_lan_scan_job.lua` and
+  `python3 test_lan_dashboard_scan.py` (POSIX live HTTP harness).
+
 - **Run Unit Tests:**
   ```bash
   make test
