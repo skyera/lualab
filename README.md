@@ -68,6 +68,8 @@ make
   ./LuaJIT/src/luajit ffi_fractal_explorer.lua # Real-time truecolor mathematical fractal explorer (Mandelbrot, Julia, etc.)
   ./LuaJIT/src/luajit ffi_image_filter_studio.lua # Interactive Photoshop/Lightroom-style image processing & filter studio
   ./LuaJIT/src/luajit todo_tui.lua         # Interactive keyboard-driven Todo TUI with modal dialogs & categories
+  luajit dictionary_web/app.lua         # Wordbook web app: local dictionary, dict.cn, Youdao, SQLite journal & review
+  luajit download_dict.lua              # Download and import the offline Wordset dictionary if needed
   ./LuaJIT/src/luajit ffi_tetris.lua        # Classic Tetris terminal game in pure LuaJIT FFI (or: ./tetris.lua)
   ./LuaJIT/src/luajit ffi_chinese_chess.lua # Chinese Chess (Xiangqi) engine with Alpha-Beta AI & ANSI/ASCII TUI
   ./LuaJIT/src/luajit ffi_chip8.lua        # Retro Chip-8 CPU emulator & VM with 7 built-in classic games

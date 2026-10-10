@@ -1,0 +1,140 @@
+local root = debug.getinfo(1, 'S').source:sub(2):match('^(.*)/') or '.'
+package.path = root .. '/?.lua;' .. package.path
+local setup = require('download_dict')
+local dictionary = require('ffi_dict')
+local json = require('json')
+local count = 0
+local function test(name, run)
+    local ok, err = pcall(run)
+    assert(ok, name .. ': ' .. tostring(err))
+    count = count + 1; print('ok ' .. count .. ' - ' .. name)
+end
+local function write(path, text)
+    local file = assert(io.open(path, 'wb')); assert(file:write(text)); file:close()
+end
+local function fixture(run)
+    local path = os.tmpname(); os.remove(path)
+    setup.run({'mkdir', '-p', path .. '/cache/data'})
+    local options = {db = path .. '/dictionary.db', cache_dir = path .. '/cache',
+        files = {'a.json', 'b.json'}, report = function() end}
+    local calls = {}
+    options.run = function(argv) calls[#calls + 1] = argv end
+    write(path .. '/cache/data/a.json', json.encode({hello = {word = 'hello', meanings = {{def = 'A greeting.', speech_part = 'interjection', example = 'Hello, friend.'}}}, alias = {word = 'alias'}}))
+    write(path .. '/cache/data/b.json', json.encode({learn = {word = 'learn', meanings = {{def = 'To gain knowledge.'}}}}))
+    local ok, err = pcall(run, options, path, calls)
+    setup.run({'rm', '-r', '--', path})
+    assert(ok, err)
+end
+
+test('fresh setup imports definitions, creates the index and skips repeat downloads', function()
+    fixture(function(options, _, calls)
+        local result = setup.ensure(options)
+        assert(result.words == 2 and result.senses == 2 and not result.skipped)
+        assert(calls[1][1] == 'mkdir' and calls[2][1] == 'git' and calls[2][2] == 'clone')
+        local db = assert(dictionary.Database.open(options.db))
+        assert(#db:dict_lookup('hello') == 1 and #db:dict_search('greeting') == 1)
+        assert(db:scalar("SELECT value FROM meta WHERE key='last_import'"):find('wordset', 1, true))
+        db:close()
+        local before = #calls
+        assert(setup.ensure(options).skipped and #calls == before)
+    end)
+end)
+
+test('empty existing database bootstraps while saved vocabulary and reviews remain intact', function()
+    fixture(function(options)
+        local db = assert(dictionary.Database.open(options.db))
+        local id = assert(db:deck_add({word = 'saved', definition = 'A personal meaning', mnem = 'A personal note'}, 100))
+        assert(db:srs_apply(id, 2, 100)); db:close()
+        assert(setup.ensure(options).words == 2)
+        db = assert(dictionary.Database.open(options.db))
+        assert(db:deck_get('saved').mnem == 'A personal note' and db:srs_state(id).due_at == 86500)
+        assert(db:scalar('SELECT count(*) FROM reviews') == 1)
+        db:close()
+    end)
+end)
+
+test('forced refresh reuses Git checkout, replaces definitions and preserves deck', function()
+    fixture(function(options, path, calls)
+        setup.ensure(options)
+        local db = assert(dictionary.Database.open(options.db))
+        local id = assert(db:deck_add({word = 'hello', mnem = 'Keep this note'}, 100)); db:close()
+        setup.run({'mkdir', '-p', path .. '/cache/.git'})
+        write(path .. '/cache/.git/config', 'fixture')
+        write(path .. '/cache/data/a.json', json.encode({hello = {word = 'hello', meanings = {{def = 'Updated greeting.'}}}}))
+        options.force = true
+        assert(setup.ensure(options).words == 2)
+        assert(calls[#calls][1] == 'git' and calls[#calls][4] == 'pull')
+        db = assert(dictionary.Database.open(options.db))
+        assert(db:dict_lookup('hello')[1].definition == 'Updated greeting.')
+        assert(db:deck_get('hello').mnem == 'Keep this note' and db:deck_get('hello').id == id)
+        assert(db:scalar('SELECT count(*) FROM dict_fts') == 2)
+        db:close()
+    end)
+end)
+
+test('invalid downloads fail before creating or altering the dictionary', function()
+    fixture(function(options, path)
+        write(path .. '/cache/data/b.json', 'invalid JSON')
+        assert(not pcall(setup.ensure, options))
+        local file = io.open(options.db, 'rb'); assert(not file)
+        local db = assert(dictionary.Database.open(options.db))
+        assert(db:dict_replace_word('existing', {{definition = 'Keep existing definition'}}) == 1); db:close()
+        options.force = true
+        assert(not pcall(setup.ensure, options))
+        db = assert(dictionary.Database.open(options.db))
+        assert(db:scalar('SELECT count(*) FROM dict') == 1 and #db:dict_lookup('existing') == 1)
+        db:close()
+    end)
+end)
+
+test('import failure rolls back all files and preserves full-text results', function()
+    fixture(function(options)
+        local db = assert(dictionary.Database.open(options.db))
+        assert(db:dict_replace_word('existing', {{definition = 'Keep existing definition'}}) == 1)
+        assert(db:exec([[CREATE TRIGGER block_word BEFORE INSERT ON dict WHEN NEW.word='learn'
+            BEGIN SELECT RAISE(ABORT,'simulated import failure'); END;]])); db:close()
+        options.force = true
+        assert(not pcall(setup.ensure, options))
+        db = assert(dictionary.Database.open(options.db))
+        assert(db:scalar('SELECT count(*) FROM dict') == 1 and #db:dict_lookup('hello') == 0)
+        assert(#db:dict_search('existing') == 1 and db:scalar('SELECT count(*) FROM dict_fts') == 1)
+        db:close()
+    end)
+end)
+
+test('download failures and invalid CLI options report errors', function()
+    fixture(function(options)
+        options.run = function() error('git download failed') end
+        assert(not pcall(setup.ensure, options))
+        assert(not pcall(setup.main, {'--db'}))
+        assert(not pcall(setup.main, {'--unknown'}))
+    end)
+end)
+
+test('external command arguments preserve quotes and do not execute injected shell text', function()
+    fixture(function(_, path)
+        local text = "quotes ' ; $(touch " .. path .. "/injected) `touch " .. path .. "/injected`"
+        setup.run({'sh', '-c', 'printf "%s" "$1" > "$2"', 'quote-test', text, path .. '/output'})
+        local file = assert(io.open(path .. '/output', 'rb')); assert(file:read('*a') == text); file:close()
+        assert(not io.open(path .. '/injected', 'rb'))
+        assert(not pcall(setup.run, {'sh', '-c', 'exit 7'}))
+    end)
+end)
+test('case aliases import deterministically and repeated refreshes retain identical definitions', function()
+    fixture(function(options, path)
+        local aliases = {a_alias = {word = 'Shared', meanings = {{def = 'Earlier alias'}, {def = 'Another earlier meaning'}}},
+            z_alias = {word = 'shared', meanings = {{def = 'Stable final meaning'}}}}
+        write(path .. '/cache/data/a.json', json.encode(aliases))
+        local first = setup.ensure(options)
+        local db = assert(dictionary.Database.open(options.db))
+        assert(#db:dict_lookup('shared') == 1 and db:dict_lookup('shared')[1].definition == 'Stable final meaning')
+        db:close()
+        options.force = true
+        local second = setup.ensure(options)
+        assert(first.words == second.words and first.senses == second.senses)
+        db = assert(dictionary.Database.open(options.db))
+        assert(#db:dict_lookup('shared') == 1 and db:dict_lookup('shared')[1].definition == 'Stable final meaning')
+        db:close()
+    end)
+end)
+print('Passed ' .. count .. ' download/import tests.')

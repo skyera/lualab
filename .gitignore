@@ -18,6 +18,8 @@ downloads/
 *.codefind.db
 .dict.db
 *.db
+*.db-wal
+*.db-shm
 lan_names.json
 lan_inventory.json
 lan_inventory.json.tmp

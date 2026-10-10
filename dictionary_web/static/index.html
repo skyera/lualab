@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Your personal dictionary and vocabulary journal. Search, collect, and remember words.">
+  <title>Wordbook — A little learning, every day</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <a class="brand" href="/" aria-label="Wordbook home"><span class="brand-mark" aria-hidden="true">w.</span>wordbook<span class="brand-dot">•</span></a>
+    <nav aria-label="Main navigation">
+      <button class="nav-button active" data-view="search" aria-current="page">Discover</button>
+      <button class="nav-button" data-view="words">My words <span id="word-count">0</span></button>
+      <button class="nav-button" data-view="review">Review <span class="due-badge" id="due-count">0</span></button>
+    </nav>
+    <span class="header-note">A little learning, every day.</span>
+  </header>
+  <main>
+    <section id="search-view" class="view">
+      <div class="intro"><p class="eyebrow">YOUR PERSONAL WORD JOURNAL</p><h1>A world of words.<br><em>Yours to discover.</em></h1><p>Find the meaning. Keep the word. Make it part of your story.</p></div>
+      <form id="search-form" class="search-card">
+        <label for="query" class="sr-only">Word or phrase to look up</label>
+        <div class="search-line"><span aria-hidden="true" class="search-icon">⌕</span><input id="query" name="word" placeholder="What word are you curious about?" maxlength="200" autocomplete="off" required><button class="primary" id="search-button" type="submit">Look it up <span aria-hidden="true">↗</span></button></div>
+        <fieldset><legend>Look up with</legend><label><input type="radio" name="source" value="all" checked><span>All dictionaries</span></label><label><input type="radio" name="source" value="local"><span>Local dictionary</span></label><label><input type="radio" name="source" value="dict.cn"><span>dict.cn <small>海词</small></span></label><label><input type="radio" name="source" value="youdao"><span>Youdao <small>有道</small></span></label></fieldset>
+        <div class="search-footer"><span class="save-dot" aria-hidden="true"></span>Words with definitions are saved to your journal.</div>
+      </form>
+      <p id="search-status" role="status" aria-live="polite"></p>
+      <div id="result" hidden></div>
+      <div class="daily-heading"><h2>A moment of discovery</h2><span id="daily-date"></span></div>
+      <div class="daily-grid">
+        <article class="daily-word"><p class="eyebrow" id="daily-label">01 / WORD OF THE DAY</p><h3 id="daily-word">…</h3><p id="daily-meaning"></p><p class="example" id="daily-example"></p><button class="text-button" id="daily-lookup">Explore this word <span aria-hidden="true">↗</span></button><span class="card-watermark" aria-hidden="true">Aa</span></article>
+        <article class="daily-proverb"><p class="eyebrow">02 / A LITTLE WISDOM</p><blockquote id="daily-proverb">…</blockquote><p class="chinese" id="daily-chinese"></p><p id="daily-explanation"></p><span class="proverb-label">PROVERB OF THE DAY</span></article>
+      </div>
+    </section>
+    <section id="words-view" class="view" hidden>
+      <div class="page-heading"><p class="eyebrow">COLLECTED WITH CURIOSITY</p><h1>Your word journal.</h1><p>Small discoveries, remembered for the long run.</p></div>
+      <label class="filter-label" for="word-filter">Find a saved word</label><input id="word-filter" class="filter" placeholder="Filter your words…" type="search">
+      <p id="words-status" role="status"></p><div id="word-list" class="word-list"></div>
+    </section>
+    <section id="review-view" class="view" hidden>
+      <div class="page-heading"><p class="eyebrow">MAKE IT SECOND NATURE</p><h1>A little practice.</h1><p>Recall the meaning, then turn the card to check yourself.</p></div>
+      <p id="review-progress" role="status"></p><div id="review-card" class="review-card"></div>
+    </section>
+    <p id="app-message" role="status" aria-live="polite"></p>
+  </main>
+  <footer><span class="brand-small">wordbook<span>•</span></span><span>One word at a time.</span><span>Your journal is saved on the Wordbook server.</span></footer>
+</body>
+</html>

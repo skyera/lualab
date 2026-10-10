@@ -1127,7 +1127,13 @@ end
 -- Wordset format: { ["word"] = { word=..., meanings = { {def=..., speech_part=..., example=..., synonyms={...}}, ... } } }
 function Importer.ingest_wordset(db, obj, defer_fts)
     local words, senses = 0, 0
-    for w, entry in pairs(obj) do
+    -- Wordset has aliases/case variants that resolve to the same stored word.
+    -- Stable order makes repeated imports choose the same final definitions.
+    local keys = {}
+    for key in pairs(obj) do keys[#keys + 1] = key end
+    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+    for _, w in ipairs(keys) do
+        local entry = obj[w]
         local meanings = type(entry) == "table" and (entry.meanings or entry) or nil
         local list = {}
         if type(meanings) == "table" then
@@ -2486,6 +2492,8 @@ Options:
   --ascii                ASCII-only borders
   --def/--example/--pos/--syn/--ant/--mnem/--tags <v>   Fields for `add`
   --wordset|--webster|--csv   Import format (with `import`)
+  --import-dict         Refresh Wordset manually (also works without a command)
+  --no-auto-import      Disable automatic setup when the dictionary is empty
   --test                 Run built-in unit & integration test suite
 
 Download and import the Wordset dictionary (run from the project directory):
@@ -2660,6 +2668,8 @@ local function parse_args(args)
         snapshot = false,
         ascii = false,
         import_fmt = nil,
+        auto_import = true,
+        force_import = false,
         fields = {},
     }
     local field_flags = {
@@ -2678,6 +2688,12 @@ local function parse_args(args)
             opts.seed = tonumber(args[i + 1]); i = i + 1
         elseif a == "--any" then
             opts.any = true
+        elseif a == "--auto-import" then
+            opts.auto_import = true
+        elseif a == "--no-auto-import" then
+            opts.auto_import = false
+        elseif a == "--import-dict" then
+            opts.force_import = true
         elseif a == "--snapshot" then
             opts.snapshot = true
         elseif a == "--ascii" then
@@ -2882,10 +2898,24 @@ local function main(args)
         run_self_tests()
         return
     end
-    if not opts.command then
+    if not opts.command and not opts.force_import then
         print_help()
         return
     end
+
+    if opts.force_import or (opts.auto_import and opts.command ~= "import") then
+        local script_root = debug.getinfo(1, "S").source:sub(2):match("^(.*)/") or "."
+        package.path = script_root .. "/?.lua;" .. package.path
+        local ready, setup_err = pcall(function()
+            require("download_dict").ensure({ db = opts.db_path, force = opts.force_import })
+        end)
+        if not ready then
+            io.stderr:write("Dictionary setup failed: " .. tostring(setup_err) .. "\n")
+            os.exit(1)
+        end
+    end
+
+    if not opts.command then return end
 
     local db, err = Database.open(opts.db_path)
     if not db then
@@ -2924,8 +2954,7 @@ end
 --------------------------------------------------------------------------------
 -- 12. Module Export / Entry Point
 --------------------------------------------------------------------------------
-if pcall(debug.getlocal, 4, 1) then
-    return {
+local exports = {
         Database = Database,
         STUDY_TRACKS = STUDY_TRACKS,
         SM2 = SM2,
@@ -2936,6 +2965,11 @@ if pcall(debug.getlocal, 4, 1) then
         Term = Term,
         main = main,
     }
+if pcall(debug.getlocal, 4, 1) then
+    return exports
 else
+    -- Startup helpers can require this module without re-declaring its FFI
+    -- structs or recursively launching the standalone application.
+    package.loaded["ffi_dict"] = exports
     main(arg)
 end
