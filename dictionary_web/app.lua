@@ -11,7 +11,8 @@ local http = require('http')
 local function read_file(path)
     local file, err = io.open(path, 'rb')
     if not file then return nil, err end
-    local data = file:read('*a'); file:close()
+    local data = file:read('*a')
+    file:close()
     return data
 end
 
@@ -26,11 +27,15 @@ while index <= #arg do
     elseif arg[index] == '--port' then
         index = index + 1
         port = tonumber(arg[index])
-        if not port or port < 0 or port > 65535 or port % 1 ~= 0 then error('Invalid --port (0–65535).') end
+        if not port or port < 0 or port > 65535 or port % 1 ~= 0 then
+            error('Invalid --port (0–65535).')
+        end
     elseif arg[index] == '--host' then
         index = index + 1
         bind_host = arg[index]
-        if bind_host ~= '127.0.0.1' and bind_host ~= '0.0.0.0' then error('Invalid --host (127.0.0.1 or 0.0.0.0).') end
+        if bind_host ~= '127.0.0.1' and bind_host ~= '0.0.0.0' then
+            error('Invalid --host (127.0.0.1 or 0.0.0.0).')
+        end
     elseif arg[index] == '--auto-import' then
         auto_import = true
     elseif arg[index] == '--no-auto-import' then
@@ -50,25 +55,35 @@ while index <= #arg do
 end
 
 local schema = assert(read_file(root .. '/schema.sql'))
-if force_import then assert(dictionary_path ~= 'none', '--import-dict requires a local dictionary database.') end
+if force_import then
+    assert(dictionary_path ~= 'none', '--import-dict requires a local dictionary database.')
+end
 if dictionary_path ~= 'none' and (auto_import or force_import) then
     require('download_dict').ensure({db = dictionary_path, force = force_import})
 end
 local db = Store.open(database, schema, dictionary_path)
-local files = {['/'] = {'index.html', 'text/html; charset=utf-8'},
+local files = {
+    ['/']           = {'index.html', 'text/html; charset=utf-8'},
     ['/index.html'] = {'index.html', 'text/html; charset=utf-8'},
-    ['/app.js'] = {'app.js', 'text/javascript; charset=utf-8'},
-    ['/style.css'] = {'style.css', 'text/css; charset=utf-8'}}
+    ['/app.js']     = {'app.js',     'text/javascript; charset=utf-8'},
+    ['/style.css']  = {'style.css',  'text/css; charset=utf-8'},
+}
 
 local function handler(request, actual_port)
-    local function reply(data, status) return json.encode(data), status, 'application/json; charset=utf-8' end
+    local function reply(data, status)
+        return json.encode(data), status, 'application/json; charset=utf-8'
+    end
     local host = request.headers.host
     local allowed = {['127.0.0.1:' .. actual_port] = true, ['localhost:' .. actual_port] = true}
     local hostname, host_port = (host or ''):match('^([%w%.%-]+):(%d+)$')
     local network_host = bind_host == '0.0.0.0' and hostname and tonumber(host_port) == actual_port
-    if not allowed[host] and not network_host then return reply({error = 'Invalid Host header.'}, 403) end
+    if not allowed[host] and not network_host then
+        return reply({error = 'Invalid Host header.'}, 403)
+    end
     local origin = request.headers.origin
-    if origin and origin ~= 'http://' .. host then return reply({error = 'Cross-origin requests are not allowed.'}, 403) end
+    if origin and origin ~= 'http://' .. host then
+        return reply({error = 'Cross-origin requests are not allowed.'}, 403)
+    end
     local path, params = http.target(request.target)
     if request.method ~= 'GET' and request.method ~= 'POST' and request.method ~= 'HEAD' then
         return reply({error = 'Method not allowed.'}, 405)
@@ -79,19 +94,29 @@ local function handler(request, actual_port)
             local kind = request.headers['content-type'] or ''
             local media_type = kind:lower():match('^%s*([^;]+)') or ''
             media_type = media_type:gsub('%s+$', '')
-            if media_type ~= 'application/json' then return reply({error = 'Send application/json.'}, 415) end
+            if media_type ~= 'application/json' then
+                return reply({error = 'Send application/json.'}, 415)
+            end
             local ok, result = pcall(json.decode, request.body)
-            if not ok then return reply({error = 'Invalid JSON request.'}, 400) end
+            if not ok then
+                return reply({error = 'Invalid JSON request.'}, 400)
+            end
             payload = result
         end
         local data, status = service.route(db, request.method == 'HEAD' and 'GET' or request.method, path, params, payload)
         return reply(data, status)
     end
-    if request.method == 'POST' then return reply({error = 'Not found.'}, 404) end
+    if request.method == 'POST' then
+        return reply({error = 'Not found.'}, 404)
+    end
     local file = files[path]
-    if not file then return reply({error = 'Not found.'}, 404) end
+    if not file then
+        return reply({error = 'Not found.'}, 404)
+    end
     local data = read_file(root .. '/static/' .. file[1])
-    if not data then return reply({error = 'File not found.'}, 404) end
+    if not data then
+        return reply({error = 'File not found.'}, 404)
+    end
     return data, 200, file[2]
 end
 
@@ -100,4 +125,7 @@ local ok, err = pcall(http.serve, port, handler, function(actual_port)
     io.stdout:flush()
 end, bind_host)
 db:close()
-if not ok then io.stderr:write(tostring(err) .. '\n'); os.exit(1) end
+if not ok then
+    io.stderr:write(tostring(err) .. '\n')
+    os.exit(1)
+end

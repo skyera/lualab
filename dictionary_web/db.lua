@@ -22,6 +22,13 @@ double sqlite3_column_double(sqlite3_stmt *, int);
 ]]
 local sqlite = ffi.load('sqlite3')
 local transient = ffi.cast('void (*)(void *)', -1)
+
+local SQLITE_INTEGER = 1
+local SQLITE_FLOAT   = 2
+local SQLITE_TEXT    = 3
+local SQLITE_ROW     = 100
+local SQLITE_DONE    = 101
+
 local DB = {}
 DB.__index = DB
 
@@ -29,14 +36,21 @@ function DB.open(path, schema)
     local ptr = ffi.new('sqlite3 *[1]')
     if sqlite.sqlite3_open(path, ptr) ~= 0 then
         local message = ptr[0] ~= nil and ffi.string(sqlite.sqlite3_errmsg(ptr[0])) or 'SQLite open failed'
-        if ptr[0] ~= nil then sqlite.sqlite3_close(ptr[0]) end
+        if ptr[0] ~= nil then
+            sqlite.sqlite3_close(ptr[0])
+        end
         error(message)
     end
     local self = setmetatable({handle = ffi.gc(ptr[0], sqlite.sqlite3_close)}, DB)
     sqlite.sqlite3_busy_timeout(self.handle, 5000)
     local ok, err = true, nil
-    if schema then ok, err = pcall(self.query, self, schema) end
-    if not ok then self:close(); error(err) end
+    if schema then
+        ok, err = pcall(self.query, self, schema)
+    end
+    if not ok then
+        self:close()
+        error(err)
+    end
     return self
 end
 
@@ -70,15 +84,17 @@ function DB:query(sql, params)
         local rows = {}
         while true do
             local rc = sqlite.sqlite3_step(stmt)
-            if rc == 101 then break end
-            if rc ~= 100 then error(ffi.string(sqlite.sqlite3_errmsg(self.handle))) end
+            if rc == SQLITE_DONE then break end
+            if rc ~= SQLITE_ROW then
+                error(ffi.string(sqlite.sqlite3_errmsg(self.handle)))
+            end
             local row = {}
             for index = 0, sqlite.sqlite3_column_count(stmt) - 1 do
                 local kind = sqlite.sqlite3_column_type(stmt, index)
                 local name = ffi.string(sqlite.sqlite3_column_name(stmt, index))
-                if kind == 1 or kind == 2 then
+                if kind == SQLITE_INTEGER or kind == SQLITE_FLOAT then
                     row[name] = sqlite.sqlite3_column_double(stmt, index)
-                elseif kind == 3 then
+                elseif kind == SQLITE_TEXT then
                     row[name] = ffi.string(sqlite.sqlite3_column_text(stmt, index))
                 end
             end
@@ -98,7 +114,9 @@ end
 function DB:save(word, source, entry, stamp)
     stamp = stamp or os.time()
     -- Youdao dictionary terms forbid caching provider responses.
-    if source == 'youdao' then entry = nil end
+    if source == 'youdao' then
+        entry = nil
+    end
     self:query([[INSERT INTO words(word,source,entry,first_seen,last_seen,fetched_at,due_at)
         VALUES(?,?,?,?,?,?,?) ON CONFLICT(word,source) DO UPDATE SET
         lookup_count=lookup_count+1,last_seen=excluded.last_seen,
@@ -112,10 +130,15 @@ function DB:words(query, due, stamp)
     local escaped = (query or ''):gsub('\\', '\\\\'):gsub('%%', '\\%%'):gsub('_', '\\_')
     local sql = "SELECT * FROM words WHERE word LIKE ? ESCAPE '\\'"
     local params = {'%' .. escaped .. '%'}
-    if due then sql = sql .. ' AND due_at<=?'; params[2] = stamp or os.time() end
+    if due then
+        sql = sql .. ' AND due_at<=?'
+        params[2] = stamp or os.time()
+    end
     local rows = self:query(sql .. ' ORDER BY last_seen DESC,id DESC', params)
     for _, row in ipairs(rows) do
-        if row.entry then row.entry = json.decode(row.entry) end
+        if row.entry then
+            row.entry = json.decode(row.entry)
+        end
     end
     return rows
 end
@@ -123,7 +146,9 @@ end
 function DB:review(id, remembered, stamp)
     stamp = stamp or os.time()
     local row = self:query('SELECT streak FROM words WHERE id=?', {id})[1]
-    if not row then return nil, 'Word not found.' end
+    if not row then
+        return nil, 'Word not found.'
+    end
     local streak = remembered and row.streak + 1 or 0
     local delay = remembered and math.min(30, 2 ^ math.min(streak - 1, 5)) * 86400 or 600
     self:query('UPDATE words SET streak=?,review_count=review_count+1,due_at=? WHERE id=?',
@@ -132,7 +157,9 @@ function DB:review(id, remembered, stamp)
 end
 
 function DB:note(id, note)
-    if not self:query('SELECT id FROM words WHERE id=?', {id})[1] then return nil, 'Word not found.' end
+    if not self:query('SELECT id FROM words WHERE id=?', {id})[1] then
+        return nil, 'Word not found.'
+    end
     self:query('UPDATE words SET note=? WHERE id=?', {note, id})
     return {saved = true}
 end
@@ -146,7 +173,9 @@ function DB:delete(id)
         self:query('COMMIT;')
         return {deleted = true, word = row.word}
     end)
-    if not ok or not result then self:query('ROLLBACK;') end
+    if not ok or not result then
+        self:query('ROLLBACK;')
+    end
     if not ok then error(result) end
     return result, not result and 'Word not found.' or nil
 end

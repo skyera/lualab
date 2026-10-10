@@ -23,12 +23,25 @@ local proverbs = {
     {'Look before you leap.', '三思而后行。', 'Consider the consequences before making a decision.'},
 }
 local M = {}
+
 function M.daily(stamp)
     stamp = stamp or os.time()
     local day = math.floor(stamp / 86400)
-    local word, proverb = words[day % #words + 1], proverbs[day % #proverbs + 1]
-    return {date = os.date('!%Y-%m-%d', stamp),
-        word = {word = word[1], meaning = word[2], example = word[3]},
-        proverb = {text = proverb[1], chinese = proverb[2], explanation = proverb[3]}}
+    local word = words[day % #words + 1]
+    local proverb = proverbs[day % #proverbs + 1]
+    return {
+        date = os.date('!%Y-%m-%d', stamp),
+        word = {
+            word = word[1],
+            meaning = word[2],
+            example = word[3],
+        },
+        proverb = {
+            text = proverb[1],
+            chinese = proverb[2],
+            explanation = proverb[3],
+        },
+    }
 end
+
 return M

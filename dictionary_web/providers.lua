@@ -117,10 +117,18 @@ local function class_elements(html, tag, class_name, limit)
         position = last + 1
         local classes = attrs:match('class%s*=%s*["\']([^"\']*)["\']') or ''
         local matches = false
-        for token in classes:gmatch('%S+') do if token == class_name then matches = true; break end end
+        for token in classes:gmatch('%S+') do
+            if token == class_name then
+                matches = true
+                break
+            end
+        end
         if matches then
             local finish, ending = html:find('</' .. tag .. '%s*>', position)
-            if finish then values[#values + 1] = html:sub(position, finish - 1); position = ending + 1 end
+            if finish then
+                values[#values + 1] = html:sub(position, finish - 1)
+                position = ending + 1
+            end
         end
     end
     return values
@@ -129,29 +137,46 @@ end
 function M.parse_youdao_public(html)
     -- Ignore JavaScript, CSS and comments; only inspect server-rendered content.
     html = html:gsub('<[sS][cC][rR][iI][pP][tT][^>]*>.-</[sS][cC][rR][iI][pP][tT]%s*>', '')
-        :gsub('<[sS][tT][yY][lL][eE][^>]*>.-</[sS][tT][yY][lL][eE]%s*>', ''):gsub('<!%-%-.-%-%->', '')
+        :gsub('<[sS][tT][yY][lL][eE][^>]*>.-</[sS][tT][yY][lL][eE]%s*>', '')
+        :gsub('<!%-%-.-%-%->', '')
     local basic = class_elements(html, 'ul', 'basic', 1)[1]
-    if not basic then return nil, 'No definition found on Youdao’s public page. Open the source page or try another dictionary.' end
+    if not basic then
+        return nil, 'No definition found on Youdao’s public page. Open the source page or try another dictionary.'
+    end
     local definitions, phonetics, examples, seen = {}, {}, {}, {}
     local function add(text)
         text = clean(text)
         if text ~= '' and not seen[text] and #definitions < 12 then
-            definitions[#definitions + 1] = text; seen[text] = true
+            definitions[#definitions + 1] = text
+            seen[text] = true
         end
     end
-    for _, text in ipairs(class_elements(basic, 'span', 'trans')) do add(text) end
+    for _, text in ipairs(class_elements(basic, 'span', 'trans')) do
+        add(text)
+    end
     -- Chinese queries have linked English translations instead of trans spans.
     if #definitions == 0 then
-        for _, text in ipairs(class_elements(basic, 'div', 'trans-ce')) do add(text) end
+        for _, text in ipairs(class_elements(basic, 'div', 'trans-ce')) do
+            add(text)
+        end
     end
-    if #definitions == 0 then return nil, 'No definition found on Youdao’s public page. Open the source page or try another dictionary.' end
-    for _, text in ipairs(class_elements(html, 'span', 'phonetic', 2)) do phonetics[#phonetics + 1] = clean(text) end
+    if #definitions == 0 then
+        return nil, 'No definition found on Youdao’s public page. Open the source page or try another dictionary.'
+    end
+    for _, text in ipairs(class_elements(html, 'span', 'phonetic', 2)) do
+        phonetics[#phonetics + 1] = clean(text)
+    end
     local english = class_elements(html, 'div', 'sen-eng', 4)
     local chinese = class_elements(html, 'div', 'sen-ch', 4)
     for index, text in ipairs(english) do
         examples[#examples + 1] = clean(text) .. (chinese[index] and ' / ' .. clean(chinese[index]) or '')
     end
-    return {definitions = definitions, phonetic = table.concat(phonetics, ' · '), examples = examples, via = 'public-page'}
+    return {
+        definitions = definitions,
+        phonetic = table.concat(phonetics, ' · '),
+        examples = examples,
+        via = 'public-page',
+    }
 end
 
 local function decorate(entry, source, word)
@@ -163,14 +188,17 @@ local function youdao_public_lookup(word, fetch)
     local raw, message = fetch(M.source_url('youdao', word))
     if not raw then return nil, message end
     local ok, entry, err = pcall(M.parse_youdao_public, raw)
-    if not ok then return nil, 'Youdao’s public page could not be read. Open the source page for this word.' end
+    if not ok then
+        return nil, 'Youdao’s public page could not be read. Open the source page for this word.'
+    end
     if not entry then return nil, err end
     return decorate(entry, 'youdao', word)
 end
 
 local function nonce()
     local file = assert(io.open('/dev/urandom', 'rb'))
-    local bytes = assert(file:read(16)); file:close()
+    local bytes = assert(file:read(16))
+    file:close()
     return (bytes:gsub('.', function(char) return string.format('%02x', char:byte()) end))
 end
 
