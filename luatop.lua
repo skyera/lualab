@@ -33,13 +33,14 @@ local is_windows = (ffi.os == "Windows")
 
 local enable_raw_mode, disable_raw_mode, suspend_raw_mode, resume_raw_mode, get_terminal_size, read_key
 local in_raw_mode = false
+local kernel32, psapi
 
 -- =========================================================================
 -- 1. FFI & OS Terminal Management (POSIX / Win32)
 -- =========================================================================
 if is_windows then
-    local kernel32 = ffi.load("kernel32")
-    local psapi = ffi.load("psapi")
+    kernel32 = ffi.load("kernel32")
+    psapi = ffi.load("psapi")
 
     ffi.cdef[[
         typedef void *HANDLE;
@@ -1115,8 +1116,8 @@ local function resolve_username(uid)
 end
 
 if is_windows then
-    local kernel32 = ffi.load("kernel32")
-    local psapi = ffi.load("psapi")
+    kernel32 = kernel32 or ffi.load("kernel32")
+    psapi = psapi or ffi.load("psapi")
 
     local function filetime_to_num(ft)
         return tonumber(ft.dwHighDateTime) * 4294967296 + tonumber(ft.dwLowDateTime)
@@ -1655,23 +1656,28 @@ if is_windows then
     terminate_process = function(pid)
         local h = kernel32.OpenProcess(0x0001, 0, pid)
         if h ~= nil then
-            kernel32.TerminateProcess(h, 1)
+            local ok = kernel32.TerminateProcess(h, 1)
             kernel32.CloseHandle(h)
+            return (ok ~= 0), (ok == 0 and "TerminateProcess failed" or nil)
         end
+        return false, "Access denied / process not found"
     end
 
     kill_process = function(pid)
         local h = kernel32.OpenProcess(0x0001, 0, pid)
         if h ~= nil then
-            kernel32.TerminateProcess(h, 9)
+            local ok = kernel32.TerminateProcess(h, 9)
             kernel32.CloseHandle(h)
+            return (ok ~= 0), (ok == 0 and "TerminateProcess failed" or nil)
         end
+        return false, "Access denied / process not found"
     end
 
     send_signal_to_process = function(pid, sig)
         if sig == 9 or sig == 15 then
-            kill_process(pid)
+            return kill_process(pid)
         end
+        return false, "Signal not supported on Windows"
     end
 
     renice_process = function(pid, new_nice)
@@ -2581,15 +2587,18 @@ else
     end
 
     terminate_process = function(pid)
-        ffi.C.kill(pid, 15)
+        local ret = ffi.C.kill(pid, 15)
+        return (ret == 0), (ret ~= 0 and "Access denied or process exited" or nil)
     end
 
     kill_process = function(pid)
-        ffi.C.kill(pid, 9)
+        local ret = ffi.C.kill(pid, 9)
+        return (ret == 0), (ret ~= 0 and "Access denied or process exited" or nil)
     end
 
     send_signal_to_process = function(pid, sig)
-        ffi.C.kill(pid, sig)
+        local ret = ffi.C.kill(pid, sig)
+        return (ret == 0), (ret ~= 0 and "Access denied or process exited" or nil)
     end
 
     renice_process = function(pid, new_nice)
@@ -3513,6 +3522,10 @@ Keybindings:
     local show_renice_modal = false
     local show_diagnostic_modal = false
     local sel_signal_idx = 1
+    local target_signal_pid = nil
+    local target_signal_comm = nil
+    local target_renice_pid = nil
+    local target_renice_comm = nil
     local sel_diagnostic_preset = 1
     local diagnostic_custom_cmd = ""
     local diagnostic_is_editing = false
@@ -3618,10 +3631,15 @@ Keybindings:
                                 show_diagnostic_modal = false
                             end
                         end
-                    elseif show_help or show_inspector or show_signal_modal then
+                    elseif show_help or show_inspector or show_signal_modal or show_renice_modal then
                         show_help = false
                         show_inspector = false
                         show_signal_modal = false
+                        show_renice_modal = false
+                        target_signal_pid = nil
+                        target_signal_comm = nil
+                        target_renice_pid = nil
+                        target_renice_comm = nil
                     elseif zoomed_pane then
                         if k.y == 2 then
                             -- Clicked title bar of zoomed pane: unzoom
@@ -3787,14 +3805,21 @@ Keybindings:
                     show_inspector = false
                 elseif k == "k" then
                     show_inspector = false
-                    show_signal_modal = true
-                    sel_signal_idx = 1
+                    local pr = procs[sel_proc]
+                    if pr then
+                        show_signal_modal = true
+                        sel_signal_idx = 1
+                        target_signal_pid = pr.pid
+                        target_signal_comm = pr.comm
+                    end
                 elseif k == "R" or k == "r" then
                     show_inspector = false
                     local pr = procs[sel_proc]
                     if pr then
                         renice_val = pr.nice or 0
                         show_renice_modal = true
+                        target_renice_pid = pr.pid
+                        target_renice_comm = pr.comm
                     end
                 elseif k == ":" or k == "!" or k == "o" or k == "O" then
                     show_inspector = false
@@ -3806,16 +3831,18 @@ Keybindings:
             elseif show_signal_modal then
                 if k == "ESC" or k == "q" then
                     show_signal_modal = false
+                    target_signal_pid = nil
+                    target_signal_comm = nil
                 elseif k == "UP" or k == "k" then
                     sel_signal_idx = math.max(1, sel_signal_idx - 1)
                 elseif k == "DOWN" or k == "j" then
                     sel_signal_idx = math.min(#SIGNALS, sel_signal_idx + 1)
                 elseif k == "ENTER" then
                     -- Dispatch signal
-                    -- Will be executed during frame logic with selected process
+                    -- Will be executed during frame logic with pinned process
                     show_signal_modal = false
                     local sig_info = SIGNALS[sel_signal_idx]
-                    status_flash_msg = string.format("Dispatched %s (%d)", sig_info.name, sig_info.sig)
+                    status_flash_msg = string.format("Dispatching %s (%d)...", sig_info.name, sig_info.sig)
                     status_flash_expiry = os.clock() + 3.0
                     -- Flag to execute kill
                     k = "__SEND_SIGNAL__"
@@ -3823,23 +3850,28 @@ Keybindings:
             elseif show_renice_modal then
                 if k == "ESC" or k == "q" then
                     show_renice_modal = false
+                    target_renice_pid = nil
+                    target_renice_comm = nil
                 elseif k == "LEFT" or k == "DOWN" or k == "h" or k == "j" or k == "-" then
                     renice_val = math.max(-20, renice_val - 1)
                 elseif k == "RIGHT" or k == "UP" or k == "l" or k == "k" or k == "+" or k == "=" then
                     renice_val = math.min(19, renice_val + 1)
                 elseif k == "ENTER" then
                     show_renice_modal = false
-                    local pr = procs[sel_proc]
-                    if pr then
-                        local ok = renice_process(pr.pid, renice_val)
+                    local r_pid = target_renice_pid or (procs[sel_proc] and procs[sel_proc].pid)
+                    local r_comm = target_renice_comm or (procs[sel_proc] and procs[sel_proc].comm)
+                    if r_pid then
+                        local ok = renice_process(r_pid, renice_val)
                         if ok then
-                            status_flash_msg = string.format("Reniced PID %d (%s) to %d", pr.pid, pr.comm, renice_val)
-                            pr.nice = renice_val
+                            status_flash_msg = string.format("Reniced PID %d (%s) to %d", r_pid, r_comm or "process", renice_val)
+                            next_refresh_time = 0
                         else
-                            status_flash_msg = string.format("Failed to renice PID %d (Permission denied? Root required)", pr.pid)
+                            status_flash_msg = string.format("Failed to renice PID %d (Permission denied? Root required)", r_pid)
                         end
                         status_flash_expiry = os.clock() + 3.0
                     end
+                    target_renice_pid = nil
+                    target_renice_comm = nil
                 end
             elseif show_diagnostic_modal then
                 local presets = get_diagnostic_presets()
@@ -4039,13 +4071,20 @@ Keybindings:
                 elseif k == "ENTER" or k == "i" then
                     show_inspector = true
                 elseif k == "k" then
-                    show_signal_modal = true
-                    sel_signal_idx = 1
+                    local pr = procs[sel_proc]
+                    if pr then
+                        show_signal_modal = true
+                        sel_signal_idx = 1
+                        target_signal_pid = pr.pid
+                        target_signal_comm = pr.comm
+                    end
                 elseif k == "R" or k == "F7" or k == "F8" then
                     local pr = procs[sel_proc]
                     if pr then
                         renice_val = pr.nice or 0
                         show_renice_modal = true
+                        target_renice_pid = pr.pid
+                        target_renice_comm = pr.comm
                     end
                 elseif k == ":" or k == "!" or k == "o" or k == "O" then
                     show_diagnostic_modal = true
@@ -4150,13 +4189,23 @@ Keybindings:
             sel_proc = math.max(1, math.min(sel_proc, math.max(1, #procs)))
 
             -- Execute signal if requested
-            if k == "__SEND_SIGNAL__" and procs[sel_proc] then
-                local target = procs[sel_proc]
-                local sig = SIGNALS[sel_signal_idx].sig
-                send_signal_to_process(target.pid, sig)
-                status_flash_msg = string.format("Sent %s (%d) to PID %d (%s)",
-                    SIGNALS[sel_signal_idx].name, sig, target.pid, target.comm)
+            if k == "__SEND_SIGNAL__" and (target_signal_pid or procs[sel_proc]) then
+                local t_pid = target_signal_pid or procs[sel_proc].pid
+                local t_comm = target_signal_comm or procs[sel_proc].comm or "process"
+                local sig_info = SIGNALS[sel_signal_idx] or SIGNALS[1]
+                local sig = sig_info.sig
+                local ok, err = send_signal_to_process(t_pid, sig)
+                if ok then
+                    status_flash_msg = string.format("Sent %s (%d) to PID %d (%s)",
+                        sig_info.name, sig, t_pid, t_comm)
+                    next_refresh_time = 0
+                else
+                    status_flash_msg = string.format("Failed to send %s to PID %d: %s",
+                        sig_info.name, t_pid, err or "Access denied")
+                end
                 status_flash_expiry = os.clock() + 3.0
+                target_signal_pid = nil
+                target_signal_comm = nil
             end
 
             -- =================================================================
@@ -4635,18 +4684,21 @@ Keybindings:
                     format_rate(pr.io_read_rate or 0), format_bytes(math.floor((pr.io_read_bytes or 0) / 1024)),
                     format_rate(pr.io_write_rate or 0), format_bytes(math.floor((pr.io_write_bytes or 0) / 1024)))))
                 table.insert(out, draw_box_row(mx, my + 11, mw, string.format("  %s[k] Kill   [R] Renice   [o/:] Diag   [Enter / Esc] Close Inspector%s", C.title_col, C.reset)))
-            elseif show_signal_modal and procs[sel_proc] then
-                local pr = procs[sel_proc]
+            elseif show_signal_modal and (target_signal_pid or procs[sel_proc]) then
+                local pr_pid = target_signal_pid or (procs[sel_proc] and procs[sel_proc].pid or 0)
+                local pr_comm = target_signal_comm or (procs[sel_proc] and procs[sel_proc].comm or "unknown")
                 local mw = math.min(68, term_w - 4)
                 local mh = #SIGNALS + 6
                 local mx = math.floor((term_w - mw) / 2)
                 local my = math.floor((term_h - mh) / 2)
-                draw_modal_box(out, mx, my, mw, mh, string.format("Dispatch Signal to PID %d (%s)", pr.pid, pr.comm))
+                draw_modal_box(out, mx, my, mw, mh, string.format("Dispatch Signal to PID %d (%s)", pr_pid, pr_comm))
 
-                table.insert(out, draw_box_row(mx, my + 1, mw, " Select a POSIX signal to send:"))
+                local prompt_header = is_windows and " Select a signal to dispatch (Win32):" or " Select a POSIX signal to send:"
+                table.insert(out, draw_box_row(mx, my + 1, mw, prompt_header))
                 for s_i, s in ipairs(SIGNALS) do
                     local is_sel = (s_i == sel_signal_idx)
-                    local line = string.format("   [%2d] %-8s - %s", s.sig, s.name, s.desc)
+                    local extra = (is_windows and s.sig ~= 9 and s.sig ~= 15) and " (POSIX only)" or ""
+                    local line = string.format("   [%2d] %-8s - %s%s", s.sig, s.name, s.desc, extra)
                     if is_sel then
                         table.insert(out, draw_box_row(mx, my + 2 + s_i, mw, C.sel_bg .. "▶" .. line:sub(2) .. C.reset))
                     else
@@ -4654,15 +4706,18 @@ Keybindings:
                     end
                 end
                 table.insert(out, draw_box_row(mx, my + mh - 2, mw, string.format("  %s[↑/↓] Select   [Enter] Send   [Esc] Cancel%s", C.dim, C.reset)))
-            elseif show_renice_modal and procs[sel_proc] then
+            elseif show_renice_modal and (target_renice_pid or procs[sel_proc]) then
                 local pr = procs[sel_proc]
+                local pr_pid = target_renice_pid or (pr and pr.pid or 0)
+                local pr_comm = target_renice_comm or (pr and pr.comm or "unknown")
+                local cur_nice = (pr and pr.nice) or renice_val or 0
                 local mw = math.min(64, term_w - 4)
                 local mh = 10
                 local mx = math.floor((term_w - mw) / 2)
                 local my = math.floor((term_h - mh) / 2)
-                draw_modal_box(out, mx, my, mw, mh, string.format("Renice Process: PID %d (%s)", pr.pid, pr.comm))
+                draw_modal_box(out, mx, my, mw, mh, string.format("Renice Process: PID %d (%s)", pr_pid, pr_comm))
 
-                table.insert(out, draw_box_row(mx, my + 1, mw, string.format(" Current Priority: %sNice %d%s", C.bold, pr.nice or 0, C.reset)))
+                table.insert(out, draw_box_row(mx, my + 1, mw, string.format(" Current Priority: %sNice %d%s", C.bold, cur_nice, C.reset)))
                 table.insert(out, draw_box_row(mx, my + 2, mw, " Adjust priority (-20 = Highest/Realtime, 19 = Lowest/Idle):"))
 
                 local slider_w = mw - 16
@@ -4977,6 +5032,21 @@ local function run_self_test()
         print(string.format("  ✔ Process Renice Engine: Priority subsystem verified (Current PID nice: %d)", cur_prio))
     end
 
+    -- Signal Dispatcher & Process Termination test
+    assert(type(send_signal_to_process) == "function", "send_signal_to_process must be a function")
+    assert(type(kill_process) == "function", "kill_process must be a function")
+    assert(type(terminate_process) == "function", "terminate_process must be a function")
+    assert(#SIGNALS == 6, "Must define 6 signals in SIGNALS table")
+    local sig_ok, sig_err = send_signal_to_process(-9999, 9)
+    assert(sig_ok == false, "Sending signal to invalid PID must fail safely")
+    assert(type(sig_err) == "string" and #sig_err > 0, "Error description must be returned on failure")
+    if is_windows then
+        local posix_ok, posix_err = send_signal_to_process(procs[1].pid, 19)
+        assert(posix_ok == false, "SIGSTOP must return false on Windows")
+        assert(posix_err:find("not supported", 1, true) ~= nil, "Unsupported signal must be reported on Windows")
+    end
+    print("  ✔ Signal Dispatcher Engine: Verified safe termination dispatch, error returns, and signal constraints")
+
     -- Maximized Zoomed Panes test (Proposal 1)
     for p_idx = 1, 4 do
         local frame_80 = render_zoomed_pane_frame(p_idx, nil, 80, 24)
@@ -5060,6 +5130,10 @@ local M = {
     build_process_tree            = build_process_tree,
     match_smart_filter            = match_smart_filter,
     renice_process                = renice_process,
+    send_signal_to_process        = send_signal_to_process,
+    kill_process                  = kill_process,
+    terminate_process             = terminate_process,
+    SIGNALS                       = SIGNALS,
     resolve_username              = resolve_username,
     set_theme                     = set_theme,
     cycle_theme                   = cycle_theme,

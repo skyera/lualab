@@ -771,6 +771,59 @@ TestRunner.describe("10. Process Diagnostic Command Runner Modal (Proposal 3)", 
     end)
 end)
 
+-- 11. Process Termination & Safe Signal Dispatcher
+TestRunner.describe("11. Process Termination & Safe Signal Dispatcher", function()
+    TestRunner.it("should safely export send_signal_to_process, kill_process, terminate_process, and SIGNALS", function()
+        assert_true(type(btop.send_signal_to_process) == "function", "send_signal_to_process must be exported")
+        assert_true(type(btop.kill_process) == "function", "kill_process must be exported")
+        assert_true(type(btop.terminate_process) == "function", "terminate_process must be exported")
+        assert_true(type(btop.SIGNALS) == "table", "SIGNALS table must be exported")
+        assert_eq(#btop.SIGNALS, 6, "SIGNALS table must contain 6 standard presets")
+    end)
+
+    TestRunner.it("should return false and informative error string when signaling invalid or non-existent PID", function()
+        local ok, err = btop.send_signal_to_process(-99999, 9)
+        assert_true(ok == false, "Signaling negative PID should return false")
+        assert_true(type(err) == "string" and #err > 0, "Error string must explain the failure reason")
+
+        local term_ok, term_err = btop.terminate_process(-99999)
+        assert_true(term_ok == false, "Terminating negative PID should return false")
+        assert_true(type(term_err) == "string" and #term_err > 0, "Terminate error string must be returned")
+
+        local kill_ok, kill_err = btop.kill_process(-99999)
+        assert_true(kill_ok == false, "Killing negative PID should return false")
+        assert_true(type(kill_err) == "string" and #kill_err > 0, "Kill error string must be returned")
+    end)
+
+    TestRunner.it("should enforce platform-specific signal capabilities cleanly", function()
+        local is_win = (package.config:sub(1, 1) == "\\")
+        if is_win then
+            -- On Windows, only SIGKILL (9) and SIGTERM (15) are executable via TerminateProcess
+            local ok, err = btop.send_signal_to_process(0, 19) -- SIGSTOP
+            assert_true(ok == false, "SIGSTOP must return false on Windows")
+            assert_true(err:find("not supported on Windows", 1, true) ~= nil, "Error message specifies Windows unsupported signal")
+
+            local hup_ok, hup_err = btop.send_signal_to_process(0, 1) -- SIGHUP
+            assert_true(hup_ok == false, "SIGHUP must return false on Windows")
+            assert_true(hup_err:find("not supported on Windows", 1, true) ~= nil, "Error message specifies Windows unsupported signal")
+        end
+    end)
+
+    TestRunner.it("should verify SIGNALS definition includes required signals and descriptions", function()
+        local sig_names = {}
+        for _, s in ipairs(btop.SIGNALS) do
+            sig_names[s.name] = s.sig
+            assert_true(type(s.desc) == "string" and #s.desc > 0, "Signal " .. s.name .. " has description")
+        end
+        assert_eq(sig_names["SIGTERM"], 15, "SIGTERM = 15")
+        assert_eq(sig_names["SIGKILL"], 9,  "SIGKILL = 9")
+        assert_eq(sig_names["SIGHUP"],  1,  "SIGHUP = 1")
+        assert_eq(sig_names["SIGINT"],  2,  "SIGINT = 2")
+        assert_eq(sig_names["SIGSTOP"], 19, "SIGSTOP = 19")
+        assert_eq(sig_names["SIGCONT"], 18, "SIGCONT = 18")
+    end)
+end)
+
 -- Summary
 print("\n--------------------------------------------------")
 local total = TestRunner.passed + TestRunner.failed
