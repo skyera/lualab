@@ -86,6 +86,20 @@ make
   ./LuaJIT/src/luajit lan_dashboard.lua           # Real-time LAN device radar & glassmorphic web dashboard (--port 8888, --scan-only)
   ```
 
+  LAN Dashboard saves its device inventory in `lan_inventory.json` in the working
+  directory. MAC identities preserve first-seen timestamps and custom names across
+  IP changes; missing devices remain visible as **Not observed**, with their last
+  scan observation time. This time means the device appeared in the scan, even if
+  it did not respond to ping. Saved devices start as **Not yet checked** after a
+  restart. Scans without port probing preserve previously detected services.
+  `lan_names.json` remains compatible. Set `LAN_INVENTORY_FILE` to use another
+  inventory path. Invalid inventories are reported and preserved; repair or move
+  the file and restart to resume saving. Changed inventories are replaced via a
+  temporary file, so failed writes leave the previous inventory intact.
+
+  Inventory checks: `luajit test_lan_inventory.lua`,
+  `luajit test_lan_dashboard.lua`, and `node test_lan_dashboard_ui.js`.
+
 - **Run Unit Tests:**
   ```bash
   make test

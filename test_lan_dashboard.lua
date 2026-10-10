@@ -227,7 +227,7 @@ end)
 
 -- Test 10: Undeclared Globals Check via LuaJIT Bytecode
 test("Bytecode Scoping (Assert 0 Undeclared Globals)", function()
-    local p = io.popen("luajit -bl lan_dashboard.lua", "r")
+    local p = io.popen("luajit -bl lan_dashboard.lua && luajit -bl lan_inventory.lua", "r")
     assert(p, "Failed to run luajit -bl")
     local bc = p:read("*a")
     p:close()
@@ -254,7 +254,15 @@ end)
 
 -- Test 11: Web Server REST Endpoints Verification
 test("Embedded HTTP Web Server endpoints respond with 200 OK", function()
-    local p = io.popen("luajit lan_dashboard.lua -p 18889 >/dev/null 2>&1 & echo $!", "r")
+    local path = os.tmpname()
+    os.remove(path)
+    local inventory_module = require("lan_inventory")
+    local saved_inventory = inventory_module.new(path)
+    saved_inventory:merge({{ip = "203.0.113.254", mac = "aa:bb:cc:dd:ee:ff", hostname = "Saved NAS",
+        vendor = "Test", category = "linux", type_name = "Linux", ports = {}, status = "online"}}, 100, false)
+    assert(saved_inventory:save())
+    local escaped_path = "'" .. path:gsub("'", "'\\''") .. "'"
+    local p = io.popen("LAN_INVENTORY_FILE=" .. escaped_path .. " luajit lan_dashboard.lua -p 18889 >/dev/null 2>&1 & echo $!", "r")
     assert(p, "Failed to spawn background server")
     local pid = p:read("*l")
     p:close()
@@ -262,18 +270,40 @@ test("Embedded HTTP Web Server endpoints respond with 200 OK", function()
 
     os.execute("sleep 0.1")
 
-    local curl_p = io.popen("curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18889/", "r")
+    local curl_p = io.popen("curl --max-time 30 -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18889/", "r")
     local code = curl_p and curl_p:read("*a")
     if curl_p then curl_p:close() end
 
-    local curl_api = io.popen("curl -s http://127.0.0.1:18889/api/devices", "r")
+    local curl_api = io.popen("curl --max-time 30 -s http://127.0.0.1:18889/api/devices", "r")
     local api_json = curl_api and curl_api:read("*a")
     if curl_api then curl_api:close() end
 
     os.execute("kill -9 " .. pid .. " 2>/dev/null")
 
+    local reloaded = inventory_module.new(path)
+    local load_ok = reloaded:load()
+    os.remove(path)
+    os.remove(path .. ".tmp")
+
     assert(code == "200", "Expected 200 OK from GET /, got: " .. tostring(code))
     assert(api_json and api_json:find('"status":"ok"'), "Expected ok status from /api/devices")
+    local response = require("json").decode(api_json)
+    local historical
+    for _, d in ipairs(response.devices) do
+        assert(type(d.first_seen) == "number" and type(d.last_seen) == "number")
+        if d.hostname == "Saved NAS" then historical = d end
+    end
+    assert(historical and historical.status == "not_observed", "Saved device disappeared after startup scan")
+    assert(historical.first_seen == 100 and historical.last_seen == 100, "Historical timestamps changed")
+    assert(load_ok and #reloaded.devices == #response.devices, "Completed scan was not persisted")
+end)
+
+test("Persistent inventory regression tests", function()
+    dofile("test_lan_inventory.lua")
+end)
+
+test("Headless dashboard rendering regression tests", function()
+    assert(os.execute("node test_lan_dashboard_ui.js") == 0, "Dashboard renderer checks failed")
 end)
 
 print(string.format("\nResults: %d Passed, %d Failed\n", passed, failed))

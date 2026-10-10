@@ -15,6 +15,7 @@
 --  * Sleek Glassmorphism Dark-Mode Web Dashboard with real-time search, filters,
 --    card/table views, live ping latency badges, and 1-click action triggers
 --  * Diagnostic CLI modes: --scan-only, --json, --port <P>, --test
+--  * Persistent JSON inventory with first/last seen times and MAC-based identity
 --------------------------------------------------------------------------------
 
 local ffi = require("ffi")
@@ -1118,6 +1119,17 @@ local STATE = {
     scanning = false,
     subnet = "192.168.1.0/24"
 }
+local inventory_module = require("lan_inventory")
+local INVENTORY = inventory_module.new(os.getenv("LAN_INVENTORY_FILE") or "lan_inventory.json")
+local inventory_loaded, inventory_error = INVENTORY:load()
+if not inventory_loaded then io.stderr:write("Inventory: " .. tostring(inventory_error) .. "\n") end
+STATE.devices = INVENTORY.devices
+
+local function save_inventory()
+    local ok, err = INVENTORY:save()
+    if not ok then io.stderr:write("Inventory: " .. tostring(err) .. "\n") end
+    return ok, err
+end
 
 -- Fast non-blocking UDP sweep to wake up all active devices on the subnet
 -- and force the OS to populate/refresh dynamic ARP table entries
@@ -1159,6 +1171,8 @@ local function run_full_scan(probe_ports)
     prime_subnet_arp(prefix)
 
     local entries = get_arp_entries()
+
+    if INVENTORY:migrate_aliases(entries, CUSTOM_NAMES, HOSTNAME_CACHE) then save_custom_names() end
 
     local list = {}
     for _, item in ipairs(entries) do
@@ -1298,14 +1312,15 @@ local function run_full_scan(probe_ports)
             latency_ms = ping_rtt,
             status = is_alive and "online" or "offline",
             hardware = hw_info,
-            last_seen = os.date("%H:%M:%S")
+            last_seen = os.time()
         })
     end
 
-    STATE.devices = list
     STATE.last_scanned = os.time()
+    STATE.devices = INVENTORY:merge(list, STATE.last_scanned, probe_ports ~= false)
+    save_inventory()
     STATE.scanning = false
-    return list
+    return STATE.devices
 end
 
 --------------------------------------------------------------------------------
@@ -1803,7 +1818,7 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                 const data = await res.json();
                 devices = data.devices || [];
                 if (data.subnet) document.getElementById('subnetDisplay').textContent = data.subnet;
-                document.getElementById('statusSubtext').textContent = 'Last scanned: ' + (data.scanned_at || 'Just now') + ' (' + devices.length + ' active nodes)';
+                document.getElementById('statusSubtext').textContent = 'Last scanned: ' + (data.scanned_at || 'Not yet') + ' (' + devices.length + ' known devices)';
                 updateCounts();
                 renderDevices();
             } catch (err) {
@@ -1823,7 +1838,7 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                 devices = data.devices || [];
                 updateCounts();
                 renderDevices();
-                showToast(`Scan complete: ${devices.length} devices found!`);
+                showToast(`Scan complete: ${devices.length} known devices`);
             } catch (err) {
                 showToast('Scan error: ' + err.message);
             } finally {
@@ -1886,6 +1901,21 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
             }
         }
 
+        function isObserved(d) {
+            return d.status === 'online' || d.status === 'offline';
+        }
+
+        function deviceStatus(d) {
+            if (d.status === 'online') return d.latency_ms + ' ms';
+            if (d.status === 'unchecked') return 'Not yet checked';
+            if (d.status === 'not_observed') return 'Not observed';
+            return 'No ping response';
+        }
+
+        function seenTime(timestamp) {
+            return typeof timestamp === 'number' ? new Date(timestamp * 1000).toLocaleString() : 'Unknown';
+        }
+
         function renderGrid(list) {
             const grid = document.getElementById('deviceGrid');
             if (list.length === 0) {
@@ -1911,11 +1941,11 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                         else if (p.port === 53) cls = 'dns';
                         return `<span class="port-tag ${cls}">${p.name} (${p.port})</span>`;
                     }).join('')
-                    : `<span style="font-size:11px; color:var(--text-dim); font-family:monospace;">${isOnline ? 'Active Host (Ports Unprobed)' : 'Offline / Dormant'}</span>`;
+                    : `<span style="font-size:11px; color:var(--text-dim); font-family:monospace;">${isOnline ? 'Active Host (Ports Unprobed)' : deviceStatus(d)}</span>`;
 
-                const hasWeb = (d.ports || []).some(p => p.port === 80 || p.port === 443 || p.port === 8080) || d.category === 'router';
-                const hasSsh = (d.ports || []).some(p => p.port === 22) || d.category === 'linux';
-                const hasRtsp = (d.ports || []).some(p => p.port === 554) || d.category === 'camera';
+                const hasWeb = isObserved(d) && ((d.ports || []).some(p => p.port === 80 || p.port === 443 || p.port === 8080) || d.category === 'router');
+                const hasSsh = isObserved(d) && ((d.ports || []).some(p => p.port === 22) || d.category === 'linux');
+                const hasRtsp = isObserved(d) && ((d.ports || []).some(p => p.port === 554) || d.category === 'camera');
 
                 return `
                 <div class="device-card">
@@ -1927,14 +1957,14 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                                     <div style="display:flex; align-items:center; gap:6px;">
                                         <h3>${escapeHtml(d.hostname)}</h3>
                                         ${d.is_local_host ? '<span style="background:#0284c7; color:#fff; font-size:10px; font-weight:700; padding:2px 6px; border-radius:4px; text-transform:uppercase;">Host</span>' : ''}
-                                        <button title="Rename Device" onclick="renameDevice('${d.ip}', '${escapeHtml(d.hostname)}')" style="background:none; border:none; padding:2px; cursor:pointer; font-size:12px; color:var(--text-dim); opacity:0.8;">✏️</button>
+                                        <button title="Rename Device" ${isObserved(d) ? '' : 'disabled'} onclick="renameDevice('${d.ip}', '${escapeHtml(d.hostname)}')" style="background:none; border:none; padding:2px; cursor:pointer; font-size:12px; color:var(--text-dim); opacity:0.8;">✏️</button>
                                     </div>
                                     <p>${escapeHtml(d.type_name)}</p>
                                 </div>
                             </div>
                             <div class="latency-badge ${isOnline ? '' : 'offline'}">
                                 <span class="dot ${isOnline ? '' : 'offline'}"></span>
-                                <span>${isOnline ? d.latency_ms + ' ms' : 'Offline'}</span>
+                                <span>${deviceStatus(d)}</span>
                             </div>
                         </div>
 
@@ -1960,6 +1990,7 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                             </div>` : ''}
                         </div>
 
+                        <p style="font-size:11px; color:var(--text-dim); margin-bottom:10px;">First seen: ${seenTime(d.first_seen)}<br>Last seen: ${seenTime(d.last_seen)}</p>
                         <div class="ports-wrap" id="ports-wrap-${d.ip.replace(/\./g, '-')}">${portsHtml}</div>
                     </div>
 
@@ -1968,8 +1999,8 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                         ${hasSsh ? `<button class="btn-secondary" onclick="copyText('ssh pi@${d.ip}')">💻 SSH</button>` : ''}
                         ${hasRtsp ? `<button class="btn-secondary" onclick="copyText('rtsp://${d.ip}:554/stream')">🎥 RTSP</button>` : ''}
                         <button class="btn-secondary" onclick="copyText('${d.ip}')">📋 IP</button>
-                        <button class="btn-secondary" id="probe-btn-${d.ip.replace(/\./g, '-')}" onclick="probeDevicePorts('${d.ip}', this)">⚡ Probe Ports</button>
-                        <button class="btn-primary" onclick="inspectDevice('${d.ip}')">🔍 Details</button>
+                        <button class="btn-secondary" id="probe-btn-${d.ip.replace(/\./g, '-')}" ${isObserved(d) ? '' : 'disabled'} onclick="probeDevicePorts('${d.ip}', this)">⚡ Probe Ports</button>
+                        <button class="btn-primary" onclick="inspectDevice('${d.ip}', '${d.mac || ''}')">🔍 Details</button>
                     </div>
                 </div>`;
             }).join('');
@@ -1993,9 +2024,9 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                                 <div style="display:flex; align-items:center; gap:6px;">
                                     <span style="font-weight:600;">${escapeHtml(d.hostname)}</span>
                                     ${d.is_local_host ? '<span style="background:#0284c7; color:#fff; font-size:9px; font-weight:700; padding:1px 5px; border-radius:4px; text-transform:uppercase;">Host</span>' : ''}
-                                    <button title="Rename" onclick="renameDevice('${d.ip}', '${escapeHtml(d.hostname)}')" style="background:none; border:none; padding:1px; cursor:pointer; font-size:11px; opacity:0.8;">✏️</button>
+                                    <button title="Rename" ${isObserved(d) ? '' : 'disabled'} onclick="renameDevice('${d.ip}', '${escapeHtml(d.hostname)}')" style="background:none; border:none; padding:1px; cursor:pointer; font-size:11px; opacity:0.8;">✏️</button>
                                 </div>
-                                <div style="font-size:11px; color:var(--text-dim);">${escapeHtml(d.type_name)}</div>
+                                <div style="font-size:11px; color:var(--text-dim);">${escapeHtml(d.type_name)}<br>Last seen: ${seenTime(d.last_seen)}</div>
                             </div>
                         </div>
                     </td>
@@ -2004,12 +2035,12 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                     <td style="color:#a5b4fc;">${escapeHtml(d.vendor)}</td>
                     <td><span style="background:rgba(255,255,255,0.06); padding:4px 8px; border-radius:6px; font-size:11px;">${d.category.toUpperCase()}</span></td>
                     <td style="font-family:monospace; font-size:11px;">${escapeHtml(portsStr)}</td>
-                    <td style="font-family:monospace; color:${isOnline ? '#34d399' : '#f87171'};">${isOnline ? d.latency_ms + ' ms' : 'Offline'}</td>
+                    <td style="font-family:monospace; color:${isOnline ? '#34d399' : '#f87171'};">${deviceStatus(d)}</td>
                     <td>
                         <div style="display:flex; gap:6px;">
                             <button class="btn-secondary" style="padding:4px 8px; font-size:11px;" onclick="copyText('${d.ip}')">Copy IP</button>
-                            <button class="btn-secondary" style="padding:4px 8px; font-size:11px;" onclick="probeDevicePorts('${d.ip}', this)">⚡ Probe</button>
-                            <button class="btn-primary" style="padding:4px 8px; font-size:11px;" onclick="inspectDevice('${d.ip}')">Inspect</button>
+                            <button class="btn-secondary" style="padding:4px 8px; font-size:11px;" ${isObserved(d) ? '' : 'disabled'} onclick="probeDevicePorts('${d.ip}', this)">⚡ Probe</button>
+                            <button class="btn-primary" style="padding:4px 8px; font-size:11px;" onclick="inspectDevice('${d.ip}', '${d.mac || ''}')">Inspect</button>
                         </div>
                     </td>
                 </tr>`;
@@ -2290,11 +2321,19 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
             }
         }
 
-        async function inspectDevice(ip) {
-            const d = devices.find(x => x.ip === ip);
+        async function inspectDevice(ip, mac) {
+            const d = devices.find(x => x.ip === ip && (mac === undefined || (x.mac || '') === mac));
             if (!d) return;
             stopPingMonitor();
             document.getElementById('modalTitle').textContent = `${d.hostname} (${d.ip})`;
+            if (!isObserved(d)) {
+                document.getElementById('modalBody').innerHTML = `<p>${deviceStatus(d)}</p>
+                    <p>First seen: ${seenTime(d.first_seen)}<br>Last seen: ${seenTime(d.last_seen)}</p>
+                    <p>Vendor: ${escapeHtml(d.vendor)}</p>
+                    <p>Last observed services: ${escapeHtml((d.ports || []).map(p => p.name + ' (' + p.port + ')').join(', ') || 'None recorded')}</p>`;
+                document.getElementById('inspectModal').style.display = 'flex';
+                return;
+            }
             const portsList = (d.ports && d.ports.length > 0)
                 ? d.ports.map(p => `<li><strong>Port ${p.port}</strong>: ${escapeHtml(p.name)}</li>`).join('')
                 : '<li style="color:var(--text-dim);">No open standard ports detected yet. Click "Probe Ports" below to scan.</li>';
@@ -2304,7 +2343,8 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                     <p style="color:var(--text-dim); margin-bottom:4px;">Device Type: <strong style="color:var(--text-main);">${escapeHtml(d.type_name)}</strong></p>
                     <p style="color:var(--text-dim); margin-bottom:4px;">MAC Address: <strong style="color:var(--text-main); font-family:monospace;">${d.mac}</strong></p>
                     <p style="color:var(--text-dim); margin-bottom:4px;">Manufacturer: <strong style="color:var(--text-main);">${escapeHtml(d.vendor)}</strong></p>
-                    <p style="color:var(--text-dim); margin-bottom:12px;">Ping Latency: <strong style="color:#34d399;">${d.latency_ms} ms</strong> (Status: ${d.status})</p>
+                    <p style="color:var(--text-dim); margin-bottom:4px;">First seen: ${seenTime(d.first_seen)}<br>Last seen: ${seenTime(d.last_seen)}</p>
+                    <p style="color:var(--text-dim); margin-bottom:12px;">Reachability: <strong style="color:#34d399;">${deviceStatus(d)}</strong></p>
                 </div>
 
                 <!-- Live Ping & Jitter Monitor -->
@@ -2337,7 +2377,7 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
 
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
                     <h4 style="margin:0;">Detected Ports &amp; Services</h4>
-                    <button class="btn-secondary" style="padding:4px 10px; font-size:11px;" onclick="probeDevicePorts('${d.ip}', this)">⚡ Probe Standard</button>
+                    <button class="btn-secondary" style="padding:4px 10px; font-size:11px;" ${isObserved(d) ? '' : 'disabled'} onclick="probeDevicePorts('${d.ip}', this)">⚡ Probe Standard</button>
                 </div>
 
                 <!-- Custom Port Scan Input -->
@@ -2581,7 +2621,7 @@ local function run_web_server(port)
                             end
                             -- Update device in memory STATE
                             for _, d in ipairs(STATE.devices) do
-                                if d.ip == target_ip then
+                                if d.ip == target_ip and (d.status == "online" or d.status == "offline") then
                                     if custom_ports_str then
                                         d.ports = d.ports or {}
                                         local existing_map = {}
@@ -2594,6 +2634,7 @@ local function run_web_server(port)
                                     else
                                         d.ports = probed_ports
                                     end
+                                    d.port_count = #d.ports
                                     -- Re-profile hardware banner if port 22 or 80 discovered
                                     if not d.hardware or not d.hardware.banner then
                                         for _, p in ipairs(d.ports) do
@@ -2611,6 +2652,7 @@ local function run_web_server(port)
                             end
                         end
                         resp_body = to_json({ status = "ok", ip = target_ip, ports = probed_ports, custom = (custom_ports_str ~= nil) })
+                        save_inventory()
                         content_type = "application/json"
                     elseif path == "/api/rename" and method == "POST" then
                         local target_ip = req:match('["\']?ip["\']?%s*[:=]%s*["\']?([%d%.]+)["\']?')
@@ -2620,11 +2662,12 @@ local function run_web_server(port)
                             HOSTNAME_CACHE[target_ip] = new_name
                             save_custom_names()
                             for _, d in ipairs(STATE.devices) do
-                                if d.ip == target_ip then
+                                if d.ip == target_ip and (d.status == "online" or d.status == "offline") then
                                     d.hostname = new_name
                                     d.is_custom = true
                                 end
                             end
+                            save_inventory()
                             resp_body = to_json({ status = "ok", ip = target_ip, name = new_name })
                         else
                             resp_body = to_json({ status = "error", message = "Missing ip or name" })
@@ -2677,7 +2720,7 @@ local function run_web_server(port)
         if os.time() - last_auto_rescan > 60 then
             last_auto_rescan = os.time()
             local updated = run_full_scan(false)
-            print(string.format("[%s] [Auto-Rescan] Subnet refresh complete: %d active devices on %s",
+            print(string.format("[%s] [Auto-Rescan] Subnet refresh complete: %d known devices on %s",
                 os.date("%H:%M:%S"), #updated, STATE.subnet))
             io.stdout:flush()
         end
@@ -2692,14 +2735,14 @@ local function print_cli_table(devices)
     print(string.format("  %-16s %-20s %-18s %-22s %-18s %-8s %s", "IP ADDRESS", "HOSTNAME", "MAC ADDRESS", "VENDOR", "CATEGORY", "STATUS", "LATENCY"))
     print(string.rep("-", 120))
     for _, d in ipairs(devices) do
-        local lat_str = d.status == "online" and string.format("%d ms", d.latency_ms) or "offline"
+        local lat_str = d.status == "online" and string.format("%d ms", d.latency_ms) or ("last seen " .. os.date("%Y-%m-%d %H:%M:%S", d.last_seen))
         local host_display = (d.hostname or "-")
         if d.is_custom then host_display = host_display .. " *" end
         print(string.format("  %-16s %-20s %-18s %-22s %-18s %-8s %s",
             d.ip, host_display:sub(1, 19), d.mac, d.vendor:sub(1, 21), d.type_name, d.status, lat_str))
     end
     print(string.rep("=", 120))
-    print(string.format("  Total: %d active devices on %s (* = custom alias)\n", #devices, STATE.subnet))
+    print(string.format("  Total: %d known devices on %s (* = custom alias)\n", #devices, STATE.subnet))
 end
 
 --------------------------------------------------------------------------------
@@ -2766,6 +2809,8 @@ local M = {
     run_full_scan = run_full_scan,
     to_json = to_json,
     STATE = STATE,
+    INVENTORY = INVENTORY,
+    DASHBOARD_HTML = DASHBOARD_HTML,
     run_self_tests = run_self_tests
 }
 
