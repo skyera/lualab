@@ -185,13 +185,21 @@ else
         int accept(int s, void *addr, unsigned int *addrlen);
         int connect(int s, const void *name, unsigned int namelen);
         int close(int s);
-        int fcntl(int s, int cmd, ...);
+        int fcntl(int s, int cmd, int arg);
         int setsockopt(int s, int level, int optname, const void *optval, unsigned int optlen);
+        int getsockopt(int s, int level, int optname, void *optval, unsigned int *optvallen);
         int getsockname(int s, void *name, unsigned int *namelen);
         int shutdown(int s, int how);
         long recv(int s, void *buf, size_t len, int flags);
         long send(int s, const void *buf, size_t len, int flags);
         long sendto(int s, const void *buf, size_t len, int flags, const void *to, unsigned int tolen);
+
+        struct pollfd {
+            int fd;
+            short events;
+            short revents;
+        };
+        int poll(struct pollfd *fds, unsigned long nfds, int timeout);
 
         struct in_addr { uint32_t s_addr; };
         struct sockaddr_in {
@@ -201,10 +209,6 @@ else
             char sin_zero[8];
         };
         struct timeval { long tv_sec; long tv_usec; };
-        typedef struct {
-            long fds_bits[1024 / (8 * sizeof(long))];
-        } fd_set_posix;
-        int select(int nfds, void *readfds, void *writefds, void *exceptfds, struct timeval *timeout);
 
         uint32_t inet_addr(const char *cp);
         uint16_t htons(uint16_t hostshort);
@@ -239,6 +243,44 @@ local function close_socket(s)
         ws2.closesocket(s)
     else
         ffi.C.close(s)
+    end
+end
+
+local function socket_wait_readable(sock, timeout_ms)
+    if is_windows then
+        local rset = ffi.new("fd_set")
+        rset.fd_count = 1
+        rset.fd_array[0] = sock
+        local tv = ffi.new("struct timeval")
+        tv.tv_sec = math.floor(timeout_ms / 1000)
+        tv.tv_usec = (timeout_ms % 1000) * 1000
+        return ws2.select(0, rset, nil, nil, tv) > 0
+    else
+        local pfd = ffi.new("struct pollfd", { fd = sock, events = 1, revents = 0 }) -- POLLIN = 1
+        return ffi.C.poll(pfd, 1, timeout_ms) > 0
+    end
+end
+
+local function socket_wait_writable(sock, timeout_ms)
+    if is_windows then
+        local wset = ffi.new("fd_set")
+        wset.fd_count = 1
+        wset.fd_array[0] = sock
+        local tv = ffi.new("struct timeval")
+        tv.tv_sec = math.floor(timeout_ms / 1000)
+        tv.tv_usec = (timeout_ms % 1000) * 1000
+        return ws2.select(0, nil, wset, nil, tv) > 0
+    else
+        local pfd = ffi.new("struct pollfd", { fd = sock, events = 4, revents = 0 }) -- POLLOUT = 4
+        local ret = ffi.C.poll(pfd, 1, timeout_ms)
+        if ret > 0 then
+            local err = ffi.new("int[1]")
+            local errlen = ffi.new("unsigned int[1]", 4)
+            if ffi.C.getsockopt(sock, 1, 4, err, errlen) == 0 then -- SOL_SOCKET=1, SO_ERROR=4
+                return err[0] == 0
+            end
+        end
+        return false
     end
 end
 
@@ -593,24 +635,19 @@ local function check_tcp_port(ip, port, timeout_ms)
     addr.sin_port = is_windows and ws2.htons(port) or ffi.C.htons(port)
     addr.sin_addr.s_addr = is_windows and ws2.inet_addr(ip) or ffi.C.inet_addr(ip)
 
+    local is_open = false
     if is_windows then
         ws2.connect(s, addr, ffi.sizeof(addr))
-        local wset = ffi.new("fd_set")
-        wset.fd_count = 1
-        wset.fd_array[0] = s
-        local tv = ffi.new("struct timeval")
-        tv.tv_sec = 0
-        tv.tv_usec = timeout_ms * 1000
-        local ret = ws2.select(0, nil, wset, nil, tv)
+        is_open = socket_wait_writable(s, timeout_ms)
         pcall(function() ws2.shutdown(s, 2) end)
         ws2.closesocket(s)
-        return ret > 0
     else
-        local res = ffi.C.connect(s, addr, ffi.sizeof(addr))
+        ffi.C.connect(s, addr, ffi.sizeof(addr))
+        is_open = socket_wait_writable(s, timeout_ms)
         pcall(function() ffi.C.shutdown(s, 2) end)
         ffi.C.close(s)
-        return res == 0
     end
+    return is_open
 end
 
 -- Smart targeted service probe based on device profile
@@ -662,20 +699,8 @@ local function grab_ssh_banner(ip)
     local banner = nil
     if is_windows then
         ws2.connect(s, addr, ffi.sizeof(addr))
-        local wset = ffi.new("fd_set")
-        wset.fd_count = 1
-        wset.fd_array[0] = s
-        local tv = ffi.new("struct timeval")
-        tv.tv_sec = 0
-        tv.tv_usec = 120 * 1000 -- 120ms connect timeout
-        if ws2.select(0, nil, wset, nil, tv) > 0 then
-            local rset = ffi.new("fd_set")
-            rset.fd_count = 1
-            rset.fd_array[0] = s
-            local tv_read = ffi.new("struct timeval")
-            tv_read.tv_sec = 0
-            tv_read.tv_usec = 120 * 1000 -- 120ms banner read timeout
-            if ws2.select(0, rset, nil, nil, tv_read) > 0 then
+        if socket_wait_writable(s, 120) then
+            if socket_wait_readable(s, 120) then
                 local buf = ffi.new("char[256]")
                 local n = ws2.recv(s, buf, 255, 0)
                 if n > 0 then
@@ -686,12 +711,14 @@ local function grab_ssh_banner(ip)
         pcall(function() ws2.shutdown(s, 2) end)
         ws2.closesocket(s)
     else
-        local res = ffi.C.connect(s, addr, ffi.sizeof(addr))
-        if res == 0 then
-            local buf = ffi.new("char[256]")
-            local n = ffi.C.recv(s, buf, 255, 0)
-            if n > 0 then
-                banner = ffi.string(buf, n):gsub("[\r\n]+", "")
+        ffi.C.connect(s, addr, ffi.sizeof(addr))
+        if socket_wait_writable(s, 120) then
+            if socket_wait_readable(s, 120) then
+                local buf = ffi.new("char[256]")
+                local n = ffi.C.recv(s, buf, 255, 0)
+                if n > 0 then
+                    banner = ffi.string(buf, n):gsub("[\r\n]+", "")
+                end
             end
         end
         pcall(function() ffi.C.shutdown(s, 2) end)
@@ -834,15 +861,8 @@ local function query_netbios_name(ip)
 
     if is_windows then
         ws2.sendto(s, NETBIOS_NAME_QUERY, #NETBIOS_NAME_QUERY, 0, addr, ffi.sizeof(addr))
-        local rset = ffi.new("fd_set")
-        rset.fd_count = 1
-        rset.fd_array[0] = s
-        local tv = ffi.new("struct timeval")
-        tv.tv_sec = 0
-        tv.tv_usec = 25 * 1000 -- 25ms timeout
-        local sel = ws2.select(0, rset, nil, nil, tv)
         local name = nil
-        if sel > 0 then
+        if socket_wait_readable(s, 25) then
             local buf = ffi.new("uint8_t[1024]")
             local recvd = ws2.recvfrom(s, buf, 1024, 0, nil, nil)
             if recvd > 56 then
@@ -2466,14 +2486,7 @@ local function run_web_server(port)
                                            or (client_sock >= 0)
 
         if is_valid_client then
-            local rset = ffi.new("fd_set")
-            rset.fd_count = 1
-            rset.fd_array[0] = client_sock
-            local tv = ffi.new("struct timeval")
-            tv.tv_sec = 0
-            tv.tv_usec = 500 * 1000 -- 500ms
-            local can_read = is_windows and ws2.select(0, rset, nil, nil, tv) or ffi.C.select(client_sock + 1, rset, nil, nil, tv)
-            if can_read > 0 then
+            if socket_wait_readable(client_sock, 500) then
                 local n_recv = is_windows and ws2.recv(client_sock, recv_buf, 4095, 0)
                                           or ffi.C.recv(client_sock, recv_buf, 4095, 0)
                 if n_recv > 0 then

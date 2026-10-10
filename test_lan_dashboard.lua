@@ -252,6 +252,30 @@ test("Bytecode Scoping (Assert 0 Undeclared Globals)", function()
     end
 end)
 
+-- Test 11: Web Server REST Endpoints Verification
+test("Embedded HTTP Web Server endpoints respond with 200 OK", function()
+    local p = io.popen("luajit lan_dashboard.lua -p 18889 >/dev/null 2>&1 & echo $!", "r")
+    assert(p, "Failed to spawn background server")
+    local pid = p:read("*l")
+    p:close()
+    assert(pid and tonumber(pid), "Failed to read server PID")
+
+    os.execute("sleep 0.1")
+
+    local curl_p = io.popen("curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18889/", "r")
+    local code = curl_p and curl_p:read("*a")
+    if curl_p then curl_p:close() end
+
+    local curl_api = io.popen("curl -s http://127.0.0.1:18889/api/devices", "r")
+    local api_json = curl_api and curl_api:read("*a")
+    if curl_api then curl_api:close() end
+
+    os.execute("kill -9 " .. pid .. " 2>/dev/null")
+
+    assert(code == "200", "Expected 200 OK from GET /, got: " .. tostring(code))
+    assert(api_json and api_json:find('"status":"ok"'), "Expected ok status from /api/devices")
+end)
+
 print(string.format("\nResults: %d Passed, %d Failed\n", passed, failed))
 if failed > 0 then
     os.exit(1)
