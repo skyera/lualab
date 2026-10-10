@@ -810,9 +810,14 @@ local function get_local_ip()
         local target_addr = ffi.new("struct sockaddr_in")
         target_addr.sin_family = 2
         target_addr.sin_port = is_windows and ws2.htons(53) or ffi.C.htons(53)
-        target_addr.sin_addr.s_addr = is_windows and ws2.inet_addr("192.168.1.1") or ffi.C.inet_addr("192.168.1.1")
+        target_addr.sin_addr.s_addr = is_windows and ws2.inet_addr("8.8.8.8") or ffi.C.inet_addr("8.8.8.8")
         local res = is_windows and ws2.connect(s, target_addr, ffi.sizeof(target_addr))
                                or ffi.C.connect(s, target_addr, ffi.sizeof(target_addr))
+        if res ~= 0 then
+            target_addr.sin_addr.s_addr = is_windows and ws2.inet_addr("192.168.1.1") or ffi.C.inet_addr("192.168.1.1")
+            res = is_windows and ws2.connect(s, target_addr, ffi.sizeof(target_addr))
+                             or ffi.C.connect(s, target_addr, ffi.sizeof(target_addr))
+        end
         if res == 0 then
             local laddr = ffi.new("struct sockaddr_in")
             local len = ffi.new(is_windows and "int[1]" or "unsigned int[1]", ffi.sizeof(laddr))
@@ -1004,67 +1009,68 @@ local function get_arp_entries()
     local entries = {}
     local seen = {}
 
+    -- 1. On Linux, prefer direct /proc/net/arp (zero subprocess overhead, 100% reliable)
+    if not is_windows then
+        local f = io.open("/proc/net/arp", "r")
+        if f then
+            for line in f:lines() do
+                local ip, hw, flags, mac = line:match("^%s*([%d%.]+)%s+([%w]+)%s+([%w]+)%s+([%x%:]+)")
+                if ip and mac and flags ~= "0x0" and mac ~= "00:00:00:00:00:00" then
+                    local is_broadcast = ip:match("%.255$") or ip == "255.255.255.255" or mac == "ff:ff:ff:ff:ff:ff"
+                    local is_multicast = ip:match("^224%.") or ip:match("^239%.") or mac:match("^01:00:5e")
+                    local is_loopback  = ip:match("^127%.") or ip:match("^169%.254%.255")
+
+                    if not is_broadcast and not is_multicast and not is_loopback and not seen[ip] then
+                        seen[ip] = true
+                        table.insert(entries, {
+                            ip = ip,
+                            mac = mac:lower()
+                        })
+                    end
+                end
+            end
+            f:close()
+        end
+    end
+
+    -- 2. Fallback / complementary CLI ARP table reading
     local cmd = is_windows and "arp -a" or "arp -an 2>/dev/null || ip neigh 2>/dev/null"
     local p = io.popen(cmd, "r")
-    if not p then return entries end
-    local out = p:read("*a")
-    p:close()
+    if p then
+        local out = p:read("*a")
+        p:close()
 
-    for line in out:gmatch("[^\r\n]+") do
-        local ip, mac = line:match("^%s*([%d%.]+)%s+([%x%-%:]+)%s+")
-        if not ip then
-            ip, mac = line:match("%(([%d%.]+)%)%s+at%s+([%x%-%:]+)")
-        end
-        if ip and mac then
-            mac = mac:lower():gsub("%-", ":")
-            local is_broadcast = ip:match("%.255$") or ip == "255.255.255.255" or mac == "ff:ff:ff:ff:ff:ff"
-            local is_multicast = ip:match("^224%.") or ip:match("^239%.") or mac:match("^01:00:5e")
-            local is_loopback  = ip:match("^127%.") or ip:match("^169%.254%.255")
+        for line in out:gmatch("[^\r\n]+") do
+            local ip, mac = line:match("^%s*([%d%.]+)%s+([%x%-%:]+)%s+")
+            if not ip then
+                ip, mac = line:match("%(([%d%.]+)%)%s+at%s+([%x%-%:]+)")
+            end
+            if not ip then
+                ip, mac = line:match("^([%d%.]+)%s+.-lladdr%s+([%x%:]+)")
+            end
+            if ip and mac then
+                mac = mac:lower():gsub("%-", ":")
+                local is_broadcast = ip:match("%.255$") or ip == "255.255.255.255" or mac == "ff:ff:ff:ff:ff:ff"
+                local is_multicast = ip:match("^224%.") or ip:match("^239%.") or mac:match("^01:00:5e")
+                local is_loopback  = ip:match("^127%.") or ip:match("^169%.254%.255")
 
-            if not is_broadcast and not is_multicast and not is_loopback and not seen[ip] then
-                seen[ip] = true
-                table.insert(entries, {
-                    ip = ip,
-                    mac = mac
-                })
+                if not is_broadcast and not is_multicast and not is_loopback and not seen[ip] then
+                    seen[ip] = true
+                    table.insert(entries, {
+                        ip = ip,
+                        mac = mac
+                    })
+                end
             end
         end
     end
 
     -- Detect and include the local host machine interface itself (since OS does not put its own IP in ARP table)
-    local local_ip = nil
-    local s = is_windows and ws2.socket(2, 2, 17) or ffi.C.socket(2, 2, 17)
-    if s ~= -1 and s ~= ffi.cast("SOCKET", -1) then
-        local target_addr = ffi.new("struct sockaddr_in")
-        target_addr.sin_family = 2
-        target_addr.sin_port = is_windows and ws2.htons(53) or ffi.C.htons(53)
-        target_addr.sin_addr.s_addr = is_windows and ws2.inet_addr("192.168.1.1") or ffi.C.inet_addr("192.168.1.1")
-        local res = is_windows and ws2.connect(s, target_addr, ffi.sizeof(target_addr))
-                               or ffi.C.connect(s, target_addr, ffi.sizeof(target_addr))
-        if res == 0 then
-            local laddr = ffi.new("struct sockaddr_in")
-            local len = ffi.new(is_windows and "int[1]" or "unsigned int[1]", ffi.sizeof(laddr))
-            local gres = is_windows and ws2.getsockname(s, laddr, len)
-                                    or ffi.C.getsockname(s, laddr, len)
-            if gres == 0 then
-                local u32 = laddr.sin_addr.s_addr
-                local b1 = bit.band(u32, 0xFF)
-                local b2 = bit.band(bit.rshift(u32, 8), 0xFF)
-                local b3 = bit.band(bit.rshift(u32, 16), 0xFF)
-                local b4 = bit.band(bit.rshift(u32, 24), 0xFF)
-                local detected = string.format("%d.%d.%d.%d", b1, b2, b3, b4)
-                if detected ~= "0.0.0.0" and not detected:find("^127%.") then
-                    local_ip = detected
-                end
-            end
-        end
-        if is_windows then ws2.closesocket(s) else ffi.C.close(s) end
-    end
-
+    local local_ip = get_local_ip()
     if local_ip and not seen[local_ip] then
         local local_mac = nil
         local p_mac = is_windows and io.popen("getmac /fo csv /nh", "r")
-                                  or io.popen("cat /sys/class/net/$(ip route show default | awk '{print $5}')/address 2>/dev/null", "r")
+                                  or io.popen("cat /sys/class/net/$(ip route show default 2>/dev/null | awk '{print $5}')/address 2>/dev/null", "r")
         if p_mac then
             for mline in p_mac:lines() do
                 local m, dev = mline:match('"([^"]+)","([^"]+)"')
@@ -1147,18 +1153,12 @@ local function run_full_scan(probe_ports)
     STATE.scanning = true
 
     -- Pre-seed/prime ARP cache so idle devices (e.g. Linux servers) appear in ARP
-    local prefix = STATE.subnet:match("^(%d+%.%d+%.%d+%.)") or "192.168.1."
+    local my_ip = get_local_ip()
+    local prefix = my_ip and my_ip:match("^(%d+%.%d+%.%d+%.)") or STATE.subnet:match("^(%d+%.%d+%.%d+%.)") or "192.168.1."
+    STATE.subnet = prefix .. "0/24"
     prime_subnet_arp(prefix)
 
     local entries = get_arp_entries()
-
-    if #entries > 0 then
-        local first_ip = entries[1].ip
-        local detected_prefix = first_ip:match("^(%d+%.%d+%.%d+%.)")
-        if detected_prefix then
-            STATE.subnet = detected_prefix .. "0/24"
-        end
-    end
 
     local list = {}
     for _, item in ipairs(entries) do
