@@ -2399,11 +2399,9 @@ local function run_web_server(port)
         return false
     end
 
-    local opt = ffi.new("int[1]", 1)
-    if is_windows then
-        ws2.setsockopt(server_sock, 0xffff, 0x0004, ffi.cast("const char*", opt), ffi.sizeof(opt)) -- SO_REUSEADDR
-    else
-        ffi.C.setsockopt(server_sock, 1, 2, opt, ffi.sizeof(opt))
+    if not is_windows then
+        local opt = ffi.new("int[1]", 1)
+        ffi.C.setsockopt(server_sock, 1, 2, opt, ffi.sizeof(opt)) -- SO_REUSEADDR on POSIX
     end
 
     local server_addr = ffi.new("struct sockaddr_in")
@@ -2436,9 +2434,15 @@ local function run_web_server(port)
     print(string.format("\n=================================================================="))
     print(string.format("  🌐 LAN Radar Dashboard Web Server Running"))
     print(string.format("  ------------------------------------------------------------------"))
-    print(string.format("  URL:        http://localhost:%d/", port))
-    print(string.format("  REST API:   http://localhost:%d/api/devices", port))
-    print(string.format("  Subnet:     %s", STATE.subnet))
+    print(string.format("  Local URL:    http://localhost:%d/", port))
+    local local_ip = get_local_ip()
+    if local_ip then
+        print(string.format("  Network URL:  http://%s:%d/  (from phone / other PCs)", local_ip, port))
+    end
+    print(string.format("  REST API:     http://localhost:%d/api/devices", port))
+    print(string.format("  Subnet:       %s", STATE.subnet))
+    print(string.format("  Ready for incoming connections..."))
+    print(string.format("==================================================================\n"))
     io.stdout:flush()
 
     -- Instant startup initial scan (takes ~40ms)
@@ -2450,6 +2454,7 @@ local function run_web_server(port)
     local recv_buf = ffi.new("char[4096]")
 
     while true do
+        addrlen[0] = ffi.sizeof(client_addr)
         local client_sock
         if is_windows then
             client_sock = ws2.accept(server_sock, client_addr, addrlen)
@@ -2472,6 +2477,16 @@ local function run_web_server(port)
                 local n_recv = is_windows and ws2.recv(client_sock, recv_buf, 4095, 0)
                                           or ffi.C.recv(client_sock, recv_buf, 4095, 0)
                 if n_recv > 0 then
+                    local client_ip = "127.0.0.1"
+                    if client_addr then
+                        local u32 = client_addr.sin_addr.s_addr
+                        local b1 = bit.band(u32, 0xFF)
+                        local b2 = bit.band(bit.rshift(u32, 8), 0xFF)
+                        local b3 = bit.band(bit.rshift(u32, 16), 0xFF)
+                        local b4 = bit.band(bit.rshift(u32, 24), 0xFF)
+                        local detected_cip = string.format("%d.%d.%d.%d", b1, b2, b3, b4)
+                        if detected_cip ~= "0.0.0.0" then client_ip = detected_cip end
+                    end
                     local req = ffi.string(recv_buf, n_recv)
                     local method, raw_uri = req:match("^(%a+)%s+([^%s]+)")
                     method = method or "GET"
@@ -2636,6 +2651,9 @@ local function run_web_server(port)
                         ffi.C.send(client_sock, full_resp, #full_resp, 0)
                         pcall(function() ffi.C.shutdown(client_sock, 1) end)
                     end
+                    print(string.format("[%s] %-15s %-4s %-28s -> %s (%d B)",
+                        os.date("%H:%M:%S"), client_ip, method, raw_uri:sub(1, 28), status_code, #resp_body))
+                    io.stdout:flush()
                 end
             end
             close_socket(client_sock)
@@ -2645,7 +2663,10 @@ local function run_web_server(port)
 
         if os.time() - last_auto_rescan > 60 then
             last_auto_rescan = os.time()
-            run_full_scan(false)
+            local updated = run_full_scan(false)
+            print(string.format("[%s] [Auto-Rescan] Subnet refresh complete: %d active devices on %s",
+                os.date("%H:%M:%S"), #updated, STATE.subnet))
+            io.stdout:flush()
         end
     end
 end

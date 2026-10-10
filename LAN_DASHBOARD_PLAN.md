@@ -30,6 +30,8 @@
 - **Client Read Select**: Added non-blocking `select` check (500ms timeout) before calling `ws2.recv(client_sock)` to prevent premature connection resets (`curl (56) Connection aborted`) caused by non-blocking socket inheritance.
 - **Graceful TCP Shutdown**: Added `ws2.shutdown(client_sock, 1)` (SD_SEND) before closing client sockets.
 - **Auto-Rescan Interval**: Tuned background auto-rescan interval to 60s.
+- **Terminal Access & Activity Logging**: Logs every incoming HTTP request with client IP, method, URI, status, and payload size, plus auto-rescan completion logs. Displays both Local and Network URLs on startup.
+- **Windows Port Safety**: Avoids `SO_REUSEADDR` on Windows to prevent port stealing / ghost listeners, and resets `addrlen[0]` before each `accept()` call.
 
 ### 5. Privacy & Security Hardening (GitHub Readiness):
 - **`.gitignore`**: Added `lan_names.json`, `.dict.db`, and `*.db`.
