@@ -16,3 +16,6 @@ portraits/portrait_*_lady.*
 downloads/
 .codefind.db
 *.codefind.db
+.dict.db
+*.db
+lan_names.json

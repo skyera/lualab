@@ -42,6 +42,7 @@ local test_suites = {
     { file = "test_ffi_dict.lua", description = "ffi_dict — Offline Vocabulary Trainer & SM-2 Dictionary Suite" },
     { file = "test_person.lua", description = "person — Metatable OOP Class, Validation & Inheritance Suite" },
     { file = "test_ffi_enigma.lua", description = "ffi_enigma — WWII Enigma Cipher Machine & Rotor Stepping Suite" },
+    { file = "test_lan_dashboard.lua", description = "lan_dashboard — High-Performance LAN Device Radar & Web Dashboard Suite" },
 }
 
 local luajit_bin = "luajit"

@@ -34,6 +34,7 @@ test: $(LUAJIT_LIB)
 	$(LUAJIT_DIR)/src/luajit test_ffi_system_info.lua
 	$(LUAJIT_DIR)/src/luajit test_ffi_verlet_cloth.lua
 	$(LUAJIT_DIR)/src/luajit test_ffi_dict.lua
+	luajit test_lan_dashboard.lua
 	-$(LUAJIT_DIR)/src/luajit test_ffi_suite.lua
 
 $(LUAJIT_LIB):
