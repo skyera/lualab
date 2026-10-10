@@ -84,6 +84,85 @@ async function main() {
     assert.match(elements.get('deviceGrid').innerHTML, /No devices match/);
     assert.equal(elements.get('deviceTableBody').innerHTML, '');
 
+    // Trust/tag filtering and escaped labels work for both device views.
+    context.organized = {...context.sample, trusted: true, tags: ['Office', '日本 <camera>']};
+    context.unknown = {...context.sample, ip: '192.168.1.21', mac: 'aa:bb:cc:dd:ee:02', hostname: 'Unknown', trusted: false, tags: ['Review']};
+    vm.runInContext('devices = [organized, unknown]; updateTagOptions(); renderGrid(devices); renderTable(devices);', context);
+    assert.match(elements.get('deviceGrid').innerHTML, /Trusted/);
+    assert.match(elements.get('deviceGrid').innerHTML, /Unrecognized/);
+    assert.match(elements.get('deviceGrid').innerHTML, /日本 &lt;camera&gt;/);
+    assert.match(elements.get('deviceTableBody').innerHTML, /日本 &lt;camera&gt;/);
+    assert.match(elements.get('tagFilter').innerHTML, /日本 &lt;camera&gt;/);
+    elements.get('trustFilter').value = 'unrecognized';
+    assert.equal(vm.runInContext('filterList().length', context), 1);
+    assert.equal(vm.runInContext('filterList()[0].hostname', context), 'Unknown');
+    elements.get('trustFilter').value = 'trusted';
+    elements.get('tagFilter').value = 'office';
+    assert.equal(vm.runInContext('filterList().length', context), 1);
+    elements.get('searchInput').value = '日本';
+    assert.equal(vm.runInContext('filterList().length', context), 1);
+    elements.get('tagFilter').value = 'review';
+    assert.equal(vm.runInContext('filterList().length', context), 0);
+    elements.get('trustFilter').value = 'all';
+    elements.get('tagFilter').value = '';
+    elements.get('searchInput').value = '';
+
+    // Historical devices can be organized by identity, without targeting a reused IP.
+    vm.runInContext('openDeviceSettings(deviceId(organized))', context);
+    assert.equal(elements.get('deviceSettingsModal').style.display, 'flex');
+    assert.equal(elements.get('settingsTrusted').checked, true);
+    assert.equal(elements.get('settingsTags').value, 'Office\n日本 <camera>');
+    elements.get('settingsTrusted').checked = false;
+    elements.get('settingsTags').value = ' Lab \nReview';
+    response = {device: {...context.organized, trusted: false, tags: ['Lab', 'Review']}};
+    let prevented = false;
+    context.submitEvent = {preventDefault() { prevented = true; }};
+    await vm.runInContext('saveDeviceSettings(submitEvent)', context);
+    assert(prevented);
+    assert.equal(requests.at(-1).url, '/api/device/meta');
+    assert.deepEqual(JSON.parse(requests.at(-1).options.body).tags, ['Lab', 'Review']);
+    assert.equal(JSON.parse(requests.at(-1).options.body).id, 'mac:aa:bb:cc:dd:ee:01');
+    assert.equal(elements.get('deviceSettingsModal').style.display, 'none');
+    vm.runInContext('openDeviceSettings(deviceId(organized))', context);
+    httpOK = false;
+    response = {message: 'Invalid <tag>'};
+    await vm.runInContext('saveDeviceSettings(submitEvent)', context);
+    assert.equal(elements.get('settingsError').textContent, 'Invalid <tag>');
+    assert.equal(elements.get('deviceSettingsModal').style.display, 'flex');
+    assert.equal(elements.get('settingsSaveBtn').disabled, false);
+    vm.runInContext('closeDeviceSettings()', context);
+    httpOK = true;
+
+    const device_id = 'mac:aa:bb:cc:dd:ee:01';
+    response = {events: [
+        {id: 1, type: 'new_device', device_id, hostname: 'NAS <script>', ip: '192.168.1.18', timestamp: 100},
+        {id: 2, type: 'ip_changed', device_id, hostname: 'NAS', ip: '192.168.1.20', old_ip: '192.168.1.18', new_ip: '192.168.1.20', timestamp: 200},
+        {id: 3, type: 'port_opened', device_id, hostname: 'NAS', ip: '192.168.1.20', port: 443, service: 'HTTPS', timestamp: 300}
+    ]};
+    await vm.runInContext("showPane('changes')", context);
+    assert.equal(elements.get('changesView').style.display, 'block');
+    assert.equal(elements.get('deviceGrid').style.display, 'none');
+    const timeline = elements.get('changesView').innerHTML;
+    assert.match(timeline, /NAS &lt;script&gt;/);
+    assert(timeline.indexOf('Port opened') < timeline.indexOf('IP changed'));
+    elements.get('searchInput').value = '192.168.1.18';
+    vm.runInContext('renderTimeline()', context);
+    assert.match(elements.get('changesView').innerHTML, /IP changed/);
+    elements.get('searchInput').value = 'Missing';
+    vm.runInContext('renderTimeline()', context);
+    assert.match(elements.get('changesView').innerHTML, /No changes match/);
+    elements.get('searchInput').value = '';
+    response = {events: []};
+    await vm.runInContext('fetchEvents()', context);
+    assert.match(elements.get('changesView').innerHTML, /No recorded changes yet/);
+    httpOK = false;
+    await vm.runInContext('fetchEvents()', context);
+    assert.match(elements.get('changesView').textContent, /Changes unavailable/);
+    httpOK = true;
+    await vm.runInContext("showPane('devices')", context);
+    assert.equal(elements.get('deviceGrid').style.display, 'grid');
+    assert.equal(elements.get('changesView').style.display, 'none');
+
     // Progress keeps the last inventory and works independently of auto-refresh.
     vm.runInContext('devices = [sample]; renderDevices();', context);
     const inventoryMarkup = elements.get('deviceGrid').innerHTML;
@@ -135,6 +214,6 @@ async function main() {
     assert.equal(elements.get('scanBtn').disabled, false);
     assert.equal(elements.get('scanProgressText').textContent, 'Worker <failed>');
     assert.match(elements.get('toast').textContent, /Worker <failed>/);
-    console.log('Dashboard rendering, progress, cancellation, polling recovery, empty completion, and errors PASS');
+    console.log('Dashboard rendering, timeline, metadata forms/filters, escaping, progress, cancellation, and errors PASS');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

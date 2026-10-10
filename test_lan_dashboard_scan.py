@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import time
 import urllib.request
+import urllib.error
 
 
 def main():
@@ -123,6 +124,7 @@ end
                 cancelled = wait_state({"cancelled"})
                 assert time.monotonic() - cancel_started < 0.8
                 assert inventory.read_text() == original
+                assert request("/api/events")[1]["events"] == []
                 assert request("/api/devices")[1]["devices"][0]["last_seen"] == 200
                 assert request("/api/scan/cancel", "POST")[1]["scan"]["state"] == "cancelled"
 
@@ -133,10 +135,30 @@ end
                 assert completed["devices"][0]["first_seen"] == 100
                 assert completed["devices"][0]["last_seen"] > 200
                 assert json.loads(inventory.read_text())["devices"] == completed["devices"]
+                device_id = completed["devices"][0]["id"]
+                assert not completed["devices"][0]["trusted"] and completed["devices"][0]["tags"] == []
+
+                def invalid_metadata(payload, expected):
+                    before = inventory.read_text()
+                    try:
+                        request("/api/device/meta", "POST", payload)
+                    except urllib.error.HTTPError as error:
+                        assert error.code == expected
+                        assert json.loads(error.read())["status"] == "error"
+                    else:
+                        raise AssertionError("Invalid metadata was accepted")
+                    assert inventory.read_text() == before
+
+                invalid_metadata({"id": device_id, "trusted": "true", "tags": []}, 400)
+                invalid_metadata({"id": device_id, "trusted": True, "tags": ["bad\nlabel"]}, 400)
+                invalid_metadata({"id": "mac:00:11:22:33:44:55", "trusted": True, "tags": []}, 404)
 
                 # Rename and probe remain usable, and their updates survive publication.
                 request("/api/scan", "POST")
                 request("/api/rename", "POST", {"ip": "127.0.0.1", "name": "Renamed during scan"})
+                metadata = request("/api/device/meta", "POST", {"id": device_id, "trusted": True,
+                    "tags": [" Office ", "Storage", "office", "日本 <camera>"]})[1]["device"]
+                assert metadata["trusted"] and metadata["tags"] == ["Office", "Storage", "日本 <camera>"]
                 with socket.socket() as service:
                     service.bind(("127.0.0.1", 0))
                     service.listen(2)
@@ -147,6 +169,26 @@ end
                 edited = request("/api/devices")[1]["devices"][0]
                 assert edited["hostname"] == "Renamed during scan"
                 assert any(p["port"] == service_port for p in edited["ports"])
+                assert edited["trusted"] and edited["tags"] == metadata["tags"]
+                assert any(e["type"] == "port_detected" and e["port"] == service_port for e in request("/api/events")[1]["events"])
+                request(f"/api/probe?ip=127.0.0.1&ports={service_port}")
+                events = request("/api/events")[1]["events"]
+                assert events[-1]["type"] == "port_closed" and events[-1]["port"] == service_port
+                assert json.loads(inventory.read_text())["events"] == events
+
+                # A fragmented JSON body is collected before parsing; escaped tags survive.
+                payload = json.dumps({"id": device_id, "trusted": True, "tags": ['Office "quoted"', "日本"]}).encode()
+                with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
+                    client.sendall(b"POST /api/device/meta HTTP/1.1\r\nHost: localhost\r\nContent-Length: " +
+                        str(len(payload)).encode() + b"\r\n\r\n" + payload[:10])
+                    time.sleep(0.03)
+                    client.sendall(payload[10:])
+                    chunks = []
+                    while chunk := client.recv(4096):
+                        chunks.append(chunk)
+                raw = b"".join(chunks)
+                assert raw.startswith(b"HTTP/1.1 200 OK")
+                assert json.loads(raw.split(b"\r\n\r\n", 1)[1])["device"]["tags"] == ['Office "quoted"', "日本"]
 
                 control.write_text("fail")
                 before_failure = inventory.read_text()
@@ -173,6 +215,19 @@ end
                 time.sleep(0.1)
                 latest = request("/api/scan")[1]["scan"]
                 assert latest["id"] == auto_cancelled["id"] and latest["state"] == "cancelled"
+                # Reload from disk through a new server, while its startup scan is still pending.
+                server.terminate(); server.wait(timeout=3)
+                server = subprocess.Popen(["luajit", str(driver)], cwd=root, env=env, stdout=log, stderr=log)
+                for _ in range(50):
+                    try:
+                        reloaded = request("/api/devices")[1]
+                        break
+                    except OSError:
+                        time.sleep(0.02)
+                assert reloaded["devices"][0]["trusted"]
+                assert reloaded["devices"][0]["tags"] == ['Office "quoted"', "日本"]
+                assert request("/api/events")[1]["events"] == events
+                request("/api/scan/cancel", "POST"); wait_state({"cancelled"})
             finally:
                 server.terminate()
                 try:
@@ -180,7 +235,7 @@ end
                 except subprocess.TimeoutExpired:
                     server.kill()
                     server.wait()
-        print("Live HTTP scans: responsiveness, progress, cancellation, retry, persistence, and automatic scans PASS")
+        print("Live HTTP: scan lifecycle, timeline, trusted tags, validation, fragmented JSON, and restart persistence PASS")
 
 
 if __name__ == "__main__":

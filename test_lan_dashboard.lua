@@ -315,6 +315,10 @@ test("Persistent inventory regression tests", function()
     dofile("test_lan_inventory.lua")
 end)
 
+test("Change timeline and trusted-device metadata", function()
+    dofile("test_lan_inventory_features.lua")
+end)
+
 test("Background scan worker lifecycle regression tests", function()
     dofile("test_lan_scan_job.lua")
 end)

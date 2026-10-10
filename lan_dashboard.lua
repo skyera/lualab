@@ -17,10 +17,12 @@
 --  * Diagnostic CLI modes: --scan-only, --json, --port <P>, --test
 --  * Persistent JSON inventory with first/last seen times and MAC-based identity
 --  * Background web scans with progress and cancellation (CLI scans stay synchronous)
+--  * Persistent change timeline, trusted-device labels, and user-defined tags
 --------------------------------------------------------------------------------
 
 local ffi = require("ffi")
 local bit = require("bit")
+local json = require("json")
 
 local is_windows = (ffi.os == "Windows")
 
@@ -678,7 +680,7 @@ local function probe_device_services(ip, category, is_alive)
         end
     end
 
-    return open_ports
+    return open_ports, targets
 end
 
 -- Fast single-shot SSH banner grab to identify remote Linux distribution & OpenSSH version
@@ -1187,9 +1189,9 @@ local function scan_devices(probe_ports, options)
         -- Pre-classification based on IP, MAC, and vendor
         local preliminary = classify_device(item.ip, item.mac, vendor, {}, nil)
 
-        local ports = {}
+        local ports, checked_ports = {}, {}
         if probe_ports ~= false and is_alive then
-            ports = probe_device_services(item.ip, preliminary.category, is_alive)
+            ports, checked_ports = probe_device_services(item.ip, preliminary.category, is_alive)
         end
 
         -- Pre-resolve hostname for more accurate classification (e.g. "pi", "ubuntu", "pc")
@@ -1313,6 +1315,7 @@ local function scan_devices(probe_ports, options)
             icon = info.icon,
             badge_color = info.badge_color,
             ports = port_details,
+            probed_ports = checked_ports,
             port_count = #ports,
             latency_ms = ping_rtt,
             status = is_alive and "online" or "offline",
@@ -1494,6 +1497,13 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
         }
 
         .header-actions { display: flex; align-items: center; gap: 12px; }
+        .device-labels { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; overflow-wrap:anywhere; }
+        .device-labels span { max-width:100%; font-size:11px; padding:3px 7px; border-radius:5px; background:rgba(255,255,255,0.06); }
+        #tagFilter { min-width:0; max-width:min(260px,100%); }
+        .device-labels .trusted { color:#34d399; }
+        .device-labels .unrecognized { color:#fbbf24; }
+        .change-row { display:grid; grid-template-columns:170px minmax(0,1fr); gap:16px; padding:16px; border-bottom:1px solid var(--border); overflow-wrap:anywhere; }
+        @media(max-width:600px) { .change-row { grid-template-columns:1fr; gap:6px; } }
         button {
             cursor: pointer; font-family: inherit;
             display: inline-flex; align-items: center; gap: 8px;
@@ -1771,12 +1781,21 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
             </div>
         </div>
 
+        <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px;">
+            <button class="btn-primary" id="devicesPaneBtn" onclick="showPane('devices')">Devices</button>
+            <button class="btn-secondary" id="changesPaneBtn" onclick="showPane('changes')">Changes</button>
+            <select class="btn-secondary" id="trustFilter" aria-label="Filter device trust" onchange="renderDevices()">
+                <option value="all">All devices</option><option value="unrecognized">Unrecognized</option><option value="trusted">Trusted</option>
+            </select>
+            <select class="btn-secondary" id="tagFilter" aria-label="Filter device tags" onchange="renderDevices()"><option value="">All tags</option></select>
+        </div>
+
         <div class="controls-bar">
             <div class="search-wrap">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--text-dim);">
                     <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
                 </svg>
-                <input type="text" id="searchInput" placeholder="Filter by IP, MAC, Hostname, Vendor, Port..." oninput="renderDevices()">
+                <input type="text" id="searchInput" placeholder="Search devices, tags, or changes..." oninput="renderDevices()">
             </div>
             <div class="filter-pills">
                 <div class="pill active" data-cat="all" onclick="setCategory('all')">All (<span id="cat-all">0</span>)</div>
@@ -1804,6 +1823,7 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
         </div>
 
         <div id="deviceGrid" class="device-grid"></div>
+        <div id="changesView" style="display:none;"></div>
         <div id="deviceTableWrap" class="device-table-wrap">
             <table>
                 <thead>
@@ -1836,8 +1856,26 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
 
     <div id="toast"></div>
 
+    <div class="modal-overlay" id="deviceSettingsModal" onclick="if(event.target === this) closeDeviceSettings()">
+        <div class="modal">
+            <div class="modal-header"><h2 id="settingsTitle">Organize device</h2>
+                <button class="modal-close" onclick="closeDeviceSettings()">&times;</button></div>
+            <form onsubmit="saveDeviceSettings(event)">
+                <label style="display:block; margin-bottom:16px;"><input type="checkbox" id="settingsTrusted"> Trusted device</label>
+                <label for="settingsTags" style="display:block; margin-bottom:6px;">Tags (one per line, up to eight)</label>
+                <textarea id="settingsTags" rows="5" style="width:100%; padding:10px; background:#090d16; color:var(--text-main); border:1px solid var(--border); border-radius:6px;"></textarea>
+                <p id="settingsError" role="alert" style="color:#f87171; margin:10px 0;"></p>
+                <button class="btn-primary" id="settingsSaveBtn" type="submit">Save</button>
+                <button class="btn-secondary" type="button" onclick="closeDeviceSettings()">Cancel</button>
+            </form>
+        </div>
+    </div>
+
     <script>
         let devices = [];
+        let events = [];
+        let activePane = 'devices';
+        let settingsDeviceId = null;
         let activeCategory = 'all';
         let currentView = 'cards';
         let refreshTimer = null;
@@ -1864,8 +1902,10 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                 if (data.subnet) document.getElementById('subnetDisplay').textContent = data.subnet;
                 document.getElementById('statusSubtext').textContent = 'Last scanned: ' + (data.scanned_at || 'Not yet') + ' (' + devices.length + ' known devices)';
                 updateCounts();
+                updateTagOptions();
                 renderDevices();
                 if (data.scan) updateScanStatus(data.scan);
+                if (activePane === 'changes') await fetchEvents();
             } catch (err) {
                 console.error('Failed to fetch devices:', err);
             }
@@ -1971,32 +2011,141 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
             currentView = view;
             document.getElementById('viewCardsBtn').classList.toggle('active', view === 'cards');
             document.getElementById('viewTableBtn').classList.toggle('active', view === 'table');
-            document.getElementById('deviceGrid').style.display = view === 'cards' ? 'grid' : 'none';
-            document.getElementById('deviceTableWrap').style.display = view === 'table' ? 'block' : 'none';
             renderDevices();
+        }
+
+        function deviceId(d) {
+            if (d.id) return d.id;
+            const mac = (d.mac || '').toLowerCase().replace(/-/g, ':');
+            return /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(mac) && !['00:00:00:00:00:00', 'ff:ff:ff:ff:ff:ff'].includes(mac)
+                ? 'mac:' + mac : 'ip:' + d.ip;
+        }
+
+        function renderDeviceLabels(d) {
+            return `<div class="device-labels"><span class="${d.trusted ? 'trusted' : 'unrecognized'}">${d.trusted ? 'Trusted' : 'Unrecognized'}</span>` +
+                (d.tags || []).map(tag => `<span>${escapeHtml(tag)}</span>`).join('') + '</div>';
+        }
+
+        function updateTagOptions() {
+            const select = document.getElementById('tagFilter');
+            const chosen = select.value;
+            const labels = new Map();
+            devices.forEach(d => (d.tags || []).forEach(tag => { if (!labels.has(tag.toLowerCase())) labels.set(tag.toLowerCase(), tag); }));
+            select.innerHTML = '<option value="">All tags</option>' + [...labels].sort((a,b) => a[1].localeCompare(b[1])).map(([key,tag]) =>
+                `<option value="${escapeHtml(key)}">${escapeHtml(tag)}</option>`).join('');
+            select.value = labels.has(chosen) ? chosen : '';
+        }
+
+        function matchesDeviceFilters(d) {
+            const trust = document.getElementById('trustFilter').value;
+            const tag = document.getElementById('tagFilter').value;
+            return (activeCategory === 'all' || d.category === activeCategory) &&
+                (trust !== 'trusted' || d.trusted === true) &&
+                (trust !== 'unrecognized' || d.trusted !== true) &&
+                (!tag || (d.tags || []).some(value => value.toLowerCase() === tag));
         }
 
         function filterList() {
             const query = (document.getElementById('searchInput').value || '').toLowerCase().trim();
             return devices.filter(d => {
-                if (activeCategory !== 'all' && d.category !== activeCategory) return false;
+                if (!matchesDeviceFilters(d)) return false;
                 if (!query) return true;
                 const portsStr = (d.ports || []).map(p => p.port + ' ' + p.name).join(' ');
                 return d.ip.toLowerCase().includes(query) ||
                        d.mac.toLowerCase().includes(query) ||
                        (d.hostname || '').toLowerCase().includes(query) ||
                        (d.vendor || '').toLowerCase().includes(query) ||
-                       portsStr.toLowerCase().includes(query);
+                       portsStr.toLowerCase().includes(query) ||
+                       (d.tags || []).some(tag => tag.toLowerCase().includes(query));
             });
         }
 
         function renderDevices() {
+            document.getElementById('deviceGrid').style.display = activePane === 'devices' && currentView === 'cards' ? 'grid' : 'none';
+            document.getElementById('deviceTableWrap').style.display = activePane === 'devices' && currentView === 'table' ? 'block' : 'none';
+            document.getElementById('changesView').style.display = activePane === 'changes' ? 'block' : 'none';
+            if (activePane === 'changes') { renderTimeline(); return; }
             const list = filterList();
             if (currentView === 'cards') {
                 renderGrid(list);
             } else {
                 renderTable(list);
             }
+        }
+
+        async function showPane(pane) {
+            activePane = pane;
+            document.getElementById('devicesPaneBtn').className = pane === 'devices' ? 'btn-primary' : 'btn-secondary';
+            document.getElementById('changesPaneBtn').className = pane === 'changes' ? 'btn-primary' : 'btn-secondary';
+            renderDevices();
+            if (pane === 'changes') await fetchEvents();
+        }
+
+        async function fetchEvents() {
+            try {
+                const res = await fetch('/api/events');
+                if (!res.ok) throw new Error('Could not fetch changes');
+                events = (await res.json()).events || [];
+                if (activePane === 'changes') renderTimeline();
+            } catch (err) {
+                if (activePane === 'changes') document.getElementById('changesView').textContent = 'Changes unavailable. Open Changes again to retry.';
+            }
+        }
+
+        function renderTimeline() {
+            const current = new Map(devices.map(d => [deviceId(d), d]));
+            const query = document.getElementById('searchInput').value.toLowerCase().trim();
+            const labels = {new_device: 'New device', ip_changed: 'IP changed', port_detected: 'Port detected', port_opened: 'Port opened', port_closed: 'Port no longer reachable'};
+            const list = events.slice().reverse().filter(event => {
+                const device = current.get(event.device_id);
+                if (device && !matchesDeviceFilters(device)) return false;
+                if (!device && (activeCategory !== 'all' || ['trusted', 'unrecognized'].includes(document.getElementById('trustFilter').value) || document.getElementById('tagFilter').value)) return false;
+                return !query || [event.hostname, event.ip, event.old_ip, event.new_ip, event.service, event.port, device?.hostname, ...(device?.tags || [])]
+                    .some(value => String(value || '').toLowerCase().includes(query));
+            });
+            document.getElementById('changesView').innerHTML = list.length ? list.map(event => {
+                const detail = event.type === 'ip_changed' ? event.old_ip + ' → ' + event.new_ip :
+                    event.type.startsWith('port_') ? event.service + ' (' + event.port + ')' : event.ip;
+                return `<article class="change-row"><time>${seenTime(event.timestamp)}</time><div><strong>${escapeHtml(labels[event.type] || event.type)}</strong>
+                    <div>${escapeHtml(event.hostname)} · ${escapeHtml(detail)}</div></div></article>`;
+            }).join('') : '<p style="padding:24px; color:var(--text-dim);">' + (events.length ? 'No changes match your filters.' : 'No recorded changes yet.') + '</p>';
+        }
+
+        function openDeviceSettings(id) {
+            const device = devices.find(d => deviceId(d) === id);
+            if (!device) return;
+            settingsDeviceId = id;
+            document.getElementById('settingsTitle').textContent = 'Organize ' + device.hostname;
+            document.getElementById('settingsTrusted').checked = device.trusted === true;
+            document.getElementById('settingsTags').value = (device.tags || []).join('\n');
+            document.getElementById('settingsError').textContent = '';
+            document.getElementById('deviceSettingsModal').style.display = 'flex';
+        }
+
+        function closeDeviceSettings() {
+            document.getElementById('deviceSettingsModal').style.display = 'none';
+            settingsDeviceId = null;
+        }
+
+        async function saveDeviceSettings(event) {
+            event.preventDefault();
+            if (!settingsDeviceId) return;
+            const id = settingsDeviceId;
+            const tags = document.getElementById('settingsTags').value.split(/\r?\n/).map(tag => tag.trim()).filter(Boolean);
+            const button = document.getElementById('settingsSaveBtn');
+            button.disabled = true;
+            try {
+                const res = await fetch('/api/device/meta', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({id, trusted: document.getElementById('settingsTrusted').checked, tags})});
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.message || 'Could not save device');
+                const device = devices.find(d => deviceId(d) === id);
+                if (device) Object.assign(device, data.device);
+                updateTagOptions(); renderDevices();
+                if (settingsDeviceId === id) closeDeviceSettings();
+            } catch (err) {
+                if (settingsDeviceId === id) document.getElementById('settingsError').textContent = err.message;
+            } finally { button.disabled = false; }
         }
 
         function isObserved(d) {
@@ -2037,7 +2186,7 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                         else if (p.port === 80 || p.port === 443 || p.port === 8080) cls = 'web';
                         else if (p.port === 3389) cls = 'rdp';
                         else if (p.port === 53) cls = 'dns';
-                        return `<span class="port-tag ${cls}">${p.name} (${p.port})</span>`;
+                        return `<span class="port-tag ${cls}">${escapeHtml(p.name)} (${p.port})</span>`;
                     }).join('')
                     : `<span style="font-size:11px; color:var(--text-dim); font-family:monospace;">${isOnline ? 'Active Host (Ports Unprobed)' : deviceStatus(d)}</span>`;
 
@@ -2066,6 +2215,7 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                             </div>
                         </div>
 
+                        ${renderDeviceLabels(d)}
                         <div class="net-specs">
                             <div class="spec-item">
                                 <div class="label">IP Address</div>
@@ -2093,6 +2243,7 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                     </div>
 
                     <div class="card-actions">
+                        <button class="btn-secondary" onclick="openDeviceSettings('${deviceId(d)}')">Organize</button>
                         ${hasWeb ? `<button class="btn-secondary" onclick="window.open('http://${d.ip}', '_blank')">🌐 Web</button>` : ''}
                         ${hasSsh ? `<button class="btn-secondary" onclick="copyText('ssh pi@${d.ip}')">💻 SSH</button>` : ''}
                         ${hasRtsp ? `<button class="btn-secondary" onclick="copyText('rtsp://${d.ip}:554/stream')">🎥 RTSP</button>` : ''}
@@ -2125,6 +2276,7 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                                     <button title="Rename" ${isObserved(d) ? '' : 'disabled'} onclick="renameDevice('${d.ip}', '${escapeHtml(d.hostname)}')" style="background:none; border:none; padding:1px; cursor:pointer; font-size:11px; opacity:0.8;">✏️</button>
                                 </div>
                                 <div style="font-size:11px; color:var(--text-dim);">${escapeHtml(d.type_name)}<br>Last seen: ${seenTime(d.last_seen)}</div>
+                                ${renderDeviceLabels(d)}
                             </div>
                         </div>
                     </td>
@@ -2136,6 +2288,7 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                     <td style="font-family:monospace; color:${isOnline ? '#34d399' : '#f87171'};">${deviceStatus(d)}</td>
                     <td>
                         <div style="display:flex; gap:6px;">
+                            <button class="btn-secondary" style="padding:4px 8px; font-size:11px;" onclick="openDeviceSettings('${deviceId(d)}')">Organize</button>
                             <button class="btn-secondary" style="padding:4px 8px; font-size:11px;" onclick="copyText('${d.ip}')">Copy IP</button>
                             <button class="btn-secondary" style="padding:4px 8px; font-size:11px;" ${isObserved(d) ? '' : 'disabled'} onclick="probeDevicePorts('${d.ip}', this)">⚡ Probe</button>
                             <button class="btn-primary" style="padding:4px 8px; font-size:11px;" onclick="inspectDevice('${d.ip}', '${d.mac || ''}')">Inspect</button>
@@ -2182,10 +2335,11 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
             try {
                 const res = await fetch(`/api/probe?ip=${ip}`);
                 const data = await res.json();
+                if (!res.ok) throw new Error(data.message || 'Port probe failed');
                 const probed = data.ports || [];
                 const dev = devices.find(x => x.ip === ip);
                 if (dev) {
-                    dev.ports = probed;
+                    if (data.device) Object.assign(dev, data.device); else dev.ports = probed;
                 }
                 renderDevices();
                 if (document.getElementById('inspectModal').style.display === 'flex') {
@@ -2193,6 +2347,7 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                 }
                 const portNames = probed.map(p => `${p.name} (${p.port})`).join(', ') || 'No open standard ports';
                 showToast(`Port scan complete for ${ip}: ${portNames}`);
+                if (activePane === 'changes') await fetchEvents();
             } catch (err) {
                 showToast(`Port probe failed for ${ip}: ${err.message}`);
             } finally {
@@ -2383,9 +2538,11 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
             try {
                 const res = await fetch(`/api/probe?ip=${ip}&ports=${encodeURIComponent(rawVal)}`);
                 const data = await res.json();
+                if (!res.ok) throw new Error(data.message || 'Port probe failed');
                 const probed = data.ports || [];
                 const dev = devices.find(x => x.ip === ip);
-                if (dev) {
+                if (dev && data.device) Object.assign(dev, data.device);
+                else if (dev) {
                     dev.ports = dev.ports || [];
                     const existingMap = new Set(dev.ports.map(p => p.port));
                     probed.forEach(p => {
@@ -2395,6 +2552,7 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                     });
                 }
                 renderDevices();
+                if (activePane === 'changes') await fetchEvents();
                 if (document.getElementById('inspectModal').style.display === 'flex') {
                     const portsListEl = document.getElementById('modalPortsList');
                     if (portsListEl && dev) {
@@ -2425,7 +2583,7 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
             stopPingMonitor();
             document.getElementById('modalTitle').textContent = `${d.hostname} (${d.ip})`;
             if (!isObserved(d)) {
-                document.getElementById('modalBody').innerHTML = `<p>${deviceStatus(d)}</p>
+                document.getElementById('modalBody').innerHTML = `${renderDeviceLabels(d)}<p>${deviceStatus(d)}</p>
                     <p>First seen: ${seenTime(d.first_seen)}<br>Last seen: ${seenTime(d.last_seen)}</p>
                     <p>Vendor: ${escapeHtml(d.vendor)}</p>
                     <p>Last observed services: ${escapeHtml((d.ports || []).map(p => p.name + ' (' + p.port + ')').join(', ') || 'None recorded')}</p>`;
@@ -2437,6 +2595,7 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
                 : '<li style="color:var(--text-dim);">No open standard ports detected yet. Click "Probe Ports" below to scan.</li>';
 
             document.getElementById('modalBody').innerHTML = `
+                ${renderDeviceLabels(d)}
                 <div style="margin-bottom:14px;">
                     <p style="color:var(--text-dim); margin-bottom:4px;">Device Type: <strong style="color:var(--text-main);">${escapeHtml(d.type_name)}</strong></p>
                     <p style="color:var(--text-dim); margin-bottom:4px;">MAC Address: <strong style="color:var(--text-main); font-family:monospace;">${d.mac}</strong></p>
@@ -2549,6 +2708,24 @@ local DASHBOARD_HTML = [[<!DOCTYPE html>
 --------------------------------------------------------------------------------
 -- 9. Embedded HTTP Web Server
 --------------------------------------------------------------------------------
+local function read_http_request(sock, buffer)
+    local request = ""
+    for _ = 1, 16 do
+        if not socket_wait_readable(sock, 200) then return nil end
+        local received = is_windows and ws2.recv(sock, buffer, 4095, 0) or ffi.C.recv(sock, buffer, 4095, 0)
+        if received <= 0 then return nil end
+        request = request .. ffi.string(buffer, received)
+        if #request > 8192 then return nil end
+        local _, header_end = request:find("\r\n\r\n", 1, true)
+        if header_end then
+            local headers = request:sub(1, header_end):lower()
+            local length = tonumber(headers:match("\r\ncontent%-length:%s*(%d+)")) or 0
+            if header_end + length > 8192 then return nil end
+            if #request >= header_end + length then return request:sub(1, header_end + length) end
+        end
+    end
+end
+
 local function run_web_server(port, options)
     port = port or 8888
     options = options or {}
@@ -2642,9 +2819,8 @@ local function run_web_server(port, options)
         if is_valid_client then
             if not is_windows then ffi.C.fcntl(client_sock, 2, 1) end -- FD_CLOEXEC
             if socket_wait_readable(client_sock, 500) then
-                local n_recv = is_windows and ws2.recv(client_sock, recv_buf, 4095, 0)
-                                          or ffi.C.recv(client_sock, recv_buf, 4095, 0)
-                if n_recv > 0 then
+                local req = read_http_request(client_sock, recv_buf)
+                if req then
                     local client_ip = "127.0.0.1"
                     if client_addr then
                         local u32 = client_addr.sin_addr.s_addr
@@ -2655,7 +2831,6 @@ local function run_web_server(port, options)
                         local detected_cip = string.format("%d.%d.%d.%d", b1, b2, b3, b4)
                         if detected_cip ~= "0.0.0.0" then client_ip = detected_cip end
                     end
-                    local req = ffi.string(recv_buf, n_recv)
                     local method, raw_uri = req:match("^(%a+)%s+([^%s]+)")
                     method = method or "GET"
                     raw_uri = raw_uri or "/"
@@ -2668,6 +2843,23 @@ local function run_web_server(port, options)
                     if path == "/" then
                         resp_body = DASHBOARD_HTML
                         content_type = "text/html; charset=utf-8"
+                    elseif path == "/api/events" and method == "GET" then
+                        resp_body = to_json({status = "ok", events = INVENTORY.events})
+                        content_type = "application/json"
+                    elseif path == "/api/device/meta" and method == "POST" then
+                        local body = req:match("\r\n\r\n(.*)") or ""
+                        local decoded, data = pcall(json.decode, body)
+                        local device, err, reason
+                        if decoded and type(data) == "table" then
+                            device, err, reason = INVENTORY:update_metadata(data.id, data.trusted, data.tags)
+                        else err, reason = "Invalid JSON request", "invalid" end
+                        if device then resp_body = to_json({status = "ok", device = device})
+                        else
+                            status_code = reason == "missing" and "404 Not Found" or
+                                (reason == "storage" and "500 Internal Server Error" or "400 Bad Request")
+                            resp_body = to_json({status = "error", message = err})
+                        end
+                        content_type = "application/json"
                     elseif path == "/api/devices" then
                         resp_body = to_json({
                             status = "ok",
@@ -2717,7 +2909,7 @@ local function run_web_server(port, options)
                         if custom_ports_str then
                             custom_ports_str = custom_ports_str:gsub("%%2[cC]", ","):gsub("%%2[dD]", "-")
                         end
-                        local probed_ports = {}
+                        local probed_ports, updated_device = {}, nil
                         if target_ip then
                             local port_list = {}
                             if custom_ports_str and custom_ports_str ~= "" then
@@ -2755,19 +2947,8 @@ local function run_web_server(port, options)
                             -- Update device in memory STATE
                             for _, d in ipairs(STATE.devices) do
                                 if d.ip == target_ip and (d.status == "online" or d.status == "offline") then
-                                    if custom_ports_str then
-                                        d.ports = d.ports or {}
-                                        local existing_map = {}
-                                        for _, ep in ipairs(d.ports) do existing_map[ep.port] = true end
-                                        for _, np in ipairs(probed_ports) do
-                                            if not existing_map[np.port] then
-                                                table.insert(d.ports, np)
-                                            end
-                                        end
-                                    else
-                                        d.ports = probed_ports
-                                    end
-                                    d.port_count = #d.ports
+                                    INVENTORY:update_ports(d, probed_ports, port_list, os.time())
+                                    updated_device = d
                                     -- Re-profile hardware banner if port 22 or 80 discovered
                                     if not d.hardware or not d.hardware.banner then
                                         for _, p in ipairs(d.ports) do
@@ -2784,8 +2965,10 @@ local function run_web_server(port, options)
                                 end
                             end
                         end
-                        resp_body = to_json({ status = "ok", ip = target_ip, ports = probed_ports, custom = (custom_ports_str ~= nil) })
-                        save_inventory()
+                        local saved, save_error = save_inventory()
+                        if not saved then status_code = "500 Internal Server Error" end
+                        resp_body = to_json({ status = saved and "ok" or "error", message = save_error, ip = target_ip,
+                            ports = probed_ports, device = updated_device, custom = (custom_ports_str ~= nil) })
                         content_type = "application/json"
                     elseif path == "/api/rename" and method == "POST" then
                         local target_ip = req:match('["\']?ip["\']?%s*[:=]%s*["\']?([%d%.]+)["\']?')

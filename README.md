@@ -119,6 +119,28 @@ make
   Worker checks: `luajit test_lan_scan_job.lua` and
   `python3 test_lan_dashboard_scan.py` (POSIX live HTTP harness).
 
+  **Changes** shows the latest 1,000 discoveries, IP changes, and port
+  observations, saved with the inventory. First-time reachable ports appear as
+  **Port detected**; subsequent probes can report **Port opened** or
+  **Port no longer reachable**. Only ports actually checked by a probe can change
+  their recorded state. Scans that skip probing and cancelled scans do not create
+  port events. Standard probes preserve services outside their scan scope.
+
+  Use **Organize** on a device card or table row to mark it trusted and assign
+  up to eight tags, with 1–64 characters per tag. Trust and tags stay with the
+  device's MAC identity across IP changes and restarts, including edits made
+  during a background scan. Devices without a valid MAC use their IP identity.
+  The **Unrecognized** filter shows devices not marked trusted; tags and search
+  work in both Devices and Changes. Existing inventories start with empty tags,
+  no trusted devices, and no retrospective timeline.
+
+  `GET /api/events` returns the retained events in recording order.
+  `POST /api/device/meta` accepts JSON such as
+  `{"id":"mac:aa:bb:cc:dd:ee:01","trusted":true,"tags":["Office","Storage"]}`.
+  Device IDs are included in `/api/devices`. Invalid input returns 400, unknown
+  IDs return 404, and persistence failures return 500 without changing metadata.
+  Feature checks: `luajit test_lan_inventory_features.lua`.
+
 - **Run Unit Tests:**
   ```bash
   make test
