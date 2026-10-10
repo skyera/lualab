@@ -930,6 +930,30 @@ TestRunner.describe("12. Smart Process Filter & Search Input Engine", function()
         assert_true(frame:find("No processes matching filter", 1, true) ~= nil, "Contains empty state placeholder")
         assert_true(frame:find("nonexistent_proc_xyz", 1, true) ~= nil, "Contains query in placeholder")
     end)
+
+    TestRunner.it("should display sort mode indicator tags and column directional arrows accurately", function()
+        local mock_state_mem = {
+            procs = { { pid = 1, comm = "init", username = "root", cpu_pct = 0.5, res_kb = 2048, state = "S" } },
+            raw_total_procs = 1,
+            sort_mode = "mem",
+            sort_reverse = false,
+            in_tree_mode = false,
+        }
+        local frame_mem = btop.render_zoomed_pane_frame(4, mock_state_mem, 100, 30)
+        assert_true(frame_mem:find("[Sort: MEM▼]", 1, true) ~= nil, "Frame must contain [Sort: MEM▼]")
+        assert_true(frame_mem:find("%MEM▼", 1, true) ~= nil, "Column header must contain %MEM▼")
+
+        local mock_state_cpu_asc = {
+            procs = { { pid = 1, comm = "init", username = "root", cpu_pct = 0.5, res_kb = 2048, state = "S" } },
+            raw_total_procs = 1,
+            sort_mode = "cpu",
+            sort_reverse = true,
+            in_tree_mode = false,
+        }
+        local frame_cpu = btop.render_zoomed_pane_frame(4, mock_state_cpu_asc, 100, 30)
+        assert_true(frame_cpu:find("[Sort: CPU▲]", 1, true) ~= nil, "Frame must contain [Sort: CPU▲]")
+        assert_true(frame_cpu:find("%CPU▲", 1, true) ~= nil, "Column header must contain %CPU▲")
+    end)
 end)
 
 -- Summary

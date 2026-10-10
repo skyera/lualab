@@ -4064,18 +4064,32 @@ Keybindings:
                     status_flash_expiry = os.clock() + 2.0
                 elseif k == "c" then
                     sort_mode = "cpu"
+                    status_flash_msg = string.format("Sort: CPU (%s)", sort_reverse and "ASC" or "DESC")
+                    status_flash_expiry = os.clock() + 2.0
                 elseif k == "m" then
                     sort_mode = "mem"
+                    status_flash_msg = string.format("Sort: MEM (%s)", sort_reverse and "ASC" or "DESC")
+                    status_flash_expiry = os.clock() + 2.0
                 elseif k == "p" then
                     sort_mode = "pid"
+                    status_flash_msg = string.format("Sort: PID (%s)", sort_reverse and "ASC" or "DESC")
+                    status_flash_expiry = os.clock() + 2.0
                 elseif k == "n" then
                     sort_mode = "name"
+                    status_flash_msg = string.format("Sort: NAME (%s)", sort_reverse and "ASC" or "DESC")
+                    status_flash_expiry = os.clock() + 2.0
                 elseif k == "u" then
                     sort_mode = "user"
+                    status_flash_msg = string.format("Sort: USER (%s)", sort_reverse and "ASC" or "DESC")
+                    status_flash_expiry = os.clock() + 2.0
                 elseif k == "s" then
                     sort_mode = "threads"
+                    status_flash_msg = string.format("Sort: THREADS (%s)", sort_reverse and "ASC" or "DESC")
+                    status_flash_expiry = os.clock() + 2.0
                 elseif k == "d" then
                     sort_mode = "io"
+                    status_flash_msg = string.format("Sort: DISK I/O (%s)", sort_reverse and "ASC" or "DESC")
+                    status_flash_expiry = os.clock() + 2.0
                 elseif k == "e" then
                     if sort_mode == "time" then
                         sort_reverse = not sort_reverse
@@ -4087,6 +4101,9 @@ Keybindings:
                     status_flash_expiry = os.clock() + 2.0
                 elseif k == "r" then
                     sort_reverse = not sort_reverse
+                    local mode_labels = { cpu = "CPU", mem = "MEM", pid = "PID", name = "NAME", user = "USER", threads = "THREADS", io = "DISK I/O", time = "TIME+" }
+                    status_flash_msg = string.format("Sort: %s (%s)", mode_labels[sort_mode] or sort_mode:upper(), sort_reverse and "ASC" or "DESC")
+                    status_flash_expiry = os.clock() + 2.0
                 elseif k == "T" then
                     cycle_theme()
                 elseif k == "?" or k == "h" then
