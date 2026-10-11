@@ -1600,6 +1600,9 @@ local function generate_text_preview(filepath, ext, max_lines, max_cols)
 
     local lines = {}
     local count = 0
+    local pad_width = (max_lines >= 10000) and 5 or ((max_lines >= 1000) and 4 or 3)
+    local num_fmt = string.format("%%s%%%dd%%s │ ", pad_width)
+
     while count < max_lines do
         local line = f:read("*l")
         if not line then break end
@@ -1607,9 +1610,30 @@ local function generate_text_preview(filepath, ext, max_lines, max_cols)
         count = count + 1
         -- Replace tabs with 4 spaces
         line = line:gsub("\t", "    ")
-        local num_str = string.format("%s%3d%s │ ", C.dim, count, C.reset)
+        local num_str = string.format(num_fmt, C.dim, count, C.reset)
         local code_str = highlight_code_line(line, ext)
         table.insert(lines, num_str .. code_str)
+    end
+
+    local next_line = f:read("*l")
+    if next_line then
+        local cur_pos = f:seek()
+        local total_lines = count + 1
+        local file_size = f:seek("end") or 0
+        if file_size < 5 * 1024 * 1024 and cur_pos then
+            f:seek("set", cur_pos)
+            while true do
+                local chunk = f:read(65536)
+                if not chunk or #chunk == 0 then break end
+                local _, nls = chunk:gsub("\n", "\n")
+                total_lines = total_lines + nls
+            end
+            table.insert(lines, string.format("%s─── [Preview truncated at line %d of %d · Press 'e' or Enter to open] ───%s",
+                C.dim, count, total_lines, C.reset))
+        else
+            table.insert(lines, string.format("%s─── [Preview truncated at line %d · Press 'e' or Enter to open] ───%s",
+                C.dim, count, C.reset))
+        end
     end
     f:close()
 
@@ -2114,6 +2138,8 @@ local function show_fuzzy_finder(root_dir, show_hidden)
         return res
     end
 
+    local visible_rows = 10
+
     local function render_modal(matches)
         local term_w, term_h = get_terminal_size()
         local box_w = math.max(40, math.min(term_w - 6, 88))
@@ -2121,7 +2147,7 @@ local function show_fuzzy_finder(root_dir, show_hidden)
         local start_x = math.floor((term_w - box_w) / 2)
         local start_y = math.floor((term_h - box_h) / 2)
 
-        local visible_rows = box_h - 5 -- border, prompt, divider, list rows, footer
+        visible_rows = box_h - 5 -- border, prompt, divider, list rows, footer
         if sel_idx <= scroll_offset then
             scroll_offset = sel_idx - 1
         elseif sel_idx > scroll_offset + visible_rows then
@@ -2602,8 +2628,17 @@ local function preview_cache_put(key, lines)
     end
 end
 
-local function get_preview_cache_key(entry, max_lines, max_cols, show_hidden)
-    local buffer_lines = math.max(max_lines * 5, 200)
+local DEFAULT_PREVIEW_LINES = 2000
+local DEFAULT_ZOOM_PREVIEW_LINES = 10000
+local env_preview_limit = tonumber(os.getenv("LUMINA_MAX_PREVIEW_LINES"))
+if env_preview_limit and env_preview_limit > 0 then
+    DEFAULT_PREVIEW_LINES = env_preview_limit
+    DEFAULT_ZOOM_PREVIEW_LINES = math.max(env_preview_limit * 2, 10000)
+end
+
+local function get_preview_cache_key(entry, max_lines, max_cols, show_hidden, is_zoomed)
+    local target_limit = is_zoomed and DEFAULT_ZOOM_PREVIEW_LINES or DEFAULT_PREVIEW_LINES
+    local buffer_lines = math.max(max_lines * 10, target_limit)
     return table.concat({
         entry.path,
         entry.ext,
@@ -2611,12 +2646,13 @@ local function get_preview_cache_key(entry, max_lines, max_cols, show_hidden)
         tostring(buffer_lines),
         tostring(max_cols),
         show_hidden and "hidden" or "visible",
+        is_zoomed and "zoomed" or "normal",
     }, "\31")
 end
 
-local function should_render_preview_instantly(entry, max_lines, max_cols, show_hidden)
+local function should_render_preview_instantly(entry, max_lines, max_cols, show_hidden, is_zoomed)
     if not entry then return true end
-    local key = get_preview_cache_key(entry, max_lines, max_cols, show_hidden)
+    local key = get_preview_cache_key(entry, max_lines, max_cols, show_hidden, is_zoomed)
     if preview_cache_get(key) ~= nil then return true end
     if entry.is_dir then return true end
     if is_text_file(entry) and entry.size and entry.size < 65536 then return true end
@@ -2624,12 +2660,13 @@ local function should_render_preview_instantly(entry, max_lines, max_cols, show_
     return false
 end
 
-local function generate_preview(entry, max_lines, max_cols, show_hidden)
-    local key = get_preview_cache_key(entry, max_lines, max_cols, show_hidden)
+local function generate_preview(entry, max_lines, max_cols, show_hidden, is_zoomed)
+    local key = get_preview_cache_key(entry, max_lines, max_cols, show_hidden, is_zoomed)
     local cached = preview_cache_get(key)
     if cached then return cached end
 
-    local buffer_lines = math.max(max_lines * 5, 200)
+    local target_limit = is_zoomed and DEFAULT_ZOOM_PREVIEW_LINES or DEFAULT_PREVIEW_LINES
+    local buffer_lines = math.max(max_lines * 10, target_limit)
 
     local lines
     if entry.is_dir then
@@ -2762,6 +2799,13 @@ local function main(args)
             i = i + 1
         elseif a:match("^%-%-theme=(.+)$") then
             initial_theme = a:match("^%-%-theme=(.+)$")
+        elseif a == "--max-preview-lines" and i + 1 <= #args then
+            local lim = tonumber(args[i + 1])
+            if lim and lim > 0 then DEFAULT_PREVIEW_LINES = lim end
+            i = i + 1
+        elseif a:match("^%-%-max%-preview%-lines=(.+)$") then
+            local lim = tonumber(a:match("^%-%-max%-preview%-lines=(.+)$"))
+            if lim and lim > 0 then DEFAULT_PREVIEW_LINES = lim end
         elseif not a:match("^%-") then
             requested_path = a
         end
@@ -3067,7 +3111,7 @@ local function main(args)
         -- Column 3: Live Preview Pane
         local sel_entry = current_entries[sel_index]
         local preview_lines
-        local can_instant = sel_entry and should_render_preview_instantly(sel_entry, visible_rows, col3_w - 4, show_hidden)
+        local can_instant = sel_entry and should_render_preview_instantly(sel_entry, visible_rows, col3_w - 4, show_hidden, is_preview_zoomed)
         if preview_pending and not can_instant then
             preview_lines = {
                 C.dim .. "Loading preview..." .. C.reset,
@@ -3075,7 +3119,7 @@ local function main(args)
             }
         elseif sel_entry then
             preview_pending = false
-            preview_lines = generate_preview(sel_entry, visible_rows, col3_w - 4, show_hidden)
+            preview_lines = generate_preview(sel_entry, visible_rows, col3_w - 4, show_hidden, is_preview_zoomed)
         else
             preview_pending = false
             preview_lines = { C.dim .. "(Empty Directory)" .. C.reset }
@@ -3239,7 +3283,7 @@ local function main(args)
         -- 3. Overwrite Col 3 (Preview)
         local sel_entry = current_entries[sel_index]
         local preview_lines
-        local can_instant = sel_entry and should_render_preview_instantly(sel_entry, visible_rows, col3_w - 4, show_hidden)
+        local can_instant = sel_entry and should_render_preview_instantly(sel_entry, visible_rows, col3_w - 4, show_hidden, false)
         if preview_pending and not can_instant then
             preview_lines = {
                 C.dim .. "Loading preview..." .. C.reset,
@@ -3247,7 +3291,7 @@ local function main(args)
             }
         elseif sel_entry then
             preview_pending = false
-            preview_lines = generate_preview(sel_entry, visible_rows, col3_w - 4, show_hidden)
+            preview_lines = generate_preview(sel_entry, visible_rows, col3_w - 4, show_hidden, false)
         else
             preview_pending = false
             preview_lines = { C.dim .. "(Empty Directory)" .. C.reset }
@@ -4064,6 +4108,10 @@ local M = {
     delete_file_or_dir              = delete_file_or_dir,
     copy_file_or_dir                = copy_file_or_dir,
     move_file_or_dir                = move_file_or_dir,
+    generate_text_preview           = generate_text_preview,
+    generate_preview                = generate_preview,
+    get_max_preview_lines           = function() return DEFAULT_PREVIEW_LINES end,
+    set_max_preview_lines           = function(n) if n and n > 0 then DEFAULT_PREVIEW_LINES = n end end,
     main                            = main,
 }
 

@@ -2076,6 +2076,69 @@ end
         "lumina.lua reports partial deletion failure accurately")
 end)()
 
+-- =========================================================================
+-- Test Suite 33: Extended Preview Lines Buffer & Truncation Banner
+-- =========================================================================
+local function test_suite_33()
+    print("\n-- Test Suite 33: Extended Preview Lines Buffer & Truncation Banner --")
+    assert_true(type(Lumina.generate_text_preview) == "function", "Lumina exports generate_text_preview")
+    assert_true(type(Lumina.generate_preview) == "function", "Lumina exports generate_preview")
+    assert_true(type(Lumina.get_max_preview_lines) == "function", "Lumina exports get_max_preview_lines")
+
+    -- 1. Default limit is 2000 lines
+    local default_lim = Lumina.get_max_preview_lines()
+    assert_true(default_lim >= 2000, "Default preview limit is at least 2000 lines")
+
+    -- 2. Create a 500-line test file and verify preview does not stop at 200 lines
+    local f500 = "test_preview_500.tmp"
+    local f = io.open(f500, "w")
+    for i = 1, 500 do
+        f:write(string.format("line %d: sample code line content\n", i))
+    end
+    f:close()
+
+    local lines500 = Lumina.generate_text_preview(f500, "txt", 2000, 80)
+    assert_eq(#lines500, 500, "500-line file previews all 500 lines without stopping at 200")
+    assert_true(lines500[1]:find("line 1:") ~= nil, "First line formatted properly")
+    assert_true(lines500[500]:find("line 500:") ~= nil, "500th line formatted properly")
+
+    -- 3. Create a 2500-line test file and test truncation banner at 2000 lines
+    local f2500 = "test_preview_2500.tmp"
+    local f2 = io.open(f2500, "w")
+    for i = 1, 2500 do
+        f2:write(string.format("item_%d = %d\n", i, i * 2))
+    end
+    f2:close()
+
+    local lines2500 = Lumina.generate_text_preview(f2500, "lua", 2000, 80)
+    assert_eq(#lines2500, 2001, "2500-line file returns 2000 lines + 1 truncation banner")
+    local last_line = lines2500[2001]
+    assert_true(last_line:find("Preview truncated at line 2000 of 2500") ~= nil,
+        "Truncation banner reports correct line count and total lines")
+
+    -- 4. Test zoom preview allows up to 10,000 lines
+    local entry2500 = {
+        name = "test_preview_2500.tmp",
+        path = f2500,
+        ext = "lua",
+        size = 2500 * 15,
+        is_dir = false,
+    }
+    local zoomed_lines = Lumina.generate_preview(entry2500, 40, 80, false, true)
+    assert_eq(#zoomed_lines, 2500, "Zoomed preview renders full 2500 lines without truncation")
+
+    -- Cleanup temporary files
+    os.remove(f500)
+    os.remove(f2500)
+
+    -- 5. Test setter and getter for max preview lines
+    Lumina.set_max_preview_lines(3000)
+    assert_eq(Lumina.get_max_preview_lines(), 3000, "set_max_preview_lines updates preview limit")
+    Lumina.set_max_preview_lines(default_lim)
+    assert_eq(Lumina.get_max_preview_lines(), default_lim, "Restored default preview limit")
+end
+test_suite_33()
+
 print(string.format("\nResults: %d passed, %d failed.", passed, failed))
 if failed > 0 then
     os.exit(1)
