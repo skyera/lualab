@@ -243,6 +243,19 @@ test('Proverb database persistence and online fetching', function()
     local fort = content.fetch_fortune(function() return "Real programmers don't write specs.\n\t-- Anonymous\n" end)
     assert(fort and fort.text == "Real programmers don't write specs." and fort.explanation:find('Anonymous') and fort.explanation:find('Fortune'))
 
+    -- Verify DB:random_proverb
+    local rand_db_p = db:random_proverb()
+    assert(rand_db_p and rand_db_p.text == 'Never give up.')
+
+    -- Verify fetch_random_iciba uses a randomized historical date
+    local called_date_url = nil
+    local rand_iciba = content.fetch_random_iciba(function(url)
+        called_date_url = url
+        return sample_json, 200
+    end)
+    assert(called_date_url and called_date_url:find('date=%d%d%d%d%-%d%d%-%d%d'))
+    assert(rand_iciba and rand_iciba.text == 'A journey of a thousand miles begins with a single step.')
+
     -- Verify service route for /api/word/random
     local rand_word, wcode = service.route(db, 'GET', '/api/word/random', {}, {})
     assert(wcode == 200 and rand_word.word and rand_word.word.word and rand_word.word.meaning)

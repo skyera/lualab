@@ -166,6 +166,9 @@ function Store:random_proverb(fetch_fn, source)
         if saved then return saved end
         return online
     end
+    -- Fallback: pick a random proverb from local database history
+    local local_rand = self.web.random_proverb and self.web:random_proverb()
+    if local_rand then return local_rand end
     -- Fallback: pick a historical or curated proverb
     local offset = math.random(1, 365) * 86400
     local target_date = os.date('!%Y-%m-%d', os.time() - offset)

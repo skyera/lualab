@@ -431,22 +431,24 @@ async function showView(view) {
 async function loadDaily() {
   const data = await api('/api/daily'); state.daily = data;
   $('daily-date').textContent = new Date(data.date + 'T12:00:00Z').toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
-  $('daily-word').textContent = data.word.word; $('daily-meaning').textContent = data.word.meaning;
-  $('daily-label').textContent = data.word.source === 'local' ? '01 / FROM YOUR LOCAL VOCABULARY' : '01 / WORD OF THE DAY';
-  $('daily-example').textContent = data.word.example ? `“${data.word.example}”` : '';
-  const exampleAudioBtn = $('daily-example-audio');
-  if (exampleAudioBtn) {
-    exampleAudioBtn.hidden = !data.word.example;
-  }
-  $('daily-proverb').textContent = `“${data.proverb.text}”`; $('daily-chinese').textContent = data.proverb.chinese;
-  $('daily-explanation').textContent = data.proverb.explanation || '';
-  const audioBtn = $('daily-proverb-audio');
-  if (audioBtn) {
-    audioBtn.hidden = false;
-  }
   // Automatically discover a fresh word & proverb on page refresh/load
-  fetchNextWord();
-  fetchNextProverb();
+  await Promise.all([fetchNextWord(), fetchNextProverb()]);
+  // Fallback to daily content if dynamic cards were not populated
+  if (!$('daily-word').textContent || $('daily-word').textContent === '…') {
+    $('daily-word').textContent = data.word.word;
+    $('daily-meaning').textContent = data.word.meaning;
+    $('daily-label').textContent = data.word.source === 'local' ? '01 / FROM YOUR LOCAL VOCABULARY' : '01 / WORD OF THE DAY';
+    $('daily-example').textContent = data.word.example ? `“${data.word.example}”` : '';
+    const exampleAudioBtn = $('daily-example-audio');
+    if (exampleAudioBtn) exampleAudioBtn.hidden = !data.word.example;
+  }
+  if (!$('daily-proverb').textContent || $('daily-proverb').textContent === '…') {
+    $('daily-proverb').textContent = `“${data.proverb.text}”`;
+    $('daily-chinese').textContent = data.proverb.chinese;
+    $('daily-explanation').textContent = data.proverb.explanation || '';
+    const audioBtn = $('daily-proverb-audio');
+    if (audioBtn) audioBtn.hidden = false;
+  }
 }
 
 let suggestTimer = null;

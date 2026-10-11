@@ -57,6 +57,10 @@ end
 
 function M.fetch_online(fetch_fn, date_str)
     if not fetch_fn then return nil, 'No fetch function provided' end
+    if not date_str or date_str == '' then
+        local offset = math.random(1, 1500) * 86400
+        date_str = os.date('!%Y-%m-%d', os.time() - offset)
+    end
     local url = 'https://open.iciba.com/dsapi/' .. (date_str and ('?date=' .. date_str) or '')
     local ok, res, code = pcall(fetch_fn, url)
     if not ok or not res or (code ~= nil and code ~= 200) then
@@ -76,6 +80,12 @@ function M.fetch_online(fetch_fn, date_str)
         explanation = (data.translation and data.translation ~= '' and data.translation ~= '新版每日一句') and data.translation or '',
         audio_url = audio,
     }
+end
+
+function M.fetch_random_iciba(fetch_fn)
+    local offset = math.random(1, 1500) * 86400
+    local date_str = os.date('!%Y-%m-%d', os.time() - offset)
+    return M.fetch_online(fetch_fn, date_str)
 end
 
 function M.fetch_zenquotes(fetch_fn)
@@ -193,9 +203,9 @@ function M.fetch_quote(fetch_fn, source)
     if source == 'favqs' then return M.fetch_favqs(fetch_fn) end
     if source == 'wikiquote' then return M.fetch_wikiquote(fetch_fn) end
     if source == 'fortune' then return M.fetch_fortune() end
-    if source == 'iciba' then return M.fetch_online(fetch_fn) end
+    if source == 'iciba' then return M.fetch_random_iciba(fetch_fn) end
     -- Randomly choose among available quote services
-    local choices = {M.fetch_online, M.fetch_zenquotes, M.fetch_dummyjson, M.fetch_favqs, M.fetch_wikiquote, M.fetch_fortune}
+    local choices = {M.fetch_random_iciba, M.fetch_zenquotes, M.fetch_dummyjson, M.fetch_favqs, M.fetch_wikiquote, M.fetch_fortune}
     local start_idx = math.random(1, #choices)
     for i = 0, #choices - 1 do
         local fn = choices[(start_idx + i - 1) % #choices + 1]

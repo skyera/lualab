@@ -129,6 +129,20 @@ function DB:get_proverb(date)
     }
 end
 
+function DB:random_proverb()
+    local row = self:query('SELECT * FROM proverbs ORDER BY RANDOM() LIMIT 1')[1]
+    if not row then return nil end
+    return {
+        id = row.id,
+        date = row.date,
+        text = row.text,
+        chinese = row.chinese,
+        explanation = row.explanation,
+        audio_url = row.audio_url,
+        created_at = row.created_at,
+    }
+end
+
 function DB:proverbs(query)
     local sql = 'SELECT * FROM proverbs'
     local params = {}
