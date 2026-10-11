@@ -365,7 +365,7 @@ if run_test("Unicode & Suffix Range Media Streaming (Port 8078)", function()
         local exp_open_cr = string.format("Content-Range: bytes 10-%d/%d", #test_content - 1, #test_content)
         check(open_res:find(exp_open_cr, 1, true) ~= nil, "Content-Range matches open-ended: " .. exp_open_cr)
 
-        -- 5. Test 2.5MB media file slice capping
+        -- 5. Test 2.5MB media file open range returns standard full content range
         local f_large = io.open(test_dir .. "/large_test.mp4", "wb")
         local chunk_1m = string.rep("A", 1024 * 1024)
         f_large:write(chunk_1m)
@@ -378,8 +378,7 @@ if run_test("Unicode & Suffix Range Media Streaming (Port 8078)", function()
         local slice_res = p_slice:read("*a")
         p_slice:close()
         check(slice_res:find("HTTP/1.1 206 Partial Content", 1, true) ~= nil, "Large media open range returns 206")
-        check(slice_res:find("Content-Length: 2097152", 1, true) ~= nil, "Large media capped at 2MB (2097152 bytes)")
-        check(slice_res:find("Content-Range: bytes 0-2097151/" .. tostring(large_total), 1, true) ~= nil, "Content-Range specifies 2MB slice")
+        check(slice_res:find("Content-Range: bytes 0-" .. tostring(large_total - 1) .. "/" .. tostring(large_total), 1, true) ~= nil, "Content-Range serves full file range")
 
         -- 6. Verify download endpoint is NOT capped
         local p_dl = io.popen(string.format("curl -s -I http://127.0.0.1:%d/download/large_test.mp4", test_port), "r")
@@ -390,12 +389,11 @@ if run_test("Unicode & Suffix Range Media Streaming (Port 8078)", function()
         -- 7. Rapid scrub / seek test across arbitrary offsets
         local seek_offsets = { 0, 524288, 1048576, 1572864, 2097152 }
         for _, offset in ipairs(seek_offsets) do
-            local p_seek = io.popen(string.format("curl -s -i -H \"Range: bytes=%d-\" http://127.0.0.1:%d/media/large_test.mp4", offset, test_port), "r")
+            local p_seek = io.popen(string.format("curl -s -i -H \"Range: bytes=%d-%d\" http://127.0.0.1:%d/media/large_test.mp4", offset, offset + 65535, test_port), "r")
             local seek_res = p_seek:read("*a")
             p_seek:close()
             check(seek_res:find("HTTP/1.1 206 Partial Content", 1, true) ~= nil, "Scrub to offset " .. offset .. " returns 206")
-            local exp_slice_end = math.min(offset + 2 * 1024 * 1024 - 1, large_total - 1)
-            local exp_cr_seek = string.format("Content-Range: bytes %d-%d/%d", offset, exp_slice_end, large_total)
+            local exp_cr_seek = string.format("Content-Range: bytes %d-%d/%d", offset, offset + 65535, large_total)
             check(seek_res:find(exp_cr_seek, 1, true) ~= nil, "Content-Range matches scrub position: " .. exp_cr_seek)
         end
     end)

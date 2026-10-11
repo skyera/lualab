@@ -2120,7 +2120,6 @@ local function run_server(host, port, root_dir)
     io.stdout:flush()
 
     local buf_size = 65536
-    local MAX_MEDIA_SLICE = 2 * 1024 * 1024 -- 2MB fast response slice for seekable media
     local buf = ffi.new("char[?]", buf_size)
 
     local function send_all(sock, data, len)
@@ -2178,10 +2177,6 @@ local function run_server(host, port, root_dir)
                 start_byte = tonumber(r_start) or 0
                 if r_end and #r_end > 0 then
                     end_byte = math.min(tonumber(r_end) or end_byte, total_size - 1)
-                elseif not is_download then
-                    -- Open-ended range for media streaming: cap to 2MB slice to eliminate
-                    -- head-of-line blocking during video scrub/drag
-                    end_byte = math.min(start_byte + MAX_MEDIA_SLICE - 1, total_size - 1)
                 end
                 is_partial = true
             else
