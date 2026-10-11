@@ -1,8 +1,8 @@
 'use strict';
 const $ = (id) => document.getElementById(id);
 const state = { view: 'search', busy: false, daily: null, words: [], queue: [], reviewed: 0, total: 0, revealed: false, grading: false, reviewRequest: 0 };
-const sourceNames = { all: 'All dictionaries', local: 'Local dictionary', 'dict.cn': 'dict.cn · 海词', youdao: 'Youdao · 有道', 'merriam-webster': 'Merriam-Webster (archived)' };
-const dictionarySources = ['local', 'dict.cn', 'youdao'];
+const sourceNames = { all: 'All dictionaries', local: 'Local dictionary', 'dict.cn': 'dict.cn · 海词', youdao: 'Youdao · 有道', iciba: 'Iciba · 词霸', 'merriam-webster': 'Merriam-Webster (archived)' };
+const dictionarySources = ['local', 'dict.cn', 'youdao', 'iciba'];
 function element(tag, text, className) {
   const node = document.createElement(tag);
   if (text !== undefined) node.textContent = text;
@@ -66,7 +66,7 @@ function sourceLink(url) {
   const link = element('a', 'Open source ↗');
   // Source URLs are server-generated, but allow only known HTTPS providers.
   const parsed = new URL(url);
-  if (parsed.protocol === 'https:' && ['dict.cn', 'www.youdao.com'].includes(parsed.hostname)) link.href = url;
+  if (parsed.protocol === 'https:' && ['dict.cn', 'www.youdao.com', 'www.iciba.com'].includes(parsed.hostname)) link.href = url;
   link.target = '_blank'; link.rel = 'noopener noreferrer';
   return link;
 }
@@ -305,6 +305,10 @@ async function loadDaily() {
   $('daily-example').hidden = !data.word.example;
   $('daily-proverb').textContent = `“${data.proverb.text}”`; $('daily-chinese').textContent = data.proverb.chinese;
   $('daily-explanation').textContent = data.proverb.explanation;
+  const audioBtn = $('daily-proverb-audio');
+  if (audioBtn) {
+    audioBtn.hidden = !data.proverb.audio_url;
+  }
 }
 
 let suggestTimer = null;
@@ -454,6 +458,11 @@ $('search-form').addEventListener('submit', event => {
 });
 $('word-filter').addEventListener('input', renderWords);
 $('daily-lookup').addEventListener('click', () => { if (state.daily) searchWord(state.daily.word.word, state.daily.word.source || selectedSource()); });
+$('daily-proverb-audio')?.addEventListener('click', () => {
+  if (state.daily?.proverb?.audio_url) {
+    new Audio(state.daily.proverb.audio_url).play().catch(report);
+  }
+});
 document.querySelectorAll('.nav-button').forEach(node => node.addEventListener('click', () => showView(node.dataset.view)));
 Promise.all([loadDaily(), refreshCounts()]).catch(report);
 setInterval(() => {

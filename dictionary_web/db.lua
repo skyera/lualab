@@ -19,6 +19,8 @@ int sqlite3_column_type(sqlite3_stmt *, int);
 const char *sqlite3_column_name(sqlite3_stmt *, int);
 const unsigned char *sqlite3_column_text(sqlite3_stmt *, int);
 double sqlite3_column_double(sqlite3_stmt *, int);
+int sqlite3_exec(sqlite3 *, const char *, void *, void *, char **);
+void sqlite3_free(void *);
 ]]
 local sqlite = ffi.load('sqlite3')
 local transient = ffi.cast('void (*)(void *)', -1)
@@ -43,13 +45,15 @@ function DB.open(path, schema)
     end
     local self = setmetatable({handle = ffi.gc(ptr[0], sqlite.sqlite3_close)}, DB)
     sqlite.sqlite3_busy_timeout(self.handle, 5000)
-    local ok, err = true, nil
     if schema then
-        ok, err = pcall(self.query, self, schema)
-    end
-    if not ok then
-        self:close()
-        error(err)
+        local err_msg = ffi.new('char *[1]')
+        local rc = sqlite.sqlite3_exec(self.handle, schema, nil, nil, err_msg)
+        if rc ~= 0 then
+            local err = err_msg[0] ~= nil and ffi.string(err_msg[0]) or 'Schema execution failed'
+            if err_msg[0] ~= nil then sqlite.sqlite3_free(err_msg[0]) end
+            self:close()
+            error(err)
+        end
     end
     return self
 end
@@ -109,6 +113,27 @@ end
 
 function DB:get(word, source)
     return self:query('SELECT * FROM words WHERE word=? AND source=?', {word, source})[1]
+end
+
+function DB:get_proverb(date)
+    local row = self:query('SELECT * FROM proverbs WHERE date=?', {date})[1]
+    if not row then return nil end
+    return {
+        text = row.text,
+        chinese = row.chinese,
+        explanation = row.explanation,
+        audio_url = row.audio_url,
+    }
+end
+
+function DB:save_proverb(p, stamp)
+    stamp = stamp or os.time()
+    self:query([[INSERT INTO proverbs(date, text, chinese, explanation, audio_url, created_at)
+        VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(date) DO UPDATE SET
+        text=excluded.text, chinese=excluded.chinese,
+        explanation=excluded.explanation, audio_url=excluded.audio_url]],
+        {p.date, p.text, p.chinese, p.explanation or '', p.audio_url or false, stamp})
+    return self:get_proverb(p.date)
 end
 
 function DB:save(word, source, entry, stamp)

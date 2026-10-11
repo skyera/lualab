@@ -25,12 +25,12 @@ function M.search(db, payload, provider, stamp)
     local source = payload.source or 'dict.cn'
     if source == 'all' then
         local results = {}
-        for _, name in ipairs({'local', 'dict.cn', 'youdao'}) do
+        for _, name in ipairs({'local', 'dict.cn', 'youdao', 'iciba'}) do
             results[#results + 1] = assert(M.search(db, {word = word, source = name}, provider, stamp))
         end
         return {word = word, source = 'all', results = results}
     end
-    if source ~= 'local' and source ~= 'dict.cn' and source ~= 'youdao' then
+    if source ~= 'local' and source ~= 'dict.cn' and source ~= 'youdao' and source ~= 'iciba' then
         return nil, 'Select a valid dictionary source.'
     end
     stamp = stamp or os.time()

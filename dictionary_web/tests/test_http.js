@@ -13,7 +13,8 @@ async function start(database, host = '127.0.0.1', dictionary = 'none', flags = 
   // Keep real HTTP/database tests offline by stubbing only the public Youdao
   // network response before running the actual application entry point.
   const publicFixture = '<ul class="basic"><li><span class="trans">A public-page fixture.</span></li></ul>';
-  const setup = `package.path=${JSON.stringify(path.join(root, '?.lua') + ';')}..package.path; local net=require('net'); local original=net.fetch; net.fetch=function(url,body) if url:find('https://www.youdao.com/result?',1,true)==1 then return ${JSON.stringify(publicFixture)} end return original(url,body) end`;
+  const icibaFixture = '<script id="__NEXT_DATA__">{"props":{"pageProps":{"initialReduxState":{"word":{"wordInfo":{"baesInfo":{"symbols":[{"ph_en":"həˈləʊ","parts":[{"part":"int.","means":["A public-page fixture."]}]}]}}}}}}}</script>';
+  const setup = `package.path=${JSON.stringify(path.join(root, '?.lua') + ';')}..package.path; local net=require('net'); local original=net.fetch; net.fetch=function(url,body) if url:find('https://www.youdao.com/result?',1,true)==1 then return ${JSON.stringify(publicFixture)} elseif url:find('https://www.iciba.com/word?',1,true)==1 then return ${JSON.stringify(icibaFixture)} end return original(url,body) end`;
   const child = spawn('luajit', ['-e', setup + ';' + setupExtra, path.join(root, 'app.lua'), '--host', host, '--port', '0', '--db', database, '--dict-db', dictionary, ...flags], {
     env: { ...process.env, YOUDAO_APP_KEY: '', YOUDAO_APP_SECRET: '' }
   });
@@ -173,10 +174,12 @@ test('HTTP uses imported dictionary and shared TUI notes/reviews without ID coll
     const cache = spawnSync('luajit', ['-e', cacheCode], { env: cacheEnv, encoding: 'utf8' });
     assert.equal(cache.status, 0, cache.stderr);
     const all = await post(server.url, '/api/search', { word: 'hello', source: 'all' });
-    assert.equal(all.status, 200); assert.equal(all.data.results.length, 3);
+    assert.equal(all.status, 200); assert.equal(all.data.results.length, 4);
     assert.ok(all.data.results[0].entry); assert.ok(all.data.results[1].cached);
     assert.equal(all.data.results[2].entry.via, 'public-page');
     assert.equal(all.data.results[2].entry.definitions[0], 'A public-page fixture.');
+    assert.equal(all.data.results[3].source, 'iciba');
+    assert.equal(all.data.results[3].entry.via, 'public-page');
     assert.ok(all.data.results.filter(result => result.saved).every(result => result.collection === 'tui' && result.id === tuiId));
     assert.equal((await post(server.url, '/api/note', { id: tuiId, collection: 'tui', note: 'Shared web note' })).status, 200);
     assert.equal((await post(server.url, '/api/review', { id: tuiId, collection: 'tui', remembered: true, grade: 3 })).status, 200);

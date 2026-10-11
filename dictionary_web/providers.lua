@@ -1,11 +1,12 @@
 local json = require('json')
 local net = require('net')
-local M = {sources = {'dict.cn', 'youdao'}}
+local M = {sources = {'dict.cn', 'youdao', 'iciba'}}
 
 function M.source_url(source, word)
     local encoded = net.encode(word)
     if source == 'dict.cn' then return 'https://dict.cn/' .. encoded end
     if source == 'youdao' then return 'https://www.youdao.com/result?word=' .. encoded .. '&lang=en' end
+    if source == 'iciba' then return 'https://www.iciba.com/word?w=' .. encoded end
     return nil
 end
 
@@ -229,6 +230,93 @@ function M.parse_youdao_public(html)
     }
 end
 
+function M.parse_iciba(html)
+    local next_data = html:match('<script id="__NEXT_DATA__"[^>]*>(.-)</script>')
+    if not next_data then
+        return nil, 'No definition found on iciba. Try another word or open the source page.'
+    end
+    local ok, data = pcall(json.decode, next_data)
+    if not ok or type(data) ~= 'table' then
+        return nil, 'The iciba page returned an invalid structure.'
+    end
+    local word_info = data.props and data.props.pageProps and data.props.pageProps.initialReduxState and data.props.pageProps.initialReduxState.word and data.props.pageProps.initialReduxState.word.wordInfo
+    if not word_info or type(word_info) ~= 'table' then
+        return nil, 'No definition found on iciba. Try another word or open the source page.'
+    end
+    local base = word_info.baesInfo or {}
+    local symbols = base.symbols or {}
+    if #symbols == 0 then
+        return nil, 'No definition found on iciba. Try another word or open the source page.'
+    end
+
+    local definitions, phonetics, examples, synonyms = {}, {}, {}, {}
+    local seen_def, seen_syn = {}, {}
+
+    for _, symbol in ipairs(symbols) do
+        local ph_list = {}
+        if symbol.ph_en and symbol.ph_en ~= '' then ph_list[#ph_list + 1] = '/' .. symbol.ph_en .. '/ (UK)' end
+        if symbol.ph_am and symbol.ph_am ~= '' then ph_list[#ph_list + 1] = '/' .. symbol.ph_am .. '/ (US)' end
+        if #ph_list == 0 and symbol.word_symbol and symbol.word_symbol ~= '' then
+            ph_list[#ph_list + 1] = symbol.word_symbol
+        end
+        for _, ph in ipairs(ph_list) do
+            if #phonetics < 4 then phonetics[#phonetics + 1] = ph end
+        end
+
+        for _, part in ipairs(symbol.parts or {}) do
+            local prefix = (part.part or part.part_name or '')
+            prefix = prefix ~= '' and prefix .. ' ' or ''
+            local means = {}
+            for _, m in ipairs(part.means or {}) do
+                local m_text = type(m) == 'table' and (m.word_mean or '') or tostring(m)
+                m_text = clean(m_text)
+                if m_text ~= '' then means[#means + 1] = m_text end
+            end
+            if #means > 0 then
+                local def_text = prefix .. table.concat(means, '; ')
+                if not seen_def[def_text] and #definitions < 12 then
+                    seen_def[def_text] = true
+                    definitions[#definitions + 1] = def_text
+                end
+            end
+        end
+    end
+
+    if #definitions == 0 then
+        return nil, 'No definition found on iciba. Try another word or open the source page.'
+    end
+
+    for _, syn_group in ipairs(word_info.synonym or {}) do
+        for _, mean in ipairs(syn_group.means or {}) do
+            for _, ci in ipairs(mean.cis or {}) do
+                local word_syn = clean(tostring(ci))
+                if word_syn ~= '' and not seen_syn[word_syn:lower()] and #synonyms < 8 then
+                    seen_syn[word_syn:lower()] = true
+                    synonyms[#synonyms + 1] = word_syn
+                end
+            end
+        end
+    end
+
+    for _, grp in ipairs(word_info.new_sentence or {}) do
+        for _, s in ipairs(grp.sentences or {}) do
+            if s.en and s.en ~= '' and #examples < 4 then
+                local en = clean(s.en)
+                local cn = s.cn and clean(s.cn) or ''
+                examples[#examples + 1] = cn ~= '' and (en .. ' / ' .. cn) or en
+            end
+        end
+    end
+
+    return {
+        definitions = definitions,
+        phonetic = table.concat(phonetics, ' · '),
+        examples = examples,
+        synonyms = #synonyms > 0 and synonyms or nil,
+        via = 'public-page',
+    }
+end
+
 local function decorate(entry, source, word)
     entry.word, entry.source, entry.source_url = word, source, M.source_url(source, word)
     return entry
@@ -259,6 +347,8 @@ function M.lookup(source, word, options)
     local url, body, parser
     if source == 'dict.cn' then
         url, parser = M.source_url(source, word), M.parse_dict
+    elseif source == 'iciba' then
+        url, parser = M.source_url(source, word), M.parse_iciba
     elseif source == 'youdao' then
         local key, secret = env('YOUDAO_APP_KEY'), env('YOUDAO_APP_SECRET')
         if not key or key == '' or not secret or secret == '' then
@@ -278,11 +368,10 @@ function M.lookup(source, word, options)
         return nil, message
     end
     local data = raw
-    if source ~= 'dict.cn' then
+    if source == 'youdao' then
         local ok, decoded = pcall(json.decode, raw)
         if not ok then
-            if source == 'youdao' then return youdao_public_lookup(word, fetch) end
-            return nil, 'The dictionary returned an invalid response.'
+            return youdao_public_lookup(word, fetch)
         end
         data = decoded
     end

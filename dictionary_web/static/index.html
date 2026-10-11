@@ -25,7 +25,7 @@
         <label for="query" class="sr-only">Word or phrase to look up</label>
         <div class="search-line"><span aria-hidden="true" class="search-icon">⌕</span><input id="query" name="word" placeholder="What word are you curious about?" maxlength="200" autocomplete="off" required><button class="primary" id="search-button" type="submit">Look it up <span aria-hidden="true">↗</span></button></div>
         <div id="search-suggest" class="search-suggest" hidden role="listbox" aria-label="Search suggestions"></div>
-        <fieldset><legend>Look up with</legend><label><input type="radio" name="source" value="all" checked><span>All dictionaries</span></label><label><input type="radio" name="source" value="local"><span>Local dictionary</span></label><label><input type="radio" name="source" value="dict.cn"><span>dict.cn <small>海词</small></span></label><label><input type="radio" name="source" value="youdao"><span>Youdao <small>有道</small></span></label></fieldset>
+        <fieldset><legend>Look up with</legend><label><input type="radio" name="source" value="all" checked><span>All dictionaries</span></label><label><input type="radio" name="source" value="local"><span>Local dictionary</span></label><label><input type="radio" name="source" value="dict.cn"><span>dict.cn <small>海词</small></span></label><label><input type="radio" name="source" value="youdao"><span>Youdao <small>有道</small></span></label><label><input type="radio" name="source" value="iciba"><span>Iciba <small>词霸</small></span></label></fieldset>
         <div class="search-footer"><span class="save-dot" aria-hidden="true"></span>Words with definitions are saved to your journal.</div>
       </form>
       <p id="search-status" role="status" aria-live="polite"></p>
@@ -33,7 +33,7 @@
       <div class="daily-heading"><h2>A moment of discovery</h2><span id="daily-date"></span></div>
       <div class="daily-grid">
         <article class="daily-word"><p class="eyebrow" id="daily-label">01 / WORD OF THE DAY</p><h3 id="daily-word">…</h3><p id="daily-meaning"></p><p class="example" id="daily-example"></p><button class="text-button" id="daily-lookup">Explore this word <span aria-hidden="true">↗</span></button><span class="card-watermark" aria-hidden="true">Aa</span></article>
-        <article class="daily-proverb"><p class="eyebrow">02 / A LITTLE WISDOM</p><blockquote id="daily-proverb">…</blockquote><p class="chinese" id="daily-chinese"></p><p id="daily-explanation"></p><span class="proverb-label">PROVERB OF THE DAY</span></article>
+        <article class="daily-proverb"><p class="eyebrow">02 / A LITTLE WISDOM</p><blockquote id="daily-proverb">…</blockquote><p class="chinese" id="daily-chinese"></p><p id="daily-explanation"></p><div style="display:flex;align-items:center;justify-content:space-between;margin-top:23px"><span class="proverb-label" style="margin-top:0">PROVERB OF THE DAY</span><button id="daily-proverb-audio" class="proverb-audio-btn" hidden type="button" aria-label="Listen to proverb pronunciation">🔊 Listen</button></div></article>
       </div>
     </section>
     <section id="words-view" class="view" hidden>

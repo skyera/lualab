@@ -181,6 +181,42 @@ test('Daily content is deterministic, rolls over at UTC midnight', function()
     assert(first.date == '1970-01-02')
 end)
 
+test('Proverb database persistence and online fetching', function()
+    local db = DB.open(':memory:', schema)
+    assert(not db:get_proverb('2026-10-10'))
+    local saved = db:save_proverb({
+        date = '2026-10-10',
+        text = 'Never give up.',
+        chinese = '永不放弃。',
+        explanation = 'Keep going.',
+        audio_url = 'https://example.com/audio.mp3',
+    }, 1000)
+    assert(saved.text == 'Never give up.' and saved.chinese == '永不放弃。')
+    assert(saved.audio_url == 'https://example.com/audio.mp3')
+    local fetched = db:get_proverb('2026-10-10')
+    assert(fetched and fetched.text == 'Never give up.')
+
+    -- Online parser parses valid dsapi JSON response
+    local sample_json = json.encode({
+        content = 'A journey of a thousand miles begins with a single step.',
+        note = '千里之行，始于足下。',
+        translation = '老子',
+        tts = 'https://example.com/step.mp3',
+    })
+    local online = content.fetch_online(function(url)
+        assert(url:find('2026-10-10', 1, true))
+        return sample_json, 200
+    end, '2026-10-10')
+    assert(online and online.text == 'A journey of a thousand miles begins with a single step.')
+    assert(online.chinese == '千里之行，始于足下。' and online.audio_url == 'https://example.com/step.mp3')
+    assert(online.explanation == '老子')
+
+    -- Online parser fails gracefully on network errors or bad responses
+    assert(not content.fetch_online(function() return nil, 500 end, '2026-10-10'))
+    assert(not content.fetch_online(function() return 'not json', 200 end, '2026-10-10'))
+    db:close()
+end)
+
 test('HTTP parser rejects ambiguous headers and decodes query parameters', function()
     assert(http.parse_headers('POST /api/search HTTP/1.1\r\nHost: localhost:8765\r\nContent-Length: 2\r\n\r\n').length == 2)
     for _, raw in ipairs({
@@ -217,14 +253,16 @@ test('all dictionaries keeps independent successes, errors, caches and lookup co
         return entry(word)
     end
     local all = assert(service.search(db, {word = ' HELLO ', source = 'all'}, provider, 100))
-    assert(all.word == 'hello' and all.source == 'all' and #all.results == 3)
+    assert(all.word == 'hello' and all.source == 'all' and #all.results == 4)
     assert(all.results[1].source == 'local' and all.results[1].error)
     assert(all.results[2].source == 'dict.cn' and all.results[2].entry)
     assert(all.results[3].source == 'youdao' and all.results[3].entry)
-    assert(calls == 2 and #db:words() == 2)
+    assert(all.results[4].source == 'iciba' and all.results[4].entry)
+    assert(calls == 3 and #db:words() == 3)
     assert(not db:get('hello', 'youdao').entry)
+    assert(db:get('hello', 'iciba').entry)
     local again = assert(service.search(db, {word = 'hello', source = 'all'}, provider, 200))
-    assert(again.results[2].cached and calls == 3)
+    assert(again.results[2].cached and again.results[4].cached and calls == 4)
     for _, result in ipairs(again.results) do
         if result.entry then assert(result.saved and result.lookup_count == 2)
         else assert(not result.saved and not result.id) end
@@ -340,4 +378,78 @@ test('prefix suggestions return matching words and handle empty queries', functi
     assert(#nomatch.suggestions == 0)
     db:close()
 end)
+
+test('Iciba public SSR parsing isolates definitions, phonetics, synonyms and examples', function()
+    local sample_ssr = [[
+<!DOCTYPE html><html><body>
+<script id="__NEXT_DATA__">
+{
+  "props": {
+    "pageProps": {
+      "initialReduxState": {
+        "word": {
+          "wordInfo": {
+            "baesInfo": {
+              "word_name": "resilient",
+              "symbols": [
+                {
+                  "ph_en": "rɪˈzɪliənt",
+                  "ph_am": "rɪˈzɪljənt",
+                  "parts": [
+                    {
+                      "part": "adj.",
+                      "means": ["能复原的", "有弹性的"]
+                    }
+                  ]
+                }
+              ]
+            },
+            "synonym": [
+              {
+                "part_name": "",
+                "means": [
+                  {
+                    "cis": ["elastic", "flexible"]
+                  }
+                ]
+              }
+            ],
+            "new_sentence": [
+              {
+                "sentences": [
+                  {
+                    "en": "The material is very resilient.",
+                    "cn": "这种材料非常有弹性。"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}
+</script></body></html>]]
+    local parsed = assert(providers.parse_iciba(sample_ssr))
+    assert(#parsed.definitions == 1 and parsed.definitions[1] == 'adj. 能复原的; 有弹性的')
+    assert(parsed.phonetic:find('rɪˈzɪliənt', 1, true) and parsed.phonetic:find('UK', 1, true))
+    assert(parsed.synonyms and #parsed.synonyms == 2 and parsed.synonyms[1] == 'elastic' and parsed.synonyms[2] == 'flexible')
+    assert(#parsed.examples == 1 and parsed.examples[1]:find('The material is very resilient.', 1, true))
+
+    -- Missing or invalid words
+    local empty_ssr = '<script id="__NEXT_DATA__">{"props":{"pageProps":{"initialReduxState":{"word":{"wordInfo":{"baesInfo":{"symbols":[]}}}}}}}</script>'
+    local no_def, err = providers.parse_iciba(empty_ssr)
+    assert(not no_def and err:find('No definition', 1, true))
+    assert(not providers.parse_iciba('<html>No next data</html>'))
+
+    -- Lookup with mock fetch
+    local res = assert(providers.lookup('iciba', 'resilient', {fetch = function(url)
+        assert(url:find('https://www.iciba.com/word?w=resilient', 1, true))
+        return sample_ssr, 200
+    end}))
+    assert(res.word == 'resilient' and res.source == 'iciba')
+    assert(res.source_url == 'https://www.iciba.com/word?w=resilient')
+end)
+
 print('Passed ' .. count .. ' tests.')

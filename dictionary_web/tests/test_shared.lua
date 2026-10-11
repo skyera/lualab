@@ -146,6 +146,29 @@ test('daily word matches the TUI selection and falls back when integration is di
         assert(selected.word.word == native:wotd(1000).word)
         assert(selected.word.meaning == native:wotd(1000).definition and selected.word.source == 'local')
         assert(selected.proverb.text and selected.date == '1970-01-01')
+        
+        -- Custom online fetcher saves into SQLite and subsequent calls read from SQLite
+        local mock_json = json.encode({
+            content = 'Knowledge is power.',
+            note = '知识就是力量。',
+            tts = 'https://example.com/power.mp3',
+        })
+        local fetched_count = 0
+        local mock_fetch = function(url)
+            fetched_count = fetched_count + 1
+            return mock_json, 200
+        end
+        local with_online = store:daily(100000, mock_fetch)
+        assert(with_online.proverb.text == 'Knowledge is power.')
+        assert(with_online.proverb.chinese == '知识就是力量。')
+        assert(with_online.proverb.audio_url == 'https://example.com/power.mp3')
+        assert(fetched_count == 1)
+
+        -- Second call for same date should read from SQLite cache without invoking fetcher
+        local cached = store:daily(100000, function() error('Should not fetch') end)
+        assert(cached.proverb.text == 'Knowledge is power.')
+        assert(cached.proverb.chinese == '知识就是力量。')
+        assert(fetched_count == 1)
     end)
     local store = Store.open(':memory:', schema, 'none')
     assert(not store:daily(1000).word.source and store:daily(1000).word.meaning ~= '')
@@ -156,15 +179,16 @@ test('all-source lookup preserves one shared word, notes and existing review pro
         local all = assert(service.search(store, {word = 'hello', source = 'all'}, function(source)
             return {definitions = {'Meaning from ' .. source}, examples = {}, phonetic = ''}
         end, 10000))
-        assert(#all.results == 3 and all.results[1].entry.definitions[1]:find('A greeting.', 1, true))
+        assert(#all.results == 4 and all.results[1].entry.definitions[1]:find('A greeting.', 1, true))
         for _, result in ipairs(all.results) do
             assert(result.collection == 'tui' and result.id == id and result.note == 'Existing TUI note')
         end
-        assert(#store:words() == 1 and store:words()[1].lookup_count == 3)
+        assert(#store:words() == 1 and store:words()[1].lookup_count == 4)
         assert(native:scalar('SELECT count(*) FROM words') == 1)
         assert(native:scalar('SELECT count(*) FROM reviews') == 1)
         assert(native:srs_state(id).due_at == 200 + 86400)
         assert(not store.web:get('hello', 'youdao').entry)
+        assert(store.web:get('hello', 'iciba').entry)
     end)
 end)
 test('shared deletion cleans related rows and all web copies but preserves imported definitions', function()

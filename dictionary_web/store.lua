@@ -2,6 +2,7 @@
 local DB = require('db')
 local dictionary = require('ffi_dict')
 local content = require('content')
+local net = require('net')
 local Store = {}
 Store.__index = Store
 
@@ -128,13 +129,26 @@ function Store:local_lookup(word)
     }
 end
 
-function Store:daily(stamp)
+function Store:daily(stamp, fetch_fn)
     local daily = content.daily(stamp)
     if self.shared then
         local word = self.shared:wotd(stamp)
         if word then
             daily.word = {word = word.word, meaning = word.definition or '', example = word.example or '', source = 'local'}
         end
+    end
+    -- Check local database for today's saved proverb first
+    local proverb = self.web:get_proverb(daily.date)
+    if not proverb then
+        -- Fetch online from Kingsoft dsapi and save to database
+        local online = content.fetch_online(fetch_fn or net.fetch, daily.date)
+        if online then
+            online.date = daily.date
+            proverb = self.web:save_proverb(online, stamp)
+        end
+    end
+    if proverb then
+        daily.proverb = proverb
     end
     return daily
 end

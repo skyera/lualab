@@ -22,6 +22,7 @@ local proverbs = {
     {'Many hands make light work.', '众人拾柴火焰高。', 'Sharing a task makes it easier for everyone.'},
     {'Look before you leap.', '三思而后行。', 'Consider the consequences before making a decision.'},
 }
+local json = require('json')
 local M = {}
 
 function M.daily(stamp)
@@ -41,6 +42,25 @@ function M.daily(stamp)
             chinese = proverb[2],
             explanation = proverb[3],
         },
+    }
+end
+
+function M.fetch_online(fetch_fn, date_str)
+    if not fetch_fn then return nil, 'No fetch function provided' end
+    local url = 'https://open.iciba.com/dsapi/' .. (date_str and ('?date=' .. date_str) or '')
+    local ok, res, code = pcall(fetch_fn, url)
+    if not ok or not res or (code ~= nil and code ~= 200) then
+        return nil, 'Failed to fetch online proverb'
+    end
+    local parse_ok, data = pcall(json.decode, res)
+    if not parse_ok or type(data) ~= 'table' or not data.content or data.content == '' then
+        return nil, 'Invalid response from proverb service'
+    end
+    return {
+        text = data.content,
+        chinese = data.note or '',
+        explanation = (data.translation and data.translation ~= '' and data.translation ~= '新版每日一句') and data.translation or '',
+        audio_url = (data.tts and data.tts ~= '') and data.tts or nil,
     }
 end
 
