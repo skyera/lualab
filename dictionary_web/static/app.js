@@ -261,7 +261,8 @@ async function fetchNextProverb(trigger) {
   if (trigger) trigger.disabled = true;
   $('app-message').textContent = '';
   try {
-    const res = await api('/api/proverb/random');
+    const src = $('daily-proverb-source')?.value || 'all';
+    const res = await api('/api/proverb/random?source=' + encodeURIComponent(src));
     if (res.proverb) {
       if (state.daily) state.daily.proverb = res.proverb;
       $('daily-proverb').textContent = `“${res.proverb.text}”`;
@@ -606,6 +607,15 @@ $('daily-word-next')?.addEventListener('click', (e) => {
   fetchNextWord(e.currentTarget);
 });
 $('proverb-filter')?.addEventListener('input', renderProverbs);
+const proverbSourceSelect = $('daily-proverb-source');
+if (proverbSourceSelect) {
+  const savedSource = localStorage.getItem('wordbook_proverb_source');
+  if (savedSource) proverbSourceSelect.value = savedSource;
+  proverbSourceSelect.addEventListener('change', () => {
+    localStorage.setItem('wordbook_proverb_source', proverbSourceSelect.value);
+    fetchNextProverb();
+  });
+}
 const voiceSelect = $('voice-select');
 if (voiceSelect) {
   const savedVoice = localStorage.getItem('wordbook_voice');
