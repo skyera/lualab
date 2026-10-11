@@ -93,8 +93,8 @@ browser storage is unavailable.
 
 ## Dictionary sources
 
-**All dictionaries** is the default search option. It checks Local dictionary,
-dict.cn, and Youdao and displays separately labeled results as each finishes.
+**All dictionaries** is the default search option. It displays results in this order: Iciba, Local dictionary, dict.cn, and Youdao,
+with separately labeled cards updated as each source finishes.
 Unknown words and connection failures appear
 on the affected source's card; successful results remain available. You can
 still select a single source. The API also accepts `source: "all"` and returns

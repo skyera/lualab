@@ -2,7 +2,7 @@
 const $ = (id) => document.getElementById(id);
 const state = { view: 'search', busy: false, daily: null, words: [], queue: [], proverbs: [], reviewed: 0, total: 0, revealed: false, grading: false, reviewLoading: false, reviewRequest: 0 };
 const sourceNames = { all: 'All dictionaries', local: 'Local dictionary', 'dict.cn': 'dict.cn · 海词', youdao: 'Youdao · 有道', iciba: 'Iciba · 词霸', 'merriam-webster': 'Merriam-Webster (archived)' };
-const dictionarySources = ['local', 'dict.cn', 'youdao', 'iciba'];
+const dictionarySources = ['iciba', 'local', 'dict.cn', 'youdao'];
 function element(tag, text, className) {
   const node = document.createElement(tag);
   if (text !== undefined) node.textContent = text;
@@ -186,7 +186,9 @@ async function searchAll(word) {
   });
   $('result').replaceChildren(...slots); $('result').hidden = false;
   let completed = 0;
-  const results = await Promise.all(dictionarySources.map(async (source, index) => {
+  const requests = ['local', ...dictionarySources.filter(source => source !== 'local')];
+  const results = await Promise.all(requests.map(async source => {
+    const index = dictionarySources.indexOf(source);
     let data;
     try {
       data = await api('/api/search', { word, source });

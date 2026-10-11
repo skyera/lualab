@@ -181,7 +181,7 @@ test('all-source lookup preserves one shared word, notes and existing review pro
         local all = assert(service.search(store, {word = 'hello', source = 'all'}, function(source)
             return {definitions = {'Meaning from ' .. source}, examples = {}, phonetic = ''}
         end, 10000))
-        assert(#all.results == 4 and all.results[1].entry.definitions[1]:find('A greeting.', 1, true))
+        assert(#all.results == 4 and all.results[2].entry.definitions[1]:find('A greeting.', 1, true))
         for _, result in ipairs(all.results) do
             assert(result.collection == 'tui' and result.id == id and result.note == 'Existing TUI note')
         end

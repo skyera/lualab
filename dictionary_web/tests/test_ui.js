@@ -17,8 +17,20 @@ class Node {
     const classes = new Set();
     this.classList = { toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name) };
   }
-  append(...nodes) { this.children.push(...nodes); }
-  replaceChildren(...nodes) { this.children = nodes; }
+  append(...nodes) {
+    for (const node of nodes) { node.parent = this; this.children.push(node); }
+  }
+  replaceChildren(...nodes) {
+    for (const node of this.children) node.parent = null;
+    this.children = [];
+    this.append(...nodes);
+  }
+  replaceWith(node) {
+    const index = this.parent.children.indexOf(this);
+    this.parent.children[index] = node;
+    node.parent = this.parent;
+    this.parent = null;
+  }
   addEventListener(name, handler) { this.handlers[name] = handler; }
   setAttribute() {}
   removeAttribute() {}
@@ -210,5 +222,29 @@ test('review renderers handle empty, web, shared, Unicode and long notes', () =>
     assert.equal(get('review-card').querySelectorAll('button').length, 1);
     state.revealed = true; context.renderReview();
     assert.equal(get('review-card').querySelectorAll('button').length, collection === 'tui' ? 4 : 2);
+  }
+});
+
+test('All dictionaries keeps Iciba first when results finish out of order or fail', async () => {
+  for (const failure of [false, true]) {
+    const { context, get } = harness();
+    const requests = new Map();
+    context.api = (_, payload) => {
+      const pending = deferred();
+      requests.set(payload.source, pending);
+      return pending.promise;
+    };
+    const searching = context.searchAll('hello');
+    assert.equal([...requests.keys()][0], 'local');
+    const names = () => get('result').children.map(row => row.querySelectorAll('.source-tag')[0].textContent);
+    const expected = ['Iciba · 词霸', 'Local dictionary', 'dict.cn · 海词', 'Youdao · 有道'];
+    assert.deepEqual(names(), expected);
+    for (const source of ['youdao', 'local', 'dict.cn', 'iciba']) {
+      if (source === 'iciba' && failure) requests.get(source).reject(new Error('unavailable'));
+      else requests.get(source).resolve({ word: 'hello', source, entry: { definitions: ['Meaning'] } });
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepEqual(names(), expected);
+    }
+    await searching;
   }
 });

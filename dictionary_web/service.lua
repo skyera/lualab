@@ -2,6 +2,7 @@ local json = require('json')
 local providers = require('providers')
 local content = require('content')
 local M = {}
+local SOURCE_ORDER = { iciba = 1, ['local'] = 2, ['dict.cn'] = 3, youdao = 4 }
 
 function M.normalize(word)
     if type(word) ~= 'string' or word:find('[%z\1-\31\127]') then return nil end
@@ -28,6 +29,9 @@ function M.search(db, payload, provider, stamp)
         for _, name in ipairs({'local', 'dict.cn', 'youdao', 'iciba'}) do
             results[#results + 1] = assert(M.search(db, {word = word, source = name}, provider, stamp))
         end
+        table.sort(results, function(a, b)
+            return SOURCE_ORDER[a.source] < SOURCE_ORDER[b.source]
+        end)
         return {word = word, source = 'all', results = results}
     end
     if source ~= 'local' and source ~= 'dict.cn' and source ~= 'youdao' and source ~= 'iciba' then

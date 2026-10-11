@@ -302,23 +302,23 @@ test('all dictionaries keeps independent successes, errors, caches and lookup co
     end
     local all = assert(service.search(db, {word = ' HELLO ', source = 'all'}, provider, 100))
     assert(all.word == 'hello' and all.source == 'all' and #all.results == 4)
-    assert(all.results[1].source == 'local' and all.results[1].error)
-    assert(all.results[2].source == 'dict.cn' and all.results[2].entry)
-    assert(all.results[3].source == 'youdao' and all.results[3].entry)
-    assert(all.results[4].source == 'iciba' and all.results[4].entry)
+    assert(all.results[2].source == 'local' and all.results[2].error)
+    assert(all.results[3].source == 'dict.cn' and all.results[3].entry)
+    assert(all.results[4].source == 'youdao' and all.results[4].entry)
+    assert(all.results[1].source == 'iciba' and all.results[1].entry)
     assert(calls == 3 and #db:words() == 3)
     assert(not db:get('hello', 'youdao').entry)
     assert(db:get('hello', 'iciba').entry)
     local again = assert(service.search(db, {word = 'hello', source = 'all'}, provider, 200))
-    assert(again.results[2].cached and again.results[4].cached and calls == 4)
+    assert(again.results[3].cached and again.results[1].cached and calls == 4)
     for _, result in ipairs(again.results) do
         if result.entry then assert(result.saved and result.lookup_count == 2)
         else assert(not result.saved and not result.id) end
     end
     failing = true
     local failed = assert(service.search(db, {word = 'hello', source = 'all'}, provider, 300))
-    assert(not failed.results[3].saved and not failed.results[3].id and failed.results[3].error)
-    assert(not failed.results[3].error:find('private', 1, true))
+    assert(not failed.results[4].saved and not failed.results[4].id and failed.results[4].error)
+    assert(not failed.results[4].error:find('private', 1, true))
     assert(db:get('hello', 'youdao').lookup_count == 2)
     assert(not service.search(db, {word = '', source = 'all'}, function() error('must not fetch') end))
     db:close()

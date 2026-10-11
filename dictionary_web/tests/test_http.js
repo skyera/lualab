@@ -185,11 +185,11 @@ test('HTTP uses imported dictionary and shared TUI notes/reviews without ID coll
     assert.equal(cache.status, 0, cache.stderr);
     const all = await post(server.url, '/api/search', { word: 'hello', source: 'all' });
     assert.equal(all.status, 200); assert.equal(all.data.results.length, 4);
-    assert.ok(all.data.results[0].entry); assert.ok(all.data.results[1].cached);
-    assert.equal(all.data.results[2].entry.via, 'public-page');
-    assert.equal(all.data.results[2].entry.definitions[0], 'A public-page fixture.');
-    assert.equal(all.data.results[3].source, 'iciba');
+    assert.ok(all.data.results[1].entry); assert.ok(all.data.results[2].cached);
     assert.equal(all.data.results[3].entry.via, 'public-page');
+    assert.equal(all.data.results[3].entry.definitions[0], 'A public-page fixture.');
+    assert.equal(all.data.results[0].source, 'iciba');
+    assert.equal(all.data.results[0].entry.via, 'public-page');
     assert.ok(all.data.results.filter(result => result.saved).every(result => result.collection === 'tui' && result.id === tuiId));
     assert.equal((await post(server.url, '/api/note', { id: tuiId, collection: 'tui', note: 'Shared web note' })).status, 200);
     assert.equal((await post(server.url, '/api/review', { id: tuiId, collection: 'tui', remembered: true, grade: 3 })).status, 200);
