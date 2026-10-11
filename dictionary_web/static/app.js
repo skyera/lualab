@@ -1,6 +1,6 @@
 'use strict';
 const $ = (id) => document.getElementById(id);
-const state = { view: 'search', busy: false, daily: null, words: [], queue: [], proverbs: [], reviewed: 0, total: 0, revealed: false, grading: false, reviewLoading: false, reviewRequest: 0, restoring: false, sessionMatching: 0 };
+const state = { view: 'search', busy: false, daily: null, words: [], queue: [], proverbs: [], reviewed: 0, total: 0, revealed: false, grading: false, reviewLoading: false, reviewRequest: 0, restoring: false, sessionMatching: 0, statistics: null };
 const sourceNames = { all: 'All dictionaries', local: 'Local dictionary', 'dict.cn': 'dict.cn · 海词', youdao: 'Youdao · 有道', iciba: 'Iciba · 词霸', 'merriam-webster': 'Merriam-Webster (archived)' };
 const dictionarySources = ['iciba', 'local', 'dict.cn', 'youdao'];
 function element(tag, text, className) {
@@ -152,7 +152,8 @@ function buildResultCard(data) {
     card.append(bottom);
     return card;
   }
-  if (data.source === 'youdao') card.append(element('p', 'Youdao definitions are available for this lookup only. Add your own note to review later.', 'source-tag'));
+  if (data.source === 'youdao') card.append(element('p', 'Youdao definitions are available for this lookup only. Add your own meaning or note to review later.', 'source-tag'));
+  card.append(meaningForm(data));
   const noteId = `study-note-${data.source}-${data.collection || 'web'}-${data.id}`;
   const label = element('label', 'Your study note', 'note-label');
   label.htmlFor = noteId;
@@ -410,8 +411,8 @@ async function restoreBackup(file) {
   try { backup = JSON.parse(await file.text()); }
   catch (_) { status.textContent = 'Choose a valid JSON backup.'; return; }
   if (state.grading || state.reviewLoading || state.restoring) return;
-  if (backup?.format !== 'wordbook' || backup?.version !== 1) {
-    status.textContent = 'Choose a Wordbook version 1 JSON backup.'; return;
+  if (backup?.format !== 'wordbook' || ![1, 2].includes(backup?.version)) {
+    status.textContent = 'Choose a Wordbook version 1 or 2 JSON backup.'; return;
   }
   if (!window.confirm('Restore this backup? This replaces your saved journal, notes, collections, and review progress. '
       + (backup.shared ? 'It also replaces the saved TUI deck and study plan. ' : '')
@@ -430,6 +431,59 @@ async function restoreBackup(file) {
   } catch (error) { status.textContent = error.message; }
   finally { state.restoring = false; button.disabled = false; }
 }
+function meaningForm(word) {
+  const form = element('form', undefined, 'meaning-form');
+  const label = element('label', 'Your meaning — saved for review', 'note-label');
+  const input = element('textarea', undefined, 'study-note');
+  input.id = `meaning-${word.collection || 'web'}-${word.id}-${word.source || 'local'}`;
+  label.htmlFor = input.id; input.value = word.study_meaning || ''; input.maxLength = 4000;
+  input.placeholder = 'Explain the word in your own words…';
+  const status = element('span', '', 'source-tag'); status.setAttribute('role', 'status');
+  const save = element('button', 'Save meaning', 'secondary'); save.type = 'submit';
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (state.restoring || state.grading) return;
+    save.disabled = true; status.textContent = 'Saving…';
+    try {
+      await api('/api/meaning', { id: word.id, collection: word.collection, meaning: input.value });
+      word.study_meaning = input.value;
+      status.textContent = 'Meaning saved';
+      await refreshCounts();
+      if (state.view === 'review') renderReview();
+    } catch (error) { status.textContent = error.message; }
+    finally { save.disabled = false; }
+  });
+  const actions = element('div', undefined, 'note-actions'); actions.append(save, status);
+  form.append(label, input, actions);
+  return form;
+}
+function renderStatistics(data) {
+  state.statistics = data;
+  $('stats-status').textContent = `${data.period_reviews} recorded reviews in the last 30 days · ${data.lifetime_reviews} saved reviews in total`;
+  const tiles = [
+    ['Saved words', data.saved_words], ['Due cards', data.due_cards], ['Reviews today', data.today_reviews],
+    ['Review streak', data.streak + ' days'], ['Recall rate', data.recall_rate == null ? '—' : data.recall_rate.toFixed(0) + '%']
+  ].map(([label, value]) => {
+    const tile = element('article', undefined, 'stat-tile');
+    tile.append(element('strong', String(value)), element('span', label)); return tile;
+  });
+  $('stats-summary').replaceChildren(...tiles);
+  const days = data.days.map(day => {
+    const tile = element('div', undefined, 'activity-day' + (day.total ? ' active' : ''));
+    const date = element('time', day.date.slice(5)); date.dateTime = day.date;
+    tile.title = `${day.date}: ${day.total} reviews, ${day.recalled} recalled`;
+    tile.append(date, element('strong', String(day.total))); return tile;
+  });
+  $('stats-activity').replaceChildren(...days);
+  const words = data.difficult.map(word => {
+    const row = element('article', undefined, 'word-row');
+    const description = element('div');
+    description.append(element('h2', word.word), element('p', `${word.again} Again grades in ${word.total} reviews`));
+    row.append(description, button('Look up ↗', () => searchWord(word.word))); return row;
+  });
+  if (!words.length) words.push(empty('No difficult words recorded yet.', 'Review a few words to build your learning history.', false));
+  $('stats-difficult').replaceChildren(...words);
+}
 function renderWords() {
   const filter = $('word-filter').value.trim().toLocaleLowerCase();
   const folder = organizationKey($('word-folder')?.value || '');
@@ -442,7 +496,7 @@ function renderWords() {
   for (const word of words) {
     const row = element('article', undefined, 'word-row organizable-row');
     const copy = element('div');
-    copy.append(element('h2', word.word), element('p', word.note || word.entry?.definitions?.[0] || 'Add your own study note when you look up this word.'));
+    copy.append(element('h2', word.word), element('p', word.study_meaning || word.note || word.entry?.definitions?.[0] || 'Add your own study note when you look up this word.'));
     const history = word.collection === 'tui' ? 'Shared with TUI' : `${word.lookup_count} lookup${word.lookup_count === 1 ? '' : 's'}`;
     copy.append(element('p', `${sourceNames[word.source]} · ${history} · Last seen ${formatTime(word.last_seen)} · ${word.due_at <= Date.now() / 1000 ? 'Ready for review' : 'Next review ' + formatTime(word.due_at)}`, 'word-meta'));
     const actions = element('div', undefined, 'word-actions');
@@ -451,11 +505,13 @@ function renderWords() {
     for (const tag of word.tags || []) badges.append(element('span', tag, 'word-tag'));
     copy.append(badges);
     const editor = organizationForm(word); editor.hidden = true;
+    const meaningEditor = meaningForm(word); meaningEditor.hidden = true;
+    const editMeaning = button('Edit meaning', () => { meaningEditor.hidden = !meaningEditor.hidden; });
     const organize = button('Organize', () => { editor.hidden = !editor.hidden; });
     const remove = button('Delete', () => deleteWord(word, remove), 'secondary delete-button');
     remove.setAttribute('aria-label', `Delete ${word.word}`);
-    actions.append(button('Look up ↗', () => searchWord(word.word)), organize, remove);
-    row.append(copy, actions, editor);
+    actions.append(button('Look up ↗', () => searchWord(word.word)), editMeaning, organize, remove);
+    row.append(copy, actions, editor, meaningEditor);
     fragment.append(row);
   }
   if (!words.length) fragment.append(empty(filter ? 'No matching words.' : 'Your first word is waiting.', filter ? 'Try a different filter.' : 'Look up something new. It will appear here automatically.', !filter));
@@ -507,10 +563,11 @@ function renderReview() {
     target.append(element('p', 'Shortcuts: [Space] reveal · [P] pronounce', 'review-shortcuts-hint'));
     return;
   }
+  if (word.study_meaning) target.append(element('p', word.study_meaning, 'personal-meaning'));
   if (word.note) target.append(element('p', word.note, 'study-answer'));
   definitions(word.entry, target);
-  if (!word.note && !word.entry) {
-    target.append(element('p', 'This word has no saved meaning. Look it up and add a study note.', 'study-answer'), button('Look up & add note ↗', () => searchWord(word.word)));
+  if (!word.study_meaning && !word.note && !word.entry) {
+    target.append(element('p', 'This word has no saved meaning. Add your own meaning or study note.', 'study-answer'), button('Add your meaning', () => { target.append(meaningForm(word)); }), button('Look up ↗', () => searchWord(word.word)));
   }
   const actions = element('div', undefined, 'review-actions');
   const grades = word.collection === 'tui'
@@ -531,7 +588,7 @@ async function showView(view) {
   lockSessionControls(state.reviewLoading);
   if (view !== 'search') hideSuggestions();
   $('app-message').textContent = '';
-  for (const name of ['search', 'words', 'review', 'proverbs']) {
+  for (const name of ['search', 'words', 'review', 'proverbs', 'stats']) {
     const section = $(name + '-view');
     if (section) section.hidden = name !== view;
   }
@@ -543,6 +600,11 @@ async function showView(view) {
   try {
     if (view === 'words') { renderWords(); await refreshCounts(); }
     if (view === 'proverbs') { renderProverbs(); await refreshCounts(); }
+    if (view === 'stats') {
+      $('stats-status').textContent = 'Loading your progress…';
+      const data = await api('/api/stats');
+      if (state.view === 'stats' && reviewRequest === state.reviewRequest) renderStatistics(data);
+    }
     if (view === 'review') {
       renderReview();
       const data = await api(reviewSessionUrl());

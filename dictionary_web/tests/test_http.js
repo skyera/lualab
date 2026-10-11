@@ -62,6 +62,79 @@ async function raw(url, text, fragments = false) {
   return completed;
 }
 
+async function waitMarker(file) {
+  const deadline = Date.now() + 4000;
+  while (!fs.existsSync(file)) {
+    assert.ok(Date.now() < deadline, 'Worker did not start: ' + file);
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  return Number(fs.readFileSync(file, 'utf8'));
+}
+
+test('background lookups keep HTTP responsive and preserve concurrent edits, deletion and restore', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wordbook-workers-'));
+  let server;
+  const setup = `local ffi=require('ffi'); ffi.cdef[[int usleep(unsigned int);]];
+    require('providers').lookup=function(source,word)
+      local f=assert(io.open(${JSON.stringify(directory + '/')}..word,'w')); f:write(ffi.C.getpid()); f:close();
+      if word~='fast' then ffi.C.usleep(1200000) end
+      return {definitions={word=='large' and string.rep('x',200000) or 'Fixture meaning'},examples={}}
+    end`;
+  try {
+    server = await start(path.join(directory, 'words.db'), '127.0.0.1', 'none', [], setup);
+    const saved = (await post(server.url, '/api/search', { word: 'edit', source: 'youdao' })).data;
+    fs.rmSync(path.join(directory, 'edit'));
+    const pending = post(server.url, '/api/search', { word: 'edit', source: 'youdao' });
+    await waitMarker(path.join(directory, 'edit'));
+    const started = Date.now();
+    for (const route of ['/api/words', '/api/stats', '/api/session', '/']) {
+      const response = await fetch(server.url + route);
+      assert.equal(response.status, 200); await response.text();
+    }
+    assert.ok(Date.now() - started < 900, 'Unrelated HTTP requests waited for the provider');
+    await post(server.url, '/api/note', { id: saved.id, note: 'Concurrent note' });
+    await post(server.url, '/api/meaning', { id: saved.id, meaning: 'Concurrent meaning' });
+    const edited = (await pending).data;
+    assert.equal(edited.note, 'Concurrent note'); assert.equal(edited.study_meaning, 'Concurrent meaning');
+    fs.rmSync(path.join(directory, 'edit'));
+    const deleting = post(server.url, '/api/search', { word: 'edit', source: 'youdao' });
+    await waitMarker(path.join(directory, 'edit'));
+    assert.equal((await post(server.url, '/api/delete', { id: saved.id })).status, 200);
+    assert.equal((await deleting).data.saved, false);
+    assert.deepEqual((await (await fetch(server.url + '/api/words')).json()).words, []);
+    const backup = await (await fetch(server.url + '/api/export?format=json')).json();
+    const restoring = post(server.url, '/api/search', { word: 'restore', source: 'youdao' });
+    await waitMarker(path.join(directory, 'restore'));
+    assert.equal((await post(server.url, '/api/restore', backup)).status, 200);
+    assert.equal((await restoring).data.saved, false);
+    assert.deepEqual((await (await fetch(server.url + '/api/words')).json()).words, []);
+    const crashing = post(server.url, '/api/search', { word: 'crash', source: 'youdao' });
+    const pid = await waitMarker(path.join(directory, 'crash'));
+    process.kill(pid, 'SIGKILL');
+    assert.match((await crashing).data.error, /worker failed/);
+    assert.equal((await post(server.url, '/api/search', { word: 'fast', source: 'youdao' })).data.saved, true);
+    assert.equal((await post(server.url, '/api/search', { word: 'large', source: 'youdao' })).data.entry.definitions[0].length, 200000);
+    const body = JSON.stringify({ word: 'halfclose', source: 'youdao' });
+    const socket = net.connect(Number(new URL(server.url).port), '127.0.0.1');
+    let response = '';
+    socket.on('data', data => { response += data; });
+    socket.setTimeout(4000, () => socket.destroy(new Error('Half-close response timed out')));
+    const ended = once(socket, 'end');
+    await once(socket, 'connect');
+    socket.end(`POST /api/search HTTP/1.1\r\nHost: ${new URL(server.url).host}\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+    await ended;
+    assert.equal(JSON.parse(response.split('\r\n\r\n')[1]).saved, true);
+    const abandoned = post(server.url, '/api/search', { word: 'shutdown', source: 'youdao' }).catch(() => null);
+    const shutdownPid = await waitMarker(path.join(directory, 'shutdown'));
+    await stop(server); server = null;
+    await abandoned;
+    assert.equal(fs.existsSync('/proc/' + shutdownPid), false, 'Shutdown left a worker behind');
+  } finally {
+    if (server) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('real LuaJIT HTTP server, static UI, SQLite round trip and clean signals', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wordbook-http-'));
   const database = path.join(directory, 'words.db');
@@ -343,9 +416,9 @@ test('All-source Fortune executes its default command runner', () => {
 });
 
 test('LuaJIT bytecode contains no undeclared globals in every new Lua module', () => {
-  const allowed = new Set(['require', 'assert', 'error', 'setmetatable', 'tonumber', 'tostring', 'type', 'ipairs', 'pairs', 'pcall', 'xpcall', 'print', 'arg', 'package', 'os', 'io', 'string', 'table', 'math', 'debug']);
+  const allowed = new Set(['require', 'assert', 'error', 'setmetatable', 'tonumber', 'tostring', 'type', 'ipairs', 'pairs', 'pcall', 'xpcall', 'print', 'arg', 'package', 'os', 'io', 'string', 'table', 'math', 'debug', 'coroutine']);
   const files = fs.readdirSync(root).filter(file => file.endsWith('.lua')).map(file => path.join(root, file));
-  files.push(path.join(root, 'tests', 'test_app.lua'), path.join(root, 'tests', 'test_shared.lua'), path.join(root, 'tests', 'test_learning.lua'));
+  files.push(path.join(root, 'tests', 'test_app.lua'), path.join(root, 'tests', 'test_shared.lua'), path.join(root, 'tests', 'test_learning.lua'), path.join(root, 'tests', 'test_insights.lua'), path.join(root, 'tests', 'test_workers.lua'));
   files.push(path.join(root, '..', 'download_dict.lua'), path.join(root, '..', 'test_download_dict.lua'), path.join(root, '..', 'ffi_dict.lua'));
   for (const file of files) {
     const result = spawnSync('luajit', ['-bl', file], { encoding: 'utf8' });

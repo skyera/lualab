@@ -16,6 +16,7 @@
       <button class="nav-button active" data-view="search" aria-current="page">Discover</button>
       <button class="nav-button" data-view="words">My words <span id="word-count">0</span></button>
       <button class="nav-button" data-view="review">Review <span class="due-badge" id="due-count">0</span></button>
+      <button class="nav-button" data-view="stats">Statistics</button>
       <button class="nav-button" data-view="proverbs">Proverbs <span id="proverbs-count">0</span></button>
     </nav>
     <div class="header-controls">
@@ -92,6 +93,14 @@
       <div class="page-heading"><p class="eyebrow">WISDOM COLLECTED</p><h1>Saved proverbs.</h1><p>Inspirational daily quotes and timeless wisdom from your journal.</p></div>
       <label class="filter-label" for="proverb-filter">Find a saved proverb</label><input id="proverb-filter" class="filter" placeholder="Filter proverbs by English or Chinese…" type="search">
       <p id="proverbs-status" role="status"></p><div id="proverb-list" class="word-list"></div>
+    </section>
+    <section id="stats-view" class="view" hidden>
+      <div class="page-heading"><p class="eyebrow">SMALL STEPS, VISIBLE PROGRESS</p><h1>Your learning progress.</h1><p>Review activity and recall over the last 30 days.</p></div>
+      <p id="stats-status" role="status"></p>
+      <div id="stats-summary" class="stats-summary"></div>
+      <h2>Daily activity</h2><div id="stats-activity" class="stats-activity"></div>
+      <p class="tool-status">Dates use UTC. Recall rate is the share of recorded reviews graded remembered, Hard, Good, or Easy. Older web review totals may not have dated history.</p>
+      <h2>Words to revisit</h2><div id="stats-difficult" class="word-list"></div>
     </section>
     <p id="app-message" role="status" aria-live="polite"></p>
   </main>

@@ -1,9 +1,12 @@
--- Linux HTTP/1.1 server through POSIX FFI. One bounded request at a time.
+-- Linux HTTP/1.1 server through POSIX FFI. Concurrent bounded requests and coroutine-based I/O.
 local ffi = require('ffi')
 local json = require('json')
+local bit = require('bit')
 ffi.cdef[[
 struct wb_sockaddr_in { uint16_t family; uint16_t port; uint32_t address; unsigned char zero[8]; };
 struct wb_pollfd { int fd; short events; short revents; };
+struct wb_timespec { long seconds; long nanoseconds; };
+int clock_gettime(int, struct wb_timespec *);
 typedef struct { unsigned long bits[16]; } wb_sigset;
 int socket(int, int, int);
 int setsockopt(int, int, int, const void *, unsigned int);
@@ -45,6 +48,17 @@ local SIG_BLOCK       = 0
 local SIG_SETMASK     = 2
 
 local M = {}
+local owned_fds = {}
+local clock_gettime = ffi.cast('int (*)(int, struct wb_timespec *)', C.clock_gettime)
+local function now_seconds()
+    local stamp = ffi.new('struct wb_timespec[1]')
+    assert(clock_gettime(1, stamp) == 0, 'Cannot read monotonic clock')
+    return tonumber(stamp[0].seconds) + tonumber(stamp[0].nanoseconds) / 1e9
+end
+
+function M.close_inherited()
+    for fd in pairs(owned_fds) do C.close(fd) end
+end
 local reasons = {
     [200] = 'OK',
     [400] = 'Bad Request',
@@ -58,8 +72,7 @@ local reasons = {
 }
 
 local function readable(fd, milliseconds)
-    local poll = ffi.new('struct wb_pollfd[1]', {{fd, POLLIN, 0}})
-    return poll_fds(poll, 1, milliseconds) > 0 and poll[0].revents ~= 0
+    return coroutine.yield({ events = POLLIN, deadline = now_seconds() + milliseconds / 1000 }) ~= false
 end
 
 function M.parse_headers(raw)
@@ -93,14 +106,14 @@ function M.parse_headers(raw)
 end
 
 local function read_request(fd)
-    local buffer, deadline = '', os.time() + 6
+    local buffer, deadline = '', now_seconds() + 6
     local chunk = ffi.new('char[4096]')
     local header_end
     while not header_end do
-        if os.time() >= deadline or not readable(fd, 1000) then
+        if now_seconds() >= deadline or not readable(fd, 1000) then
             return nil, 'Request timed out.', 408
         end
-        local bytes = tonumber(C.recv(fd, chunk, 4096, 0))
+        local bytes = tonumber(C.recv(fd, chunk, 4096, MSG_DONTWAIT))
         if bytes <= 0 then
             return nil, 'Incomplete request.', 400
         end
@@ -116,10 +129,10 @@ local function read_request(fd)
     end
     local body = buffer:sub(header_end + 4)
     while #body < request.length do
-        if os.time() >= deadline or not readable(fd, 1000) then
+        if now_seconds() >= deadline or not readable(fd, 1000) then
             return nil, 'Request timed out.', 408
         end
-        local bytes = tonumber(C.recv(fd, chunk, math.min(4096, request.length - #body), 0))
+        local bytes = tonumber(C.recv(fd, chunk, math.min(4096, request.length - #body), MSG_DONTWAIT))
         if bytes <= 0 then
             return nil, 'Incomplete request body.', 400
         end
@@ -157,25 +170,25 @@ function M.respond(fd, status, body, content_type, head, extra_headers)
         frame = frame .. key .. ': ' .. value .. '\r\n'
     end
     frame = frame .. '\r\n' .. (head and '' or body)
-    local offset, deadline = 0, os.time() + 5
+    local offset, deadline = 0, now_seconds() + 5
     local pointer = ffi.cast('const char *', frame)
-    while offset < #frame and os.time() <= deadline do
-        local poll = ffi.new('struct wb_pollfd[1]', {{fd, POLLOUT, 0}})
-        if poll_fds(poll, 1, 1000) <= 0 then return false end
+    while offset < #frame and now_seconds() <= deadline do
+        if coroutine.yield({ events = POLLOUT, deadline = deadline }) == false then return false end
         local bytes = tonumber(C.send(fd, pointer + offset, #frame - offset, MSG_NOSIGNAL + MSG_DONTWAIT))
-        if bytes <= 0 then return false end
-        offset = offset + bytes
+        if bytes > 0 then offset = offset + bytes
+        elseif bytes == 0 or (ffi.errno() ~= 4 and ffi.errno() ~= 11) then return false end
     end
     return offset == #frame
 end
 
-function M.serve(port, handler, ready, host)
+function M.serve(port, handler, ready, host, workers)
     assert(ffi.os == 'Linux', 'This HTTP server currently supports Linux.')
     host = host or '127.0.0.1'
     assert(host == '127.0.0.1' or host == '0.0.0.0', 'Host must be 127.0.0.1 or 0.0.0.0.')
     local listener, signals = -1, -1
     local previous = ffi.new('wb_sigset[1]')
     local blocked = false
+    local clients = {}
     local ok, err = xpcall(function()
         local mask = ffi.new('wb_sigset[1]')
         assert(C.sigemptyset(mask) == 0 and C.sigaddset(mask, SIGINT) == 0 and C.sigaddset(mask, SIGTERM) == 0, 'Signal setup failed')
@@ -199,39 +212,95 @@ function M.serve(port, handler, ready, host)
         assert(C.getsockname(listener, address, length) == 0, 'Cannot read server port')
         port = tonumber(C.ntohs(address.port))
         ready(port)
-        local fds = ffi.new('struct wb_pollfd[2]', {{listener, POLLIN, 0}, {signals, POLLIN, 0}})
+        owned_fds[listener], owned_fds[signals] = true, true
+        local function discard(index)
+            local client = clients[index]
+            if workers then workers:cancel(client) end
+            owned_fds[client.fd] = nil
+            C.close(client.fd)
+            table.remove(clients, index)
+        end
+        local function serve_client(client)
+            local request, message, status = read_request(client.fd)
+            if not request then M.respond(client.fd, status, json.encode({ error = message })); return end
+            request.background = workers and function(run, timeout)
+                if client.cancelled then return nil, 'Request cancelled.' end
+                return workers:run(client, run, timeout)
+            end or nil
+            local body, code, mime, headers = handler(request, port)
+            M.respond(client.fd, code, body, mime, request.method == 'HEAD', headers)
+        end
         while true do
-            local result = poll_fds(fds, 2, 1000)
-            if result > 0 then
-                if fds[1].revents ~= 0 then
-                    local signal = ffi.new('char[128]')
-                    C.read(signals, signal, 128)
-                    break
-                end
-                if fds[0].revents ~= 0 then
-                    local client = C.accept(listener, nil, nil)
-                    if client >= 0 then
-                        local served, failure = pcall(function()
-                            local request, message, status = read_request(client)
-                            if not request then
-                                M.respond(client, status, json.encode({error = message}))
-                                return
-                            end
-                            local body, code, mime, headers = handler(request, port)
-                            M.respond(client, code, body, mime, request.method == 'HEAD', headers)
-                        end)
-                        if not served then
-                            io.stderr:write('Request failed: ' .. tostring(failure) .. '\n')
-                            M.respond(client, 500, json.encode({error = 'Internal server error.'}))
-                        end
-                        C.close(client)
+            if workers then workers:tick() end
+            local count = #clients
+            local fds = ffi.new('struct wb_pollfd[?]', count + 2)
+            fds[0].fd, fds[0].events = listener, POLLIN
+            fds[1].fd, fds[1].events = signals, POLLIN
+            for i, client in ipairs(clients) do
+                fds[i + 1].fd = client.fd
+                fds[i + 1].events = client.pending.events or (client.eof and 0 or POLLIN)
+            end
+            local result = poll_fds(fds, count + 2, 50)
+            if result < 0 and ffi.errno() ~= 4 then error('Server poll failed') end
+            if fds[1].revents ~= 0 then
+                local signal = ffi.new('char[128]')
+                C.read(signals, signal, 128)
+                break
+            end
+            for i = count, 1, -1 do
+                local client, pending = clients[i], clients[i].pending
+                local events, now = tonumber(fds[i + 1].revents), now_seconds()
+                if bit.band(events, 24) ~= 0 then
+                    discard(i)
+                else
+                    local expired = pending.deadline and now >= pending.deadline
+                    local resume = pending.events and (events ~= 0 or expired) or pending.done
+                    if not pending.events and now - client.started >= 120 then
+                        client.cancelled = true
+                        if workers then workers:cancel(client) end
+                        resume = true
+                    end
+                    if not pending.events and events ~= 0 and not resume then
+                        -- TCP half-close is legal after sending a complete request.
+                        local probe = ffi.new('char[4096]')
+                        if C.recv(client.fd, probe, 4096, MSG_DONTWAIT) == 0 then client.eof = true end
+                    end
+                    if resume then
+                        local served, waiting = coroutine.resume(client.thread, not expired)
+                        if not served or coroutine.status(client.thread) == 'dead' then
+                            if not served then io.stderr:write('Request failed: ' .. tostring(waiting) .. '\n') end
+                            discard(i)
+                        else client.pending = waiting end
                     end
                 end
-            elseif result < 0 and ffi.errno() ~= 4 then
-                error('Server poll failed')
+            end
+            if fds[0].revents ~= 0 then
+                local fd = C.accept(listener, nil, nil)
+                if fd >= 0 then
+                    if #clients >= 64 then C.close(fd)
+                    else
+                        local client = { fd = tonumber(fd), started = now_seconds() }
+                        owned_fds[client.fd] = true
+                        client.thread = coroutine.create(function()
+                            local served, failure = pcall(serve_client, client)
+                            if not served then
+                                io.stderr:write('Request failed: ' .. tostring(failure) .. '\n')
+                                M.respond(client.fd, 500, json.encode({ error = 'Internal server error.' }))
+                            end
+                        end)
+                        local served, waiting = coroutine.resume(client.thread)
+                        if served and coroutine.status(client.thread) ~= 'dead' then
+                            client.pending = waiting
+                            clients[#clients + 1] = client
+                        else owned_fds[client.fd] = nil; C.close(client.fd) end
+                    end
+                end
             end
         end
     end, debug.traceback)
+    if workers then workers:close() end
+    for _, client in ipairs(clients) do C.close(client.fd) end
+    owned_fds = {}
     if listener >= 0 then C.close(listener) end
     if signals >= 0 then C.close(signals) end
     if blocked then C.sigprocmask(SIG_SETMASK, previous, nil) end

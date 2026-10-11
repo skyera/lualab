@@ -84,6 +84,63 @@ function deferred() {
 const card = (id, collection = 'web') => ({ id, collection, source: 'local', word: 'word-' + id,
   entry: { definitions: ['Meaning ' + id], examples: [] }, note: '' });
 
+test('personal meaning editor saves separately and review reveals it before provider text', async () => {
+  const { context, state, get, key } = harness();
+  const word = { ...card(7), study_meaning: 'My meaning 学习', note: 'Mnemonic' };
+  const mutations = [];
+  context.api = async (route, payload) => { mutations.push({ route, payload }); return { saved: true }; };
+  const form = context.meaningForm(word);
+  const input = form.querySelectorAll('textarea')[0];
+  assert.equal(input.value, 'My meaning 学习');
+  input.value = '<script>literal own meaning</script>';
+  await form.handlers.submit({ preventDefault() {} });
+  assert.equal(mutations[0].route, '/api/meaning');
+  assert.equal(mutations[0].payload.meaning, input.value);
+  assert.equal(word.entry.definitions[0], 'Meaning 7'); assert.equal(word.note, 'Mnemonic');
+  state.view = 'review'; state.queue = [word]; state.total = 1;
+  context.renderReview();
+  assert.equal(get('review-card').querySelectorAll('.personal-meaning').length, 0);
+  key(' ');
+  assert.equal(get('review-card').querySelectorAll('.personal-meaning')[0].textContent, input.value);
+  input.value = '';
+  state.view = 'words';
+  await form.handlers.submit({ preventDefault() {} });
+  assert.equal(word.study_meaning, '');
+  state.queue = [{ ...card(8), entry: null }]; state.revealed = true;
+  context.renderReview();
+  const add = get('review-card').querySelectorAll('button').find(node => node.textContent === 'Add your meaning');
+  add.handlers.click();
+  assert.equal(get('review-card').querySelectorAll('.meaning-form').length, 1);
+});
+
+test('statistics render empty and populated histories, ignore stale responses and allow navigation during lookups', async () => {
+  const { context, state, get } = harness();
+  const empty = { saved_words: 0, due_cards: 0, today_reviews: 0, streak: 0, recall_rate: null,
+    lifetime_reviews: 4, period_reviews: 0, difficult: [],
+    days: Array.from({ length: 30 }, (_, index) => ({ date: `2026-09-${String(index + 1).padStart(2, '0')}`, total: 0, recalled: 0 })) };
+  context.renderStatistics(empty);
+  assert.equal(get('stats-summary').children.length, 5);
+  assert.equal(get('stats-summary').children[4].children[0].textContent, '—');
+  assert.equal(get('stats-activity').children.length, 30);
+  const populated = { ...empty, recall_rate: 66.6, difficult: [{ word: '<学习>', again: 2, total: 3 }] };
+  context.renderStatistics(populated);
+  assert.equal(get('stats-summary').children[4].children[0].textContent, '67%');
+  assert.equal(get('stats-difficult').querySelectorAll('h2')[0].textContent, '<学习>');
+  const first = deferred(), second = deferred(); let calls = 0;
+  context.api = async route => { assert.equal(route, '/api/stats'); return (++calls === 1 ? first : second).promise; };
+  state.busy = true;
+  const oldLoad = context.showView('stats');
+  assert.equal(state.view, 'stats'); assert.equal(get('stats-view').hidden, false);
+  await context.showView('search');
+  const newLoad = context.showView('stats');
+  second.resolve(populated); await newLoad;
+  first.resolve(empty); await oldLoad;
+  assert.equal(state.statistics.recall_rate, 66.6);
+  context.api = async () => { throw new Error('Statistics unavailable'); };
+  await context.showView('stats');
+  assert.equal(get('app-message').textContent, 'Statistics unavailable');
+});
+
 test('review loading blocks mouse and keyboard grading; new queue remains intact', async () => {
   const { context, state, get, key } = harness();
   const due = deferred();

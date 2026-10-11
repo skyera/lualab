@@ -19,6 +19,11 @@ local WEB = {
     } },
     { name = 'word_organization', columns = { { 'word', 'text' }, { 'folder', 'text' }, { 'tags', 'text' } } },
 }
+local WEB_V1 = { WEB[1], WEB[2], WEB[3] }
+WEB[#WEB + 1] = { name = 'study_meanings', columns = { { 'word', 'text' }, { 'meaning', 'text' } } }
+WEB[#WEB + 1] = { name = 'review_log', columns = {
+    { 'id', 'id' }, { 'word_id', 'id' }, { 'rated_at', 'integer' }, { 'grade', 'integer' },
+} }
 local SHARED = {
     { name = 'words', columns = {
         { 'id', 'id' }, { 'word', 'text' }, { 'pos', 'optional' }, { 'definition', 'optional' },
@@ -66,7 +71,7 @@ function M.export(store)
     attach(store)
     store.web:query('BEGIN IMMEDIATE;')
     local ok, data = pcall(function()
-        local result = { format = 'wordbook', version = 1, created_at = os.time(),
+        local result = { format = 'wordbook', version = 2, created_at = os.time(),
             web = snapshot(store.web, 'main', WEB) }
         if store.shared then result.shared = snapshot(store.web, 'shared_deletion', SHARED) end
         for _, row in ipairs(result.web.words) do
@@ -163,7 +168,10 @@ local function validate_tables(data, specs)
                     return nil, 'Invalid saved organization.'
                 end
             end
-            if spec.name == 'reviews' and row.grade > 3 then return nil, 'Invalid review grade.' end
+            if (spec.name == 'reviews' or spec.name == 'review_log') and row.grade > 3 then return nil, 'Invalid review grade.' end
+            if spec.name == 'study_meanings' and (#row.meaning > 4000 or row.word ~= row.word:lower()) then
+                return nil, 'Invalid study meaning.'
+            end
             if spec.name == 'study_plan' and row.id ~= 1 then return nil, 'Invalid study plan.' end
         end
     end
@@ -172,10 +180,10 @@ local function validate_tables(data, specs)
 end
 
 function M.validate(payload)
-    if type(payload) ~= 'table' or payload.format ~= 'wordbook' or payload.version ~= 1 then
-        return nil, 'Select a Wordbook version 1 JSON backup.'
+    if type(payload) ~= 'table' or payload.format ~= 'wordbook' or (payload.version ~= 1 and payload.version ~= 2) then
+        return nil, 'Select a Wordbook version 1 or 2 JSON backup.'
     end
-    local ok, err = validate_tables(payload.web, WEB)
+    local ok, err = validate_tables(payload.web, payload.version == 1 and WEB_V1 or WEB)
     if not ok then return nil, err end
     if payload.shared ~= nil then
         ok, err = validate_tables(payload.shared, SHARED)
@@ -195,6 +203,11 @@ function M.validate(payload)
             end
         end
         for id in pairs(words) do if not states[id] then return nil, 'Missing shared review state.' end end
+    end
+    local ids = {}
+    for _, row in ipairs(payload.web.words) do ids[row.id] = true end
+    for _, row in ipairs(payload.web.review_log or {}) do
+        if not ids[row.word_id] then return nil, 'Review data references a missing word.' end
     end
     local names, dates = {}, {}
     for _, row in ipairs(payload.web.words) do
@@ -241,7 +254,12 @@ function M.restore(store, payload)
     attach(store)
     store.web:query('BEGIN IMMEDIATE;')
     local restored, failure = pcall(function()
-        replace(store.web, 'main', WEB, payload.web)
+        local web = payload.web
+        if payload.version == 1 then
+            web = { words = web.words, proverbs = web.proverbs, word_organization = web.word_organization,
+                study_meanings = {}, review_log = {} }
+        end
+        replace(store.web, 'main', WEB, web)
         if payload.shared then replace(store.web, 'shared_deletion', SHARED, payload.shared) end
         store.web:query('COMMIT;')
     end)
@@ -260,13 +278,13 @@ local function cell(value)
 end
 
 function M.csv(store)
-    local lines = { 'word,source,origin,collection,tags,note,definition,review_count,due_at,lookup_count' }
+    local lines = { 'word,source,origin,collection,tags,note,definition,review_count,due_at,lookup_count,study_meaning' }
     for _, row in ipairs(store:words()) do
         local fields = { row.word, row.source, row.collection, row.folder, table.concat(row.tags, ', '),
             row.note, row.entry and table.concat(row.entry.definitions or {}, '\n') or '',
-            row.review_count, row.due_at, row.lookup_count }
+            row.review_count, row.due_at, row.lookup_count, row.study_meaning }
         local cells = {}
-        for index = 1, 10 do cells[index] = cell(fields[index]) end
+        for index = 1, 11 do cells[index] = cell(fields[index]) end
         lines[#lines + 1] = table.concat(cells, ',')
     end
     return table.concat(lines, '\r\n') .. '\r\n'

@@ -7,6 +7,7 @@ local json = require('json')
 local Store = require('store')
 local service = require('service')
 local http = require('http')
+local workers = require('workers').new(http.close_inherited)
 
 local function read_file(path)
     local file, err = io.open(path, 'rb')
@@ -118,7 +119,14 @@ local function handler(request, actual_port)
             end
             payload = result
         end
-        local data, status = service.route(db, request.method == 'HEAD' and 'GET' or request.method, path, params, payload)
+        local generation = db.lookup_generation
+        local word = type(payload) == 'table' and service.normalize(payload.word) or nil
+        local version = word and (db.word_versions[word] or 0) or 0
+        local background = request.background and { run = request.background, guard = function()
+            return db.lookup_generation == generation and (not word or (db.word_versions[word] or 0) == version)
+        end } or nil
+        local data, status = service.route(db, request.method == 'HEAD' and 'GET' or request.method,
+            path, params, payload, background)
         return reply(data, status)
     end
     if request.method == 'POST' then
@@ -138,7 +146,7 @@ end
 local ok, err = pcall(http.serve, port, handler, function(actual_port)
     print('Wordbook: http://127.0.0.1:' .. actual_port .. ' | Listening: ' .. bind_host .. ':' .. actual_port .. ' | SQLite: ' .. database)
     io.stdout:flush()
-end, bind_host)
+end, bind_host, workers)
 db:close()
 if not ok then
     io.stderr:write(tostring(err) .. '\n')

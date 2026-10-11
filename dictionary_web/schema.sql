@@ -29,3 +29,16 @@ CREATE TABLE IF NOT EXISTS word_organization (
     folder TEXT NOT NULL DEFAULT '',
     tags TEXT NOT NULL DEFAULT '[]'
 );
+
+CREATE TABLE IF NOT EXISTS study_meanings (
+    word TEXT PRIMARY KEY,
+    meaning TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS review_log (
+    id INTEGER PRIMARY KEY,
+    word_id INTEGER NOT NULL,
+    rated_at INTEGER NOT NULL,
+    grade INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS review_log_time ON review_log(rated_at);

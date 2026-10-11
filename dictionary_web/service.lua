@@ -19,7 +19,7 @@ function M.normalize(word)
     return word
 end
 
-function M.search(db, payload, provider, stamp)
+function M.search(db, payload, provider, stamp, guard)
     if type(payload) ~= 'table' then return nil, 'Expected a JSON object.' end
     local word = M.normalize(payload.word)
     if not word then return nil, 'Enter a word or short phrase (1–100 characters).' end
@@ -27,7 +27,7 @@ function M.search(db, payload, provider, stamp)
     if source == 'all' then
         local results = {}
         for _, name in ipairs({'local', 'dict.cn', 'youdao', 'iciba'}) do
-            results[#results + 1] = assert(M.search(db, {word = word, source = name}, provider, stamp))
+            results[#results + 1] = assert(M.search(db, {word = word, source = name}, provider, stamp, guard))
         end
         table.sort(results, function(a, b)
             return SOURCE_ORDER[a.source] < SOURCE_ORDER[b.source]
@@ -65,6 +65,9 @@ function M.search(db, payload, provider, stamp)
             end
         end
     end
+    if guard and not guard(word) then
+        return { word = word, source = source, saved = false, error = 'Lookup cancelled because the journal changed.' }
+    end
     if not usable then
         return {
             word = word,
@@ -85,6 +88,7 @@ function M.search(db, payload, provider, stamp)
         id = saved.id,
         lookup_count = saved.lookup_count,
         note = saved.note,
+        study_meaning = saved.study_meaning or '',
         collection = saved.collection or 'web',
         cached = not not cached,
         entry = entry,
@@ -94,13 +98,18 @@ function M.search(db, payload, provider, stamp)
     }
 end
 
-function M.route(db, method, path, params, payload)
+function M.route(db, method, path, params, payload, background)
     if path == '/api/proverb/random' or path == '/api/proverbs/random' then
         if method ~= 'GET' and method ~= 'POST' then
             return {error = 'Method not allowed.'}, 405
         end
         local src = (params and params.source) or (payload and payload.source)
-        local proverb = db.random_proverb and db:random_proverb(nil, src)
+        local quote_fn = background and function()
+            local result = background.run(function() return content.fetch_quote(require('net').fetch, src) end, 75)
+            if background.guard and not background.guard() then return nil end
+            return result
+        end or nil
+        local proverb = db.random_proverb and db:random_proverb(nil, src, quote_fn)
         if not proverb then
             proverb = content.fetch_quote and content.fetch_quote(nil, src)
         end
@@ -121,8 +130,14 @@ function M.route(db, method, path, params, payload)
     end
     if method == 'GET' then
         if path == '/api/daily' then
-            return db.daily and db:daily() or content.daily(), 200
+            local fetch = background and function(url)
+                local result, err = background.run(function() return require('net').fetch(url) end, 15)
+                if background.guard and not background.guard() then return nil, 'Request cancelled.' end
+                return result, err
+            end or nil
+            return db.daily and db:daily(nil, fetch) or content.daily(), 200
         end
+        if path == '/api/stats' then return db:statistics(), 200 end
         if path == '/api/session' then
             local result, err = db:session(params)
             return result or { error = err }, result and 200 or 400
@@ -145,10 +160,13 @@ function M.route(db, method, path, params, payload)
             return result or { error = err }, result and 200 or 400
         end
         if path == '/api/search' then
-            local result, err = M.search(db, payload)
+            local provider = background and function(source, word)
+                return background.run(function() return providers.lookup(source, word) end, 30)
+            end or nil
+            local result, err = M.search(db, payload, provider, nil, background and background.guard)
             return result or {error = err}, result and 200 or 400
         end
-        if path == '/api/review' or path == '/api/note' or path == '/api/delete' or path == '/api/organize' then
+        if path == '/api/review' or path == '/api/note' or path == '/api/delete' or path == '/api/organize' or path == '/api/meaning' then
             local collection = payload.collection or 'web'
             if collection ~= 'web' and collection ~= 'tui' then
                 return {error = 'Invalid word collection.'}, 400
@@ -157,7 +175,12 @@ function M.route(db, method, path, params, payload)
                 return {error = 'Invalid word ID.'}, 400
             end
             local result, err
-            if path == '/api/organize' then
+            if path == '/api/meaning' then
+                if type(payload.meaning) ~= 'string' or #payload.meaning > 4000 then
+                    return { error = 'Your meaning must be at most 4000 bytes.' }, 400
+                end
+                result, err = db:meaning(payload.id, collection, payload.meaning)
+            elseif path == '/api/organize' then
                 local status
                 result, err, status = db:organize(payload.id, collection, payload.folder, payload.tags)
                 return result or { error = err }, result and 200 or (status or 400)

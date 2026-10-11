@@ -228,15 +228,22 @@ end
 
 function DB:review(id, remembered, stamp)
     stamp = stamp or os.time()
-    local row = self:query('SELECT streak FROM words WHERE id=?', {id})[1]
-    if not row then
-        return nil, 'Word not found.'
-    end
-    local streak = remembered and row.streak + 1 or 0
-    local delay = remembered and math.min(30, 2 ^ math.min(streak - 1, 5)) * 86400 or 600
-    self:query('UPDATE words SET streak=?,review_count=review_count+1,due_at=? WHERE id=?',
-        {streak, stamp + delay, id})
-    return {due_at = stamp + delay}
+    self:query('BEGIN IMMEDIATE;')
+    local ok, result = pcall(function()
+        local row = self:query('SELECT streak FROM words WHERE id=?', { id })[1]
+        if not row then return nil end
+        local streak = remembered and row.streak + 1 or 0
+        local delay = remembered and math.min(30, 2 ^ math.min(streak - 1, 5)) * 86400 or 600
+        self:query('UPDATE words SET streak=?,review_count=review_count+1,due_at=? WHERE id=?',
+            { streak, stamp + delay, id })
+        self:query('INSERT INTO review_log(word_id,rated_at,grade) VALUES(?,?,?)',
+            { id, stamp, remembered and 2 or 0 })
+        self:query('COMMIT;')
+        return { due_at = stamp + delay }
+    end)
+    if not ok or not result then self:query('ROLLBACK;') end
+    if not ok then error(result) end
+    return result, not result and 'Word not found.' or nil
 end
 
 function DB:note(id, note)
@@ -247,12 +254,16 @@ function DB:note(id, note)
     return {saved = true}
 end
 
-function DB:delete(id)
+function DB:delete(id, preserve_meaning)
     self:query('BEGIN IMMEDIATE;')
     local ok, result = pcall(function()
         local row = self:query('SELECT word FROM words WHERE id=?', {id})[1]
         if not row then return nil end
+        self:query('DELETE FROM review_log WHERE word_id=?', { id })
         self:query('DELETE FROM words WHERE id=?', {id})
+        if not preserve_meaning and not self:query('SELECT id FROM words WHERE lower(word)=lower(?)', { row.word })[1] then
+            self:query('DELETE FROM study_meanings WHERE word=lower(?)', { row.word })
+        end
         self:query('COMMIT;')
         return {deleted = true, word = row.word}
     end)

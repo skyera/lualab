@@ -79,9 +79,12 @@ not enable IPv6 listening.
 
 The default database is `dictionary_web/wordbook.db`, ignored by Git. Back up
 that file with the app stopped. Ctrl-C and SIGTERM close the server and database.
-The server processes one request at a time. Each outbound HTTPS request has a
-12-second timeout; trying a configured Youdao API and then its public-page
-fallback can take up to two timeouts and delay other requests.
+HTTP connections are handled concurrently. Up to four background workers fetch
+online dictionaries and proverbs while notes, reviews, statistics, and local
+lookups remain available. The queue holds up to 20 jobs; excess requests show
+a retry message. Each HTTPS call has a 12-second timeout, with overall worker
+limits of 30 seconds for a dictionary, 15 seconds for the daily feed, and 75
+seconds for a multi-provider proverb. Shutdown terminates and reaps workers.
 
 ## Color themes
 
@@ -98,8 +101,8 @@ with separately labeled cards updated as each source finishes.
 Unknown words and connection failures appear
 on the affected source's card; successful results remain available. You can
 still select a single source. The API also accepts `source: "all"` and returns
-a `results` array. The local server handles requests sequentially, so slow
-online sources may delay later results; local requests are issued first.
+a `results` array. Local requests are issued first, and online sources run in background workers.
+The browser keeps Iciba first regardless of completion order.
 
 - **Local dictionary** reads imported definitions and
   saved vocabulary from the repository's `.dict.db`, used by `ffi_dict.lua`.
@@ -174,6 +177,27 @@ Requests do not execute a shell or put credentials in command arguments.
 - Pronunciation playback uses browser speech synthesis when available; voice
   availability depends on the browser and operating system.
 
+## Your meanings and learning statistics
+
+Use **Your meaning** on a saved lookup or **Edit meaning** in My words to write
+an explanation in your own words. Review shows it before provider definitions
+and notes. It follows the word across sources and shared TUI entries, without
+changing the provider definition, mnemonic, or review schedule. Meanings are
+stored in Wordbook and included in JSON backups and CSV exports. An empty value
+clears it. The limit is 4,000 UTF-8 bytes; longer text produces a validation error.
+
+**Statistics** shows saved words, due cards, today's reviews, a review streak,
+a 30-day activity grid, and words with the most **Again** grades. Dates use UTC.
+Recall rate is the share of recorded grades above Again, based on your own
+ratings. A streak continues through yesterday until today's first review.
+Web and shared TUI review events are combined. Existing web review counts still
+contribute to the lifetime total; their missing historical dates are not
+invented. Version 1 backups retain those totals but contain no new web activity
+history or personal meanings. Deleting a word removes its associated history.
+
+API: `GET /api/stats`, and `POST /api/meaning` with
+`{id, collection: "web"|"tui", meaning}`.
+
 ## Collections, tags, and review sessions
 
 In **My words**, use **Organize** to assign a collection and up to eight tags.
@@ -191,13 +215,14 @@ shared SM-2 scheduler and appear oldest-due first. Empty filters show all words.
 
 ## Backup and export
 
-**Download backup** saves a version 1 JSON file with the web journal, notes,
-review state, saved proverbs, collections, and tags. When local integration is
+**Download backup** saves a version 2 JSON file with the web journal, notes,
+review state, dated review history, your meanings, saved proverbs, collections,
+and tags. When local integration is
 enabled, it also includes the saved TUI deck, SM-2 states, review history, and
 study plan. Bulk imported dictionary definitions, API credentials, and browser
 preferences are excluded. Youdao provider definitions are not exported.
 
-**Restore backup…** validates the selected JSON file and asks for confirmation.
+**Restore backup…** accepts version 1 and 2 files, validates the selected JSON file and asks for confirmation.
 It replaces the web journal and organization; a backup containing shared data
 also replaces the saved TUI deck and study plan. Imported dictionary definitions
 remain. Download the current backup first if you want to retain the old journal.
@@ -206,7 +231,7 @@ are limited to 16 MB; larger journals can use the stopped-database backup method
 above. Validation and SQL failures leave existing saved data unchanged. Reload
 other open browser tabs after restoring.
 
-**Export CSV** downloads a readable word list with definitions, notes, tags,
+**Export CSV** downloads a readable word list with definitions, your meanings, notes, tags,
 collections, and review dates. Cells are quoted; formula-like text is prefixed
 with an apostrophe for spreadsheet safety. CSV is not a restorable backup.
 
@@ -224,6 +249,8 @@ Run from the repository root. Node.js is needed only for the HTTP/scoping tests:
 luajit dictionary_web/tests/test_app.lua
 luajit dictionary_web/tests/test_shared.lua
 luajit dictionary_web/tests/test_learning.lua
+luajit dictionary_web/tests/test_insights.lua
+luajit dictionary_web/tests/test_workers.lua
 luajit test_ffi_dict.lua
 luajit test_download_dict.lua
 node --test dictionary_web/tests/test_http.js dictionary_web/tests/test_ui.js dictionary_web/tests/test_theme.js

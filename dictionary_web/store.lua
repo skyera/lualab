@@ -5,6 +5,7 @@ local content = require('content')
 local net = require('net')
 local learning = require('learning')
 local backup = require('backup')
+local statistics = require('statistics')
 local Store = {}
 Store.__index = Store
 
@@ -16,7 +17,7 @@ local function checked(value, err)
 end
 
 function Store.open(path, schema, dictionary_path)
-    local self = setmetatable({web = DB.open(path, schema)}, Store)
+    local self = setmetatable({ web = DB.open(path, schema), lookup_generation = 0, word_versions = {} }, Store)
     if dictionary_path and dictionary_path ~= 'none' then
         local file = io.open(dictionary_path, 'rb')
         if file then
@@ -159,9 +160,11 @@ function Store:proverbs(query)
     return self.web:proverbs(query)
 end
 
-function Store:random_proverb(fetch_fn, source)
+function Store:random_proverb(fetch_fn, source, quote_fn)
     -- Try fetching from online quote / proverb services first
-    local online = content.fetch_quote(fetch_fn or net.fetch, source)
+    local online
+    if quote_fn then online = quote_fn()
+    else online = content.fetch_quote(fetch_fn or net.fetch, source) end
     if online and online.text and online.text ~= '' then
         online.date = os.date('!%Y-%m-%d %H:%M:%S', os.time()) .. '-' .. math.random(100, 999)
         local saved = self.web:save_proverb(online)
@@ -227,6 +230,7 @@ function Store:save(word, source, entry, stamp)
             saved.id, saved.collection, saved.note = deck.id, 'tui', deck.mnem or ''
         end
     end
+    saved.study_meaning = self:study_meaning(word)
     return saved
 end
 
@@ -272,6 +276,9 @@ function Store:words(query, due, stamp)
         if a.last_seen ~= b.last_seen then return a.last_seen > b.last_seen end
         return a.word < b.word
     end)
+    local meanings = {}
+    for _, row in ipairs(self.web:query('SELECT * FROM study_meanings')) do meanings[row.word] = row.meaning end
+    for _, row in ipairs(rows) do row.study_meaning = meanings[row.word:lower()] or '' end
     return learning.decorate(self, rows)
 end
 
@@ -362,7 +369,11 @@ end
 
 function Store:delete(id, collection)
     if collection ~= 'tui' then
-        return self.web:delete(id)
+        local row = self.web:query('SELECT word FROM words WHERE id=?', { id })[1]
+        local preserve = row and self.shared and self.shared:deck_get(row.word)
+        local result, err = self.web:delete(id, not not preserve)
+        if result then self.word_versions[result.word:lower()] = (self.word_versions[result.word:lower()] or 0) + 1 end
+        return result, err
     end
     if not self.shared then
         return nil, 'Shared dictionary is unavailable.'
@@ -380,7 +391,9 @@ function Store:delete(id, collection)
             self.web:query('DELETE FROM shared_deletion.' .. name .. ' WHERE word_id=?', {id})
         end
         self.web:query('DELETE FROM shared_deletion.words WHERE id=?', {id})
+        self.web:query('DELETE FROM main.review_log WHERE word_id IN (SELECT id FROM main.words WHERE lower(word)=lower(?))', { row.word })
         self.web:query('DELETE FROM main.words WHERE lower(word)=lower(?)', {row.word})
+        self.web:query('DELETE FROM main.study_meanings WHERE word=lower(?)', { row.word })
         self.web:query('COMMIT;')
         return {deleted = true, word = row.word, collection = 'tui'}
     end)
@@ -388,6 +401,7 @@ function Store:delete(id, collection)
         self.web:query('ROLLBACK;')
     end
     if not ok then error(result) end
+    if result then self.word_versions[result.word:lower()] = (self.word_versions[result.word:lower()] or 0) + 1 end
     return result, not result and 'Word not found.' or nil
 end
 function Store:organize(id, collection, folder, tags)
@@ -407,6 +421,30 @@ function Store:export_csv()
 end
 
 function Store:restore(payload)
-    return backup.restore(self, payload)
+    local result, err = backup.restore(self, payload)
+    if result then self.lookup_generation = self.lookup_generation + 1 end
+    return result, err
+end
+
+function Store:study_meaning(word)
+    local row = self.web:query('SELECT meaning FROM study_meanings WHERE word=lower(?)', { word })[1]
+    return row and row.meaning or ''
+end
+
+function Store:meaning(id, collection, meaning)
+    local row
+    if collection == 'tui' and self.shared then
+        row = checked(self.shared:query('SELECT word FROM words WHERE id=?', { id }))[1]
+    elseif collection == 'web' then
+        row = self.web:query('SELECT word FROM words WHERE id=?', { id })[1]
+    end
+    if not row then return nil, 'Word not found.' end
+    self.web:query([[INSERT INTO study_meanings(word,meaning) VALUES(lower(?),?)
+        ON CONFLICT(word) DO UPDATE SET meaning=excluded.meaning]], { row.word, meaning })
+    return { saved = true, study_meaning = meaning }
+end
+
+function Store:statistics(stamp)
+    return statistics.get(self, stamp)
 end
 return Store

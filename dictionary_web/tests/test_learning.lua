@@ -45,7 +45,7 @@ test('old journals upgrade without changing notes or review progress', function(
     local old = DB.open(path, assert(schema:match('^(.-)CREATE TABLE IF NOT EXISTS word_organization')))
     local row = old:save('legacy', 'dict.cn', nil, 100)
     assert(old:note(row.id, 'before\0after').saved)
-    old:review(row.id, true, 100)
+    old:query('UPDATE words SET streak=1,review_count=1,due_at=86500 WHERE id=?', { row.id })
     local prior = old:get('legacy', 'dict.cn')
     old:close()
     local store = Store.open(path, schema, 'none')
@@ -161,7 +161,7 @@ test('malformed backups and missing shared integration leave existing data untou
         save(store, 'original')
         local original = store:export_backup()
         local invalid = {}
-        local bad = clone(original); bad.version = 2; invalid[#invalid + 1] = bad
+        local bad = clone(original); bad.version = 99; invalid[#invalid + 1] = bad
         bad = clone(original); bad.web.words[1].due_at = -1; invalid[#invalid + 1] = bad
         bad = clone(original); bad.web.words[1].entry = '{bad'; invalid[#invalid + 1] = bad
         bad = clone(original); bad.web.words[2] = clone(bad.web.words[1]); invalid[#invalid + 1] = bad
