@@ -24,6 +24,8 @@ WEB[#WEB + 1] = { name = 'study_meanings', columns = { { 'word', 'text' }, { 'me
 WEB[#WEB + 1] = { name = 'review_log', columns = {
     { 'id', 'id' }, { 'word_id', 'id' }, { 'rated_at', 'integer' }, { 'grade', 'integer' },
 } }
+local WEB_V2 = { WEB[1], WEB[2], WEB[3], WEB[4], WEB[5] }
+WEB[#WEB + 1] = { name = 'study_examples', columns = { { 'word', 'text' }, { 'example', 'text' } } }
 local SHARED = {
     { name = 'words', columns = {
         { 'id', 'id' }, { 'word', 'text' }, { 'pos', 'optional' }, { 'definition', 'optional' },
@@ -71,7 +73,7 @@ function M.export(store)
     attach(store)
     store.web:query('BEGIN IMMEDIATE;')
     local ok, data = pcall(function()
-        local result = { format = 'wordbook', version = 2, created_at = os.time(),
+        local result = { format = 'wordbook', version = 3, created_at = os.time(),
             web = snapshot(store.web, 'main', WEB) }
         if store.shared then result.shared = snapshot(store.web, 'shared_deletion', SHARED) end
         for _, row in ipairs(result.web.words) do
@@ -172,6 +174,9 @@ local function validate_tables(data, specs)
             if spec.name == 'study_meanings' and (#row.meaning > 4000 or row.word ~= row.word:lower()) then
                 return nil, 'Invalid study meaning.'
             end
+            if spec.name == 'study_examples' and (#row.example > 4000 or row.word ~= row.word:lower()) then
+                return nil, 'Invalid study example.'
+            end
             if spec.name == 'study_plan' and row.id ~= 1 then return nil, 'Invalid study plan.' end
         end
     end
@@ -180,10 +185,12 @@ local function validate_tables(data, specs)
 end
 
 function M.validate(payload)
-    if type(payload) ~= 'table' or payload.format ~= 'wordbook' or (payload.version ~= 1 and payload.version ~= 2) then
-        return nil, 'Select a Wordbook version 1 or 2 JSON backup.'
+    if type(payload) ~= 'table' or payload.format ~= 'wordbook'
+        or (payload.version ~= 1 and payload.version ~= 2 and payload.version ~= 3) then
+        return nil, 'Select a Wordbook version 1, 2 or 3 JSON backup.'
     end
-    local ok, err = validate_tables(payload.web, payload.version == 1 and WEB_V1 or WEB)
+    local specs = payload.version == 1 and WEB_V1 or payload.version == 2 and WEB_V2 or WEB
+    local ok, err = validate_tables(payload.web, specs)
     if not ok then return nil, err end
     if payload.shared ~= nil then
         ok, err = validate_tables(payload.shared, SHARED)
@@ -255,9 +262,10 @@ function M.restore(store, payload)
     store.web:query('BEGIN IMMEDIATE;')
     local restored, failure = pcall(function()
         local web = payload.web
-        if payload.version == 1 then
+        if payload.version < 3 then
             web = { words = web.words, proverbs = web.proverbs, word_organization = web.word_organization,
-                study_meanings = {}, review_log = {} }
+                study_meanings = payload.version == 2 and web.study_meanings or {},
+                review_log = payload.version == 2 and web.review_log or {}, study_examples = {} }
         end
         replace(store.web, 'main', WEB, web)
         if payload.shared then replace(store.web, 'shared_deletion', SHARED, payload.shared) end
@@ -278,13 +286,13 @@ local function cell(value)
 end
 
 function M.csv(store)
-    local lines = { 'word,source,origin,collection,tags,note,definition,review_count,due_at,lookup_count,study_meaning' }
+    local lines = { 'word,source,origin,collection,tags,note,definition,review_count,due_at,lookup_count,study_meaning,study_example' }
     for _, row in ipairs(store:words()) do
         local fields = { row.word, row.source, row.collection, row.folder, table.concat(row.tags, ', '),
             row.note, row.entry and table.concat(row.entry.definitions or {}, '\n') or '',
-            row.review_count, row.due_at, row.lookup_count, row.study_meaning }
+            row.review_count, row.due_at, row.lookup_count, row.study_meaning, row.study_example }
         local cells = {}
-        for index = 1, 11 do cells[index] = cell(fields[index]) end
+        for index = 1, 12 do cells[index] = cell(fields[index]) end
         lines[#lines + 1] = table.concat(cells, ',')
     end
     return table.concat(lines, '\r\n') .. '\r\n'

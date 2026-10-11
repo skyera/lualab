@@ -35,6 +35,11 @@ CREATE TABLE IF NOT EXISTS study_meanings (
     meaning TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS study_examples (
+    word TEXT PRIMARY KEY,
+    example TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS review_log (
     id INTEGER PRIMARY KEY,
     word_id INTEGER NOT NULL,

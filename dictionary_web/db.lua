@@ -282,6 +282,7 @@ function DB:delete(id, preserve_meaning)
         self:query('DELETE FROM words WHERE id=?', {id})
         if not preserve_meaning and not self:query('SELECT id FROM words WHERE lower(word)=lower(?)', { row.word })[1] then
             self:query('DELETE FROM study_meanings WHERE word=lower(?)', { row.word })
+            self:query('DELETE FROM study_examples WHERE word=lower(?)', { row.word })
         end
         self:query('COMMIT;')
         return {deleted = true, word = row.word}

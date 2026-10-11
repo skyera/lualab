@@ -89,6 +89,7 @@ function M.search(db, payload, provider, stamp, guard)
         lookup_count = saved.lookup_count,
         note = saved.note,
         study_meaning = saved.study_meaning or '',
+        study_example = saved.study_example or '',
         collection = saved.collection or 'web',
         cached = not not cached,
         entry = entry,
@@ -166,7 +167,8 @@ function M.route(db, method, path, params, payload, background)
             local result, err = M.search(db, payload, provider, nil, background and background.guard)
             return result or {error = err}, result and 200 or 400
         end
-        if path == '/api/review' or path == '/api/note' or path == '/api/delete' or path == '/api/organize' or path == '/api/meaning' then
+        if path == '/api/review' or path == '/api/note' or path == '/api/delete'
+            or path == '/api/organize' or path == '/api/meaning' or path == '/api/example' then
             local collection = payload.collection or 'web'
             if collection ~= 'web' and collection ~= 'tui' then
                 return {error = 'Invalid word collection.'}, 400
@@ -175,7 +177,12 @@ function M.route(db, method, path, params, payload, background)
                 return {error = 'Invalid word ID.'}, 400
             end
             local result, err
-            if path == '/api/meaning' then
+            if path == '/api/example' then
+                if type(payload.example) ~= 'string' or #payload.example > 4000 then
+                    return { error = 'Your example must be at most 4000 bytes.' }, 400
+                end
+                result, err = db:example(payload.id, collection, payload.example)
+            elseif path == '/api/meaning' then
                 if type(payload.meaning) ~= 'string' or #payload.meaning > 4000 then
                     return { error = 'Your meaning must be at most 4000 bytes.' }, 400
                 end

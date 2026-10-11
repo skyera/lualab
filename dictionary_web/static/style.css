@@ -175,8 +175,8 @@ input::placeholder,textarea::placeholder{color:var(--placeholder)}
 .journal-tools label{max-width:100%}
 .journal-tools select{max-width:100%}
 
-.meaning-form{width:100%;margin-top:16px;border-top:1px solid var(--line);padding-top:12px}
-.personal-meaning{font-weight:600;color:var(--ink);white-space:pre-wrap;overflow-wrap:anywhere}
+.meaning-form,.example-form{width:100%;margin-top:16px;border-top:1px solid var(--line);padding-top:12px}
+.personal-meaning,.personal-example{font-weight:600;color:var(--ink);white-space:pre-wrap;overflow-wrap:anywhere}
 .stats-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:12px;margin:24px 0}
 .stat-tile{border:1px solid var(--line);border-radius:8px;padding:18px;background:var(--white)}
 .stat-tile strong{display:block;font:normal 30px Georgia;color:var(--green)}

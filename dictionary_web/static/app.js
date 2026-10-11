@@ -153,7 +153,7 @@ function buildResultCard(data) {
     return card;
   }
   if (data.source === 'youdao') card.append(element('p', 'Youdao definitions are available for this lookup only. Add your own meaning or note to review later.', 'source-tag'));
-  card.append(meaningForm(data));
+  card.append(meaningForm(data), exampleForm(data));
   const noteId = `study-note-${data.source}-${data.collection || 'web'}-${data.id}`;
   const label = element('label', 'Your study note', 'note-label');
   label.htmlFor = noteId;
@@ -411,8 +411,8 @@ async function restoreBackup(file) {
   try { backup = JSON.parse(await file.text()); }
   catch (_) { status.textContent = 'Choose a valid JSON backup.'; return; }
   if (state.grading || state.reviewLoading || state.restoring) return;
-  if (backup?.format !== 'wordbook' || ![1, 2].includes(backup?.version)) {
-    status.textContent = 'Choose a Wordbook version 1 or 2 JSON backup.'; return;
+  if (backup?.format !== 'wordbook' || ![1, 2, 3].includes(backup?.version)) {
+    status.textContent = 'Choose a Wordbook version 1, 2 or 3 JSON backup.'; return;
   }
   if (!window.confirm('Restore this backup? This replaces your saved journal, notes, collections, and review progress. '
       + (backup.shared ? 'It also replaces the saved TUI deck and study plan. ' : '')
@@ -431,23 +431,29 @@ async function restoreBackup(file) {
   } catch (error) { status.textContent = error.message; }
   finally { state.restoring = false; button.disabled = false; }
 }
-function meaningForm(word) {
-  const form = element('form', undefined, 'meaning-form');
-  const label = element('label', 'Your meaning — saved for review', 'note-label');
+function meaningForm(word) { return studyTextForm(word, 'meaning'); }
+function exampleForm(word) { return studyTextForm(word, 'example'); }
+function studyTextForm(word, kind) {
+  const isExample = kind === 'example';
+  const field = 'study_' + kind;
+  const form = element('form', undefined, kind + '-form');
+  const label = element('label', isExample ? 'Your example sentence — saved for review' : 'Your meaning — saved for review', 'note-label');
   const input = element('textarea', undefined, 'study-note');
-  input.id = `meaning-${word.collection || 'web'}-${word.id}-${word.source || 'local'}`;
-  label.htmlFor = input.id; input.value = word.study_meaning || ''; input.maxLength = 4000;
-  input.placeholder = 'Explain the word in your own words…';
+  input.id = `${kind}-${word.collection || 'web'}-${word.id}-${word.source || 'local'}`;
+  label.htmlFor = input.id; input.value = word[field] || ''; input.maxLength = 4000;
+  input.placeholder = isExample ? 'Write a sentence using this word…' : 'Explain the word in your own words…';
   const status = element('span', '', 'source-tag'); status.setAttribute('role', 'status');
-  const save = element('button', 'Save meaning', 'secondary'); save.type = 'submit';
+  const save = element('button', isExample ? 'Save example' : 'Save meaning', 'secondary'); save.type = 'submit';
   form.addEventListener('submit', async event => {
     event.preventDefault();
     if (state.restoring || state.grading) return;
+    const value = input.value;
     save.disabled = true; status.textContent = 'Saving…';
     try {
-      await api('/api/meaning', { id: word.id, collection: word.collection, meaning: input.value });
-      word.study_meaning = input.value;
-      status.textContent = 'Meaning saved';
+      await api('/api/' + kind, { id: word.id, collection: word.collection, [kind]: value });
+      word[field] = value;
+      status.textContent = input.value !== value ? 'Saved previous text. Save again for your latest edits.'
+        : isExample ? 'Example saved' : 'Meaning saved';
       await refreshCounts();
       if (state.view === 'review') renderReview();
     } catch (error) { status.textContent = error.message; }
@@ -497,6 +503,7 @@ function renderWords() {
     const row = element('article', undefined, 'word-row organizable-row');
     const copy = element('div');
     copy.append(element('h2', word.word), element('p', word.study_meaning || word.note || word.entry?.definitions?.[0] || 'Add your own study note when you look up this word.'));
+    if (word.study_example) copy.append(element('p', word.study_example, 'personal-example'));
     const history = word.collection === 'tui' ? 'Shared with TUI' : `${word.lookup_count} lookup${word.lookup_count === 1 ? '' : 's'}`;
     copy.append(element('p', `${sourceNames[word.source]} · ${history} · Last seen ${formatTime(word.last_seen)} · ${word.due_at <= Date.now() / 1000 ? 'Ready for review' : 'Next review ' + formatTime(word.due_at)}`, 'word-meta'));
     const actions = element('div', undefined, 'word-actions');
@@ -506,12 +513,14 @@ function renderWords() {
     copy.append(badges);
     const editor = organizationForm(word); editor.hidden = true;
     const meaningEditor = meaningForm(word); meaningEditor.hidden = true;
+    const exampleEditor = exampleForm(word); exampleEditor.hidden = true;
+    const editExample = button('Edit example', () => { exampleEditor.hidden = !exampleEditor.hidden; });
     const editMeaning = button('Edit meaning', () => { meaningEditor.hidden = !meaningEditor.hidden; });
     const organize = button('Organize', () => { editor.hidden = !editor.hidden; });
     const remove = button('Delete', () => deleteWord(word, remove), 'secondary delete-button');
     remove.setAttribute('aria-label', `Delete ${word.word}`);
-    actions.append(button('Look up ↗', () => searchWord(word.word)), editMeaning, organize, remove);
-    row.append(copy, actions, editor, meaningEditor);
+    actions.append(button('Look up ↗', () => searchWord(word.word)), editMeaning, editExample, organize, remove);
+    row.append(copy, actions, editor, meaningEditor, exampleEditor);
     fragment.append(row);
   }
   if (!words.length) fragment.append(empty(filter ? 'No matching words.' : 'Your first word is waiting.', filter ? 'Try a different filter.' : 'Look up something new. It will appear here automatically.', !filter));
@@ -564,6 +573,9 @@ function renderReview() {
     return;
   }
   if (word.study_meaning) target.append(element('p', word.study_meaning, 'personal-meaning'));
+  if (word.study_example) {
+    target.append(element('p', 'Your example', 'eyebrow'), element('p', word.study_example, 'personal-example'));
+  }
   if (word.note) target.append(element('p', word.note, 'study-answer'));
   definitions(word.entry, target);
   if (!word.study_meaning && !word.note && !word.entry) {

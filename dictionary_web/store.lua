@@ -238,6 +238,7 @@ function Store:save(word, source, entry, stamp)
         end
     end
     saved.study_meaning = self:study_meaning(word)
+    saved.study_example = self:study_example(word)
     return saved
 end
 
@@ -286,6 +287,9 @@ function Store:words(query, due, stamp)
     local meanings = {}
     for _, row in ipairs(self.web:query('SELECT * FROM study_meanings')) do meanings[row.word] = row.meaning end
     for _, row in ipairs(rows) do row.study_meaning = meanings[row.word:lower()] or '' end
+    local examples = {}
+    for _, row in ipairs(self.web:query('SELECT * FROM study_examples')) do examples[row.word] = row.example end
+    for _, row in ipairs(rows) do row.study_example = examples[row.word:lower()] or '' end
     return learning.decorate(self, rows)
 end
 
@@ -401,6 +405,7 @@ function Store:delete(id, collection)
         self.web:query('DELETE FROM main.review_log WHERE word_id IN (SELECT id FROM main.words WHERE lower(word)=lower(?))', { row.word })
         self.web:query('DELETE FROM main.words WHERE lower(word)=lower(?)', {row.word})
         self.web:query('DELETE FROM main.study_meanings WHERE word=lower(?)', { row.word })
+        self.web:query('DELETE FROM main.study_examples WHERE word=lower(?)', { row.word })
         self.web:query('COMMIT;')
         return {deleted = true, word = row.word, collection = 'tui'}
     end)
@@ -453,5 +458,23 @@ end
 
 function Store:statistics(stamp)
     return statistics.get(self, stamp)
+end
+
+function Store:study_example(word)
+    local row = self.web:query('SELECT example FROM study_examples WHERE word=lower(?)', { word })[1]
+    return row and row.example or ''
+end
+
+function Store:example(id, collection, example)
+    local row
+    if collection == 'tui' and self.shared then
+        row = checked(self.shared:query('SELECT word FROM words WHERE id=?', { id }))[1]
+    elseif collection == 'web' then
+        row = self.web:query('SELECT word FROM words WHERE id=?', { id })[1]
+    end
+    if not row then return nil, 'Word not found.' end
+    self.web:query([[INSERT INTO study_examples(word,example) VALUES(lower(?),?)
+        ON CONFLICT(word) DO UPDATE SET example=excluded.example]], { row.word, example })
+    return { saved = true, study_example = example }
 end
 return Store

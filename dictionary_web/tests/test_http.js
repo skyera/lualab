@@ -94,8 +94,10 @@ test('background lookups keep HTTP responsive and preserve concurrent edits, del
     assert.ok(Date.now() - started < 900, 'Unrelated HTTP requests waited for the provider');
     await post(server.url, '/api/note', { id: saved.id, note: 'Concurrent note' });
     await post(server.url, '/api/meaning', { id: saved.id, meaning: 'Concurrent meaning' });
+    assert.equal((await post(server.url, '/api/example', { id: saved.id, example: 'Concurrent example 学习' })).status, 200);
     const edited = (await pending).data;
     assert.equal(edited.note, 'Concurrent note'); assert.equal(edited.study_meaning, 'Concurrent meaning');
+    assert.equal(edited.study_example, 'Concurrent example 学习');
     fs.rmSync(path.join(directory, 'edit'));
     const deleting = post(server.url, '/api/search', { word: 'edit', source: 'youdao' });
     await waitMarker(path.join(directory, 'edit'));

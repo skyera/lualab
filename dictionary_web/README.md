@@ -191,6 +191,13 @@ changing the provider definition, mnemonic, or review schedule. Meanings are
 stored in Wordbook and included in JSON backups and CSV exports. An empty value
 clears it. The limit is 4,000 UTF-8 bytes; longer text produces a validation error.
 
+Use **Your example sentence** on a saved lookup or **Edit example** in My words
+to write one sentence using the word. Review keeps it hidden until you reveal
+the answer. The sentence follows the word across sources and shared TUI entries;
+it does not replace provider examples or the TUI's existing example. An empty
+value clears it. The limit is 4,000 UTF-8 bytes. Version 3 JSON backups and CSV
+exports include personal examples; restoring version 1 or 2 leaves them empty.
+
 **Statistics** shows saved words, due cards, today's reviews, a review streak,
 a 30-day activity grid, and words with the most **Again** grades. Dates use UTC.
 Recall rate is the share of recorded grades above Again, based on your own
@@ -201,7 +208,8 @@ invented. Version 1 backups retain those totals but contain no new web activity
 history or personal meanings. Deleting a word removes its associated history.
 
 API: `GET /api/stats`, and `POST /api/meaning` with
-`{id, collection: "web"|"tui", meaning}`.
+`{id, collection: "web"|"tui", meaning}`. Save an example with
+`POST /api/example` and `{id, collection: "web"|"tui", example}`.
 
 ## Collections, tags, and review sessions
 
@@ -220,14 +228,14 @@ shared SM-2 scheduler and appear oldest-due first. Empty filters show all words.
 
 ## Backup and export
 
-**Download backup** saves a version 2 JSON file with the web journal, notes,
-review state, dated review history, your meanings, saved proverbs, collections,
+**Download backup** saves a version 3 JSON file with the web journal, notes,
+review state, dated review history, your meanings and examples, saved proverbs, collections,
 and tags. When local integration is
 enabled, it also includes the saved TUI deck, SM-2 states, review history, and
 study plan. Bulk imported dictionary definitions, API credentials, and browser
 preferences are excluded. Youdao provider definitions are not exported.
 
-**Restore backup…** accepts version 1 and 2 files, validates the selected JSON file and asks for confirmation.
+**Restore backup…** accepts version 1, 2 and 3 files, validates the selected JSON file and asks for confirmation.
 It replaces the web journal and organization; a backup containing shared data
 also replaces the saved TUI deck and study plan. Imported dictionary definitions
 remain. Download the current backup first if you want to retain the old journal.
@@ -236,7 +244,7 @@ are limited to 16 MB; larger journals can use the stopped-database backup method
 above. Validation and SQL failures leave existing saved data unchanged. Reload
 other open browser tabs after restoring.
 
-**Export CSV** downloads a readable word list with definitions, your meanings, notes, tags,
+**Export CSV** downloads a readable word list with definitions, your meanings and examples, notes, tags,
 collections, and review dates. Cells are quoted; formula-like text is prefixed
 with an apostrophe for spreadsheet safety. CSV is not a restorable backup.
 

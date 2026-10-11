@@ -113,6 +113,53 @@ test('personal meaning editor saves separately and review reveals it before prov
   assert.equal(get('review-card').querySelectorAll('.meaning-form').length, 1);
 });
 
+test('example editor saves literal text, handles errors, and hides the sentence before review reveal', async () => {
+  const { context, state, get, key } = harness();
+  const word = { ...card(9), study_example: 'My sentence 学习', entry: { definitions: ['Meaning'], examples: [{ en: 'Provider example', zh: '翻译' }] } };
+  const mutations = [];
+  context.api = async (route, payload) => { mutations.push({ route, payload }); return { saved: true }; };
+  const result = context.buildResultCard(word);
+  const form = result.querySelectorAll('.example-form')[0];
+  const input = form.querySelectorAll('textarea')[0];
+  assert.equal(input.value, 'My sentence 学习');
+  input.value = '<script>literal sentence</script>';
+  await form.handlers.submit({ preventDefault() {} });
+  assert.equal(mutations[0].route, '/api/example');
+  assert.equal(mutations[0].payload.example, input.value);
+  assert.equal(word.entry.examples[0].en, 'Provider example');
+  state.view = 'review'; state.queue = [word]; state.total = 1;
+  context.renderReview();
+  assert.equal(get('review-card').querySelectorAll('.personal-example').length, 0);
+  key(' ');
+  assert.equal(get('review-card').querySelectorAll('.personal-example')[0].textContent, input.value);
+  state.words = [word]; context.renderWords();
+  assert.equal(get('word-list').querySelectorAll('.personal-example')[0].textContent, input.value);
+  const edit = get('word-list').querySelectorAll('button').find(node => node.textContent === 'Edit example');
+  const editor = get('word-list').querySelectorAll('.example-form')[0];
+  assert.equal(editor.hidden, true); edit.handlers.click(); assert.equal(editor.hidden, false);
+  context.api = async () => { throw new Error('Save failed'); };
+  const previous = word.study_example; input.value = 'Failed edit';
+  await form.handlers.submit({ preventDefault() {} });
+  assert.equal(word.study_example, previous);
+  assert.equal(form.querySelectorAll('button')[0].disabled, false);
+  assert.equal(form.querySelectorAll('span').at(-1).textContent, 'Save failed');
+  const pending = deferred();
+  context.api = async () => pending.promise;
+  input.value = 'Submitted sentence';
+  const saving = form.handlers.submit({ preventDefault() {} });
+  input.value = 'Later unsaved sentence';
+  pending.resolve({ saved: true }); await saving;
+  assert.equal(word.study_example, 'Submitted sentence');
+  assert.match(form.querySelectorAll('span').at(-1).textContent, /latest edits/);
+  state.restoring = true;
+  context.api = async () => { throw new Error('Restore should block example writes'); };
+  await form.handlers.submit({ preventDefault() {} });
+  assert.equal(word.study_example, 'Submitted sentence');
+  state.restoring = false; state.view = 'words';
+  context.api = async () => ({ saved: true }); input.value = '';
+  await form.handlers.submit({ preventDefault() {} }); assert.equal(word.study_example, '');
+});
+
 test('statistics render empty and populated histories, ignore stale responses and allow navigation during lookups', async () => {
   const { context, state, get } = harness();
   const empty = { saved_words: 0, due_cards: 0, today_reviews: 0, streak: 0, recall_rate: null,
@@ -359,7 +406,7 @@ test('review options generate the filtered session URL and lock during loading',
 
 test('restore requires confirmation, rejects invalid files and clears stale review/result IDs', async () => {
   const { context, state, get } = harness();
-  const payload = { format: 'wordbook', version: 1, web: { words: [], proverbs: [], word_organization: [] } };
+  const payload = { format: 'wordbook', version: 3, web: { words: [], proverbs: [], word_organization: [] } };
   const file = { size: 100, text: async () => JSON.stringify(payload) };
   let calls = 0;
   context.api = async () => { calls++; return { restored: true, web_words: 2, shared_words: 0 }; };
