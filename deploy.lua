@@ -77,6 +77,14 @@ local APPS = {
         desc = "Local Code & Document Full-Text Search",
         env_var = "CODEFIND_LUAJIT",
     },
+    codefind_web = {
+        id = "codefind_web",
+        name = "codefind_web",
+        script = "codefind_web.lua",
+        desc = "Local Code & Document Search Engine Web Server",
+        env_var = "CODEFIND_WEB_LUAJIT",
+        aliases = { "cfweb" },
+    },
 }
 
 local opts = {
@@ -89,9 +97,9 @@ local opts = {
 local function print_usage()
     print("lualab deploy — Cross-Platform Tools Deployer (LuaJIT FFI)")
     print("Usage:")
-    print("  luajit deploy.lua [--app all|pix|lumina|yt|weblite|luatop|codefind|logexplorer] [--dir <path>] [--os linux|windows] [--check]")
+    print("  luajit deploy.lua [--app all|pix|lumina|yt|weblite|luatop|codefind|codefind_web|logexplorer] [--dir <path>] [--os linux|windows] [--check]")
     print("")
-    print("  --app <name>    App to deploy: all (default), pix, lumina, yt, weblite (wl), luatop (ltop), codefind, or logexplorer")
+    print("  --app <name>    App to deploy: all (default), pix, lumina, yt, weblite (wl), luatop (ltop), codefind, codefind_web (cfweb), or logexplorer")
     print("  --dir <path>    Target directory (default: C:\\app\\bin on Windows, ~/bin elsewhere)")
     print("  --os <name>     Force the target layout: linux (POSIX) or windows")
     print("  --check         Show what would be installed without writing anything")
@@ -131,8 +139,8 @@ do
     end
 end
 
-if opts.app ~= "all" and not APPS[opts.app] and opts.app ~= "wl" and opts.app ~= "ltop" then
-    io.stderr:write("deploy: unknown --app '" .. tostring(opts.app) .. "' (use all, pix, lumina, yt, weblite, luatop, codefind, or logexplorer)\n")
+if opts.app ~= "all" and not APPS[opts.app] and opts.app ~= "wl" and opts.app ~= "ltop" and opts.app ~= "cfweb" then
+    io.stderr:write("deploy: unknown --app '" .. tostring(opts.app) .. "' (use all, pix, lumina, yt, weblite, luatop, codefind, codefind_web, or logexplorer)\n")
     os.exit(2)
 end
 
@@ -366,11 +374,14 @@ if opts.app == "all" then
     table.insert(apps_to_deploy, APPS.weblite)
     table.insert(apps_to_deploy, APPS.luatop)
     table.insert(apps_to_deploy, APPS.codefind)
+    table.insert(apps_to_deploy, APPS.codefind_web)
     table.insert(apps_to_deploy, APPS.logexplorer)
 elseif opts.app == "weblite" or opts.app == "wl" then
     table.insert(apps_to_deploy, APPS.weblite)
 elseif opts.app == "luatop" or opts.app == "ltop" then
     table.insert(apps_to_deploy, APPS.luatop)
+elseif opts.app == "codefind_web" or opts.app == "cfweb" then
+    table.insert(apps_to_deploy, APPS.codefind_web)
 elseif APPS[opts.app] then
     table.insert(apps_to_deploy, APPS[opts.app])
 end
@@ -452,6 +463,18 @@ for _, app in ipairs(apps_to_deploy) do
         local copied, err = copy_file(script_dir .. SEP .. test_name, target_dir .. SEP .. test_name)
         if not copied then error('Cannot install log explorer tests: ' .. tostring(err)) end
         written = written + 1
+    elseif app.id == 'codefind_web' then
+        -- codefind_web requires json.lua and codefind.lua
+        for _, dep in ipairs({ "codefind.lua", "json.lua" }) do
+            local dep_dst = target_dir .. SEP .. dep
+            if not file_exists(dep_dst) then
+                local copied, err = copy_file(script_dir .. SEP .. dep, dep_dst)
+                if copied then
+                    written = written + 1
+                    print(string.format("  [ok] copied  %s -> %s (dependency)", dep, display_path(dep_dst)))
+                end
+            end
+        end
     end
 
     -- 2. Launchers (primary name + aliases)
