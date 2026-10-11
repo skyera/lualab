@@ -70,6 +70,7 @@ if is_windows then
 
         int _mkdir(const char *path);
         int remove(const char *filename);
+        int GetDiskFreeSpaceExA(const char *lpDirectoryName, uint64_t *lpFreeBytesAvailable, uint64_t *lpTotalNumberOfBytes, uint64_t *lpTotalNumberOfFreeBytes);
     ]]
     ws2 = ffi.load("ws2_32")
     local wsa_data = ffi.new("WSADATA")
@@ -113,6 +114,22 @@ else
 
         int mkdir(const char *pathname, unsigned int mode);
         int remove(const char *pathname);
+
+        struct statvfs {
+            unsigned long f_bsize;
+            unsigned long f_frsize;
+            unsigned long f_blocks;
+            unsigned long f_bfree;
+            unsigned long f_bavail;
+            unsigned long f_files;
+            unsigned long f_ffree;
+            unsigned long f_favail;
+            unsigned long f_fsid;
+            unsigned long f_flag;
+            unsigned long f_namemax;
+            int __f_spare[6];
+        };
+        int statvfs(const char *path, struct statvfs *buf);
     ]]
 end
 
@@ -270,13 +287,14 @@ end
 
 function Storage:list_files()
     local files = {}
+    local total_bytes = 0
     local p
     if is_windows then
         p = io.popen('dir /b /a-d "' .. self.dir .. '" 2>nul')
     else
         p = io.popen('ls -1 "' .. self.dir .. '" 2>/dev/null')
     end
-    if not p then return files end
+    if not p then return files, 0, "0 B" end
 
     for line in p:lines() do
         local fname = line:gsub("[\r\n]", "")
@@ -286,16 +304,21 @@ function Storage:list_files()
             if f then
                 local sz = f:seek("end")
                 f:close()
+                total_bytes = total_bytes + sz
                 local ext = fname:match("%.([%w_]+)$") or ""
                 ext = ext:lower()
                 local is_img = (ext == "png" or ext == "jpg" or ext == "jpeg" or ext == "gif" or ext == "webp" or ext == "svg")
-                local is_txt = (ext == "txt" or ext == "md" or ext == "lua" or ext == "py" or ext == "json" or ext == "sh" or ext == "html" or ext == "css")
+                local is_vid = (ext == "mp4" or ext == "webm" or ext == "mkv" or ext == "mov")
+                local is_aud = (ext == "mp3" or ext == "wav" or ext == "ogg" or ext == "m4a" or ext == "flac")
+                local is_txt = (ext == "txt" or ext == "md" or ext == "lua" or ext == "py" or ext == "json" or ext == "sh" or ext == "html" or ext == "css" or ext == "js")
                 table.insert(files, {
                     name = fname,
                     size = sz,
                     size_fmt = format_bytes(sz),
                     mime = get_mime_type(fname),
                     is_image = is_img,
+                    is_video = is_vid,
+                    is_audio = is_aud,
                     is_text = is_txt,
                 })
             end
@@ -303,7 +326,39 @@ function Storage:list_files()
     end
     p:close()
     table.sort(files, function(a, b) return a.name:lower() < b.name:lower() end)
-    return files
+    return files, total_bytes, format_bytes(total_bytes)
+end
+
+function Storage:disk_usage()
+    local free_b, total_b = 0, 0
+    if is_windows then
+        local free_avail = ffi.new("uint64_t[1]")
+        local total_num  = ffi.new("uint64_t[1]")
+        local total_free = ffi.new("uint64_t[1]")
+        local kernel32 = ffi.load("kernel32")
+        if kernel32.GetDiskFreeSpaceExA(self.dir, free_avail, total_num, total_free) ~= 0 then
+            free_b = tonumber(free_avail[0])
+            total_b = tonumber(total_num[0])
+        end
+    else
+        local buf = ffi.new("struct statvfs")
+        if C.statvfs(self.dir, buf) == 0 then
+            local bsize = tonumber(buf.f_frsize) > 0 and tonumber(buf.f_frsize) or tonumber(buf.f_bsize)
+            free_b = tonumber(buf.f_bavail) * bsize
+            total_b = tonumber(buf.f_blocks) * bsize
+        end
+    end
+    local used_percent = 0
+    if total_b > 0 then
+        used_percent = ((total_b - free_b) / total_b) * 100
+    end
+    return {
+        disk_free = free_b,
+        disk_free_fmt = format_bytes(free_b),
+        disk_total = total_b,
+        disk_total_fmt = format_bytes(total_b),
+        disk_used_percent = math.floor(used_percent * 10 + 0.5) / 10,
+    }
 end
 
 function Storage:save_file(filename, data)
@@ -449,10 +504,10 @@ local function get_index_html(lan_ip, port)
     }
     .container {
       width: 100%;
-      max-width: 860px;
+      max-width: 880px;
       display: flex;
       flex-direction: column;
-      gap: 16px;
+      gap: 14px;
     }
     header {
       display: flex;
@@ -478,10 +533,25 @@ local function get_index_html(lan_ip, port)
       font-size: 11px;
       background: rgba(88, 166, 255, 0.15);
       color: var(--accent);
-      padding: 4px 10px;
+      padding: 5px 11px;
       border-radius: 20px;
       font-family: monospace;
       font-weight: 600;
+      cursor: pointer;
+    }
+    .badge:hover { background: rgba(88, 166, 255, 0.25); }
+    .storage-bar {
+      font-size: 11px;
+      color: var(--text-muted);
+      background: rgba(22, 27, 34, 0.65);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 7px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
     }
     .tabs {
       display: flex;
@@ -504,7 +574,7 @@ local function get_index_html(lan_ip, port)
       background: var(--card-border);
       color: var(--text);
     }
-    .panel { display: none; flex-direction: column; gap: 16px; }
+    .panel { display: none; flex-direction: column; gap: 14px; }
     .panel.active { display: flex; }
     .card {
       background: var(--card-bg);
@@ -517,7 +587,7 @@ local function get_index_html(lan_ip, port)
     .dropzone {
       border: 2px dashed var(--card-border);
       border-radius: 12px;
-      padding: 32px 16px;
+      padding: 30px 16px;
       text-align: center;
       cursor: pointer;
       transition: border-color 0.2s, background 0.2s;
@@ -530,7 +600,7 @@ local function get_index_html(lan_ip, port)
       border-color: var(--accent);
       background: rgba(88, 166, 255, 0.08);
     }
-    .dropzone-icon { font-size: 36px; }
+    .dropzone-icon { font-size: 34px; }
     .dropzone p { color: var(--text-muted); font-size: 13px; }
     .dropzone input { display: none; }
     /* File List */
@@ -579,7 +649,7 @@ local function get_index_html(lan_ip, port)
     /* Clipboard Panel */
     .clip-textarea {
       width: 100%;
-      height: 120px;
+      height: 110px;
       background: #0d1117;
       border: 1px solid var(--card-border);
       border-radius: 8px;
@@ -617,6 +687,65 @@ local function get_index_html(lan_ip, port)
       color: var(--text-muted);
       margin-top: 4px;
     }
+    /* Modals */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.78);
+      backdrop-filter: blur(6px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 999;
+      padding: 16px;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal-card {
+      background: #161b22;
+      border: 1px solid var(--card-border);
+      border-radius: 14px;
+      max-width: 760px;
+      width: 100%;
+      max-height: 90vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      box-shadow: 0 16px 48px rgba(0, 0, 0, 0.7);
+    }
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--card-border);
+    }
+    .modal-header h3 { font-size: 15px; font-weight: 600; }
+    .modal-close {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 20px;
+      cursor: pointer;
+      padding: 0 4px;
+      line-height: 1;
+    }
+    .modal-close:hover { color: var(--text); }
+    .modal-body {
+      padding: 18px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+    .modal-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      padding: 12px 18px;
+      border-top: 1px solid var(--card-border);
+      background: rgba(13, 17, 23, 0.5);
+    }
     /* Toast Notification */
     #toast {
       position: fixed;
@@ -647,8 +776,16 @@ local function get_index_html(lan_ip, port)
           <div style="font-size:11px; color:var(--text-muted)">Cross-Device Sharing</div>
         </div>
       </div>
-      <div class="badge" id="lan-badge">]] .. lan_ip .. ":" .. port .. [[</div>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <button class="btn btn-primary" onclick="openQRModal()" title="Connect phone via QR code">📱 Connect Phone</button>
+        <div class="badge" id="lan-badge" onclick="openQRModal()">]] .. lan_ip .. ":" .. port .. [[</div>
+      </div>
     </header>
+
+    <div class="storage-bar" id="storage-bar">
+      <span id="storage-text">Loading storage info...</span>
+      <span id="storage-disk-badge" style="font-family:monospace; color:var(--accent);">-- Free</span>
+    </div>
 
     <div class="tabs">
       <button class="tab-btn active" onclick="switchTab('files')">📁 Files (<span id="files-count">0</span>)</button>
@@ -701,9 +838,50 @@ local function get_index_html(lan_ip, port)
     </div>
   </div>
 
+  <!-- QR Code Modal -->
+  <div class="modal-backdrop" id="qr-modal" onclick="if(event.target===this) closeQRModal()">
+    <div class="modal-card" style="max-width:440px;">
+      <div class="modal-header">
+        <h3>📱 Connect Phone or Tablet</h3>
+        <button class="modal-close" onclick="closeQRModal()">✕</button>
+      </div>
+      <div class="modal-body" style="text-align:center;">
+        <div id="qr-svg-wrap" style="background:#fff; padding:14px; border-radius:12px; display:inline-flex; box-shadow:0 4px 16px rgba(0,0,0,0.4);"></div>
+        <div style="font-family:monospace; font-size:14px; color:var(--accent); word-break:break-all;" id="qr-url-text">http://]] .. lan_ip .. ":" .. port .. [[</div>
+        <p style="font-size:12px; color:var(--text-muted); line-height:1.5;">Point your phone's camera at the QR code to open LAN Drop instantly on the same Wi-Fi network.</p>
+      </div>
+      <div class="modal-footer" style="justify-content:center;">
+        <button class="btn btn-primary" onclick="copyToClipboard('http://]] .. lan_ip .. ":" .. port .. [[')">📋 Copy Link</button>
+        <button class="btn" onclick="closeQRModal()">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- In-Browser Media / Preview Modal -->
+  <div class="modal-backdrop" id="preview-modal" onclick="if(event.target===this) closePreviewModal()">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="preview-title" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">File Preview</h3>
+        <button class="modal-close" onclick="closePreviewModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <video id="preview-video" controls playsinline style="display:none; max-width:100%; max-height:72vh; border-radius:8px; outline:none;"></video>
+        <img id="preview-img" style="display:none; max-width:100%; max-height:72vh; object-fit:contain; border-radius:8px;" />
+        <audio id="preview-audio" controls style="display:none; width:100%; margin:24px 0; outline:none;"></audio>
+        <pre id="preview-text" style="display:none; width:100%; max-height:68vh; overflow:auto; background:#0d1117; padding:14px; border-radius:8px; font-family:monospace; font-size:13px; white-space:pre-wrap; word-break:break-all;"></pre>
+      </div>
+      <div class="modal-footer">
+        <a id="preview-download-link" href="#" class="btn btn-primary">Download File</a>
+        <button class="btn" onclick="closePreviewModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast"></div>
 
   <script>
+    const serverUrl = 'http://]] .. lan_ip .. ":" .. port .. [[';
+
     function showToast(msg) {
       const t = document.getElementById('toast');
       t.textContent = msg;
@@ -726,6 +904,177 @@ local function get_index_html(lan_ip, port)
     function clearInput() {
       document.getElementById('clip-input').value = '';
     }
+
+    // QR Code Generator (Pure JS Version 2-L)
+    function createQR(text) {
+      const size = 25;
+      const grid = Array.from({length: size}, () => Array(size).fill(null));
+      const isFunc = Array.from({length: size}, () => Array(size).fill(false));
+      function setFunc(r, c, val) { grid[r][c] = val; isFunc[r][c] = true; }
+      function addFinder(or, oc) {
+        for (let r = 0; r < 7; r++) {
+          for (let c = 0; c < 7; c++) {
+            const val = (r === 0 || r === 6 || c === 0 || c === 6 || (r >= 2 && r <= 4 && c >= 2 && c <= 4)) ? 1 : 0;
+            setFunc(or + r, oc + c, val);
+          }
+        }
+        for (let i = 0; i < 8; i++) {
+          if (or + 7 < size && oc + i < size) setFunc(or + 7, oc + i, 0);
+          if (or + i < size && oc + 7 < size) setFunc(or + i, oc + 7, 0);
+          if (or - 1 >= 0 && oc + i < size) setFunc(or - 1, oc + i, 0);
+          if (or + i < size && oc - 1 >= 0) setFunc(or + i, oc - 1, 0);
+        }
+      }
+      addFinder(0, 0); addFinder(0, size - 7); addFinder(size - 7, 0);
+      for (let r = -2; r <= 2; r++) {
+        for (let c = -2; c <= 2; c++) {
+          setFunc(18 + r, 18 + c, (Math.max(Math.abs(r), Math.abs(c)) === 1) ? 0 : 1);
+        }
+      }
+      for (let i = 8; i < size - 8; i++) {
+        if (!isFunc[6][i]) setFunc(6, i, i % 2 === 0 ? 1 : 0);
+        if (!isFunc[i][6]) setFunc(i, 6, i % 2 === 0 ? 1 : 0);
+      }
+      setFunc(size - 8, 8, 1);
+      const exp = new Uint8Array(512), log = new Uint8Array(256);
+      let x = 1;
+      for (let i = 0; i < 255; i++) {
+        exp[i] = exp[i + 255] = x; log[x] = i;
+        x = (x << 1) ^ (x >= 128 ? 0x11d : 0);
+      }
+      function gmul(a, b) { return (a === 0 || b === 0) ? 0 : exp[log[a] + log[b] ]; }
+      let gen = [1];
+      for (let i = 0; i < 10; i++) {
+        const next = new Array(gen.length + 1).fill(0);
+        for (let j = 0; j < gen.length; j++) {
+          next[j] ^= gmul(gen[j], exp[i]);
+          next[j + 1] ^= gen[j];
+        }
+        gen = next;
+      }
+      const data = [];
+      data.push(0x40 | (text.length >> 4));
+      data.push(((text.length & 0x0f) << 4) | (text.charCodeAt(0) >> 4));
+      for (let i = 0; i < text.length - 1; i++) {
+        data.push(((text.charCodeAt(i) & 0x0f) << 4) | (text.charCodeAt(i + 1) >> 4));
+      }
+      data.push(((text.charCodeAt(text.length - 1) & 0x0f) << 4));
+      const pad = [0xec, 0x11]; let pidx = 0;
+      while (data.length < 34) data.push(pad[pidx++ % 2]);
+      const ec = new Array(10).fill(0);
+      for (let i = 0; i < data.length; i++) {
+        const factor = data[i] ^ ec[0];
+        for (let j = 0; j < 9; j++) ec[j] = ec[j + 1] ^ gmul(gen[j], factor);
+        ec[9] = gmul(gen[9], factor);
+      }
+      const allCodewords = data.concat(ec);
+      const formatBits = 0x77c4;
+      for (let i = 0; i < 15; i++) {
+        const bit = (formatBits >> i) & 1;
+        if (i < 6) setFunc(8, i, bit);
+        else if (i < 8) setFunc(8, i + 1, bit);
+        else if (i === 8) setFunc(7, 8, bit);
+        else setFunc(14 - i, 8, bit);
+        if (i < 8) setFunc(size - 1 - i, bit);
+        else setFunc(8, size - 15 + i, bit);
+      }
+      let bitIdx = 0;
+      for (let right = size - 1; right > 0; right -= 2) {
+        if (right === 6) right--;
+        for (let vert = 0; vert < size; vert++) {
+          for (let j = 0; j < 2; j++) {
+            const px = right - j;
+            const upwards = ((right + 1) & 2) === 0;
+            const py = upwards ? size - 1 - vert : vert;
+            if (!isFunc[py][px]) {
+              const byte = allCodewords[bitIdx >> 3] || 0;
+              let val = (byte >> (7 - (bitIdx & 7))) & 1;
+              if ((py + px) % 2 === 0) val ^= 1;
+              grid[py][px] = val;
+              bitIdx++;
+            }
+          }
+        }
+      }
+      const modSize = 7, padSvg = 14;
+      const totalSvg = size * modSize + padSvg * 2;
+      let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${totalSvg} ${totalSvg}" width="${totalSvg}" height="${totalSvg}"><rect width="100%" height="100%" fill="#ffffff"/>`;
+      for (let r = 0; r < size; r++) {
+        for (let c = 0; c < size; c++) {
+          if (grid[r][c] === 1) {
+            svg += `<rect x="${padSvg + c * modSize}" y="${padSvg + r * modSize}" width="${modSize}" height="${modSize}" fill="#000000"/>`;
+          }
+        }
+      }
+      svg += "</svg>";
+      return svg;
+    }
+
+    function openQRModal() {
+      document.getElementById('qr-svg-wrap').innerHTML = createQR(serverUrl);
+      document.getElementById('qr-modal').classList.add('open');
+    }
+    function closeQRModal() {
+      document.getElementById('qr-modal').classList.remove('open');
+    }
+
+    // Media Preview Modal
+    async function openPreview(name, mime, isImg, isVid, isAud, isTxt) {
+      const modal = document.getElementById('preview-modal');
+      const title = document.getElementById('preview-title');
+      const v = document.getElementById('preview-video');
+      const img = document.getElementById('preview-img');
+      const a = document.getElementById('preview-audio');
+      const txt = document.getElementById('preview-text');
+      const dl = document.getElementById('preview-download-link');
+
+      title.textContent = decodeURIComponent(name);
+      dl.href = '/download/' + name;
+
+      v.style.display = 'none'; v.pause(); v.src = '';
+      img.style.display = 'none'; img.src = '';
+      a.style.display = 'none'; a.pause(); a.src = '';
+      txt.style.display = 'none'; txt.textContent = '';
+
+      if (isVid) {
+        v.src = '/view/' + name;
+        v.style.display = 'block';
+        v.play().catch(() => {});
+      } else if (isImg) {
+        img.src = '/view/' + name;
+        img.style.display = 'block';
+      } else if (isAud) {
+        a.src = '/view/' + name;
+        a.style.display = 'block';
+        a.play().catch(() => {});
+      } else if (isTxt) {
+        txt.style.display = 'block';
+        txt.textContent = 'Loading text content...';
+        try {
+          const res = await fetch('/view/' + name);
+          txt.textContent = await res.text();
+        } catch(e) {
+          txt.textContent = 'Failed to load text: ' + e.message;
+        }
+      }
+      modal.classList.add('open');
+    }
+
+    function closePreviewModal() {
+      const modal = document.getElementById('preview-modal');
+      const v = document.getElementById('preview-video');
+      const a = document.getElementById('preview-audio');
+      v.pause(); v.src = '';
+      a.pause(); a.src = '';
+      modal.classList.remove('open');
+    }
+
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        closeQRModal();
+        closePreviewModal();
+      }
+    });
 
     // Drag and Drop
     const dz = document.getElementById('dropzone');
@@ -761,6 +1110,7 @@ local function get_index_html(lan_ip, port)
         }
       }
       loadFiles();
+      loadStatus();
     }
 
     async function loadFiles() {
@@ -777,9 +1127,12 @@ local function get_index_html(lan_ip, port)
         list.forEach(f => {
           let icon = '📄';
           if (f.is_image) icon = '🖼️';
+          else if (f.is_video) icon = '🎬';
+          else if (f.is_audio) icon = '🎵';
           else if (f.name.match(/\.(zip|tar|gz|rar|7z)$/i)) icon = '📦';
-          else if (f.name.match(/\.(mp3|wav|ogg)$/i)) icon = '🎵';
-          else if (f.name.match(/\.(mp4|webm|mkv)$/i)) icon = '🎬';
+
+          const canPreview = (f.is_image || f.is_video || f.is_audio || f.is_text);
+          const safeName = encodeURIComponent(f.name);
 
           html += `
             <div class="file-item">
@@ -791,15 +1144,27 @@ local function get_index_html(lan_ip, port)
                 </div>
               </div>
               <div class="file-actions">
-                ${(f.is_image || f.is_text) ? `<a href="/view/${encodeURIComponent(f.name)}" target="_blank" class="btn">View</a>` : ''}
-                <a href="/download/${encodeURIComponent(f.name)}" class="btn btn-primary">Download</a>
-                <button class="btn btn-danger" onclick="deleteFile('${encodeURIComponent(f.name)}')">Delete</button>
+                ${canPreview ? `<button class="btn" onclick="openPreview('${safeName}', '${f.mime}', ${f.is_image}, ${f.is_video}, ${f.is_audio}, ${f.is_text})">👁️ View</button>` : ''}
+                <a href="/download/${safeName}" class="btn btn-primary">Download</a>
+                <button class="btn btn-danger" onclick="deleteFile('${safeName}')">Delete</button>
               </div>
             </div>`;
         });
         container.innerHTML = html;
       } catch (err) {
         console.error(err);
+      }
+    }
+
+    async function loadStatus() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        const text = `💾 ${data.shared_size_fmt || '0 B'} used in shared_files (${data.files_count || 0} files) · Host: ${data.disk_free_fmt || '--'} free`;
+        document.getElementById('storage-text').textContent = text;
+        document.getElementById('storage-disk-badge').textContent = `${data.disk_used_percent || 0}% Host Disk Used`;
+      } catch (e) {
+        console.error(e);
       }
     }
 
@@ -811,6 +1176,7 @@ local function get_index_html(lan_ip, port)
         if (data.ok) {
           showToast('Deleted file');
           loadFiles();
+          loadStatus();
         } else {
           showToast('Delete failed: ' + (data.error || ''));
         }
@@ -896,9 +1262,11 @@ local function get_index_html(lan_ip, port)
     // Polling updates every 3 seconds
     loadFiles();
     loadClipboard();
+    loadStatus();
     setInterval(() => {
       loadFiles();
       loadClipboard();
+      loadStatus();
     }, 3000);
   </script>
 </body>
@@ -1095,12 +1463,20 @@ local function run_server(host, port, storage_dir)
                     if url_path == "/" or url_path == "/index.html" then
                         send_response(client_sock, 200, "text/html; charset=utf-8", get_index_html(lan_ip, port))
                     elseif url_path == "/api/status" then
-                        local files = storage:list_files()
+                        local files, total_bytes, total_fmt = storage:list_files()
+                        local disk = storage:disk_usage()
                         local resp = {
                             lan_ip = lan_ip,
                             port = port,
                             dir = storage.dir,
                             files_count = #files,
+                            shared_size = total_bytes,
+                            shared_size_fmt = total_fmt,
+                            disk_free = disk.disk_free,
+                            disk_free_fmt = disk.disk_free_fmt,
+                            disk_total = disk.disk_total,
+                            disk_total_fmt = disk.disk_total_fmt,
+                            disk_used_percent = disk.disk_used_percent,
                             version = LANDROP_VERSION,
                         }
                         send_response(client_sock, 200, "application/json", json.encode(resp))

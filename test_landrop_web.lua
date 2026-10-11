@@ -99,7 +99,45 @@ test("Storage manager saves, reads, lists, and deletes files safely", function()
 end)
 
 -- =========================================================================
--- 4. Clipboard Store Tests
+-- 4. Host Disk Storage Monitor Tests
+-- =========================================================================
+test("Host disk storage monitor queries filesystem capacity safely", function()
+    local s = landrop.Storage.new("./test_shared_disk")
+    local du = s:disk_usage()
+    assert(type(du) == "table", "disk_usage must return a table")
+    assert(type(du.disk_free) == "number" and du.disk_free > 0, "disk_free must be positive")
+    assert(type(du.disk_total) == "number" and du.disk_total > 0, "disk_total must be positive")
+    assert(type(du.disk_free_fmt) == "string" and #du.disk_free_fmt > 0)
+    assert(type(du.disk_total_fmt) == "string" and #du.disk_total_fmt > 0)
+    assert(type(du.disk_used_percent) == "number" and du.disk_used_percent >= 0 and du.disk_used_percent <= 100)
+    os.remove("./test_shared_disk")
+end)
+
+-- =========================================================================
+-- 5. Media & File Type Classification Tests
+-- =========================================================================
+test("Media classification identifies videos, images, audios, and documents", function()
+    local test_dir = "./test_shared_media"
+    local s = landrop.Storage.new(test_dir)
+    s:save_file("movie.mp4", "fake mp4")
+    s:save_file("song.mp3", "fake mp3")
+    s:save_file("photo.jpg", "fake jpg")
+    s:save_file("notes.md", "fake md")
+
+    local files = s:list_files()
+    local map = {}
+    for _, f in ipairs(files) do map[f.name] = f end
+
+    assert(map["movie.mp4"] and map["movie.mp4"].is_video == true and map["movie.mp4"].is_audio == false)
+    assert(map["song.mp3"] and map["song.mp3"].is_audio == true and map["song.mp3"].is_video == false)
+    assert(map["photo.jpg"] and map["photo.jpg"].is_image == true and map["photo.jpg"].is_video == false)
+    assert(map["notes.md"] and map["notes.md"].is_text == true and map["notes.md"].is_image == false)
+
+    os.execute("rm -rf " .. test_dir .. " 2>/dev/null")
+end)
+
+-- =========================================================================
+-- 6. Clipboard Store Tests
 -- =========================================================================
 test("Clipboard store captures clips, detects URLs, and bounds history", function()
     local c = landrop.ClipboardStore.new()
@@ -168,12 +206,15 @@ test("Live HTTP server serves UI, uploads, downloads, and syncs clipboard", func
         p_ui:close()
         assert(ui_html:find("LAN Drop"), "Expected 'LAN Drop' in HTML")
 
-        -- 2. Check /api/status
+        -- 2. Check /api/status with storage & disk metrics
         local p_st = io.popen("curl -s http://127.0.0.1:" .. test_port .. "/api/status")
         local st_raw = p_st:read("*a")
         p_st:close()
         local st = json.decode(st_raw)
         assert(st and st.port == test_port and st.version == "0.1.0")
+        assert(type(st.disk_free) == "number")
+        assert(type(st.disk_free_fmt) == "string")
+        assert(type(st.disk_used_percent) == "number")
 
         -- 3. Upload file
         local test_body = "Hello from automated test suite " .. os.time()
@@ -183,19 +224,26 @@ test("Live HTTP server serves UI, uploads, downloads, and syncs clipboard", func
         local up = json.decode(up_raw)
         assert(up and up.ok == true and up.file == "hello_test.txt")
 
-        -- 4. List files
+        -- 4. List files with media flags
         local p_list = io.popen("curl -s http://127.0.0.1:" .. test_port .. "/api/files")
         local list_raw = p_list:read("*a")
         p_list:close()
         local files = json.decode(list_raw)
         assert(type(files) == "table" and #files == 1)
         assert(files[1].name == "hello_test.txt" and files[1].size == #test_body)
+        assert(files[1].is_text == true and files[1].is_video == false)
 
         -- 5. Download file and verify byte equality
         local p_dl = io.popen("curl -s http://127.0.0.1:" .. test_port .. "/download/hello_test.txt")
         local dl_body = p_dl:read("*a")
         p_dl:close()
         assert(dl_body == test_body, "Downloaded body does not match uploaded body")
+
+        -- 5b. In-browser view endpoint (/view/...)
+        local p_view = io.popen("curl -s http://127.0.0.1:" .. test_port .. "/view/hello_test.txt")
+        local view_body = p_view:read("*a")
+        p_view:close()
+        assert(view_body == test_body, "Viewed body does not match uploaded body")
 
         -- 6. Clipboard sync
         local clip_text = "https://example.org/lan-drop-link"
