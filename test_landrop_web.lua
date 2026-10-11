@@ -313,4 +313,76 @@ test("Streaming upload handles multi-megabyte payloads without memory limits", f
     if not ok then error(err) end
 end)
 
+test("Clipboard rejects non-string values without throwing", function()
+    local clips = landrop.ClipboardStore.new()
+    for _, value in ipairs({ 123, true, {} }) do
+        assert(clips:set_text(value) == false)
+    end
+    assert(clips:set_text(string.rep("x", 1024 * 1024 + 1)) == false)
+    assert(#clips:get_data().history == 0)
+end)
+
+test("Streaming failures preserve existing files and report errors", function()
+    local dir = "./test_shared_failures"
+    local storage = landrop.Storage.new(dir)
+    assert(storage:save_file("existing.txt", "original"))
+    local old_open, old_rename = io.open, os.rename
+    local ok, err = pcall(function()
+        local stream = assert(storage:save_file_stream("existing.txt"))
+        assert(stream:write("replacement"))
+        os.rename = function() return nil, "simulated rename failure" end
+        assert(stream:finish() == false)
+        os.rename = old_rename
+        assert(storage:read_file("existing.txt") == "original")
+
+        for _, phase in ipairs({ "write", "close" }) do
+            io.open = function(path, mode)
+                if path:find("/.tmp_", 1, true) and mode == "wb" then
+                    return {
+                        write = function()
+                            if phase == "write" then return nil, "disk full" end
+                            return true
+                        end,
+                        close = function()
+                            if phase == "close" then return nil, "disk full" end
+                            return true
+                        end,
+                    }
+                end
+                return old_open(path, mode)
+            end
+            local failed = assert(storage:save_file_stream("existing.txt"))
+            local written = failed:write("replacement")
+            assert(written == (phase ~= "write"))
+            assert(failed:finish() == false)
+            io.open = old_open
+            assert(storage:read_file("existing.txt") == "original")
+        end
+        local stream_ok = assert(storage:save_file_stream("existing.txt"))
+        assert(stream_ok:write("replacement"))
+        assert(stream_ok:finish())
+        assert(storage:read_file("existing.txt") == "replacement")
+    end)
+    io.open, os.rename = old_open, old_rename
+    storage:delete_file("existing.txt")
+    os.remove(dir)
+    assert(ok, err)
+end)
+
+test("Concurrent upload streams use distinct temporary files", function()
+    local dir = "./test_shared_concurrent"
+    local storage = landrop.Storage.new(dir)
+    local first = assert(storage:save_file_stream("first.txt"))
+    local second = assert(storage:save_file_stream("second.txt"))
+    assert(first:write("first"))
+    assert(second:write("second"))
+    assert(first:finish())
+    assert(second:finish())
+    assert(storage:read_file("first.txt") == "first")
+    assert(storage:read_file("second.txt") == "second")
+    storage:delete_file("first.txt")
+    storage:delete_file("second.txt")
+    os.remove(dir)
+end)
+
 print(string.format("Passed all %d tests.", passed))

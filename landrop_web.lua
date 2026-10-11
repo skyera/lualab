@@ -3,6 +3,9 @@
 -- landrop_web.lua
 -- Fast, Zero-Dependency LAN File Drop & Cross-Device Clipboard Web Service
 -- Written in Pure LuaJIT FFI (POSIX sockets on Linux/macOS, Winsock on Windows)
+-- Bounded, nonblocking HTTP clients; checked atomic uploads and safe DOM rendering.
+-- Limits: 64 clients, 16 KiB headers, 1 GiB uploads, 1 MiB clipboard/request bodies.
+-- Connections expire after 15 seconds idle or 300 seconds total.
 --------------------------------------------------------------------------------
 
 local ffi = require("ffi")
@@ -52,6 +55,12 @@ if is_windows then
         int recv(SOCKET s, char *buf, int len, int flags);
         int send(SOCKET s, const char *buf, int len, int flags);
         int connect(SOCKET s, const void *name, int namelen);
+        typedef struct { SOCKET fd; short events; short revents; } LandropPollFD;
+        int WSAPoll(LandropPollFD *fds, unsigned long count, int timeout);
+        int ioctlsocket(SOCKET s, long command, unsigned long *value);
+        int WSAGetLastError(void);
+        unsigned long GetCurrentProcessId(void);
+        int MoveFileExA(const char *existing, const char *replacement, unsigned long flags);
 
         struct in_addr { uint32_t s_addr; };
         struct sockaddr_in {
@@ -104,6 +113,8 @@ else
         long send(int sockfd, const void *buf, size_t len, int flags);
         int connect(int sockfd, const void *addr, unsigned int addrlen);
         int poll(struct pollfd *fds, unsigned long nfds, int timeout);
+        int fcntl(int fd, int command, ...);
+        int getpid(void);
 
         uint16_t htons(uint16_t hostshort);
         uint16_t ntohs(uint16_t netshort);
@@ -140,7 +151,16 @@ local SOCK_STREAM  = 1
 local SOCK_DGRAM   = 2
 local SOL_SOCKET   = is_windows and 0xFFFF or 1
 local SO_REUSEADDR = is_windows and 0x0004 or 2
-local POLLIN       = 0x0001
+local POLLIN       = is_windows and 0x0300 or 0x0001
+local POLLOUT      = is_windows and 0x0010 or 0x0004
+local MAX_CLIENTS = 64
+local MAX_HEADER_BYTES = 16384
+local MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
+local MAX_BODY_BYTES = 1024 * 1024
+local IDLE_TIMEOUT = 15
+local REQUEST_TIMEOUT = 300
+local process_id = is_windows and tonumber(ffi.load("kernel32").GetCurrentProcessId()) or C.getpid()
+local temp_sequence = 0
 local INVALID_SOCK = is_windows and ffi.cast("SOCKET", -1) or -1
 
 local function close_socket(s)
@@ -304,23 +324,25 @@ function Storage:list_files()
             if f then
                 local sz = f:seek("end")
                 f:close()
-                total_bytes = total_bytes + sz
-                local ext = fname:match("%.([%w_]+)$") or ""
-                ext = ext:lower()
-                local is_img = (ext == "png" or ext == "jpg" or ext == "jpeg" or ext == "gif" or ext == "webp" or ext == "svg")
-                local is_vid = (ext == "mp4" or ext == "webm" or ext == "mkv" or ext == "mov")
-                local is_aud = (ext == "mp3" or ext == "wav" or ext == "ogg" or ext == "m4a" or ext == "flac")
-                local is_txt = (ext == "txt" or ext == "md" or ext == "lua" or ext == "py" or ext == "json" or ext == "sh" or ext == "html" or ext == "css" or ext == "js")
-                table.insert(files, {
-                    name = fname,
-                    size = sz,
-                    size_fmt = format_bytes(sz),
-                    mime = get_mime_type(fname),
-                    is_image = is_img,
-                    is_video = is_vid,
-                    is_audio = is_aud,
-                    is_text = is_txt,
-                })
+                if sz then
+                    total_bytes = total_bytes + sz
+                    local ext = fname:match("%.([%w_]+)$") or ""
+                    ext = ext:lower()
+                    local is_img = (ext == "png" or ext == "jpg" or ext == "jpeg" or ext == "gif" or ext == "webp" or ext == "svg")
+                    local is_vid = (ext == "mp4" or ext == "webm" or ext == "mkv" or ext == "mov")
+                    local is_aud = (ext == "mp3" or ext == "wav" or ext == "ogg" or ext == "m4a" or ext == "flac")
+                    local is_txt = (ext == "txt" or ext == "md" or ext == "lua" or ext == "py" or ext == "json" or ext == "sh" or ext == "html" or ext == "css" or ext == "js")
+                    table.insert(files, {
+                        name = fname,
+                        size = sz,
+                        size_fmt = format_bytes(sz),
+                        mime = get_mime_type(fname),
+                        is_image = is_img,
+                        is_video = is_vid,
+                        is_audio = is_aud,
+                        is_text = is_txt,
+                    })
+                end
             end
         end
     end
@@ -362,46 +384,64 @@ function Storage:disk_usage()
 end
 
 function Storage:save_file(filename, data)
-    local safe = sanitize_filename(filename)
-    if not safe then return false, "Invalid filename" end
-    local full_path = self.dir .. "/" .. safe
-    local f, err = io.open(full_path, "wb")
-    if not f then return false, err or "Failed to open file for writing" end
-    f:write(data)
-    f:close()
-    return true, safe
+    local stream, err = self:save_file_stream(filename)
+    if not stream then return false, err end
+    local ok, write_err = stream:write(data)
+    if not ok then
+        stream:abort()
+        return false, write_err
+    end
+    return stream:finish()
 end
 
 function Storage:save_file_stream(filename)
     local safe = sanitize_filename(filename)
     if not safe then return nil, "Invalid filename" end
-    local tmp_name = ".tmp_" .. os.time() .. "_" .. math.random(1000, 9999)
+    temp_sequence = temp_sequence + 1
+    local tmp_name = string.format(".tmp_%d_%d_%d", process_id, os.time(), temp_sequence)
     local tmp_path = self.dir .. "/" .. tmp_name
     local f, err = io.open(tmp_path, "wb")
     if not f then return nil, err or "Failed to open temporary file" end
     local final_path = self.dir .. "/" .. safe
-    return {
-        write = function(_, chunk) f:write(chunk) end,
-        finish = function(_)
+    local failure
+    local closed = false
+    local function abort()
+        if not closed then
             f:close()
-            os.remove(final_path)
-            local ok = os.rename(tmp_path, final_path)
+            closed = true
+        end
+        os.remove(tmp_path)
+    end
+    return {
+        write = function(_, chunk)
+            if closed then return nil, "Upload already closed" end
+            if failure then return nil, failure end
+            local ok, write_err = f:write(chunk)
+            if not ok then failure = write_err or "Write failed" end
+            return ok ~= nil, failure
+        end,
+        finish = function(_)
+            if closed then return false, "Upload already closed" end
+            local ok_close, close_err = f:close()
+            closed = true
+            if failure or not ok_close then
+                os.remove(tmp_path)
+                return false, failure or close_err or "Close failed"
+            end
+            local ok, rename_err
+            if is_windows then
+                ok = ffi.load("kernel32").MoveFileExA(tmp_path, final_path, 1) ~= 0
+                rename_err = "Could not replace destination"
+            else
+                ok, rename_err = os.rename(tmp_path, final_path)
+            end
             if not ok then
-                local src = io.open(tmp_path, "rb")
-                local dst = io.open(final_path, "wb")
-                if src and dst then
-                    dst:write(src:read("*a"))
-                    src:close()
-                    dst:close()
-                    os.remove(tmp_path)
-                end
+                os.remove(tmp_path)
+                return false, rename_err or "Could not replace destination"
             end
             return true, safe
         end,
-        abort = function(_)
-            f:close()
-            os.remove(tmp_path)
-        end,
+        abort = abort,
     }
 end
 
@@ -438,7 +478,7 @@ function ClipboardStore.new()
 end
 
 function ClipboardStore:set_text(text, source)
-    if not text or #text == 0 then return false end
+    if type(text) ~= "string" or #text == 0 or #text > MAX_BODY_BYTES then return false end
     local now = os.time()
     local item = {
         id = now .. "_" .. math.random(1000, 9999),
@@ -1113,6 +1153,13 @@ local function get_index_html(lan_ip, port)
       loadStatus();
     }
 
+    function element(tag, className = '', text = '') {
+      const node = document.createElement(tag);
+      node.className = className;
+      node.textContent = text;
+      return node;
+    }
+
     async function loadFiles() {
       try {
         const res = await fetch('/api/files');
@@ -1123,34 +1170,36 @@ local function get_index_html(lan_ip, port)
           container.innerHTML = '<p style="text-align:center; color:var(--text-muted); padding:20px 0;">No shared files yet. Drag or choose a file above!</p>';
           return;
         }
-        let html = '';
-        list.forEach(f => {
+        const rows = list.map(f => {
           let icon = '📄';
           if (f.is_image) icon = '🖼️';
           else if (f.is_video) icon = '🎬';
           else if (f.is_audio) icon = '🎵';
-          else if (f.name.match(/\.(zip|tar|gz|rar|7z)$/i)) icon = '📦';
-
-          const canPreview = (f.is_image || f.is_video || f.is_audio || f.is_text);
-          const safeName = encodeURIComponent(f.name);
-
-          html += `
-            <div class="file-item">
-              <div class="file-info">
-                <span class="file-icon">${icon}</span>
-                <div>
-                  <div class="file-name" title="${f.name}">${f.name}</div>
-                  <div class="file-meta">${f.size_fmt}</div>
-                </div>
-              </div>
-              <div class="file-actions">
-                ${canPreview ? `<button class="btn" onclick="openPreview('${safeName}', '${f.mime}', ${f.is_image}, ${f.is_video}, ${f.is_audio}, ${f.is_text})">👁️ View</button>` : ''}
-                <a href="/download/${safeName}" class="btn btn-primary">Download</a>
-                <button class="btn btn-danger" onclick="deleteFile('${safeName}')">Delete</button>
-              </div>
-            </div>`;
+          else if (/\.(zip|tar|gz|rar|7z)$/i.test(f.name)) icon = '📦';
+          const row = element('div', 'file-item');
+          const info = element('div', 'file-info');
+          const details = element('div');
+          const name = element('div', 'file-name', f.name);
+          name.title = f.name;
+          details.append(name, element('div', 'file-meta', f.size_fmt));
+          info.append(element('span', 'file-icon', icon), details);
+          const actions = element('div', 'file-actions');
+          const encoded = encodeURIComponent(f.name);
+          if (f.is_image || f.is_video || f.is_audio || f.is_text) {
+            const preview = element('button', 'btn', '👁️ View');
+            preview.addEventListener('click', () => openPreview(encoded, f.mime,
+              f.is_image, f.is_video, f.is_audio, f.is_text));
+            actions.append(preview);
+          }
+          const download = element('a', 'btn btn-primary', 'Download');
+          download.href = '/download/' + encoded;
+          const remove = element('button', 'btn btn-danger', 'Delete');
+          remove.addEventListener('click', () => deleteFile(encoded));
+          actions.append(download, remove);
+          row.append(info, actions);
+          return row;
         });
-        container.innerHTML = html;
+        container.replaceChildren(...rows);
       } catch (err) {
         console.error(err);
       }
@@ -1226,23 +1275,27 @@ local function get_index_html(lan_ip, port)
           container.innerHTML = '<p style="text-align:center; color:var(--text-muted); padding:20px 0;">No text shared yet.</p>';
           return;
         }
-        let html = '';
-        history.forEach(item => {
-          const safeText = item.text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-          const rawEscaped = encodeURIComponent(item.text);
-          html += `
-            <div class="clip-history-item">
-              <div class="clip-text-preview">${safeText}</div>
-              <div class="clip-footer">
-                <span>${item.date} ${item.time}</span>
-                <div style="display:flex; gap:6px;">
-                  ${item.is_url ? `<a href="${item.text}" target="_blank" class="btn">Open Link ↗</a>` : ''}
-                  <button class="btn btn-primary" onclick="copyToClipboard(decodeURIComponent('${rawEscaped}'))">📋 Copy</button>
-                </div>
-              </div>
-            </div>`;
+        const rows = history.map(item => {
+          const row = element('div', 'clip-history-item');
+          const footer = element('div', 'clip-footer');
+          const actions = element('div');
+          actions.style.display = 'flex';
+          actions.style.gap = '6px';
+          if (item.is_url && /^https?:\/\//i.test(item.text)) {
+            const link = element('a', 'btn', 'Open Link ↗');
+            link.href = item.text;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            actions.append(link);
+          }
+          const copy = element('button', 'btn btn-primary', '📋 Copy');
+          copy.addEventListener('click', () => copyToClipboard(item.text));
+          actions.append(copy);
+          footer.append(element('span', '', item.date + ' ' + item.time), actions);
+          row.append(element('div', 'clip-text-preview', item.text), footer);
+          return row;
         });
-        container.innerHTML = html;
+        container.replaceChildren(...rows);
       } catch (e) {
         console.error(e);
       }
@@ -1333,6 +1386,44 @@ local function run_server(host, port, storage_dir)
     local buf_size = 65536
     local buf = ffi.new("char[?]", buf_size)
 
+    local function nonblocking(sock)
+        if is_windows then
+            return ws2.ioctlsocket(sock, -2147195266, ffi.new("unsigned long[1]", 1)) == 0
+        end
+        local flags = C.fcntl(sock, 3)
+        local nonblock = ffi.os == "OSX" and 4 or 2048
+        return flags >= 0 and C.fcntl(sock, 4, ffi.new("int", bit.bor(flags, nonblock))) == 0
+    end
+
+    local function socket_io(sock, data, count, writing)
+        while true do
+            coroutine.yield(writing and POLLOUT or POLLIN)
+            local n
+            if is_windows then
+                n = writing and ws2.send(sock, data, count, 0) or ws2.recv(sock, data, count, 0)
+            else
+                local flags = ffi.os == "Linux" and 0x4000 or 0
+                n = writing and C.send(sock, data, count, flags) or C.recv(sock, data, count, 0)
+            end
+            n = tonumber(n)
+            if n >= 0 then return n end
+            local err = is_windows and ws2.WSAGetLastError() or ffi.errno()
+            if err ~= 11 and err ~= 35 and err ~= 4 and err ~= 10035 and err ~= 10004 then
+                return -1
+            end
+        end
+    end
+
+    local function send_all(sock, data)
+        local offset = 0
+        local pointer = ffi.cast("const char *", data)
+        while offset < #data do
+            local n = socket_io(sock, pointer + offset, #data - offset, true)
+            if n <= 0 then error("Client disconnected during response") end
+            offset = offset + n
+        end
+    end
+
     local function send_response(client_sock, status_code, content_type, body, extra_headers)
         local status_text = (status_code == 200 and "OK") or (status_code == 404 and "Not Found") or (status_code == 400 and "Bad Request") or "Server Error"
         local header = string.format("HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n", status_code, status_text, content_type, #body)
@@ -1342,154 +1433,155 @@ local function run_server(host, port, storage_dir)
             end
         end
         header = header .. "\r\n"
-        local MSG_NOSIGNAL = is_windows and 0 or 0x4000
-        if is_windows then
-            ws2.send(client_sock, header, #header, 0)
-            if #body > 0 then ws2.send(client_sock, body, #body, 0) end
-        else
-            C.send(client_sock, header, #header, MSG_NOSIGNAL)
-            if #body > 0 then C.send(client_sock, body, #body, MSG_NOSIGNAL) end
-        end
+        send_all(client_sock, header)
+        send_all(client_sock, body)
     end
 
-    while true do
-        local client_addr = ffi.new("struct sockaddr_in")
-        local addr_len = ffi.new(is_windows and "int[1]" or "unsigned int[1]", ffi.sizeof(client_addr))
-        local client_sock
-        if is_windows then
-            client_sock = ws2.accept(listen_sock, client_addr, addr_len)
-        else
-            client_sock = C.accept(listen_sock, client_addr, addr_len)
+    local function handle_client(state)
+        local client_sock = state.sock
+        -- Read headers
+        local req_raw = ""
+        local header_end = nil
+        while not header_end do
+            local n = socket_io(client_sock, buf, buf_size, false)
+            if not n or n <= 0 then break end
+            req_raw = req_raw .. ffi.string(buf, n)
+            header_end = req_raw:find("\r\n\r\n", 1, true)
+            if (header_end and header_end + 3 > MAX_HEADER_BYTES)
+                or (not header_end and #req_raw > MAX_HEADER_BYTES) then
+                send_response(client_sock, 400, "application/json", json.encode({ ok = false, error = "Headers too large" }))
+                return
+            end
         end
 
-        if client_sock ~= INVALID_SOCK and client_sock >= 0 then
-            -- Read headers
-            local req_raw = ""
-            local header_end = nil
-            while not header_end do
-                local n
-                if is_windows then
-                    n = ws2.recv(client_sock, buf, buf_size, 0)
-                else
-                    n = C.recv(client_sock, buf, buf_size, 0)
+        if header_end then
+            local header_part = req_raw:sub(1, header_end - 1)
+            local body_so_far = req_raw:sub(header_end + 4)
+            local request_line = header_part:match("^[^\r\n]+") or ""
+            local method, path = request_line:match("^(%u+) ([^%s]+) HTTP/1%.[01]$")
+            if not method then
+                send_response(client_sock, 400, "application/json", json.encode({ ok = false, error = "Invalid request line" }))
+                return
+            end
+            local url_path, query_str = path:match("^([^?]+)%??(.*)")
+            url_path = url_path or path
+            query_str = query_str or ""
+
+            local lengths = {}
+            local headers = {}
+            for line in header_part:gmatch("[^\r\n]+") do
+                local key, value = line:match("^([^:]+):%s*(.-)%s*$")
+                if key then
+                    key = key:lower()
+                    headers[key] = value
+                    if key == "content-length" then table.insert(lengths, value) end
                 end
-                n = tonumber(n)
-                if not n or n <= 0 then break end
-                req_raw = req_raw .. ffi.string(buf, n)
-                header_end = req_raw:find("\r\n\r\n", 1, true)
+            end
+            local content_length = #lengths == 1 and tonumber(lengths[1]) or 0
+            local upload = url_path == "/api/upload" and method == "POST"
+            local limit = upload and MAX_UPLOAD_BYTES or MAX_BODY_BYTES
+            if #lengths > 1 or (#lengths == 1 and not lengths[1]:match("^%d+$"))
+                or headers["transfer-encoding"] or content_length > limit
+                or ((upload or (url_path == "/api/clipboard" and method == "POST")) and #lengths == 0) then
+                send_response(client_sock, 400, "application/json", json.encode({ ok = false, error = "Invalid request framing or body size" }))
+                return
+            end
+            -- This connection handles exactly one request; discard any pipelined bytes.
+            body_so_far = body_so_far:sub(1, content_length)
+            local needed = content_length - #body_so_far
+            if headers.expect and headers.expect:lower() == "100-continue" then
+                send_all(client_sock, "HTTP/1.1 100 Continue\r\n\r\n")
             end
 
-            if header_end then
-                local header_part = req_raw:sub(1, header_end - 1)
-                local body_so_far = req_raw:sub(header_end + 4)
-                local method, path = header_part:match("^(%u+)%s+([^%s]+)")
-
-                method = method or "GET"
-                path = path or "/"
-                local url_path, query_str = path:match("^([^?]+)%??(.*)")
-                url_path = url_path or path
-                query_str = query_str or ""
-
-                -- Respond to Expect: 100-continue if requested by client
-                if header_part:find("[Ee]xpect:%s*100%-continue") then
-                    local cont = "HTTP/1.1 100 Continue\r\n\r\n"
-                    local MSG_NOSIGNAL = is_windows and 0 or 0x4000
-                    if is_windows then ws2.send(client_sock, cont, #cont, 0) else C.send(client_sock, cont, #cont, MSG_NOSIGNAL) end
+            -- Handle file uploads via streaming write directly to disk
+            if url_path == "/api/upload" and method == "POST" then
+                local name = query_str:match("name=([^&]+)")
+                if name then
+                    name = name:gsub("%%(%x%x)", function(hex) return string.char(tonumber(hex, 16)) end)
                 end
-
-                local content_length = tonumber(header_part:match("[Cc]ontent%-[Ll]ength:%s*(%d+)")) or 0
-                local needed = content_length - #body_so_far
-
-                -- Handle file uploads via streaming write directly to disk
-                if url_path == "/api/upload" and method == "POST" then
-                    local name = query_str:match("name=([^&]+)")
-                    if name then
-                        name = name:gsub("%%(%x%x)", function(hex) return string.char(tonumber(hex, 16)) end)
-                    end
-                    if not name or #name == 0 then
-                        name = "upload_" .. os.time() .. ".bin"
-                    end
-                    local stream, s_err = storage:save_file_stream(name)
-                    if not stream then
-                        send_response(client_sock, 400, "application/json", json.encode({ ok = false, error = s_err or "Invalid filename" }))
-                    else
-                        if #body_so_far > 0 then
-                            stream:write(body_so_far)
-                        end
-                        while needed > 0 do
-                            local to_read = math.min(needed, buf_size)
-                            local n
-                            if is_windows then
-                                n = ws2.recv(client_sock, buf, to_read, 0)
-                            else
-                                n = C.recv(client_sock, buf, to_read, 0)
-                            end
-                            n = tonumber(n)
-                            if not n or n <= 0 then break end
-                            stream:write(ffi.string(buf, n))
-                            needed = needed - n
-                        end
-                        if needed <= 0 then
-                            local ok_fin, res_name = stream:finish()
-                            if ok_fin then
-                                send_response(client_sock, 200, "application/json", json.encode({ ok = true, file = res_name }))
-                            else
-                                send_response(client_sock, 500, "application/json", json.encode({ ok = false, error = "Save failed" }))
-                            end
-                        else
-                            stream:abort()
-                            send_response(client_sock, 400, "application/json", json.encode({ ok = false, error = "Incomplete upload" }))
-                        end
-                    end
+                if not name or #name == 0 then
+                    name = "upload_" .. os.time() .. ".bin"
+                end
+                local stream, s_err = storage:save_file_stream(name)
+                if not stream then
+                    local status = sanitize_filename(name) and 500 or 400
+                    send_response(client_sock, status, "application/json", json.encode({ ok = false, error = s_err or "Save failed" }))
                 else
-                    -- For non-streaming endpoints, buffer body chunks
-                    local chunks = { body_so_far }
+                    state.stream = stream
+                    if #body_so_far > 0 and not stream:write(body_so_far) then
+                        send_response(client_sock, 500, "application/json", json.encode({ ok = false, error = "Write failed" }))
+                        return
+                    end
                     while needed > 0 do
                         local to_read = math.min(needed, buf_size)
-                        local n
-                        if is_windows then
-                            n = ws2.recv(client_sock, buf, to_read, 0)
-                        else
-                            n = C.recv(client_sock, buf, to_read, 0)
-                        end
-                        n = tonumber(n)
+                        local n = socket_io(client_sock, buf, to_read, false)
                         if not n or n <= 0 then break end
-                        table.insert(chunks, ffi.string(buf, n))
+                        if not stream:write(ffi.string(buf, n)) then
+                            send_response(client_sock, 500, "application/json", json.encode({ ok = false, error = "Write failed" }))
+                            return
+                        end
                         needed = needed - n
                     end
-                    local full_body = table.concat(chunks)
+                    if needed <= 0 then
+                        local ok_fin, res_name = stream:finish()
+                        state.stream = nil
+                        if ok_fin then
+                            send_response(client_sock, 200, "application/json", json.encode({ ok = true, file = res_name }))
+                        else
+                            send_response(client_sock, 500, "application/json", json.encode({ ok = false, error = "Save failed" }))
+                        end
+                    else
+                        stream:abort()
+                        send_response(client_sock, 400, "application/json", json.encode({ ok = false, error = "Incomplete upload" }))
+                    end
+                end
+            else
+                -- For non-streaming endpoints, buffer body chunks
+                local chunks = { body_so_far }
+                while needed > 0 do
+                    local to_read = math.min(needed, buf_size)
+                    local n = socket_io(client_sock, buf, to_read, false)
+                    if not n or n <= 0 then break end
+                    table.insert(chunks, ffi.string(buf, n))
+                    needed = needed - n
+                end
+                if needed > 0 then
+                    send_response(client_sock, 400, "application/json", json.encode({ ok = false, error = "Incomplete body" }))
+                    return
+                end
+                local full_body = table.concat(chunks)
 
-                    -- Route handling
-                    if url_path == "/" or url_path == "/index.html" then
-                        send_response(client_sock, 200, "text/html; charset=utf-8", get_index_html(lan_ip, port))
-                    elseif url_path == "/api/status" then
-                        local files, total_bytes, total_fmt = storage:list_files()
-                        local disk = storage:disk_usage()
-                        local resp = {
-                            lan_ip = lan_ip,
-                            port = port,
-                            dir = storage.dir,
-                            files_count = #files,
-                            shared_size = total_bytes,
-                            shared_size_fmt = total_fmt,
-                            disk_free = disk.disk_free,
-                            disk_free_fmt = disk.disk_free_fmt,
-                            disk_total = disk.disk_total,
-                            disk_total_fmt = disk.disk_total_fmt,
-                            disk_used_percent = disk.disk_used_percent,
-                            version = LANDROP_VERSION,
-                        }
-                        send_response(client_sock, 200, "application/json", json.encode(resp))
-                    elseif url_path == "/api/files" then
-                        local files = storage:list_files()
-                        send_response(client_sock, 200, "application/json", json.encode(files))
+                -- Route handling
+                if url_path == "/" or url_path == "/index.html" then
+                    send_response(client_sock, 200, "text/html; charset=utf-8", get_index_html(lan_ip, port))
+                elseif url_path == "/api/status" then
+                    local files, total_bytes, total_fmt = storage:list_files()
+                    local disk = storage:disk_usage()
+                    local resp = {
+                        lan_ip = lan_ip,
+                        port = port,
+                        dir = storage.dir,
+                        files_count = #files,
+                        shared_size = total_bytes,
+                        shared_size_fmt = total_fmt,
+                        disk_free = disk.disk_free,
+                        disk_free_fmt = disk.disk_free_fmt,
+                        disk_total = disk.disk_total,
+                        disk_total_fmt = disk.disk_total_fmt,
+                        disk_used_percent = disk.disk_used_percent,
+                        version = LANDROP_VERSION,
+                    }
+                    send_response(client_sock, 200, "application/json", json.encode(resp))
+                elseif url_path == "/api/files" then
+                    local files = storage:list_files()
+                    send_response(client_sock, 200, "application/json", json.encode(files))
                 elseif url_path:find("^/download/") then
                     local req_file = url_path:sub(11)
                     req_file = req_file:gsub("%%(%x%x)", function(hex) return string.char(tonumber(hex, 16)) end)
                     local content, safe_name = storage:read_file(req_file)
                     if content then
                         local headers = {
-                            ["Content-Disposition"] = 'attachment; filename="' .. safe_name .. '"'
+                            ["Content-Disposition"] = 'attachment; filename="' .. safe_name:gsub('["\\]', '_') .. '"'
                         }
                         send_response(client_sock, 200, get_mime_type(safe_name), content, headers)
                     else
@@ -1500,7 +1592,10 @@ local function run_server(host, port, storage_dir)
                     req_file = req_file:gsub("%%(%x%x)", function(hex) return string.char(tonumber(hex, 16)) end)
                     local content, safe_name = storage:read_file(req_file)
                     if content then
-                        send_response(client_sock, 200, get_mime_type(safe_name), content)
+                        send_response(client_sock, 200, get_mime_type(safe_name), content, {
+                            ["Content-Security-Policy"] = "sandbox",
+                            ["X-Content-Type-Options"] = "nosniff",
+                        })
                     else
                         send_response(client_sock, 404, "application/json", json.encode({ ok = false, error = "File not found" }))
                     end
@@ -1519,8 +1614,11 @@ local function run_server(host, port, storage_dir)
                         send_response(client_sock, 200, "application/json", json.encode(clips:get_data()))
                     elseif method == "POST" then
                         local ok_json, payload = pcall(json.decode, full_body)
-                        local text = (ok_json and type(payload) == "table" and payload.text) or full_body
-                        local ok, item = clips:set_text(text)
+                        if not ok_json or type(payload) ~= "table" or type(payload.text) ~= "string" then
+                            send_response(client_sock, 400, "application/json", json.encode({ ok = false, error = "Expected JSON with string text" }))
+                            return
+                        end
+                        local ok, item = clips:set_text(payload.text)
                         if ok then
                             send_response(client_sock, 200, "application/json", json.encode({ ok = true, item = item }))
                         else
@@ -1535,7 +1633,59 @@ local function run_server(host, port, storage_dir)
                 end
             end
         end
-        close_socket(client_sock)
+    end
+
+    assert(nonblocking(listen_sock), "Could not configure listening socket")
+    local clients = {}
+    while true do
+        local count = #clients
+        local descriptors = ffi.new(is_windows and "LandropPollFD[?]" or "struct pollfd[?]", count + 1)
+        descriptors[0].fd = listen_sock
+        descriptors[0].events = POLLIN
+        for i, state in ipairs(clients) do
+            descriptors[i].fd = state.sock
+            descriptors[i].events = state.event
+        end
+        if is_windows then
+            ws2.WSAPoll(descriptors, count + 1, 100)
+        else
+            C.poll(descriptors, count + 1, 100)
+        end
+        local now = os.time()
+        for i = count, 1, -1 do
+            local state = clients[i]
+            local expired = now - state.last >= IDLE_TIMEOUT or now - state.started >= REQUEST_TIMEOUT
+            local done = expired
+            if not expired and descriptors[i].revents ~= 0 then
+                local ok, event = coroutine.resume(state.thread)
+                state.last = now
+                done = not ok or coroutine.status(state.thread) == "dead"
+                if not ok then io.stderr:write("Request failed: " .. tostring(event) .. "\n") end
+                state.event = event
+            end
+            if done then
+                if state.stream then state.stream:abort() end
+                close_socket(state.sock)
+                table.remove(clients, i)
+            end
+        end
+        if descriptors[0].revents ~= 0 then
+            local client_addr = ffi.new("struct sockaddr_in")
+            local addr_len = ffi.new(is_windows and "int[1]" or "unsigned int[1]", ffi.sizeof(client_addr))
+            local sock = is_windows and ws2.accept(listen_sock, client_addr, addr_len)
+                or C.accept(listen_sock, client_addr, addr_len)
+            if sock ~= INVALID_SOCK and sock >= 0 then
+                if #clients >= MAX_CLIENTS or not nonblocking(sock) then close_socket(sock)
+                else
+                    local state = { sock = sock, started = now, last = now, event = POLLIN }
+                    state.thread = coroutine.create(function() handle_client(state) end)
+                    local ok, event = coroutine.resume(state.thread)
+                    if ok and coroutine.status(state.thread) ~= "dead" then
+                        state.event = event
+                        table.insert(clients, state)
+                    else close_socket(sock) end
+                end
+            end
         end
     end
 end
