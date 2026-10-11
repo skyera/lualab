@@ -356,6 +356,36 @@ if run_test("Unicode & Suffix Range Media Streaming (Port 8078)", function()
         local exp_cr = string.format("Content-Range: bytes %d-%d/%d", #test_content - 4, #test_content - 1, #test_content)
         check(suffix_res:find(exp_cr, 1, true) ~= nil, "Content-Range matches suffix range: " .. exp_cr)
         check(suffix_res:find("9999", 1, true) ~= nil, "Suffix payload contains trailing bytes '9999'")
+
+        -- 4. Open-ended range request on Unicode media: bytes=10-
+        local p_open = io.popen("curl -s -i -H \"Range: bytes=10-\" " .. url_enc, "r")
+        local open_res = p_open:read("*a")
+        p_open:close()
+        check(open_res:find("HTTP/1.1 206 Partial Content", 1, true) ~= nil, "Open-ended range returns 206")
+        local exp_open_cr = string.format("Content-Range: bytes 10-%d/%d", #test_content - 1, #test_content)
+        check(open_res:find(exp_open_cr, 1, true) ~= nil, "Content-Range matches open-ended: " .. exp_open_cr)
+
+        -- 5. Test 2.5MB media file slice capping
+        local f_large = io.open(test_dir .. "/large_test.mp4", "wb")
+        local chunk_1m = string.rep("A", 1024 * 1024)
+        f_large:write(chunk_1m)
+        f_large:write(chunk_1m)
+        f_large:write(string.rep("B", 512 * 1024))
+        f_large:close()
+        local large_total = math.floor(2.5 * 1024 * 1024)
+
+        local p_slice = io.popen(string.format("curl -s -i -H \"Range: bytes=0-\" http://127.0.0.1:%d/media/large_test.mp4", test_port), "r")
+        local slice_res = p_slice:read("*a")
+        p_slice:close()
+        check(slice_res:find("HTTP/1.1 206 Partial Content", 1, true) ~= nil, "Large media open range returns 206")
+        check(slice_res:find("Content-Length: 2097152", 1, true) ~= nil, "Large media capped at 2MB (2097152 bytes)")
+        check(slice_res:find("Content-Range: bytes 0-2097151/" .. tostring(large_total), 1, true) ~= nil, "Content-Range specifies 2MB slice")
+
+        -- 6. Verify download endpoint is NOT capped
+        local p_dl = io.popen(string.format("curl -s -I http://127.0.0.1:%d/download/large_test.mp4", test_port), "r")
+        local dl_headers = p_dl:read("*a")
+        p_dl:close()
+        check(dl_headers:find("Content-Length: " .. tostring(large_total), 1, true) ~= nil, "Download preserves full content length")
     end)
 
     cleanup_uni()

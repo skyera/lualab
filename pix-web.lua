@@ -2104,6 +2104,7 @@ local function run_server(host, port, root_dir)
     io.stdout:flush()
 
     local buf_size = 65536
+    local MAX_MEDIA_SLICE = 2 * 1024 * 1024 -- 2MB fast response slice for seekable media
     local buf = ffi.new("char[?]", buf_size)
 
     local function send_all(sock, data, len)
@@ -2161,6 +2162,10 @@ local function run_server(host, port, root_dir)
                 start_byte = tonumber(r_start) or 0
                 if r_end and #r_end > 0 then
                     end_byte = math.min(tonumber(r_end) or end_byte, total_size - 1)
+                elseif not is_download then
+                    -- Open-ended range for media streaming: cap to 2MB slice to eliminate
+                    -- head-of-line blocking during video scrub/drag
+                    end_byte = math.min(start_byte + MAX_MEDIA_SLICE - 1, total_size - 1)
                 end
                 is_partial = true
             else
@@ -2219,6 +2224,16 @@ local function run_server(host, port, root_dir)
         local client_sock = is_windows and ws2.accept(listen_sock, client_addr, addr_len) or C.accept(listen_sock, client_addr, addr_len)
 
         if client_sock ~= INVALID_SOCK and client_sock >= 0 then
+            -- Configure TCP_NODELAY and socket timeouts for instant seek response
+            local opt_one = ffi.new("int[1]", 1)
+            if is_windows then
+                ws2.setsockopt(client_sock, 6, 1, opt_one, 4) -- IPPROTO_TCP, TCP_NODELAY
+                local to_ms = ffi.new("int[1]", 2000)
+                ws2.setsockopt(client_sock, 0xFFFF, 0x1005, to_ms, 4) -- SOL_SOCKET, SO_SNDTIMEO
+                ws2.setsockopt(client_sock, 0xFFFF, 0x1006, to_ms, 4) -- SOL_SOCKET, SO_RCVTIMEO
+            else
+                C.setsockopt(client_sock, 6, 1, opt_one, 4)
+            end
             local req_raw = ""
             local header_end = nil
             while not header_end do
