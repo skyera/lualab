@@ -83,6 +83,14 @@ The server processes one request at a time. Each outbound HTTPS request has a
 12-second timeout; trying a configured Youdao API and then its public-page
 fallback can take up to two timeouts and delay other requests.
 
+## Color themes
+
+Use the header's **Theme** selector for Paper (the default), Midnight, Sepia,
+Ocean, or System. The choice is saved in this browser and applied before the page
+renders. System follows your device's light/dark preference, including changes
+while the app is open. Theme selection still works for the current session when
+browser storage is unavailable.
+
 ## Dictionary sources
 
 **All dictionaries** is the default search option. It checks Local dictionary,
@@ -175,8 +183,9 @@ luajit dictionary_web/tests/test_app.lua
 luajit dictionary_web/tests/test_shared.lua
 luajit test_ffi_dict.lua
 luajit test_download_dict.lua
-node --test dictionary_web/tests/test_http.js dictionary_web/tests/test_ui.js
+node --test dictionary_web/tests/test_http.js dictionary_web/tests/test_ui.js dictionary_web/tests/test_theme.js
 node --check dictionary_web/static/app.js
+node --check dictionary_web/static/theme.js
 ```
 
 The Lua suite checks SQLite persistence, duplicate handling, cache expiry,

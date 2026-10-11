@@ -69,7 +69,7 @@ test('real LuaJIT HTTP server, static UI, SQLite round trip and clean signals', 
   try {
     server = await start(database);
     const { url } = server;
-    for (const [route, type] of [['/', 'text/html'], ['/style.css', 'text/css'], ['/app.js', 'text/javascript']]) {
+    for (const [route, type] of [['/', 'text/html'], ['/style.css', 'text/css'], ['/app.js', 'text/javascript'], ['/theme.js', 'text/javascript']]) {
       const response = await fetch(url + route);
       assert.equal(response.status, 200); assert.ok(response.headers.get('content-type').startsWith(type));
       assert.ok((await response.text()).length > 100);

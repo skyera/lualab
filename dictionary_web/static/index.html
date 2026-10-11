@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="Your personal dictionary and vocabulary journal. Search, collect, and remember words.">
   <title>Wordbook — A little learning, every day</title>
+  <script src="/theme.js"></script>
   <link rel="stylesheet" href="/style.css">
   <script src="/app.js" defer></script>
 </head>
@@ -17,13 +18,25 @@
       <button class="nav-button" data-view="review">Review <span class="due-badge" id="due-count">0</span></button>
       <button class="nav-button" data-view="proverbs">Proverbs <span id="proverbs-count">0</span></button>
     </nav>
-    <div class="voice-picker">
-      <label for="voice-select" class="sr-only">Pronunciation voice</label>
-      <select id="voice-select" class="voice-select" title="Select pronunciation voice">
-        <option value="auto">Voice: Auto</option>
-        <option value="female">Voice: Female (女声)</option>
-        <option value="male">Voice: Male (男声)</option>
-      </select>
+    <div class="header-controls">
+      <div class="theme-picker">
+        <label for="theme-select" class="sr-only">Color theme</label>
+        <select id="theme-select" class="voice-select" title="Select color theme">
+          <option value="paper">Theme: Paper</option>
+          <option value="midnight">Theme: Midnight</option>
+          <option value="sepia">Theme: Sepia</option>
+          <option value="ocean">Theme: Ocean</option>
+          <option value="system">Theme: System</option>
+        </select>
+      </div>
+      <div class="voice-picker">
+        <label for="voice-select" class="sr-only">Pronunciation voice</label>
+        <select id="voice-select" class="voice-select" title="Select pronunciation voice">
+          <option value="auto">Voice: Auto</option>
+          <option value="female">Voice: Female (女声)</option>
+          <option value="male">Voice: Male (男声)</option>
+        </select>
+      </div>
     </div>
     <span class="header-note">A little learning, every day.</span>
   </header>
@@ -42,7 +55,7 @@
       <div class="daily-heading"><h2>A moment of discovery</h2><span id="daily-date"></span></div>
       <div class="daily-grid">
         <article class="daily-word"><p class="eyebrow" id="daily-label">01 / WORD OF THE DAY</p><h3 id="daily-word">…</h3><p id="daily-meaning"></p><p class="example"><span id="daily-example"></span><button id="daily-example-audio" class="example-audio-btn" style="margin-left:10px" hidden type="button" aria-label="Listen to example sentence">🔊 Listen</button></p><div style="display:flex;align-items:center;justify-content:space-between;margin-top:20px;flex-wrap:wrap;gap:8px"><button class="text-button" id="daily-lookup">Explore this word <span aria-hidden="true">↗</span></button><button id="daily-word-next" class="proverb-audio-btn" type="button" aria-label="Discover another word">Discover another ↻</button></div><span class="card-watermark" aria-hidden="true">Aa</span></article>
-        <article class="daily-proverb"><p class="eyebrow" id="daily-label-proverb">02 / A LITTLE WISDOM</p><blockquote id="daily-proverb">…</blockquote><p class="chinese" id="daily-chinese"></p><p id="daily-explanation"></p><div style="display:flex;align-items:center;justify-content:space-between;margin-top:23px;flex-wrap:wrap;gap:8px"><div style="display:flex;align-items:center;gap:6px"><label for="daily-proverb-source" class="proverb-label" style="margin-top:0">SOURCE:</label><select id="daily-proverb-source" class="voice-select" style="font-size:11px;padding:2px 8px;border-radius:12px;background:none;border-color:#dcd4c5;color:#827665" title="Wisdom source"><option value="all">Random (All)</option><option value="iciba">Iciba (Bilingual)</option><option value="zenquotes">ZenQuotes</option><option value="wikiquote">Wikiquote</option><option value="fortune">Linux Fortune</option><option value="dummyjson">Famous Quotes</option><option value="favqs">FavQs</option></select></div><div><button id="daily-proverb-audio" class="proverb-audio-btn" type="button" aria-label="Listen to proverb pronunciation">🔊 Listen</button><button id="daily-proverb-next" class="proverb-audio-btn" type="button" aria-label="Discover another proverb">Discover another ↻</button></div></div></article>
+        <article class="daily-proverb"><p class="eyebrow" id="daily-label-proverb">02 / A LITTLE WISDOM</p><blockquote id="daily-proverb">…</blockquote><p class="chinese" id="daily-chinese"></p><p id="daily-explanation"></p><div style="display:flex;align-items:center;justify-content:space-between;margin-top:23px;flex-wrap:wrap;gap:8px"><div style="display:flex;align-items:center;gap:6px"><label for="daily-proverb-source" class="proverb-label" style="margin-top:0">SOURCE:</label><select id="daily-proverb-source" class="voice-select proverb-source" title="Wisdom source"><option value="all">Random (All)</option><option value="iciba">Iciba (Bilingual)</option><option value="zenquotes">ZenQuotes</option><option value="wikiquote">Wikiquote</option><option value="fortune">Linux Fortune</option><option value="dummyjson">Famous Quotes</option><option value="favqs">FavQs</option></select></div><div><button id="daily-proverb-audio" class="proverb-audio-btn" type="button" aria-label="Listen to proverb pronunciation">🔊 Listen</button><button id="daily-proverb-next" class="proverb-audio-btn" type="button" aria-label="Discover another proverb">Discover another ↻</button></div></div></article>
       </div>
     </section>
     <section id="words-view" class="view" hidden>
