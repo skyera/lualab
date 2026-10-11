@@ -174,6 +174,48 @@ Requests do not execute a shell or put credentials in command arguments.
 - Pronunciation playback uses browser speech synthesis when available; voice
   availability depends on the browser and operating system.
 
+## Collections, tags, and review sessions
+
+In **My words**, use **Organize** to assign a collection and up to eight tags.
+Names allow up to 64 characters; tags are entered with commas between them.
+Collection and tag filters also appear in Review. Organization follows a word
+across its online sources and shared TUI entry. It is stored in Wordbook; the
+TUI's existing notes and review schedule remain shared as before.
+
+Review starts with up to 20 due cards. Choose a collection, tag, mode, and a
+limit of 1–200 cards, then select **Start session**. **Due** includes new and
+previously reviewed words whose scheduled time has arrived. **New only** means
+never reviewed; **Overdue** means previously reviewed and due; **All saved words**
+also permits practice before the scheduled date. Cards use the existing web or
+shared SM-2 scheduler and appear oldest-due first. Empty filters show all words.
+
+## Backup and export
+
+**Download backup** saves a version 1 JSON file with the web journal, notes,
+review state, saved proverbs, collections, and tags. When local integration is
+enabled, it also includes the saved TUI deck, SM-2 states, review history, and
+study plan. Bulk imported dictionary definitions, API credentials, and browser
+preferences are excluded. Youdao provider definitions are not exported.
+
+**Restore backup…** validates the selected JSON file and asks for confirmation.
+It replaces the web journal and organization; a backup containing shared data
+also replaces the saved TUI deck and study plan. Imported dictionary definitions
+remain. Download the current backup first if you want to retain the old journal.
+Shared backups require local dictionary integration on the destination. Files
+are limited to 16 MB; larger journals can use the stopped-database backup method
+above. Validation and SQL failures leave existing saved data unchanged. Reload
+other open browser tabs after restoring.
+
+**Export CSV** downloads a readable word list with definitions, notes, tags,
+collections, and review dates. Cells are quoted; formula-like text is prefixed
+with an apostrophe for spreadsheet safety. CSV is not a restorable backup.
+
+API: `GET /api/export?format=json|csv`, `POST /api/restore` with the JSON backup,
+`POST /api/organize` with `{id, collection, folder, tags}`, and
+`GET /api/session?folder=Books&tag=travel&mode=due&limit=20`. The `collection`
+mutation field still identifies `web` or `tui`; `folder` is the user collection.
+Ordinary requests retain the 8 KB limit; only restore accepts up to 16 MB.
+
 ## Verify
 
 Run from the repository root. Node.js is needed only for the HTTP/scoping tests:
@@ -181,6 +223,7 @@ Run from the repository root. Node.js is needed only for the HTTP/scoping tests:
 ```sh
 luajit dictionary_web/tests/test_app.lua
 luajit dictionary_web/tests/test_shared.lua
+luajit dictionary_web/tests/test_learning.lua
 luajit test_ffi_dict.lua
 luajit test_download_dict.lua
 node --test dictionary_web/tests/test_http.js dictionary_web/tests/test_ui.js dictionary_web/tests/test_theme.js

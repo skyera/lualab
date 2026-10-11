@@ -123,6 +123,10 @@ function M.route(db, method, path, params, payload)
         if path == '/api/daily' then
             return db.daily and db:daily() or content.daily(), 200
         end
+        if path == '/api/session' then
+            local result, err = db:session(params)
+            return result or { error = err }, result and 200 or 400
+        end
         if path == '/api/words' then
             return {words = db:words(params.q, params.due == '1')}, 200
         end
@@ -136,11 +140,15 @@ function M.route(db, method, path, params, payload)
         if type(payload) ~= 'table' then
             return {error = 'Expected a JSON object.'}, 400
         end
+        if path == '/api/restore' then
+            local result, err = db:restore(payload)
+            return result or { error = err }, result and 200 or 400
+        end
         if path == '/api/search' then
             local result, err = M.search(db, payload)
             return result or {error = err}, result and 200 or 400
         end
-        if path == '/api/review' or path == '/api/note' or path == '/api/delete' then
+        if path == '/api/review' or path == '/api/note' or path == '/api/delete' or path == '/api/organize' then
             local collection = payload.collection or 'web'
             if collection ~= 'web' and collection ~= 'tui' then
                 return {error = 'Invalid word collection.'}, 400
@@ -149,7 +157,11 @@ function M.route(db, method, path, params, payload)
                 return {error = 'Invalid word ID.'}, 400
             end
             local result, err
-            if path == '/api/delete' then
+            if path == '/api/organize' then
+                local status
+                result, err, status = db:organize(payload.id, collection, payload.folder, payload.tags)
+                return result or { error = err }, result and 200 or (status or 400)
+            elseif path == '/api/delete' then
                 result, err = db:delete(payload.id, collection)
             elseif path == '/api/review' then
                 if payload.grade ~= nil and (type(payload.grade) ~= 'number' or payload.grade % 1 ~= 0 or payload.grade < 0 or payload.grade > 3) then

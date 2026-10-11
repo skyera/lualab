@@ -23,3 +23,9 @@ CREATE TABLE IF NOT EXISTS proverbs (
 	audio_url TEXT,
 	created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS word_organization (
+    word TEXT PRIMARY KEY,
+    folder TEXT NOT NULL DEFAULT '',
+    tags TEXT NOT NULL DEFAULT '[]'
+);

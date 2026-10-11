@@ -85,7 +85,8 @@ function M.parse_headers(raw)
         return nil, 'Invalid content length.'
     end
     length = tonumber(length)
-    if length > 8192 then
+    local maximum = target:match('^([^?]*)') == '/api/restore' and 16 * 1024 * 1024 or 8192
+    if length > maximum then
         return nil, 'Request body is too large.', 413
     end
     return {method = method, target = target, version = version, headers = headers, length = length}
@@ -143,15 +144,19 @@ function M.target(target)
     return path, params
 end
 
-function M.respond(fd, status, body, content_type, head)
+function M.respond(fd, status, body, content_type, head, extra_headers)
     local frame = 'HTTP/1.1 ' .. status .. ' ' .. (reasons[status] or 'Error') .. '\r\n'
         .. 'Content-Type: ' .. (content_type or 'application/json; charset=utf-8') .. '\r\n'
         .. 'Content-Length: ' .. #body .. '\r\nConnection: close\r\nCache-Control: no-store\r\n'
         .. 'X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n'
         .. "Content-Security-Policy: default-src 'self'; style-src 'self'; script-src 'self'; "
         .. "media-src 'self' https://audio.dict.cn https://dict.youdao.com https://iciba.com https://*.iciba.com; "
-        .. "frame-ancestors 'none'\r\n\r\n"
-        .. (head and '' or body)
+        .. "frame-ancestors 'none'\r\n"
+    for key, value in pairs(extra_headers or {}) do
+        assert(key:match('^[%w%-]+$') and not value:find('[\r\n]'), 'Invalid response header')
+        frame = frame .. key .. ': ' .. value .. '\r\n'
+    end
+    frame = frame .. '\r\n' .. (head and '' or body)
     local offset, deadline = 0, os.time() + 5
     local pointer = ffi.cast('const char *', frame)
     while offset < #frame and os.time() <= deadline do
@@ -212,8 +217,8 @@ function M.serve(port, handler, ready, host)
                                 M.respond(client, status, json.encode({error = message}))
                                 return
                             end
-                            local body, code, mime = handler(request, port)
-                            M.respond(client, code, body, mime, request.method == 'HEAD')
+                            local body, code, mime, headers = handler(request, port)
+                            M.respond(client, code, body, mime, request.method == 'HEAD', headers)
                         end)
                         if not served then
                             io.stderr:write('Request failed: ' .. tostring(failure) .. '\n')

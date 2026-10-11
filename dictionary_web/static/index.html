@@ -60,11 +60,32 @@
     </section>
     <section id="words-view" class="view" hidden>
       <div class="page-heading"><p class="eyebrow">COLLECTED WITH CURIOSITY</p><h1>Your word journal.</h1><p>Small discoveries, remembered for the long run.</p></div>
+      <div class="journal-tools">
+        <label>Collection <select id="word-folder" class="voice-select"><option value="">All collections</option></select></label>
+        <label>Tag <select id="word-tag" class="voice-select"><option value="">All tags</option></select></label>
+        <a class="secondary" href="/api/export?format=json">Download backup</a>
+        <a class="secondary" href="/api/export?format=csv">Export CSV</a>
+        <button id="restore-button" class="secondary" type="button">Restore backup…</button>
+        <input id="restore-file" type="file" accept=".json,application/json" hidden>
+      </div>
+      <p id="backup-status" role="status" class="tool-status"></p>
       <label class="filter-label" for="word-filter">Find a saved word</label><input id="word-filter" class="filter" placeholder="Filter your words…" type="search">
       <p id="words-status" role="status"></p><div id="word-list" class="word-list"></div>
     </section>
     <section id="review-view" class="view" hidden>
       <div class="page-heading"><p class="eyebrow">MAKE IT SECOND NATURE</p><h1>A little practice.</h1><p>Recall the meaning, then turn the card to check yourself.</p></div>
+      <form id="review-options" class="journal-tools">
+        <label>Collection <select id="review-folder" class="voice-select"><option value="">All collections</option></select></label>
+        <label>Tag <select id="review-tag" class="voice-select"><option value="">All tags</option></select></label>
+        <label>Cards <select id="review-mode" class="voice-select">
+          <option value="due">Due: new + overdue</option>
+          <option value="new">New only</option>
+          <option value="overdue">Overdue: reviewed words</option>
+          <option value="all">All saved words</option>
+        </select></label>
+        <label>Limit <input id="review-limit" class="session-limit" type="number" min="1" max="200" value="20" required></label>
+        <button id="review-start" class="primary" type="submit">Start session</button>
+      </form>
       <p id="review-progress" role="status"></p><div id="review-card" class="review-card"></div>
     </section>
     <section id="proverbs-view" class="view" hidden>

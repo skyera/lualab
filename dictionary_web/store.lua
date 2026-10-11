@@ -3,6 +3,8 @@ local DB = require('db')
 local dictionary = require('ffi_dict')
 local content = require('content')
 local net = require('net')
+local learning = require('learning')
+local backup = require('backup')
 local Store = {}
 Store.__index = Store
 
@@ -270,7 +272,7 @@ function Store:words(query, due, stamp)
         if a.last_seen ~= b.last_seen then return a.last_seen > b.last_seen end
         return a.word < b.word
     end)
-    return rows
+    return learning.decorate(self, rows)
 end
 
 function Store:suggest(prefix, limit)
@@ -387,5 +389,24 @@ function Store:delete(id, collection)
     end
     if not ok then error(result) end
     return result, not result and 'Word not found.' or nil
+end
+function Store:organize(id, collection, folder, tags)
+    return learning.organize(self, id, collection, folder, tags)
+end
+
+function Store:session(params, stamp)
+    return learning.session(self, params, stamp)
+end
+
+function Store:export_backup()
+    return backup.export(self)
+end
+
+function Store:export_csv()
+    return backup.csv(self)
+end
+
+function Store:restore(payload)
+    return backup.restore(self, payload)
 end
 return Store

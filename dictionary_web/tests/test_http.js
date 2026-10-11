@@ -260,6 +260,70 @@ test('both launchers automatically invoke setup and expose manual/disabled setup
   }
 });
 
+test('journal organization, filtered sessions and downloadable backup/restore work over HTTP', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wordbook-learning-http-'));
+  let server;
+  try {
+    server = await start(path.join(directory, 'web.db'));
+    const { url } = server;
+    const rows = [];
+    for (const word of ['first', 'second', 'third']) {
+      const row = (await post(url, '/api/search', { word, source: 'youdao' })).data;
+      rows.push(row);
+      assert.equal((await post(url, '/api/note', { id: row.id, note: 'note'.repeat(900) })).status, 200);
+      assert.equal((await post(url, '/api/organize', { id: row.id, collection: 'web',
+        folder: word === 'third' ? 'Work' : 'Books', tags: [word === 'third' ? 'verbs' : 'travel'] })).status, 200);
+    }
+    assert.equal((await post(url, '/api/organize', { id: rows[0].id, folder: 'Bad', tags: { bad: true } })).status, 400);
+    assert.equal((await post(url, '/api/organize', { id: 99999, folder: '', tags: [] })).status, 404);
+    assert.equal((await post(url, '/api/review', { id: rows[0].id, remembered: true })).status, 200);
+    let response = await fetch(url + '/api/session?mode=new&folder=Books&tag=travel&limit=1');
+    const session = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(session.words.length, 1); assert.equal(session.words[0].word, 'second');
+    assert.equal(session.words[0].folder, 'Books'); assert.deepEqual(session.words[0].tags, ['travel']);
+    assert.equal((await fetch(url + '/api/session?limit=201')).status, 400);
+    const all = await (await fetch(url + '/api/session?mode=all&limit=1')).json();
+    assert.equal(all.total_matching, 3); assert.equal(all.words.length, 1);
+
+    response = await fetch(url + '/api/export?format=json');
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-disposition'), /attachment; filename="wordbook-.*\.json"/);
+    const exported = await response.json();
+    assert.ok(Buffer.byteLength(JSON.stringify(exported)) > 8192);
+    assert.equal(exported.web.words.length, 3);
+    assert.equal(exported.web.word_organization.length, 3);
+    const csvResponse = await fetch(url + '/api/export?format=csv');
+    assert.equal(csvResponse.status, 200); assert.match(csvResponse.headers.get('content-type'), /text\/csv/);
+    assert.match(await csvResponse.text(), /"Books","travel"/);
+    assert.equal((await fetch(url + '/api/export?format=invalid')).status, 400);
+    assert.equal((await post(url, '/api/export', {})).status, 405);
+    const head = await fetch(url + '/api/export', { method: 'HEAD' });
+    assert.equal(head.status, 200); assert.equal(await head.text(), '');
+
+    assert.equal((await post(url, '/api/delete', { id: rows[1].id })).status, 200);
+    assert.equal((await post(url, '/api/note', { id: rows[0].id, note: 'changed' })).status, 200);
+    const malformed = structuredClone(exported); malformed.web.words[0].due_at = -1;
+    assert.equal((await post(url, '/api/restore', malformed)).status, 400);
+    let words = (await (await fetch(url + '/api/words')).json()).words;
+    assert.equal(words.length, 2); assert.equal(words.find(word => word.id === rows[0].id).note, 'changed');
+    assert.equal((await post(url, '/api/restore', exported, { Origin: 'https://evil.example' })).status, 403);
+    const restored = await post(url, '/api/restore', exported);
+    assert.equal(restored.status, 200); assert.equal(restored.data.web_words, 3);
+    words = (await (await fetch(url + '/api/words')).json()).words;
+    assert.equal(words.length, 3); assert.equal(words.find(word => word.id === rows[0].id).note, 'note'.repeat(900));
+    const host = new URL(url).host;
+    assert.match(await raw(url, `POST /api/restore HTTP/1.1\r\nHost: ${host}\r\nContent-Length: 16777217\r\n\r\n`), /^HTTP\/1.1 413/);
+    await stop(server); server = null;
+    server = await start(path.join(directory, 'web.db'));
+    words = (await (await fetch(server.url + '/api/words')).json()).words;
+    assert.equal(words.length, 3); assert.ok(words.some(word => word.folder === 'Books'));
+  } finally {
+    if (server && server.child.exitCode === null) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('All-source Fortune executes its default command runner', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wordbook-fortune-'));
   try {
@@ -281,7 +345,7 @@ test('All-source Fortune executes its default command runner', () => {
 test('LuaJIT bytecode contains no undeclared globals in every new Lua module', () => {
   const allowed = new Set(['require', 'assert', 'error', 'setmetatable', 'tonumber', 'tostring', 'type', 'ipairs', 'pairs', 'pcall', 'xpcall', 'print', 'arg', 'package', 'os', 'io', 'string', 'table', 'math', 'debug']);
   const files = fs.readdirSync(root).filter(file => file.endsWith('.lua')).map(file => path.join(root, file));
-  files.push(path.join(root, 'tests', 'test_app.lua'), path.join(root, 'tests', 'test_shared.lua'));
+  files.push(path.join(root, 'tests', 'test_app.lua'), path.join(root, 'tests', 'test_shared.lua'), path.join(root, 'tests', 'test_learning.lua'));
   files.push(path.join(root, '..', 'download_dict.lua'), path.join(root, '..', 'test_download_dict.lua'), path.join(root, '..', 'ffi_dict.lua'));
   for (const file of files) {
     const result = spawnSync('luajit', ['-bl', file], { encoding: 'utf8' });

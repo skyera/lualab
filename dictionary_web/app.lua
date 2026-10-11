@@ -89,6 +89,20 @@ local function handler(request, actual_port)
     if request.method ~= 'GET' and request.method ~= 'POST' and request.method ~= 'HEAD' then
         return reply({error = 'Method not allowed.'}, 405)
     end
+    if path == '/api/export' then
+        if request.method ~= 'GET' and request.method ~= 'HEAD' then
+            return reply({ error = 'Method not allowed.' }, 405)
+        end
+        local format = params.format or 'json'
+        if format ~= 'json' and format ~= 'csv' then return reply({ error = 'Invalid export format.' }, 400) end
+        local data = format == 'json' and json.encode(db:export_backup()) or db:export_csv()
+        if format == 'json' and #data > 16 * 1024 * 1024 then
+            return reply({ error = 'JSON backups are limited to 16 MB. Back up the database files directly.' }, 413)
+        end
+        local filename = 'wordbook-' .. os.date('!%Y-%m-%d') .. '.' .. format
+        return data, 200, format == 'csv' and 'text/csv; charset=utf-8' or 'application/json; charset=utf-8',
+            { ['Content-Disposition'] = 'attachment; filename="' .. filename .. '"' }
+    end
     if path:sub(1, 5) == '/api/' then
         local payload
         if request.method == 'POST' then

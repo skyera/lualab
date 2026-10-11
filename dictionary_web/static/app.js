@@ -1,6 +1,6 @@
 'use strict';
 const $ = (id) => document.getElementById(id);
-const state = { view: 'search', busy: false, daily: null, words: [], queue: [], proverbs: [], reviewed: 0, total: 0, revealed: false, grading: false, reviewLoading: false, reviewRequest: 0 };
+const state = { view: 'search', busy: false, daily: null, words: [], queue: [], proverbs: [], reviewed: 0, total: 0, revealed: false, grading: false, reviewLoading: false, reviewRequest: 0, restoring: false, sessionMatching: 0 };
 const sourceNames = { all: 'All dictionaries', local: 'Local dictionary', 'dict.cn': 'dict.cn · 海词', youdao: 'Youdao · 有道', iciba: 'Iciba · 词霸', 'merriam-webster': 'Merriam-Webster (archived)' };
 const dictionarySources = ['iciba', 'local', 'dict.cn', 'youdao'];
 function element(tag, text, className) {
@@ -206,7 +206,7 @@ async function searchAll(word) {
   $('search-status').textContent = `${found} of ${dictionarySources.length} dictionaries returned definitions. ${saved ? 'Successful lookups saved; failed lookups were not added.' : 'No new history saved.'}`;
 }
 async function searchWord(word, source) {
-  if (state.busy || state.grading) return;
+  if (state.busy || state.grading || state.restoring) return;
   source = source || selectedSource();
   if (source !== 'all' && !dictionarySources.includes(source)) source = 'all';
   state.busy = true;
@@ -245,6 +245,7 @@ async function refreshCounts() {
   $('word-count').textContent = String(data.words.length);
   $('due-count').textContent = String(data.words.filter(word => word.due_at <= Date.now() / 1000).length);
   if ($('proverbs-count')) $('proverbs-count').textContent = String(state.proverbs.length);
+  refreshOrganizationFilters();
   if (state.view === 'words') renderWords();
   if (state.view === 'proverbs') renderProverbs();
 }
@@ -321,6 +322,7 @@ function empty(title, subtitle, action) {
   return container;
 }
 async function deleteWord(word, trigger) {
+  if (state.restoring) return;
   const scope = word.collection === 'tui'
     ? 'This removes the word, notes, review history, and matching web history from both the web app and TUI. Imported dictionary definitions remain.'
     : 'This removes this saved entry, its notes, and review progress.';
@@ -341,32 +343,130 @@ async function deleteWord(word, trigger) {
   } catch (error) { report(error); }
   finally { trigger.disabled = false; }
 }
+function organizationKey(value) {
+  // Match SQLite/Lua's ASCII folding while preserving non-ASCII label identity.
+  return value.replace(/[A-Z]/g, character => character.toLowerCase());
+}
+function refreshOrganizationFilters() {
+  const folders = new Map(), tags = new Map();
+  for (const word of state.words) {
+    if (word.folder) folders.set(organizationKey(word.folder), word.folder);
+    for (const tag of word.tags || []) tags.set(organizationKey(tag), tag);
+  }
+  for (const [ids, values, label] of [
+    [['word-folder', 'review-folder'], folders, 'All collections'],
+    [['word-tag', 'review-tag'], tags, 'All tags']
+  ]) {
+    const names = [...values.values()].sort((a, b) => a.localeCompare(b));
+    for (const id of ids) {
+      const select = $(id);
+      if (!select) continue;
+      const selected = select.value;
+      const options = [element('option', label)]; options[0].value = '';
+      for (const name of names) { const option = element('option', name); option.value = name; options.push(option); }
+      select.replaceChildren(...options);
+      select.value = names.find(name => organizationKey(name) === organizationKey(selected)) || '';
+    }
+  }
+}
+function organizationForm(word) {
+  const form = element('form', undefined, 'organization-form');
+  const folderLabel = element('label', 'Collection');
+  const folder = element('input'); folder.value = word.folder || ''; folder.maxLength = 64;
+  folder.placeholder = 'Books, Exam, Work…'; folderLabel.append(folder);
+  const tagLabel = element('label', 'Tags, separated by commas');
+  const tags = element('input'); tags.value = (word.tags || []).join(', '); tags.maxLength = 526;
+  tags.placeholder = 'travel, verbs'; tagLabel.append(tags);
+  const status = element('span', '', 'tool-status'); status.setAttribute('role', 'status');
+  const save = element('button', 'Save organization', 'primary'); save.type = 'submit';
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (state.restoring) return;
+    save.disabled = true; status.textContent = 'Saving…';
+    try {
+      await api('/api/organize', { id: word.id, collection: word.collection, folder: folder.value,
+        tags: tags.value.split(',').map(tag => tag.trim()).filter(Boolean) });
+      await refreshCounts();
+    } catch (error) { status.textContent = error.message; }
+    finally { save.disabled = false; }
+  });
+  form.append(folderLabel, tagLabel, save, status);
+  return form;
+}
+function reviewSessionUrl() {
+  const params = new URLSearchParams({ mode: $('review-mode')?.value || 'due', limit: $('review-limit')?.value || '20' });
+  if ($('review-folder')?.value) params.set('folder', $('review-folder').value);
+  if ($('review-tag')?.value) params.set('tag', $('review-tag').value);
+  return '/api/session?' + params.toString();
+}
+function lockSessionControls(locked) {
+  $('review-options')?.querySelectorAll('input,select,button').forEach(node => { node.disabled = locked; });
+}
+async function restoreBackup(file) {
+  if (!file || state.grading || state.reviewLoading || state.restoring) return;
+  const status = $('backup-status');
+  if (file.size > 16 * 1024 * 1024) { status.textContent = 'Choose a backup smaller than 16 MB.'; return; }
+  let backup;
+  try { backup = JSON.parse(await file.text()); }
+  catch (_) { status.textContent = 'Choose a valid JSON backup.'; return; }
+  if (state.grading || state.reviewLoading || state.restoring) return;
+  if (backup?.format !== 'wordbook' || backup?.version !== 1) {
+    status.textContent = 'Choose a Wordbook version 1 JSON backup.'; return;
+  }
+  if (!window.confirm('Restore this backup? This replaces your saved journal, notes, collections, and review progress. '
+      + (backup.shared ? 'It also replaces the saved TUI deck and study plan. ' : '')
+      + 'Imported dictionary definitions stay available. Download a backup first if you want to keep the current data.')) return;
+  state.restoring = true;
+  const button = $('restore-button'); button.disabled = true;
+  status.textContent = 'Restoring…';
+  try {
+    const result = await api('/api/restore', backup);
+    state.reviewRequest++;
+    state.queue = []; state.reviewed = 0; state.total = 0; state.sessionMatching = 0; state.revealed = false;
+    $('result').replaceChildren(); $('result').hidden = true;
+    await refreshCounts();
+    renderReview();
+    status.textContent = `Restored ${result.web_words} journal entries and ${result.shared_words} shared words.`;
+  } catch (error) { status.textContent = error.message; }
+  finally { state.restoring = false; button.disabled = false; }
+}
 function renderWords() {
   const filter = $('word-filter').value.trim().toLocaleLowerCase();
-  const words = state.words.filter(word => word.word.toLocaleLowerCase().includes(filter));
+  const folder = organizationKey($('word-folder')?.value || '');
+  const tag = organizationKey($('word-tag')?.value || '');
+  const words = state.words.filter(word => word.word.toLocaleLowerCase().includes(filter)
+    && (!folder || organizationKey(word.folder || '') === folder)
+    && (!tag || (word.tags || []).some(value => organizationKey(value) === tag)));
   $('words-status').textContent = `${words.length} saved entr${words.length === 1 ? 'y' : 'ies'}`;
   const fragment = document.createDocumentFragment();
   for (const word of words) {
-    const row = element('article', undefined, 'word-row');
+    const row = element('article', undefined, 'word-row organizable-row');
     const copy = element('div');
     copy.append(element('h2', word.word), element('p', word.note || word.entry?.definitions?.[0] || 'Add your own study note when you look up this word.'));
     const history = word.collection === 'tui' ? 'Shared with TUI' : `${word.lookup_count} lookup${word.lookup_count === 1 ? '' : 's'}`;
     copy.append(element('p', `${sourceNames[word.source]} · ${history} · Last seen ${formatTime(word.last_seen)} · ${word.due_at <= Date.now() / 1000 ? 'Ready for review' : 'Next review ' + formatTime(word.due_at)}`, 'word-meta'));
     const actions = element('div', undefined, 'word-actions');
+    const badges = element('div', undefined, 'word-tags');
+    if (word.folder) badges.append(element('span', 'Collection: ' + word.folder, 'word-tag'));
+    for (const tag of word.tags || []) badges.append(element('span', tag, 'word-tag'));
+    copy.append(badges);
+    const editor = organizationForm(word); editor.hidden = true;
+    const organize = button('Organize', () => { editor.hidden = !editor.hidden; });
     const remove = button('Delete', () => deleteWord(word, remove), 'secondary delete-button');
     remove.setAttribute('aria-label', `Delete ${word.word}`);
-    actions.append(button('Look up ↗', () => searchWord(word.word)), remove);
-    row.append(copy, actions);
+    actions.append(button('Look up ↗', () => searchWord(word.word)), organize, remove);
+    row.append(copy, actions, editor);
     fragment.append(row);
   }
   if (!words.length) fragment.append(empty(filter ? 'No matching words.' : 'Your first word is waiting.', filter ? 'Try a different filter.' : 'Look up something new. It will appear here automatically.', !filter));
   $('word-list').replaceChildren(fragment);
 }
 async function gradeWord(word, remembered, gradeValue) {
-  if (state.grading || state.reviewLoading || state.view !== 'review') return;
+  if (state.grading || state.reviewLoading || state.restoring || state.view !== 'review') return;
   const sameCard = item => item.id === word.id && (item.collection || 'web') === (word.collection || 'web');
   if (!state.queue.length || !sameCard(state.queue[0])) return;
   state.grading = true;
+  lockSessionControls(true);
   const actions = document.querySelector('.review-actions');
   if (actions) actions.querySelectorAll('button').forEach(node => { node.disabled = true; });
   try {
@@ -382,6 +482,7 @@ async function gradeWord(word, remembered, gradeValue) {
     report(error);
   } finally {
     state.grading = false;
+    lockSessionControls(false);
     if (actions) actions.querySelectorAll('button').forEach(node => { node.disabled = false; });
   }
 }
@@ -393,7 +494,8 @@ function renderReview() {
     target.append(element('p', 'Preparing your words…', 'study-answer'));
     return;
   }
-  $('review-progress').textContent = `${state.reviewed} of ${state.total} reviewed this session`;
+  $('review-progress').textContent = `${state.reviewed} of ${state.total} reviewed this session`
+    + (state.sessionMatching > state.total ? ` · ${state.sessionMatching} matching words` : '');
   if (!state.queue.length) {
     target.append(empty(state.total ? 'A little wiser already.' : 'You’re all caught up.', state.total ? 'Your next reviews are scheduled. Come back for another small step.' : 'New words appear here as soon as you look them up.', true));
     return;
@@ -422,10 +524,11 @@ function renderReview() {
   target.append(element('p', `Shortcuts: [1–${grades.length}] grade · [Space] confirm · [P] pronounce`, 'review-shortcuts-hint'));
 }
 async function showView(view) {
-  if (state.grading) return;
+  if (state.grading || state.restoring) return;
   const reviewRequest = ++state.reviewRequest;
   state.view = view;
   state.reviewLoading = view === 'review';
+  lockSessionControls(state.reviewLoading);
   if (view !== 'search') hideSuggestions();
   $('app-message').textContent = '';
   for (const name of ['search', 'words', 'review', 'proverbs']) {
@@ -442,10 +545,11 @@ async function showView(view) {
     if (view === 'proverbs') { renderProverbs(); await refreshCounts(); }
     if (view === 'review') {
       renderReview();
-      const data = await api('/api/words?due=1');
+      const data = await api(reviewSessionUrl());
       if (state.view !== 'review' || reviewRequest !== state.reviewRequest) return;
       state.reviewLoading = false;
-      $('due-count').textContent = String(data.words.length);
+      lockSessionControls(false);
+      state.sessionMatching = data.total_matching ?? data.words.length;
       state.queue = data.words; state.reviewed = 0; state.total = data.words.length; state.revealed = false;
       renderReview();
     }
@@ -453,6 +557,7 @@ async function showView(view) {
     if (reviewRequest !== state.reviewRequest) return;
     report(error);
     state.reviewLoading = false;
+    lockSessionControls(false);
     if (view === 'review') renderReview();
   }
 }
@@ -631,6 +736,14 @@ $('search-form').addEventListener('submit', event => {
   searchWord($('query').value);
 });
 $('word-filter').addEventListener('input', renderWords);
+$('word-folder')?.addEventListener('change', renderWords);
+$('word-tag')?.addEventListener('change', renderWords);
+$('review-options')?.addEventListener('submit', event => { event.preventDefault(); showView('review'); });
+$('restore-button')?.addEventListener('click', () => $('restore-file').click());
+$('restore-file')?.addEventListener('change', async event => {
+  await restoreBackup(event.target.files[0]);
+  event.target.value = '';
+});
 $('daily-lookup').addEventListener('click', () => { if (state.daily) searchWord(state.daily.word.word); });
 $('daily-example-audio')?.addEventListener('click', () => {
   if (state.daily?.word?.example) {
