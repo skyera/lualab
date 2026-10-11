@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Leaf Wiki</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/markdown.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <button id="menu" aria-label="Toggle notebook tree" aria-expanded="false">☰</button>
+    <a class="brand" href="/">Leaf<span> Wiki</span></a>
+    <label class="search"><span class="sr-only">Search pages</span><input id="search" type="search" placeholder="Search pages…" autocomplete="off"><kbd>Ctrl K</kbd></label>
+    <button id="new-page" class="primary">+ Page</button>
+  </header>
+  <div class="workspace">
+    <aside id="sidebar">
+      <div class="sidebar-heading">YOUR NOTEBOOK <span id="page-count">0</span></div>
+      <nav id="tree" aria-label="Notebook pages"></nav>
+      <div class="sidebar-bottom"><button id="trash-list">Trash</button><p id="data-path"></p></div>
+    </aside>
+    <main>
+      <p id="message" role="alert"></p>
+      <section id="welcome">
+        <p class="eyebrow">A PLACE FOR YOUR IDEAS</p>
+        <h1>Start a small leaf.</h1>
+        <p>Write a note. Link a thought. Build your own notebook.</p>
+        <button id="first-page" class="primary">Create your first page</button>
+        <p class="welcome-help">Markdown files stay in your notebook folder.<br>Paste screenshots or drop images into the editor.</p>
+      </section>
+      <section id="page" hidden>
+        <p id="breadcrumb"></p>
+        <div class="page-heading"><h1 id="title"></h1><span id="save-status" role="status">Saved</span></div>
+        <div class="toolbar">
+          <div class="modes" aria-label="Editor layout"><button data-mode="edit">Edit</button><button data-mode="split" class="selected">Split</button><button data-mode="preview">Preview</button></div>
+          <button id="save">Save</button><button id="rename">Rename</button><button id="delete">Trash page</button>
+        </div>
+        <div id="conflict" hidden><p>Your draft is still in the editor. Copy it before loading the changed file.</p><button id="copy-draft">Copy draft</button><button id="reload-page">Load saved file…</button></div>
+        <div id="panes" class="split">
+          <div class="editor-pane"><label for="editor">MARKDOWN</label><textarea id="editor" spellcheck="true" placeholder="# A new thought…"></textarea><p class="editor-tip">Link with [[Page]] · Paste an image · Ctrl S to save</p></div>
+          <div class="preview-pane"><p class="pane-label">PREVIEW</p><article id="preview"></article></div>
+        </div>
+        <section class="backlinks"><h2>Linked from <span id="backlink-count">0</span></h2><div id="backlinks"></div></section>
+      </section>
+      <footer><span id="word-count">Your notebook, your files.</span><span>Markdown · Local notebook</span></footer>
+    </main>
+  </div>
+  <dialog id="prompt-dialog"><form id="prompt-form"><h2 id="prompt-title"></h2><label for="prompt-value">Page name <span class="hint">Use / for nested pages</span></label><input id="prompt-value" required maxlength="240"><p id="prompt-error" role="alert"></p><div class="dialog-actions"><button type="button" id="prompt-cancel">Cancel</button><button class="primary" type="submit">Continue</button></div></form></dialog>
+  <dialog id="trash-dialog"><h2>Trashed pages</h2><div id="trashed-pages"></div><button id="trash-close">Close</button></dialog>
+</body>
+</html>

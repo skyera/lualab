@@ -66,6 +66,7 @@ local reasons = {
     [404] = 'Not Found',
     [405] = 'Method Not Allowed',
     [408] = 'Request Timeout',
+    [409] = 'Conflict',
     [413] = 'Payload Too Large',
     [415] = 'Unsupported Media Type',
     [500] = 'Internal Server Error',
@@ -75,7 +76,7 @@ local function readable(fd, milliseconds)
     return coroutine.yield({ events = POLLIN, deadline = now_seconds() + milliseconds / 1000 }) ~= false
 end
 
-function M.parse_headers(raw)
+function M.parse_headers(raw, body_limits)
     local method, target, version = raw:match('^(%u+) ([^%s]+) (HTTP/1%.[01])\r\n')
     if not method or not target:match('^/') then
         return nil, 'Invalid request line.'
@@ -98,14 +99,16 @@ function M.parse_headers(raw)
         return nil, 'Invalid content length.'
     end
     length = tonumber(length)
-    local maximum = target:match('^([^?]*)') == '/api/restore' and 16 * 1024 * 1024 or 8192
+    local path = target:match('^([^?]*)')
+    local maximum = body_limits and body_limits[path]
+        or (path == '/api/restore' and 16 * 1024 * 1024 or 8192)
     if length > maximum then
         return nil, 'Request body is too large.', 413
     end
     return {method = method, target = target, version = version, headers = headers, length = length}
 end
 
-local function read_request(fd)
+local function read_request(fd, body_limits)
     local buffer, deadline = '', now_seconds() + 6
     local chunk = ffi.new('char[4096]')
     local header_end
@@ -123,7 +126,7 @@ local function read_request(fd)
             return nil, 'Request headers are too large.', 413
         end
     end
-    local request, err, status = M.parse_headers(buffer:sub(1, header_end + 3))
+    local request, err, status = M.parse_headers(buffer:sub(1, header_end + 3), body_limits)
     if not request then
         return nil, err, status or 400
     end
@@ -181,7 +184,7 @@ function M.respond(fd, status, body, content_type, head, extra_headers)
     return offset == #frame
 end
 
-function M.serve(port, handler, ready, host, workers)
+function M.serve(port, handler, ready, host, workers, options)
     assert(ffi.os == 'Linux', 'This HTTP server currently supports Linux.')
     host = host or '127.0.0.1'
     assert(host == '127.0.0.1' or host == '0.0.0.0', 'Host must be 127.0.0.1 or 0.0.0.0.')
@@ -221,7 +224,7 @@ function M.serve(port, handler, ready, host, workers)
             table.remove(clients, index)
         end
         local function serve_client(client)
-            local request, message, status = read_request(client.fd)
+            local request, message, status = read_request(client.fd, options and options.body_limits)
             if not request then M.respond(client.fd, status, json.encode({ error = message })); return end
             request.background = workers and function(run, timeout)
                 if client.cancelled then return nil, 'Request cancelled.' end

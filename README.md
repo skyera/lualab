@@ -8,6 +8,19 @@
 
 A collection of Lua embedding examples using LuaJIT and LuaBridge.
 
+## Leaf Wiki
+
+A local Markdown notebook with browser editing, wiki links, search, backlinks,
+autosave, and pasted images. Choose a notebook folder, including a locally
+available Google Drive folder:
+
+```sh
+luajit wiki_web.lua --data-dir "/path/to/Leaf Wiki" --save-config
+```
+
+Open **http://127.0.0.1:8770**. See [the Leaf Wiki guide](wiki_web/README.md)
+for dependencies, folder configuration, and verification commands.
+
 ## Prerequisites
 Ensure you have the following installed on your system:
 - `g++` (C++11 or later)

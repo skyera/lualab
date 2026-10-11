@@ -1,0 +1,170 @@
+// Execute the actual editor handlers and Markdown renderer with controlled responses.
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+class Node {
+  constructor(tag = 'div', text = '') {
+    this.tagName = tag.toUpperCase(); this.textContent = text; this.children = []; this.handlers = {};
+    this.value = ''; this.hidden = false; this.dataset = {}; this.className = ''; this.open = false;
+    const classes = new Set();
+    this.classList = { toggle(name, value) { const enabled = value ?? !classes.has(name); if (enabled) classes.add(name); else classes.delete(name); return enabled; }, remove: name => classes.delete(name) };
+  }
+  append(...nodes) { this.children.push(...nodes); }
+  replaceChildren(...nodes) { this.children = nodes; this.textContent = ''; }
+  addEventListener(name, run) { this.handlers[name] = run; }
+  setAttribute() {}
+  focus() { this.focused = true; }
+  select() {}
+  scrollIntoView() {}
+  showModal() { this.open = true; }
+  close() { this.open = false; }
+  setRangeText(text, start, end) { this.value = this.value.slice(0, start) + text + this.value.slice(end); this.selectionStart = this.selectionEnd = start + text.length; }
+  querySelectorAll(tag) { return this.children.flatMap(n => [...(n.tagName?.toLowerCase() === tag ? [n] : []), ...(n.querySelectorAll?.(tag) || [])]); }
+  querySelector() { return this.querySelectorAll('button')[0] || new Node('button'); }
+}
+const texts = node => [node.textContent, ...node.children.map(texts)].join('');
+const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+function harness() {
+  const nodes = new Map(), events = {}, stored = new Map(); let serial = 0;
+  const timers = new Map();
+  const get = id => { if (!nodes.has(id)) nodes.set(id, new Node()); return nodes.get(id); };
+  const context = { URLSearchParams, TextEncoder, console, innerWidth: 1200,
+    setTimeout: fn => { timers.set(++serial, fn); return serial; }, clearTimeout: id => timers.delete(id),
+    document: { getElementById: get, createElement: tag => new Node(tag), createTextNode: text => new Node('#text', text),
+      createDocumentFragment: () => new Node('fragment'), querySelectorAll: () => [], querySelector: () => get('workspace') },
+    window: { addEventListener: (name, fn) => { events[name] = fn; } },
+    localStorage: { getItem: key => stored.get(key), setItem: (key, value) => stored.set(key, value), removeItem: key => stored.delete(key) },
+    history: { replaceState() {} }, location: { hash: '', pathname: '/' }, navigator: { clipboard: { writeText: async () => {} } }, confirm: () => true,
+  };
+  vm.createContext(context);
+  for (const file of ['markdown.js', 'app.js']) {
+    let source = fs.readFileSync(path.join(__dirname, '../static', file), 'utf8');
+    if (file === 'app.js') source = source.slice(0, source.lastIndexOf('start();'));
+    vm.runInContext(source, context);
+  }
+  const state = vm.runInContext('state', context), markdown = vm.runInContext('WikiMarkdown', context);
+  state.root = '/notebook'; state.page = { id: 'Home', title: 'Home', content: 'Initial', revision: 'r1' };
+  state.pages = [state.page, { id: 'Other', title: 'Other', revision: 'r2' }]; get('editor').value = 'Initial';
+  context.refresh = async () => {};
+  return { context, state, get, events, stored, markdown, timers };
+}
+test('safe preview renders empty, Unicode, code, tasks, links, images and hostile markup', () => {
+  const { markdown } = harness();
+  const pages = new Set(['Home', 'Other']); const navigation = [];
+  const source = '# 学习\n<script>alert(1)</script>\n\n- [ ] A task\n- [x] Done\n\n[[Other|Go]] [[Missing]]\n'
+    + '![image](Home.attachments/test.png)\n[evil](javascript:alert) **bold** *italic* `[[Literal]]`\n\n````js\n[[Code]]\n```\n[[Still code]]\n````';
+  const frame = markdown.render(source, 'Home', pages, (...args) => navigation.push(args));
+  assert.equal(frame.querySelectorAll('script').length, 0);
+  assert.match(texts(frame), /<script>alert\(1\)<\/script>/);
+  assert.equal(frame.querySelectorAll('img')[0].src, '/api/attachment?page=Home&file=test.png');
+  const anchors = frame.querySelectorAll('a'); assert.equal(anchors.length, 2);
+  anchors[0].handlers.click({ preventDefault() {} }); assert.equal(navigation[0][0], 'Other');
+  assert.equal(anchors[1].className, 'missing');
+  assert.equal(frame.querySelectorAll('input').length, 2);
+  assert.equal(frame.querySelectorAll('pre').length, 1);
+  assert.equal(markdown.render('', 'Home', pages, () => {}).children.length, 0);
+  assert.equal(markdown.resolve('Projects/Design', './Tasks').id, 'Projects/Tasks');
+  assert.equal(markdown.resolve('Home', '../escape'), null);
+});
+test('actual input and Ctrl S handlers preserve edits typed while a save is pending', async () => {
+  const { context, state, get, events } = harness();
+  const pending = deferred(), writes = [];
+  context.api = async (route, payload) => { writes.push(payload); return pending.promise; };
+  get('editor').value = 'Submitted'; get('editor').handlers.input();
+  let prevented = false;
+  events.keydown({ ctrlKey: true, key: 's', preventDefault() { prevented = true; } });
+  assert.equal(prevented, true); assert.equal(writes[0].revision, 'r1');
+  get('editor').value = 'Newer edits'; get('editor').handlers.input();
+  pending.resolve({ revision: 'r3' }); await state.saving;
+  assert.equal(state.page.revision, 'r3'); assert.equal(state.page.content, 'Submitted');
+  assert.equal(get('editor').value, 'Newer edits'); assert.equal(state.dirty, true);
+  context.api = async () => ({ revision: 'r4' }); await context.save();
+  assert.equal(state.dirty, false); assert.equal(get('save-status').textContent, '✓ Saved');
+});
+test('failed saves and revision conflicts preserve drafts and block navigation', async () => {
+  const { context, state, get, stored } = harness();
+  get('editor').value = 'My draft'; get('editor').handlers.input();
+  context.api = async () => { throw new Error('Disk failure'); };
+  assert.equal(await context.save(), false); assert.equal(state.dirty, true);
+  assert.ok(stored.size); assert.equal(get('editor').value, 'My draft');
+  context.api = async () => { const error = new Error('External change'); error.status = 409; throw error; };
+  await context.save(); assert.equal(state.blocked, true); assert.equal(get('conflict').hidden, false);
+  assert.equal(await context.openPage('Other'), false); assert.equal(state.page.id, 'Home');
+});
+test('page transitions restore drafts and render editor, preview, tree and backlinks', async () => {
+  const { context, state, get, stored } = harness();
+  context.api = async () => ({ id: 'Other', title: 'Other', content: '# Other', revision: 'r2', backlinks: [{ id: 'Home' }] });
+  stored.set('leaf-draft:/notebook:Other', JSON.stringify({ content: 'Recovered draft', revision: 'r2' }));
+  assert.equal(await context.openPage('Other'), true);
+  assert.equal(get('editor').value, 'Recovered draft'); assert.equal(state.dirty, true);
+  assert.equal(get('backlink-count').textContent, 1); assert.match(texts(get('backlinks')), /Home/);
+  context.setMode('preview'); assert.equal(get('panes').className, 'preview');
+  context.innerWidth = 320; context.setMode('split'); assert.equal(get('panes').className, 'edit');
+  context.renderTree([]); assert.match(texts(get('tree')), /No pages/);
+  state.dirty = false; context.ask('create', 'Missing'); assert.equal(get('prompt-dialog').open, true);
+  context.ask('rename', 'Other'); assert.equal(get('prompt-title').textContent, 'Rename this page');
+});
+test('actual paste event uploads a clipboard file and saves the inserted image Markdown', async () => {
+  const { context, state, get } = harness();
+  const file = { type: 'image/png', size: 30 };
+  const writes = [];
+  context.fetch = async (route, options) => { assert.equal(options.body, file); return { ok: true, json: async () => ({ markdown: '![Image](Home.attachments/image.png)' }) }; };
+  context.api = async (_, payload) => { writes.push(payload); return { revision: 'r5' }; };
+  get('editor').selectionStart = get('editor').selectionEnd = 7;
+  let prevented = false, uploading;
+  const original = context.uploadImages;
+  context.uploadImages = files => { uploading = original(files); return uploading; };
+  get('editor').handlers.paste({ preventDefault() { prevented = true; }, clipboardData: { items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }] } });
+  await uploading;
+  assert.equal(prevented, true); assert.equal(writes.length, 1);
+  assert.match(writes[0].content, /Home.attachments\/image.png/); assert.equal(state.dirty, false);
+  assert.equal(state.uploading, false);
+});
+
+test('trash dialogs, missing-page prompts and long tree names render through actual handlers', async () => {
+  const { context, state, get, events } = harness();
+  state.trash = [];
+  await get('trash-list').handlers.click();
+  assert.equal(get('trash-dialog').open, true); assert.equal(get('trashed-pages').textContent, 'Trash is empty.');
+  get('trash-close').handlers.click(); assert.equal(get('trash-dialog').open, false);
+  state.trash = [{ id: '学习/'.repeat(12) + 'Long page', token: 'abc' }];
+  await get('trash-list').handlers.click(); assert.equal(get('trashed-pages').children.length, 1);
+  await context.openPage('Missing'); assert.equal(get('prompt-value').value, 'Missing');
+  get('prompt-cancel').handlers.click(); assert.equal(get('prompt-dialog').open, false);
+  context.renderTree([{ id: 'Folder/' + '长'.repeat(70), title: '长'.repeat(70) }]);
+  assert.match(texts(get('tree')), /长/);
+  events.keydown({ ctrlKey: true, key: 'k', preventDefault() {} }); assert.equal(get('search').focused, true);
+});
+
+test('external revisions preserve editor text and stale search results cannot replace newer matches', async () => {
+  const { context, state, get, timers } = harness();
+  context.refresh = async () => { state.pages[0] = { ...state.pages[0], revision: 'external' }; };
+  await context.checkExternal();
+  assert.equal(state.blocked, true); assert.equal(get('editor').value, 'Initial');
+  const first = deferred(), second = deferred(); let requests = 0;
+  context.api = async () => (++requests === 1 ? first : second).promise;
+  get('search').value = 'old'; get('search').handlers.input();
+  const oldLoad = [...timers.values()].at(-1)();
+  get('search').value = 'new'; get('search').handlers.input();
+  const newLoad = [...timers.values()].at(-1)();
+  second.resolve({ pages: [{ id: 'New', title: 'New' }] }); await newLoad;
+  first.resolve({ pages: [{ id: 'Old', title: 'Old' }] }); await oldLoad;
+  assert.match(texts(get('tree')), /New/); assert.doesNotMatch(texts(get('tree')), /Old/);
+});
+
+test('an external-change poll cannot flag a save that completed while the poll was pending', async () => {
+  const { context, state, get } = harness();
+  const pending = deferred();
+  context.refresh = async () => pending.promise;
+  get('conflict').hidden = true;
+  const polling = context.checkExternal();
+  get('editor').value = 'New content'; get('editor').handlers.input();
+  context.api = async () => ({ revision: 'new-save' });
+  await context.save();
+  state.pages[0] = { id: 'Home', title: 'Home', revision: 'r1' };
+  pending.resolve(); await polling;
+  assert.equal(state.blocked, false); assert.equal(get('conflict').hidden, true);
+  assert.equal(get('save-status').textContent, '✓ Saved');
+});
