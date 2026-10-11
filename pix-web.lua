@@ -1450,6 +1450,7 @@ local function get_index_html(lan_ip, port, default_dir)
         <div class="lightbox-title" id="lightbox-title">Filename</div>
         <div style="display:flex; gap:8px; align-items:center;">
           <button class="btn btn-icon" id="btn-slideshow" onclick="toggleSlideshow()">▶ Slideshow</button>
+          <button class="btn btn-icon" id="btn-play-mpv" style="display:none;" onclick="playInMpv()" title="Launch in mpv desktop player with zero-latency scrubbing">🚀 Open in mpv</button>
           <button class="btn btn-icon" id="btn-zoom-in" onclick="zoomImage(0.25)">🔍+</button>
           <button class="btn btn-icon" id="btn-zoom-out" onclick="zoomImage(-0.25)">🔍-</button>
           <button class="btn btn-icon" id="btn-rotate" onclick="rotateImage(90)">↷ Rotate</button>
@@ -1864,6 +1865,13 @@ local function get_index_html(lan_ip, port, default_dir)
         try { v.pause(); } catch(e) {}
       });
 
+      const mpvBtn = document.getElementById('btn-play-mpv');
+      if (item.type === 'video') {
+        if (mpvBtn) mpvBtn.style.display = 'inline-block';
+      } else {
+        if (mpvBtn) mpvBtn.style.display = 'none';
+      }
+
       if (item.type === 'image') {
         img.src = streamUrl;
         img.style.display = 'block';
@@ -1886,12 +1894,33 @@ local function get_index_html(lan_ip, port, default_dir)
       modal.classList.add('open');
     }
 
+    async function playInMpv() {
+      if (activeIndex === -1 || !currentMediaList[activeIndex]) return;
+      const item = currentMediaList[activeIndex];
+      const vid = document.getElementById('lightbox-video');
+      if (vid) vid.pause();
+      showToast(`Launching ${item.name} in mpv...`);
+      try {
+        const res = await fetch(`/api/play-external?path=${encodeURIComponent(item.subpath)}`, { method: 'POST' });
+        const data = await res.json();
+        if (data.ok) {
+          showToast(`Opened in mpv player`);
+        } else {
+          showToast(`Failed: ${data.error || 'launch error'}`);
+        }
+      } catch (e) {
+        showToast('Error requesting mpv launch');
+      }
+    }
+
     function closeLightbox() {
       if (slideshowTimer) {
         clearInterval(slideshowTimer);
         slideshowTimer = null;
         document.getElementById('btn-slideshow').textContent = '▶ Slideshow';
       }
+      const mpvBtn = document.getElementById('btn-play-mpv');
+      if (mpvBtn) mpvBtn.style.display = 'none';
       const vid = document.getElementById('lightbox-video');
       vid.pause();
       vid.removeAttribute('src');
@@ -2011,7 +2040,28 @@ local function get_index_html(lan_ip, port, default_dir)
     window.addEventListener('keydown', e => {
       const modalOpen = document.getElementById('lightbox-modal').classList.contains('open');
       if (modalOpen) {
-        if (e.key === 'ArrowRight' || e.key === 'n' || e.key === 'N') navigateMedia(1);
+        const vid = document.getElementById('lightbox-video');
+        const isVidActive = vid && vid.style.display !== 'none';
+
+        if (isVidActive && (e.key === 'm' || e.key === 'M')) {
+          e.preventDefault();
+          playInMpv();
+        } else if (isVidActive && (e.key === 'k' || e.key === 'K')) {
+          e.preventDefault();
+          if (vid.paused) vid.play(); else vid.pause();
+        } else if (isVidActive && (e.key === 'j' || e.key === 'J')) {
+          e.preventDefault();
+          vid.currentTime = Math.max(0, vid.currentTime - 10);
+        } else if (isVidActive && (e.key === 'l' || e.key === 'L')) {
+          e.preventDefault();
+          vid.currentTime = Math.min(vid.duration || Infinity, vid.currentTime + 10);
+        } else if (isVidActive && e.key === 'ArrowLeft' && !e.shiftKey) {
+          e.preventDefault();
+          vid.currentTime = Math.max(0, vid.currentTime - 5);
+        } else if (isVidActive && e.key === 'ArrowRight' && !e.shiftKey) {
+          e.preventDefault();
+          vid.currentTime = Math.min(vid.duration || Infinity, vid.currentTime + 5);
+        } else if (e.key === 'ArrowRight' || e.key === 'n' || e.key === 'N') navigateMedia(1);
         else if (e.key === 'ArrowLeft' || e.key === 'p' || e.key === 'P') navigateMedia(-1);
         else if (e.key === 'Escape' || e.key === 'q' || e.key === 'Q') closeLightbox();
         else if (e.key === '+' || e.key === '=') zoomImage(0.25);
@@ -2019,7 +2069,11 @@ local function get_index_html(lan_ip, port, default_dir)
         else if (e.key === 'r' || e.key === 'R') rotateImage(90);
         else if (e.key === ' ') {
           e.preventDefault();
-          toggleSlideshow();
+          if (isVidActive) {
+            if (vid.paused) vid.play(); else vid.pause();
+          } else {
+            toggleSlideshow();
+          }
         }
       }
     });
@@ -2122,6 +2176,22 @@ local function run_server(host, port, root_dir)
     local buf_size = 65536
     local buf = ffi.new("char[?]", buf_size)
 
+    local function socket_has_pending(sock)
+        if is_windows then
+            local fds = ffi.new("fd_set")
+            fds.fd_count = 1
+            fds.fd_array[0] = sock
+            local tv = ffi.new("struct timeval", { tv_sec = 0, tv_usec = 0 })
+            return ws2.select(0, fds, nil, nil, tv) > 0
+        else
+            local pfd = ffi.new("struct pollfd[1]")
+            pfd[0].fd = sock
+            pfd[0].events = 1 -- POLLIN
+            pfd[0].revents = 0
+            return C.poll(pfd, 1, 0) > 0
+        end
+    end
+
     local function send_all(sock, data, len)
         len = len or #data
         local total_sent = 0
@@ -2218,13 +2288,20 @@ local function run_server(host, port, root_dir)
 
         f:seek("set", start_byte)
         local remaining = content_length
+        local chunks_sent = 0
         while remaining > 0 do
+            -- Preemption check: if client is streaming media and a new request (e.g. video scrub/seek)
+            -- arrives on listen_sock, yield immediately so accept() can serve the new seek without blocking!
+            if not is_download and chunks_sent >= 4 and socket_has_pending(listen_sock) then
+                break
+            end
             local chunk_sz = math.min(remaining, buf_size)
             local chunk = f:read(chunk_sz)
             if not chunk or #chunk == 0 then break end
             local ok = send_all(client_sock, chunk, #chunk)
             if not ok then break end
             remaining = remaining - #chunk
+            chunks_sent = chunks_sent + 1
         end
         f:close()
     end
@@ -2235,18 +2312,18 @@ local function run_server(host, port, root_dir)
         local client_sock = is_windows and ws2.accept(listen_sock, client_addr, addr_len) or C.accept(listen_sock, client_addr, addr_len)
 
         if client_sock ~= INVALID_SOCK and client_sock >= 0 then
-            -- Configure TCP_NODELAY and socket timeouts for instant seek response
+            -- Configure TCP_NODELAY and socket timeouts for instant seek response (250ms abort on pause)
             local opt_one = ffi.new("int[1]", 1)
             if is_windows then
                 ws2.setsockopt(client_sock, 6, 1, opt_one, 4) -- IPPROTO_TCP, TCP_NODELAY
-                local to_ms = ffi.new("int[1]", 2000)
+                local to_ms = ffi.new("int[1]", 250)
                 ws2.setsockopt(client_sock, 0xFFFF, 0x1005, to_ms, 4) -- SOL_SOCKET, SO_SNDTIMEO
                 ws2.setsockopt(client_sock, 0xFFFF, 0x1006, to_ms, 4) -- SOL_SOCKET, SO_RCVTIMEO
             else
                 C.setsockopt(client_sock, 6, 1, opt_one, 4) -- IPPROTO_TCP, TCP_NODELAY
                 local tv = ffi.new("struct timeval")
-                tv.tv_sec = 2
-                tv.tv_usec = 0
+                tv.tv_sec = 0
+                tv.tv_usec = 250000 -- 250ms fast abort
                 C.setsockopt(client_sock, 1, 21, tv, ffi.sizeof(tv)) -- SOL_SOCKET, SO_SNDTIMEO
                 C.setsockopt(client_sock, 1, 20, tv, ffi.sizeof(tv)) -- SOL_SOCKET, SO_RCVTIMEO
             end
@@ -2389,6 +2466,25 @@ local function run_server(host, port, root_dir)
                         local safe_sub = sanitize_subpath(rel_file)
                         local full_target = root_dir .. "/" .. safe_sub
                         stream_file_range(client_sock, full_target, get_mime_type(safe_sub), range_hdr, true)
+                    elseif url_path == "/api/play-external" and method == "POST" then
+                        local target_file = query_str:match("path=([^&]+)")
+                        if target_file then
+                            target_file = target_file:gsub("%%(%x%x)", function(hex) return string.char(tonumber(hex, 16)) end)
+                        end
+                        if not target_file or #target_file == 0 then
+                            send_response(client_sock, 400, "application/json", json.encode({ ok = false, error = "Path required" }))
+                        else
+                            local safe_sub = sanitize_subpath(target_file)
+                            local full_target = root_dir .. "/" .. safe_sub
+                            local spawn_cmd
+                            if is_windows then
+                                spawn_cmd = string.format('start "" mpv "%s" 2>nul || start "" "%s"', full_target:gsub("/", "\\"), full_target:gsub("/", "\\"))
+                            else
+                                spawn_cmd = string.format('(mpv %q >/dev/null 2>&1 || xdg-open %q >/dev/null 2>&1) &', full_target, full_target)
+                            end
+                            os.execute(spawn_cmd)
+                            send_response(client_sock, 200, "application/json", json.encode({ ok = true, player = "mpv" }))
+                        end
                     elseif url_path == "/api/delete" and method == "POST" then
                         local target_file = query_str:match("path=([^&]+)")
                         if target_file then

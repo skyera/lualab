@@ -396,6 +396,12 @@ if run_test("Unicode & Suffix Range Media Streaming (Port 8078)", function()
             local exp_cr_seek = string.format("Content-Range: bytes %d-%d/%d", offset, offset + 65535, large_total)
             check(seek_res:find(exp_cr_seek, 1, true) ~= nil, "Content-Range matches scrub position: " .. exp_cr_seek)
         end
+
+        -- 8. Verify /api/play-external endpoint
+        local p_ext = io.popen(string.format("curl -s -X POST \"http://127.0.0.1:%d/api/play-external?path=large_test.mp4\"", test_port), "r")
+        local ext_res = p_ext:read("*a")
+        p_ext:close()
+        check(ext_res:find('"ok":true', 1, true) ~= nil, "/api/play-external returns ok:true")
     end)
 
     cleanup_uni()
