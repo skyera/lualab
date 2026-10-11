@@ -13,7 +13,7 @@ sudo apt install luajit libsqlite3-0 libcurl4 libssl3
 luajit wiki_web.lua
 ```
 
-Open **http://127.0.0.1:8770**. The default notebook is `~/Leaf Wiki`.
+Open **http://127.0.0.1:8020**. The default notebook is `~/Leaf Wiki`.
 The server listens on localhost. Ctrl-C and SIGTERM close the server and index.
 An absolute launcher path works from any working directory.
 

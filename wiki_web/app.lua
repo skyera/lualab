@@ -21,13 +21,13 @@ function M.run(root)
     local home = os.getenv('HOME') or '.'
     local config_path = (os.getenv('XDG_CONFIG_HOME') or home .. '/.config') .. '/leaf-wiki/config.json'
     local cache = (os.getenv('XDG_CACHE_HOME') or home .. '/.cache') .. '/leaf-wiki'
-    local options = { port = 8770 }
+    local options = { port = 8020 }
     local index = 1
     while index <= #arg do
         local flag = arg[index]
         if flag == '--help' then
             print('Usage: luajit wiki_web.lua [--data-dir PATH] [--cache-dir PATH] '
-                .. '[--config FILE] [--save-config] [--port 8770]')
+                .. '[--config FILE] [--save-config] [--port 8020]')
             return
         elseif flag == '--save-config' then options.save_config = true
         elseif flag == '--data-dir' or flag == '--cache-dir' or flag == '--config' or flag == '--port' then

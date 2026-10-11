@@ -18,7 +18,7 @@ available Google Drive folder:
 luajit wiki_web.lua --data-dir "/path/to/Leaf Wiki" --save-config
 ```
 
-Open **http://127.0.0.1:8770**. See [the Leaf Wiki guide](wiki_web/README.md)
+Open **http://127.0.0.1:8020**. See [the Leaf Wiki guide](wiki_web/README.md)
 for dependencies, folder configuration, and verification commands.
 
 ## Prerequisites
