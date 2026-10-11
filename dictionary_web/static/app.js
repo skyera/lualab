@@ -19,10 +19,38 @@ function button(text, action, className = 'secondary', kbd = null) {
   node.addEventListener('click', action);
   return node;
 }
+function findVoiceByGender(langPrefix, gender) {
+  if (!('speechSynthesis' in window)) return null;
+  const voices = window.speechSynthesis.getVoices().filter(v => v.lang.toLowerCase().startsWith(langPrefix.toLowerCase()));
+  if (!voices.length) return null;
+  const femaleNames = ['female', 'woman', 'zira', 'samantha', 'victoria', 'karen', 'susan', 'cathy', 'tingting', 'huihui', 'yaoyao', 'xiaoxiao', 'xiaoyi', 'mei-jia', 'sin-ji'];
+  const maleNames = ['male', 'man', 'david', 'alex', 'daniel', 'george', 'fred', 'kangkang', 'yunxi', 'yunjian', 'danny'];
+  const targets = gender === 'female' ? femaleNames : maleNames;
+  const matched = voices.find(v => targets.some(name => v.name.toLowerCase().includes(name)));
+  return matched || null;
+}
 function pronounceWord(text) {
   if (!('speechSynthesis' in window) || !text) return;
   const speech = new SpeechSynthesisUtterance(text);
-  speech.lang = /[\u3400-\u9fff]/.test(text) ? 'zh-CN' : 'en-US';
+  const isChinese = /[\u3400-\u9fff]/.test(text);
+  const langPrefix = isChinese ? 'zh' : 'en';
+  speech.lang = isChinese ? 'zh-CN' : 'en-US';
+  const selectedGender = $('voice-select')?.value || localStorage.getItem('wordbook_voice') || 'auto';
+  if (selectedGender === 'female') {
+    const voice = findVoiceByGender(langPrefix, 'female');
+    if (voice) {
+      speech.voice = voice;
+    } else {
+      speech.pitch = 1.25;
+    }
+  } else if (selectedGender === 'male') {
+    const voice = findVoiceByGender(langPrefix, 'male');
+    if (voice) {
+      speech.voice = voice;
+    } else {
+      speech.pitch = 0.82;
+    }
+  }
   window.speechSynthesis.cancel();
   window.speechSynthesis.speak(speech);
 }
@@ -553,6 +581,19 @@ $('daily-proverb-next')?.addEventListener('click', (e) => {
   fetchNextProverb(e.currentTarget);
 });
 $('proverb-filter')?.addEventListener('input', renderProverbs);
+const voiceSelect = $('voice-select');
+if (voiceSelect) {
+  const savedVoice = localStorage.getItem('wordbook_voice');
+  if (savedVoice) voiceSelect.value = savedVoice;
+  voiceSelect.addEventListener('change', () => {
+    localStorage.setItem('wordbook_voice', voiceSelect.value);
+  });
+}
+if ('speechSynthesis' in window) {
+  window.speechSynthesis.onvoiceschanged = () => {
+    window.speechSynthesis.getVoices();
+  };
+}
 document.querySelectorAll('.nav-button').forEach(node => node.addEventListener('click', () => showView(node.dataset.view)));
 Promise.all([loadDaily(), refreshCounts()]).catch(report);
 setInterval(() => {
