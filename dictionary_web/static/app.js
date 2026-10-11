@@ -218,6 +218,9 @@ async function searchWord(word, source) {
       $('search-status').textContent = data.saved ? 'A new discovery, safely saved.' : 'Lookup failed. No new history saved.';
     }
     await refreshCounts();
+    // Refresh the Word of the Day and Wisdom/Proverb on each new search
+    fetchNextWord();
+    fetchNextProverb();
   } catch (error) { $('search-status').textContent = error.message; }
   finally {
     state.busy = false; $('search-button').disabled = false; $('query').readOnly = false;
@@ -441,6 +444,9 @@ async function loadDaily() {
   if (audioBtn) {
     audioBtn.hidden = false;
   }
+  // Automatically discover a fresh word & proverb on page refresh/load
+  fetchNextWord();
+  fetchNextProverb();
 }
 
 let suggestTimer = null;
