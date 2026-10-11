@@ -37,6 +37,7 @@ test('existing deck and dictionary become available without resetting state', fu
         assert(words[1].due_at == 200 + 86400)
         local imported = assert(store:local_lookup('LEARN'))
         assert(#imported.definitions == 2 and imported.examples[1] == 'We learn daily.')
+        assert(imported.synonyms and imported.synonyms[1] == 'study')
         assert(native:scalar('SELECT count(*) FROM words') == 1)
         assert(native:scalar('SELECT count(*) FROM reviews') == 1)
     end)

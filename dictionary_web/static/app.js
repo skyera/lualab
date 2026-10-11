@@ -43,6 +43,19 @@ function definitions(entry, target) {
   const list = element('ol', undefined, 'definitions');
   for (const text of entry.definitions || []) list.append(element('li', text));
   target.append(list);
+  const syns = Array.isArray(entry.synonyms)
+    ? entry.synonyms
+    : (typeof entry.syn === 'string' ? entry.syn.split(/[,;]/).map(s => s.trim()).filter(Boolean) : []);
+  if (syns.length) {
+    const wrap = element('div', undefined, 'synonyms-wrap');
+    wrap.append(element('span', 'Synonyms:', 'synonyms-label'));
+    for (const syn of syns.slice(0, 8)) {
+      const chip = button(syn, () => searchWord(syn), 'synonym-chip');
+      chip.setAttribute('aria-label', `Look up synonym ${syn}`);
+      wrap.append(chip);
+    }
+    target.append(wrap);
+  }
   if (entry.examples?.length) {
     const examples = element('div', undefined, 'examples');
     for (const text of entry.examples) examples.append(element('p', text));

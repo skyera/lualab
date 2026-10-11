@@ -38,6 +38,20 @@ function Store:close()
     self.web:close()
 end
 
+local function parse_synonyms(text)
+    if not text or text == '' then return nil end
+    local list = {}
+    local seen = {}
+    for s in text:gmatch('[^,;]+') do
+        local trimmed = s:gsub('^%s+', ''):gsub('%s+$', '')
+        if trimmed ~= '' and not seen[trimmed:lower()] and #list < 8 then
+            seen[trimmed:lower()] = true
+            list[#list + 1] = trimmed
+        end
+    end
+    return #list > 0 and list or nil
+end
+
 local function deck_entry(row)
     return {
         word = row.word,
@@ -45,6 +59,7 @@ local function deck_entry(row)
         phonetic = '',
         pos = row.pos,
         syn = row.syn,
+        synonyms = parse_synonyms(row.syn),
         ant = row.ant,
         definitions = row.definition and row.definition ~= '' and {row.definition} or {},
         examples = row.example and row.example ~= '' and {row.example} or {},
@@ -99,6 +114,7 @@ function Store:local_lookup(word)
     if #definitions == 0 then
         return nil, 'Word not found in the local dictionary. Try an online source.'
     end
+    local syn_combined = table.concat(synonyms, ', ')
     return {
         word = word,
         source = 'local',
@@ -106,7 +122,8 @@ function Store:local_lookup(word)
         definitions = definitions,
         examples = examples,
         pos = senses[1].pos or '',
-        syn = table.concat(synonyms, ', '),
+        syn = syn_combined,
+        synonyms = parse_synonyms(syn_combined),
         ant = table.concat(antonyms, ', '),
     }
 end

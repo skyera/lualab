@@ -67,7 +67,22 @@ function M.parse_dict(html)
     for sentence in (sentences or ''):gmatch('<li[^>]*>(.-)</li>') do
         if #examples < 4 then examples[#examples + 1] = clean(sentence) end
     end
-    return {definitions = definitions, phonetic = table.concat(phonetics, ' · '), examples = examples}
+    local synonyms, syn_seen = {}, {}
+    local rel_section = html:match('<div[^>]*class=["\'][^"\']*rel[^"\']*["\'][^>]*>(.-)</div>')
+        or html:match('<div[^>]*class=["\'][^"\']*ncs[^"\']*["\'][^>]*>(.-)</div>')
+    for syn in (rel_section or ''):gmatch('<a[^>]*>(.-)</a>') do
+        local text = clean(syn)
+        if text ~= '' and not syn_seen[text:lower()] and #synonyms < 8 then
+            syn_seen[text:lower()] = true
+            synonyms[#synonyms + 1] = text
+        end
+    end
+    return {
+        definitions = definitions,
+        phonetic = table.concat(phonetics, ' · '),
+        examples = examples,
+        synonyms = #synonyms > 0 and synonyms or nil,
+    }
 end
 
 function M.parse_youdao(data)
@@ -76,14 +91,27 @@ function M.parse_youdao(data)
         return nil, 'Youdao error ' .. tostring(data.errorCode) .. '. Check your account and dictionary service access.'
     end
     local definitions, examples, phonetic, seen = {}, {}, '', {}
+    local synonyms, syn_seen = {}, {}
     local function add(value)
         if type(value) == 'string' then
             local text = clean(value)
             if text ~= '' and not seen[text] and #definitions < 12 then
-                definitions[#definitions + 1] = text; seen[text] = true
+                definitions[#definitions + 1] = text
+                seen[text] = true
             end
         elseif type(value) == 'table' then
             for _, item in ipairs(value) do add(item) end
+        end
+    end
+    local function add_syn(w)
+        if type(w) == 'string' then
+            local text = clean(w)
+            if text ~= '' and not syn_seen[text:lower()] and #synonyms < 8 then
+                syn_seen[text:lower()] = true
+                synonyms[#synonyms + 1] = text
+            end
+        elseif type(w) == 'table' then
+            for _, item in ipairs(w) do add_syn(item) end
         end
     end
     local function walk(node)
@@ -92,14 +120,36 @@ function M.parse_youdao(data)
             examples[#examples + 1] = clean(node.sentence) .. (type(node.translation) == 'string' and ' / ' .. clean(node.translation) or '')
         end
         for key, value in pairs(node) do
-            if key == 'phonetic' and type(value) == 'string' and phonetic == '' then phonetic = value end
-            if key == 'explains' or key == 'explain' or key == 'trans' or key == 'i' then add(value)
-            elseif type(value) == 'table' then walk(value) end
+            if key == 'phonetic' and type(value) == 'string' and phonetic == '' then
+                phonetic = value
+            end
+            if key == 'explains' or key == 'explain' or key == 'trans' or key == 'i' then
+                add(value)
+            elseif key == 'syno' or key == 'synonyms' then
+                if type(value) == 'table' then
+                    for _, item in ipairs(value) do
+                        if type(item) == 'table' and item.ws then
+                            add_syn(item.ws)
+                        elseif type(item) == 'string' then
+                            add_syn(item)
+                        end
+                    end
+                end
+            elseif type(value) == 'table' then
+                walk(value)
+            end
         end
     end
     walk(data.result or data.data or data)
-    if #definitions == 0 then return nil, 'Youdao returned no readable definitions. Open the source page for the full entry.' end
-    return {definitions = definitions, phonetic = phonetic, examples = examples}
+    if #definitions == 0 then
+        return nil, 'Youdao returned no readable definitions. Open the source page for the full entry.'
+    end
+    return {
+        definitions = definitions,
+        phonetic = phonetic,
+        examples = examples,
+        synonyms = #synonyms > 0 and synonyms or nil,
+    }
 end
 
 function M.youdao_input(word)

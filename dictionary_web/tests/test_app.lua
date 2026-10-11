@@ -35,12 +35,14 @@ end)
 test('HTML parsing isolates definitions, pronunciation and bilingual examples', function()
     local html = [[<div class="phonetic"><bdo>[test]</bdo><bdo>[test]</bdo></div>
         <ul class="dict-basic-ul"><li><strong>n. &lt;meaning&gt; &amp; &#x4e2d;&#25991;</strong></li></ul>
+        <div class="section rel"><ol><li><a href="/syn1">synonym1</a></li><li><a href="/syn2">synonym2</a></li></ol></div>
         <div class="section sent"><ol><li>Example.<br/>例句。</li></ol></div>
         <bdo>not a pronunciation</bdo><strong>not a definition</strong>]]
     local result = assert(providers.parse_dict(html))
     assert(result.definitions[1] == 'n. <meaning> & 中文')
     assert(result.phonetic == '[test]')
     assert(result.examples[1] == 'Example. / 例句。')
+    assert(result.synonyms and result.synonyms[1] == 'synonym1' and result.synonyms[2] == 'synonym2')
     assert(not providers.parse_dict('<html>Not found</html>'))
 end)
 
@@ -77,9 +79,10 @@ end)
 
 test('Youdao documented response shape and service errors', function()
     local result = assert(providers.parse_youdao({errorCode = '0', result = {{ec = {basic = {
-        explains = {'释义'}, phonetic = 'test'}, sentenceSample = {{sentence = 'Example.', translation = '例句。'}}}}}}))
+        explains = {'释义'}, phonetic = 'test', syno = {{ws = {'peaceful', 'calm'}}}}, sentenceSample = {{sentence = 'Example.', translation = '例句。'}}}}}}))
     assert(result.definitions[1] == '释义' and result.phonetic == 'test')
     assert(result.examples[1] == 'Example. / 例句。')
+    assert(result.synonyms and result.synonyms[1] == 'peaceful' and result.synonyms[2] == 'calm')
     assert(not providers.parse_youdao({errorCode = '401'}))
     assert(not providers.parse_youdao({errorCode = '0'}))
 end)
