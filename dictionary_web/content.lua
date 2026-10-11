@@ -151,14 +151,51 @@ function M.fetch_wikiquote(fetch_fn)
     }
 end
 
+function M.fetch_fortune(runner)
+    runner = runner or function(cmd)
+        local p = io.popen(cmd)
+        if not p then return nil end
+        local out = p:read('*a')
+        p:close()
+        return out
+    end
+    local ok, raw = pcall(runner, 'fortune -s wisdom literature fortunes computers 2>/dev/null')
+    if not ok or not raw or raw:match('^%s*$') then return nil end
+    local lines = {}
+    for line in raw:gmatch('[^\r\n]+') do
+        lines[#lines + 1] = line
+    end
+    if #lines == 0 then return nil end
+    local author = ''
+    local quote_lines = {}
+    for _, line in ipairs(lines) do
+        local m_author = line:match('^%s*%-%-%s*(.+)$') or line:match('^\t+%-%-%s*(.+)$')
+        if m_author then
+            author = m_author:gsub('%s+$', '')
+        else
+            quote_lines[#quote_lines + 1] = line:gsub('^%s+', ''):gsub('%s+$', '')
+        end
+    end
+    local quote_text = table.concat(quote_lines, ' '):gsub('%s+', ' ')
+    quote_text = quote_text:gsub('^["“”\']', ''):gsub('["“”\']$', '')
+    if #quote_text < 5 then return nil end
+    return {
+        text = quote_text,
+        chinese = '',
+        explanation = author ~= '' and ('— ' .. author .. ' · Fortune') or 'Fortune · Linux',
+        audio_url = nil,
+    }
+end
+
 function M.fetch_quote(fetch_fn, source)
     if source == 'zenquotes' then return M.fetch_zenquotes(fetch_fn) end
     if source == 'dummyjson' then return M.fetch_dummyjson(fetch_fn) end
     if source == 'favqs' then return M.fetch_favqs(fetch_fn) end
     if source == 'wikiquote' then return M.fetch_wikiquote(fetch_fn) end
+    if source == 'fortune' then return M.fetch_fortune() end
     if source == 'iciba' then return M.fetch_online(fetch_fn) end
     -- Randomly choose among available quote services
-    local choices = {M.fetch_online, M.fetch_zenquotes, M.fetch_dummyjson, M.fetch_favqs, M.fetch_wikiquote}
+    local choices = {M.fetch_online, M.fetch_zenquotes, M.fetch_dummyjson, M.fetch_favqs, M.fetch_wikiquote, M.fetch_fortune}
     local start_idx = math.random(1, #choices)
     for i = 0, #choices - 1 do
         local fn = choices[(start_idx + i - 1) % #choices + 1]

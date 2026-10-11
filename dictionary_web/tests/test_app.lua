@@ -240,6 +240,9 @@ test('Proverb database persistence and online fetching', function()
     local wq = content.fetch_wikiquote(function() return '{"parse":{"text":{"*":"<li>Practice makes perfect.</li>"}}}', 200 end)
     assert(wq and wq.text == 'Practice makes perfect.' and wq.explanation:find('Wikiquote'))
 
+    local fort = content.fetch_fortune(function() return "Real programmers don't write specs.\n\t-- Anonymous\n" end)
+    assert(fort and fort.text == "Real programmers don't write specs." and fort.explanation:find('Anonymous') and fort.explanation:find('Fortune'))
+
     -- Verify service route for /api/word/random
     local rand_word, wcode = service.route(db, 'GET', '/api/word/random', {}, {})
     assert(wcode == 200 and rand_word.word and rand_word.word.word and rand_word.word.meaning)
