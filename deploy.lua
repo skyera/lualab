@@ -401,6 +401,7 @@ if opts.app == "all" then
     table.insert(apps_to_deploy, APPS.codefind_web)
     table.insert(apps_to_deploy, APPS.landrop)
     table.insert(apps_to_deploy, APPS.ytweb)
+    table.insert(apps_to_deploy, APPS.pixweb)
     table.insert(apps_to_deploy, APPS.logexplorer)
 elseif opts.app == "weblite" or opts.app == "wl" then
     table.insert(apps_to_deploy, APPS.weblite)
@@ -412,6 +413,8 @@ elseif opts.app == "landrop" or opts.app == "ldrop" then
     table.insert(apps_to_deploy, APPS.landrop)
 elseif opts.app == "ytweb" or opts.app == "yt-web" then
     table.insert(apps_to_deploy, APPS.ytweb)
+elseif opts.app == "pixweb" or opts.app == "pix-web" then
+    table.insert(apps_to_deploy, APPS.pixweb)
 elseif APPS[opts.app] then
     table.insert(apps_to_deploy, APPS[opts.app])
 end
