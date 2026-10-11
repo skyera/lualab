@@ -155,8 +155,8 @@ do
     end
 end
 
-if opts.app ~= "all" and not APPS[opts.app] and opts.app ~= "wl" and opts.app ~= "ltop" and opts.app ~= "cfweb" then
-    io.stderr:write("deploy: unknown --app '" .. tostring(opts.app) .. "' (use all, pix, lumina, yt, weblite, luatop, codefind, codefind_web, or logexplorer)\n")
+if opts.app ~= "all" and not APPS[opts.app] and opts.app ~= "wl" and opts.app ~= "ltop" and opts.app ~= "cfweb" and opts.app ~= "ldrop" and opts.app ~= "yt-web" then
+    io.stderr:write("deploy: unknown --app '" .. tostring(opts.app) .. "' (use all, pix, lumina, yt, weblite, luatop, codefind, codefind_web, landrop, ytweb, or logexplorer)\n")
     os.exit(2)
 end
 
@@ -391,6 +391,8 @@ if opts.app == "all" then
     table.insert(apps_to_deploy, APPS.luatop)
     table.insert(apps_to_deploy, APPS.codefind)
     table.insert(apps_to_deploy, APPS.codefind_web)
+    table.insert(apps_to_deploy, APPS.landrop)
+    table.insert(apps_to_deploy, APPS.ytweb)
     table.insert(apps_to_deploy, APPS.logexplorer)
 elseif opts.app == "weblite" or opts.app == "wl" then
     table.insert(apps_to_deploy, APPS.weblite)
@@ -398,6 +400,10 @@ elseif opts.app == "luatop" or opts.app == "ltop" then
     table.insert(apps_to_deploy, APPS.luatop)
 elseif opts.app == "codefind_web" or opts.app == "cfweb" then
     table.insert(apps_to_deploy, APPS.codefind_web)
+elseif opts.app == "landrop" or opts.app == "ldrop" then
+    table.insert(apps_to_deploy, APPS.landrop)
+elseif opts.app == "ytweb" or opts.app == "yt-web" then
+    table.insert(apps_to_deploy, APPS.ytweb)
 elseif APPS[opts.app] then
     table.insert(apps_to_deploy, APPS[opts.app])
 end
@@ -489,6 +495,15 @@ for _, app in ipairs(apps_to_deploy) do
                     written = written + 1
                     print(string.format("  [ok] copied  %s -> %s (dependency)", dep, display_path(dep_dst)))
                 end
+            end
+        end
+    elseif app.id == 'landrop' or app.id == 'ytweb' then
+        local dep_dst = target_dir .. SEP .. "json.lua"
+        if not file_exists(dep_dst) then
+            local copied, err = copy_file(script_dir .. SEP .. "json.lua", dep_dst)
+            if copied then
+                written = written + 1
+                print(string.format("  [ok] copied  json.lua -> %s (dependency)", display_path(dep_dst)))
             end
         end
     end
