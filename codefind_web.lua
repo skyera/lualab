@@ -630,6 +630,23 @@ local function render_web_app(meta)
     white-space: pre;
     color: #e6edf3;
   }
+  /* Syntax Highlighting Tokens (VSCode Dark+ / GitHub Dark Modern) */
+  .tok-kw   { color: #ff7b72; font-weight: 600; } /* keywords: if, for, return, function */
+  .tok-str  { color: #a5d6ff; }                   /* strings: "hello", 'world', `path` */
+  .tok-com  { color: #8b949e; font-style: italic; } /* comments: //, --, #, /* */ */
+  .tok-num  { color: #79c0ff; }                   /* numbers: 123, 0x4f, 3.14 */
+  .tok-type { color: #ffa657; }                   /* types/classes: int, void, char, bool */
+  .tok-pre  { color: #d2a8ff; }                   /* preprocessor: #include, #define */
+  .tok-fn   { color: #d2a8ff; }                   /* function names: foo() */
+  .tok-op   { color: #79c0ff; }                   /* operators: =, +, -, *, -> */
+  .code-table mark.query-match {
+    background: var(--match-hl-bg);
+    color: var(--match-hl);
+    font-weight: 700;
+    border-radius: 2px;
+    padding: 0 1px;
+    border-bottom: 2px solid var(--match-hl);
+  }
   .empty-state {
     flex: 1;
     display: flex;
@@ -710,6 +727,93 @@ local function render_web_app(meta)
     transition: opacity 0.2s;
     pointer-events: none;
     font-weight: 500;
+    z-index: 2000;
+  }
+  .modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(0, 0, 0, 0.7);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 1500;
+  }
+  .modal-overlay.open {
+    display: flex;
+  }
+  .modal-box {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    width: 580px;
+    max-width: 90vw;
+    max-height: 85vh;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .modal-header {
+    padding: 12px 18px;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .modal-header h3 {
+    font-size: 14px;
+    color: var(--text-bright);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .modal-body {
+    padding: 18px;
+    overflow-y: auto;
+    font-size: 12.5px;
+    line-height: 1.6;
+  }
+  .modal-section-title {
+    color: var(--accent);
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-top: 14px;
+    margin-bottom: 8px;
+  }
+  .modal-section-title:first-child { margin-top: 0; }
+  .shortcut-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 8px;
+  }
+  .shortcut-table td {
+    padding: 5px 8px;
+    border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+  }
+  .shortcut-table td:first-child {
+    width: 140px;
+    white-space: nowrap;
+  }
+  .syntax-item {
+    background: var(--bg-main);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 10px;
+    margin-bottom: 6px;
+    font-family: var(--font-code);
+    font-size: 12px;
+  }
+  .syntax-desc {
+    color: var(--text-muted);
+    font-size: 11.5px;
+    margin-top: 2px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
 </style>
 </head>
@@ -734,6 +838,10 @@ local function render_web_app(meta)
 
   <div class="header-actions">
     <div id="searchMeta" class="search-meta">Ready</div>
+    <button class="btn" onclick="openHelpModal()" title="Keyboard shortcuts and search syntax [?]">
+      <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm6.5-.25A1.75 1.75 0 0 1 8.25 6h.5a1.75 1.75 0 0 1 1.75 1.75c0 .498-.209.951-.549 1.28l-.504.49c-.43.418-.7.865-.7 1.48v.25a.75.75 0 0 1-1.5 0v-.25c0-.987.436-1.687 1.017-2.253l.492-.477a.25.25 0 0 0 .094-.193.25.25 0 0 0-.25-.25h-.5a.25.25 0 0 0-.25.25.75.75 0 0 1-1.5 0ZM9 13a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path></svg>
+      Help (?)
+    </button>
     <button class="btn" onclick="triggerReindex()" title="Reindex files in repository">
       <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M1.705 8.001a6.3 6.3 0 0 1 10.39-4.878l.707-.707a7.3 7.3 0 0 0-12.097 5.585H0l2.5 3 2.5-3H1.705ZM14.295 8a6.3 6.3 0 0 1-10.39 4.878l-.707.707a7.3 7.3 0 0 0 12.097-5.585H16l-2.5-3-2.5 3h1.295Z"></path></svg>
       Reindex
@@ -745,13 +853,13 @@ local function render_web_app(meta)
   <div class="results-pane">
     <div class="pane-header">
       <span id="resultsHeader">Results</span>
-      <span style="font-weight:normal;"><span class="kbd">j</span> <span class="kbd">k</span> navigate</span>
+      <span style="font-weight:normal;"><span class="kbd">j</span> <span class="kbd">k</span> navigate &middot; <span class="kbd">?</span> help</span>
     </div>
     <ul id="resultsList" class="results-list">
       <li class="empty-state">
         <svg width="36" height="36" viewBox="0 0 16 16"><path d="M10.68 11.74a6 6 0 0 1-7.922-8.982 6 6 0 0 1 8.982 7.922l3.04 3.04a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215ZM11.5 7a4.499 4.499 0 1 0-8.997 0A4.499 4.499 0 0 0 11.5 7Z"></path></svg>
         <h3>No Query Entered</h3>
-        <p>Type keywords to search across all indexed files using SQLite FTS5 BM25 ranking.<br>Use <span class="kbd">/</span> anytime to focus search.</p>
+        <p>Type keywords to search across all indexed files using SQLite FTS5 BM25 ranking.<br>Use <span class="kbd">/</span> to search &middot; Press <span class="kbd">?</span> for shortcuts.</p>
       </li>
     </ul>
   </div>
@@ -802,10 +910,64 @@ local function render_web_app(meta)
     <span><b>Indexed:</b> <span id="statFiles">]] .. total_files .. [[</span> files</span>
     <span><b>Total Size:</b> <span id="statSize">]] .. total_size .. [[</span></span>
   </div>
-  <div>
+  <div style="display:flex; align-items:center; gap:12px;">
+    <span onclick="openHelpModal()" style="cursor:pointer; color:var(--accent); font-weight:600;">⌨ Shortcuts &amp; Help [?]</span>
+    <span>&middot;</span>
     <span>Accessible on LAN &middot; Pure LuaJIT FFI &middot; SQLite FTS5</span>
   </div>
 </footer>
+
+<!-- Help Modal Dialog -->
+<div id="helpModal" class="modal-overlay" onclick="if(event.target===this) closeHelpModal()">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h3>
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm6.5-.25A1.75 1.75 0 0 1 8.25 6h.5a1.75 1.75 0 0 1 1.75 1.75c0 .498-.209.951-.549 1.28l-.504.49c-.43.418-.7.865-.7 1.48v.25a.75.75 0 0 1-1.5 0v-.25c0-.987.436-1.687 1.017-2.253l.492-.477a.25.25 0 0 0 .094-.193.25.25 0 0 0-.25-.25h-.5a.25.25 0 0 0-.25.25.75.75 0 0 1-1.5 0ZM9 13a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path></svg>
+        CodeFind Web &mdash; Shortcuts &amp; Search Syntax
+      </h3>
+      <button class="btn btn-sm" onclick="closeHelpModal()">&times; Close</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-section-title">Keyboard Navigation</div>
+      <table class="shortcut-table">
+        <tr><td><span class="kbd">/</span> or <span class="kbd">s</span></td><td>Focus search bar and select text</td></tr>
+        <tr><td><span class="kbd">j</span> / <span class="kbd">k</span> or <span class="kbd">&darr;</span> / <span class="kbd">&uarr;</span></td><td>Move selection between results</td></tr>
+        <tr><td><span class="kbd">Enter</span></td><td>Open / preview selected document</td></tr>
+        <tr><td><span class="kbd">n</span></td><td>Jump to next match occurrence in current file</td></tr>
+        <tr><td><span class="kbd">N</span> (Shift+n)</td><td>Jump to previous match occurrence in current file</td></tr>
+        <tr><td><span class="kbd">+</span> or <span class="kbd">=</span></td><td>Zoom in code preview font size</td></tr>
+        <tr><td><span class="kbd">-</span></td><td>Zoom out code preview font size</td></tr>
+        <tr><td><span class="kbd">0</span></td><td>Reset code zoom back to 100% (13px)</td></tr>
+        <tr><td><span class="kbd">w</span></td><td>Toggle soft line wrapping</td></tr>
+        <tr><td><span class="kbd">f</span></td><td>Toggle fullscreen distraction-free code viewer</td></tr>
+        <tr><td><span class="kbd">?</span></td><td>Open this Help &amp; Shortcuts dialog</td></tr>
+        <tr><td><span class="kbd">Esc</span></td><td>Close dialogs or unfocus search</td></tr>
+      </table>
+
+      <div class="modal-section-title">Search Syntax &amp; Query Filters</div>
+      <div class="syntax-item">
+        <b>sqlite3_prepare_v2</b>
+        <div class="syntax-desc">Prefix / token search matching identifiers with underscores &amp; dots.</div>
+      </div>
+      <div class="syntax-item">
+        <b>sqlite3 OR prepare</b>
+        <div class="syntax-desc">Boolean OR / AND / NOT query logic.</div>
+      </div>
+      <div class="syntax-item">
+        <b>"exact phrase match"</b>
+        <div class="syntax-desc">Contiguous exact phrase search with quote wrapping.</div>
+      </div>
+      <div class="syntax-item">
+        <b>@lua</b> or <b>ext:c</b>
+        <div class="syntax-desc">Filter matches strictly to specific file extension (e.g. <code>prepare @lua</code>).</div>
+      </div>
+      <div class="syntax-item">
+        <b>files:*.md</b> or <b>files:config</b>
+        <div class="syntax-desc">Filename search bypassing full-text index to find files by name.</div>
+      </div>
+    </div>
+  </div>
+</div>
 
 <div id="toast" class="toast"></div>
 
@@ -993,25 +1155,187 @@ async function loadFilePreview(item) {
       matchNavGroup.style.display = "none";
       return;
     }
-    renderCode(data.lines, data.hit_lines || {});
+    renderCode(data.lines, data.hit_lines || {}, item.filename);
   } catch (err) {
     codeViewerWrap.innerHTML = `<div class="empty-state"><p>Failed to load file: ${escapeHtml(err.message)}</p></div>`;
     matchNavGroup.style.display = "none";
   }
 }
+// --- Fast Client-Side Syntax Highlighter ---
+const LANG_RULES = {
+  lua: {
+    commentLine: "--",
+    commentBlockStart: "--[\x5b",
+    commentBlockEnd: "\x5d\x5d",
+    keywords: new Set([
+      "and", "break", "do", "else", "elseif", "end", "false", "for", "function",
+      "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then",
+      "true", "until", "while"
+    ]),
+    types: new Set(["string", "number", "table", "boolean", "thread", "userdata", "ffi", "bit", "io", "os", "math"])
+  },
+  c: {
+    commentLine: "//",
+    commentBlockStart: "/*",
+    commentBlockEnd: "*/",
+    keywords: new Set([
+      "auto", "break", "case", "const", "continue", "default", "do", "else", "enum",
+      "extern", "for", "goto", "if", "inline", "register", "restrict", "return",
+      "sizeof", "static", "struct", "switch", "typedef", "union", "volatile", "while",
+      "class", "public", "private", "protected", "virtual", "template", "namespace",
+      "new", "delete", "try", "catch", "throw", "true", "false", "nullptr"
+    ]),
+    types: new Set([
+      "void", "char", "short", "int", "long", "float", "double", "signed", "unsigned",
+      "bool", "_Bool", "size_t", "ssize_t", "int8_t", "int16_t", "int32_t", "int64_t",
+      "uint8_t", "uint16_t", "uint32_t", "uint64_t", "uintptr_t", "intptr_t"
+    ])
+  },
+  py: {
+    commentLine: "#",
+    keywords: new Set([
+      "False", "None", "True", "and", "as", "assert", "async", "await", "break",
+      "class", "continue", "def", "del", "elif", "else", "except", "finally", "for",
+      "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or",
+      "pass", "raise", "return", "try", "while", "with", "yield"
+    ]),
+    types: new Set(["int", "str", "float", "bool", "list", "dict", "set", "tuple", "bytes", "object"])
+  },
+  js: {
+    commentLine: "//",
+    commentBlockStart: "/*",
+    commentBlockEnd: "*/",
+    keywords: new Set([
+      "async", "await", "break", "case", "catch", "class", "const", "continue", "debugger",
+      "default", "delete", "do", "else", "export", "extends", "finally", "for", "function",
+      "if", "import", "in", "instanceof", "let", "new", "return", "super", "switch",
+      "this", "throw", "try", "typeof", "var", "void", "while", "with", "yield"
+    ]),
+    types: new Set(["null", "undefined", "true", "false", "NaN", "Infinity", "Promise", "Array", "Object", "String", "Number", "Boolean"])
+  },
+  sh: {
+    commentLine: "#",
+    keywords: new Set([
+      "if", "then", "else", "elif", "fi", "case", "esac", "for", "while", "until", "do",
+      "done", "in", "function", "select", "time", "return", "exit", "local", "export"
+    ]),
+    types: new Set()
+  }
+};
 
-function renderCode(lines, hitLines) {
+function getFileLang(filename) {
+  if (!filename) return "txt";
+  const ext = filename.includes(".") ? filename.split(".").pop().toLowerCase() : "";
+  if (ext === "lua" || ext === "luau") return "lua";
+  if (["c", "h", "cpp", "hpp", "cc", "hh", "cxx", "hxx", "cu", "cuh"].includes(ext)) return "c";
+  if (["py", "pyw"].includes(ext)) return "py";
+  if (["js", "jsx", "ts", "tsx", "mjs", "cjs"].includes(ext)) return "js";
+  if (["sh", "bash", "zsh"].includes(ext)) return "sh";
+  if (["json"].includes(ext)) return "js";
+  return "c"; // default general C-like fallback
+}
+
+function highlightLine(line, lang, queryTokens) {
+  if (!line || line.length === 0) return "";
+  const rules = LANG_RULES[lang] || LANG_RULES.c;
+  
+  // 1. Check for single-line comments first
+  if (rules.commentLine) {
+    const cIdx = line.indexOf(rules.commentLine);
+    if (cIdx !== -1) {
+      // Check that it's not inside quotes
+      const before = line.slice(0, cIdx);
+      const qCount = (before.match(/"/g) || []).length + (before.match(/'/g) || []).length;
+      if (qCount % 2 === 0) {
+        const codePart = highlightCodeTokens(before, rules, queryTokens);
+        const commentPart = `<span class="tok-com">${escapeHtml(line.slice(cIdx))}</span>`;
+        return codePart + commentPart;
+      }
+    }
+  }
+
+  // 2. Check for C preprocessor directives
+  const trimmed = line.trimStart();
+  if (rules.commentLine === "//" && trimmed.startsWith("#")) {
+    const leadSpace = line.slice(0, line.length - trimmed.length);
+    return escapeHtml(leadSpace) + `<span class="tok-pre">${escapeHtml(trimmed)}</span>`;
+  }
+
+  return highlightCodeTokens(line, rules, queryTokens);
+}
+
+function highlightCodeTokens(text, rules, queryTokens) {
+  // Regex to match: strings, numbers, identifiers/words, symbols
+  const tokenRegex = /(".*?"|'.*?'|`.*?`|\b0x[0-9a-fA-F]+\b|\b\d+(?:\.\d+)?\b|[a-zA-Z_]\w*|[^\s\w"']+|\s+)/g;
+  let out = "";
+  let match;
+
+  while ((match = tokenRegex.exec(text)) !== null) {
+    const tok = match[0];
+    const ch = tok[0];
+
+    // String literals
+    if (ch === '"' || ch === "'" || ch === '`') {
+      out += `<span class="tok-str">${escapeHtml(tok)}</span>`;
+    }
+    // Numbers
+    else if (/\b\d/.test(tok)) {
+      out += `<span class="tok-num">${escapeHtml(tok)}</span>`;
+    }
+    // Identifiers & Words
+    else if (/[a-zA-Z_]/.test(ch)) {
+      const lower = tok.toLowerCase();
+      // Check if this token matches active search query
+      if (queryTokens && queryTokens.has(lower)) {
+        out += `<mark class="query-match">${escapeHtml(tok)}</mark>`;
+      } else if (rules.keywords.has(tok)) {
+        out += `<span class="tok-kw">${escapeHtml(tok)}</span>`;
+      } else if (rules.types.has(tok)) {
+        out += `<span class="tok-type">${escapeHtml(tok)}</span>`;
+      } else {
+        out += escapeHtml(tok);
+      }
+    }
+    // Symbols / Operators / Spaces
+    else {
+      // Also highlight query match if query is a symbol or substring
+      out += escapeHtml(tok);
+    }
+  }
+
+  return out;
+}
+
+function getQueryTokensSet(queryStr) {
+  const set = new Set();
+  if (!queryStr) return set;
+  const clean = queryStr.replace(/@\w+/g, "").replace(/files:\S+/g, "");
+  const words = clean.match(/[\w_\-]+/g) || [];
+  for (const w of words) {
+    if (w !== "AND" && w !== "OR" && w !== "NOT") {
+      set.add(w.toLowerCase().replace(/\*$/, ""));
+    }
+  }
+  return set;
+}
+
+function renderCode(lines, hitLines, filename) {
+  const lang = getFileLang(filename);
+  const queryTokens = getQueryTokensSet(state.currentQuery);
   let html = `<table class="code-table">`;
+
   lines.forEach((lineText, i) => {
     const ln = i + 1;
     const isHit = !!hitLines[ln];
     const marker = isHit ? "▶" : "";
     const rowClass = isHit ? "hit-row" : "";
+    const highlightedCode = highlightLine(lineText, lang, isHit ? queryTokens : null);
+
     html += `
       <tr class="${rowClass}" id="code-line-${ln}">
         <td class="col-marker">${marker}</td>
         <td class="col-line">${ln}</td>
-        <td class="col-code">${escapeHtml(lineText)}</td>
+        <td class="col-code">${highlightedCode}</td>
       </tr>
     `;
   });
@@ -1129,7 +1453,16 @@ async function updateStats() {
   } catch (e) {}
 }
 
-// Global hotkeys (/, j, k, n, N, +, -, 0, w, f, Esc)
+// --- Help Modal Functions ---
+const helpModal = document.getElementById("helpModal");
+function openHelpModal() {
+  helpModal.classList.add("open");
+}
+function closeHelpModal() {
+  helpModal.classList.remove("open");
+}
+
+// Global hotkeys (/, j, k, n, N, +, -, 0, w, f, ?, Esc)
 window.addEventListener("keydown", (e) => {
   if (e.target === searchInput) {
     if (e.key === "Escape") {
@@ -1144,7 +1477,14 @@ window.addEventListener("keydown", (e) => {
   }
 
   // Hotkey navigation
-  if (e.key === "/" || e.key === "s") {
+  if (e.key === "?" || (e.key === "/" && e.shiftKey)) {
+    e.preventDefault();
+    if (helpModal.classList.contains("open")) {
+      closeHelpModal();
+    } else {
+      openHelpModal();
+    }
+  } else if (e.key === "/" || e.key === "s") {
     e.preventDefault();
     searchInput.focus();
     searchInput.select();
@@ -1187,7 +1527,9 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault();
     toggleFullscreen();
   } else if (e.key === "Escape") {
-    if (state.isFullscreen) {
+    if (helpModal.classList.contains("open")) {
+      closeHelpModal();
+    } else if (state.isFullscreen) {
       toggleFullscreen();
     }
   }
