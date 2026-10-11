@@ -1121,14 +1121,55 @@ local function get_index_html(lan_ip, port, default_dir)
       position: relative;
       overflow: hidden;
     }
-    .thumb-wrap img {
+    .thumb-wrap img, .thumb-wrap video {
       width: 100%;
       height: 100%;
       object-fit: cover;
       transition: transform 0.25s ease;
+      pointer-events: none;
     }
-    .media-card:hover .thumb-wrap img {
+    .media-card:hover .thumb-wrap img,
+    .media-card:hover .thumb-wrap video {
       transform: scale(1.05);
+    }
+    .video-play-indicator {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 38px;
+      height: 38px;
+      background: rgba(0, 0, 0, 0.65);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      backdrop-filter: blur(4px);
+      border: 1px solid rgba(255, 255, 255, 0.25);
+      color: #fff;
+      font-size: 14px;
+      pointer-events: none;
+      transition: opacity 0.2s, transform 0.2s;
+    }
+    .media-card:hover .video-play-indicator {
+      opacity: 0;
+      transform: translate(-50%, -50%) scale(0.85);
+    }
+    .list-thumb {
+      width: 48px;
+      height: 32px;
+      border-radius: 4px;
+      object-fit: cover;
+      background: #0d1117;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      vertical-align: middle;
+      border: 1px solid var(--card-border);
+      pointer-events: none;
+    }
+    .list-thumb-icon {
+      font-size: 16px;
     }
     .badge-type {
       position: absolute;
@@ -1679,13 +1720,19 @@ local function get_index_html(lan_ip, port, default_dir)
           if (item.type === 'image') {
             thumbContent = `<img src="${streamUrl}" loading="lazy" alt="${item.name}">`;
           } else if (item.type === 'video') {
-            thumbContent = `<div style="font-size:42px;">🎬</div><div style="position:absolute; bottom:6px; right:8px; font-size:10px; background:rgba(0,0,0,0.7); padding:2px 6px; border-radius:4px;">VIDEO</div>`;
+            thumbContent = `
+              <video class="thumb-media" src="${streamUrl}#t=0.1" preload="metadata" muted playsinline
+                     onerror="this.style.display='none'; if(this.nextElementSibling) this.nextElementSibling.style.display='flex';"></video>
+              <div style="display:none; font-size:42px;">🎬</div>
+              <div class="video-play-indicator">▶</div>`;
           } else {
             thumbContent = `<div style="font-size:42px;">🎵</div><div style="position:absolute; bottom:6px; right:8px; font-size:10px; background:rgba(0,0,0,0.7); padding:2px 6px; border-radius:4px;">AUDIO</div>`;
           }
 
           html += `
-            <div class="media-card" onclick="openLightbox(${idx})">
+            <div class="media-card" onclick="openLightbox(${idx})"
+                 onmouseenter="previewVideo(this, true)"
+                 onmouseleave="previewVideo(this, false)">
               <div class="thumb-wrap">
                 ${thumbContent}
                 <div class="badge-type">${item.ext}</div>
@@ -1708,6 +1755,7 @@ local function get_index_html(lan_ip, port, default_dir)
             <thead>
               <tr>
                 <th style="width:40px;">#</th>
+                <th style="width:60px;">Preview</th>
                 <th>Name</th>
                 <th>Type</th>
                 <th>Size</th>
@@ -1717,9 +1765,19 @@ local function get_index_html(lan_ip, port, default_dir)
             </thead>
             <tbody>`;
         media.forEach((item, idx) => {
+          const streamUrl = `/media/${encodeURIComponent(item.subpath)}`;
+          let listThumb = '';
+          if (item.type === 'image') {
+            listThumb = `<img class="list-thumb" src="${streamUrl}" loading="lazy" alt="${item.name}">`;
+          } else if (item.type === 'video') {
+            listThumb = `<video class="list-thumb" src="${streamUrl}#t=0.1" preload="metadata" muted playsinline onerror="this.outerHTML='<div class=\\\'list-thumb list-thumb-icon\\\'>🎬</div>'"></video>`;
+          } else {
+            listThumb = `<div class="list-thumb list-thumb-icon">🎵</div>`;
+          }
           html += `
             <tr onclick="openLightbox(${idx})">
               <td style="color:var(--text-muted);">${idx + 1}</td>
+              <td>${listThumb}</td>
               <td style="font-weight:600; color:var(--text);">${item.name}</td>
               <td><span class="badge-type" style="position:static;">${item.ext}</span></td>
               <td>${item.size_fmt}</td>
@@ -1732,6 +1790,23 @@ local function get_index_html(lan_ip, port, default_dir)
         });
         html += `</tbody></table>`;
         container.innerHTML = html;
+      }
+    }
+
+    function previewVideo(card, play) {
+      const vid = card.querySelector('.thumb-wrap video');
+      if (!vid) return;
+      if (play) {
+        try {
+          vid.muted = true;
+          const p = vid.play();
+          if (p !== undefined) p.catch(() => {});
+        } catch (e) {}
+      } else {
+        try {
+          vid.pause();
+          vid.currentTime = 0.1;
+        } catch (e) {}
       }
     }
 
@@ -1755,6 +1830,9 @@ local function get_index_html(lan_ip, port, default_dir)
     // Lightbox & Viewer
     function openLightbox(idx) {
       if (idx < 0 || idx >= currentMediaList.length) return;
+      document.querySelectorAll('.thumb-wrap video').forEach(v => {
+        try { v.pause(); v.currentTime = 0.1; } catch (e) {}
+      });
       activeIndex = idx;
       currentZoom = 1;
       currentRotate = 0;

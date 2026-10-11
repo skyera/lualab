@@ -155,6 +155,10 @@ if run_test("HTML5 Template Generation", function()
     check(html:find("PixWeb Media Gallery") ~= nil, "Page title check")
     check(html:find("lightbox%-modal") ~= nil, "Lightbox modal present")
     check(html:find("qr%-modal") ~= nil, "QR modal present")
+    check(html:find("thumb%-media") ~= nil, "Video thumbnail element present")
+    check(html:find("video%-play%-indicator") ~= nil, "Video play indicator present")
+    check(html:find("previewVideo") ~= nil, "Video hover preview handler present")
+    check(html:find("list%-thumb") ~= nil, "List view thumbnail present")
 end) then passed = passed + 1 end
 
 -- Test 7: Adaptive Banner & Mojibake Prevention
