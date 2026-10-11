@@ -150,4 +150,51 @@ test('deletion removes personal meaning on the last source and lookup guards pre
         assert(not result.saved and not store.web:get('hello', 'youdao'))
     end)
 end)
+test('distinct random proverbs cannot overwrite a colliding timestamp', function()
+    fixture(function(store)
+        local original = math.random
+        math.random = function() return 728 end
+        local ok, err = pcall(function()
+            local first = store:random_proverb(nil, nil, function() return { text = 'First quote.', chinese = '' } end)
+            local second = store:random_proverb(nil, nil, function() return { text = 'Second quote.', chinese = '' } end)
+            assert(first.id ~= second.id and #store:proverbs() == 2)
+            assert(store.web:get_proverb(first.date).text == 'First quote.')
+        end)
+        math.random = original
+        assert(ok, err)
+    end)
+end)
+
+test('random proverbs reuse normalized content and legacy duplicates stay out of the list', function()
+    fixture(function(store)
+        local text = "Manners maketh the man. 'Manners makyth man' - the motto of William of Wykeham(1320 - 1404)"
+        local old = store.web:save_proverb({ date = '2026-10-11 22:30:00-777', text = text,
+            chinese = '', explanation = 'English Proverb · Wikiquote' }, 100)
+        local latest = store.web:save_proverb({ date = '2026-10-11 22:51:48-728', text = text,
+            chinese = '', explanation = 'English Proverb · Wikiquote' }, 200)
+        assert(#store:proverbs() == 1 and store:proverbs()[1].id == latest.id)
+        assert(#store:proverbs('Manners') == 1 and #store:proverbs('absent') == 0)
+        local repeated = store:random_proverb(nil, 'wikiquote', function()
+            return { text = '  ' .. text:gsub(' ', '  ') .. '\n', chinese = '  ', explanation = 'Updated attribution' }
+        end)
+        assert(repeated.id == latest.id and repeated.date == latest.date)
+        assert(store.web:query('SELECT count(*) AS total FROM proverbs')[1].total == 2)
+        local translated = store:random_proverb(nil, nil, function()
+            return { text = text, chinese = '礼貌造就人。', explanation = 'Different translation' }
+        end)
+        assert(translated.id ~= latest.id and #store:proverbs() == 2)
+        assert(#store:proverbs('礼貌') == 1)
+        local distinct = store:random_proverb(nil, nil, function()
+            return { text = 'Manners maketh a man.', chinese = '' }
+        end)
+        assert(distinct.id ~= latest.id and #store:proverbs() == 3)
+        local daily = store.web:save_proverb({ date = '2026-10-11', text = text, chinese = '' }, 300)
+        assert(store.web:get_proverb('2026-10-11').id == daily.id)
+        assert(store.web:get_proverb(old.date).id == old.id and #store:proverbs() == 3)
+        local exported = store:export_backup()
+        assert(#exported.web.proverbs == 5)
+        assert(store:restore(exported))
+        assert(#store:proverbs() == 3 and store.web:get_proverb('2026-10-11').id == daily.id)
+    end)
+end)
 print('Passed ' .. count .. ' meaning/statistics tests.')

@@ -415,6 +415,27 @@ test('All-source Fortune executes its default command runner', () => {
   }
 });
 
+test('repeated proverb fetches reuse one saved card through real HTTP workers', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wordbook-proverbs-'));
+  let server;
+  try {
+    server = await start(path.join(directory, 'words.db'), '127.0.0.1', 'none', [],
+      "require('content').fetch_quote=function() return {text='Manners maketh the man.',chinese='',explanation='English Proverb · Wikiquote'} end");
+    const first = (await post(server.url, '/api/proverb/random', { source: 'wikiquote' })).data.proverb;
+    const second = (await post(server.url, '/api/proverb/random', { source: 'wikiquote' })).data.proverb;
+    assert.equal(first.id, second.id); assert.equal(first.date, second.date);
+    const list = await (await fetch(server.url + '/api/proverbs?q=Manners')).json();
+    assert.equal(list.proverbs.length, 1);
+    const backup = await (await fetch(server.url + '/api/export?format=json')).json();
+    assert.equal(backup.web.proverbs.length, 1);
+    assert.equal((await post(server.url, '/api/restore', backup)).status, 200);
+    assert.equal((await (await fetch(server.url + '/api/proverbs')).json()).proverbs.length, 1);
+  } finally {
+    if (server) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('LuaJIT bytecode contains no undeclared globals in every new Lua module', () => {
   const allowed = new Set(['require', 'assert', 'error', 'setmetatable', 'tonumber', 'tostring', 'type', 'ipairs', 'pairs', 'pcall', 'xpcall', 'print', 'arg', 'package', 'os', 'io', 'string', 'table', 'math', 'debug', 'coroutine']);
   const files = fs.readdirSync(root).filter(file => file.endsWith('.lua')).map(file => path.join(root, file));

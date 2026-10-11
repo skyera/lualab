@@ -177,6 +177,11 @@ Requests do not execute a shell or put credentials in command arguments.
 - Pronunciation playback uses browser speech synthesis when available; voice
   availability depends on the browser and operating system.
 
+Collected proverbs show one card per matching text and translation, ignoring extra
+whitespace and retaining the newest matching entry. Repeated random fetches reuse
+the saved entry. Different translations remain separate. Daily records and JSON
+backups preserve all stored history, including older duplicate records.
+
 ## Your meanings and learning statistics
 
 Use **Your meaning** on a saved lookup or **Edit meaning** in My words to write

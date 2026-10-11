@@ -145,6 +145,14 @@ function DB:random_proverb()
     }
 end
 
+local function proverb_key(proverb)
+    local function normalize(text)
+        return (text or ''):gsub('%s+', ' '):gsub('^ ', ''):gsub(' $', '')
+    end
+    local text, chinese = normalize(proverb.text), normalize(proverb.chinese)
+    return #text .. ':' .. text .. chinese
+end
+
 function DB:proverbs(query)
     local sql = 'SELECT * FROM proverbs'
     local params = {}
@@ -156,19 +164,30 @@ function DB:proverbs(query)
     end
     sql = sql .. ' ORDER BY date DESC, id DESC'
     local rows = self:query(sql, params)
-    local list = {}
+    local list, seen = {}, {}
     for _, row in ipairs(rows) do
-        list[#list + 1] = {
-            id = row.id,
-            date = row.date,
-            text = row.text,
-            chinese = row.chinese,
-            explanation = row.explanation,
-            audio_url = row.audio_url,
-            created_at = row.created_at,
-        }
+        local key = proverb_key(row)
+        if not seen[key] then
+            seen[key] = true
+            list[#list + 1] = {
+                id = row.id,
+                date = row.date,
+                text = row.text,
+                chinese = row.chinese,
+                explanation = row.explanation,
+                audio_url = row.audio_url,
+                created_at = row.created_at,
+            }
+        end
     end
     return list
+end
+
+function DB:find_proverb(proverb)
+    local key = proverb_key(proverb)
+    for _, saved in ipairs(self:proverbs()) do
+        if proverb_key(saved) == key then return saved end
+    end
 end
 
 function DB:save_proverb(p, stamp)

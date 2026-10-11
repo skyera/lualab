@@ -166,7 +166,14 @@ function Store:random_proverb(fetch_fn, source, quote_fn)
     if quote_fn then online = quote_fn()
     else online = content.fetch_quote(fetch_fn or net.fetch, source) end
     if online and online.text and online.text ~= '' then
-        online.date = os.date('!%Y-%m-%d %H:%M:%S', os.time()) .. '-' .. math.random(100, 999)
+        local existing = self.web:find_proverb(online)
+        if existing then return existing end
+        local date, suffix = os.date('!%Y-%m-%d %H:%M:%S', os.time()), math.random(100, 999)
+        online.date = date .. '-' .. suffix
+        while self.web:get_proverb(online.date) do
+            suffix = suffix + 1
+            online.date = date .. '-' .. suffix
+        end
         local saved = self.web:save_proverb(online)
         if saved then return saved end
         return online
