@@ -386,6 +386,18 @@ if run_test("Unicode & Suffix Range Media Streaming (Port 8078)", function()
         local dl_headers = p_dl:read("*a")
         p_dl:close()
         check(dl_headers:find("Content-Length: " .. tostring(large_total), 1, true) ~= nil, "Download preserves full content length")
+
+        -- 7. Rapid scrub / seek test across arbitrary offsets
+        local seek_offsets = { 0, 524288, 1048576, 1572864, 2097152 }
+        for _, offset in ipairs(seek_offsets) do
+            local p_seek = io.popen(string.format("curl -s -i -H \"Range: bytes=%d-\" http://127.0.0.1:%d/media/large_test.mp4", offset, test_port), "r")
+            local seek_res = p_seek:read("*a")
+            p_seek:close()
+            check(seek_res:find("HTTP/1.1 206 Partial Content", 1, true) ~= nil, "Scrub to offset " .. offset .. " returns 206")
+            local exp_slice_end = math.min(offset + 2 * 1024 * 1024 - 1, large_total - 1)
+            local exp_cr_seek = string.format("Content-Range: bytes %d-%d/%d", offset, exp_slice_end, large_total)
+            check(seek_res:find(exp_cr_seek, 1, true) ~= nil, "Content-Range matches scrub position: " .. exp_cr_seek)
+        end
     end)
 
     cleanup_uni()

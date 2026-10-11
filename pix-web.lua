@@ -275,6 +275,11 @@ else
             short revents;
         };
 
+        struct timeval {
+            long tv_sec;
+            long tv_usec;
+        };
+
         int socket(int domain, int type, int protocol);
         int bind(int sockfd, const void *addr, unsigned int addrlen);
         int listen(int sockfd, int backlog);
@@ -1854,6 +1859,11 @@ local function get_index_html(lan_ip, port, default_dir)
 
       const streamUrl = `/media/${encodeURIComponent(item.subpath)}`;
 
+      // Pause any active preview thumbnails to free server bandwidth for playback
+      document.querySelectorAll('.thumb-wrap video').forEach(v => {
+        try { v.pause(); } catch(e) {}
+      });
+
       if (item.type === 'image') {
         img.src = streamUrl;
         img.style.display = 'block';
@@ -1882,8 +1892,14 @@ local function get_index_html(lan_ip, port, default_dir)
         slideshowTimer = null;
         document.getElementById('btn-slideshow').textContent = '▶ Slideshow';
       }
-      document.getElementById('lightbox-video').pause();
-      document.getElementById('lightbox-audio').pause();
+      const vid = document.getElementById('lightbox-video');
+      vid.pause();
+      vid.removeAttribute('src');
+      vid.load();
+      const aud = document.getElementById('lightbox-audio');
+      aud.pause();
+      aud.removeAttribute('src');
+      aud.load();
       document.getElementById('lightbox-modal').classList.remove('open');
       activeIndex = -1;
     }
@@ -2232,7 +2248,12 @@ local function run_server(host, port, root_dir)
                 ws2.setsockopt(client_sock, 0xFFFF, 0x1005, to_ms, 4) -- SOL_SOCKET, SO_SNDTIMEO
                 ws2.setsockopt(client_sock, 0xFFFF, 0x1006, to_ms, 4) -- SOL_SOCKET, SO_RCVTIMEO
             else
-                C.setsockopt(client_sock, 6, 1, opt_one, 4)
+                C.setsockopt(client_sock, 6, 1, opt_one, 4) -- IPPROTO_TCP, TCP_NODELAY
+                local tv = ffi.new("struct timeval")
+                tv.tv_sec = 2
+                tv.tv_usec = 0
+                C.setsockopt(client_sock, 1, 21, tv, ffi.sizeof(tv)) -- SOL_SOCKET, SO_SNDTIMEO
+                C.setsockopt(client_sock, 1, 20, tv, ffi.sizeof(tv)) -- SOL_SOCKET, SO_RCVTIMEO
             end
             local req_raw = ""
             local header_end = nil
