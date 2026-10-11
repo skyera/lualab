@@ -224,4 +224,45 @@ test("Live HTTP server serves UI, uploads, downloads, and syncs clipboard", func
     if not ok then error(err) end
 end)
 
+-- =========================================================================
+-- 8. Streaming Multi-Megabyte Upload Test
+-- =========================================================================
+test("Streaming upload handles multi-megabyte payloads without memory limits", function()
+    local test_port = 8943
+    local test_dir = "./test_shared_stream"
+    os.execute("rm -rf " .. test_dir .. " 2>/dev/null")
+
+    local cmd = string.format("luajit landrop_web.lua --port %d --dir %s > /dev/null 2>&1 & echo $!", test_port, test_dir)
+    local p = io.popen(cmd)
+    local pid = tonumber(p:read("*l"))
+    p:close()
+    os.execute("sleep 0.3")
+
+    local function cleanup()
+        if pid then os.execute("kill " .. pid .. " 2>/dev/null") end
+        os.execute("rm -rf " .. test_dir .. " 2>/dev/null")
+    end
+
+    local ok, err = pcall(function()
+        -- Generate 2MB payload and upload
+        local sample_file = "./test_stream_2mb.tmp"
+        local f = io.open(sample_file, "wb")
+        f:write(string.rep("X", 2 * 1024 * 1024))
+        f:close()
+
+        local res = os.execute(string.format("curl -s -f -X POST --data-binary @%s \"http://127.0.0.1:%d/api/upload?name=stream_2mb.bin\" > /dev/null", sample_file, test_port))
+        os.remove(sample_file)
+        assert(res == 0, "2MB streaming upload failed")
+
+        local p_list = io.popen(string.format("curl -s http://127.0.0.1:%d/api/files", test_port))
+        local list_raw = p_list:read("*a")
+        p_list:close()
+        local files = json.decode(list_raw)
+        assert(#files == 1 and files[1].name == "stream_2mb.bin" and files[1].size == 2097152)
+    end)
+
+    cleanup()
+    if not ok then error(err) end
+end)
+
 print(string.format("Passed all %d tests.", passed))

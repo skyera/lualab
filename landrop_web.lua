@@ -317,6 +317,39 @@ function Storage:save_file(filename, data)
     return true, safe
 end
 
+function Storage:save_file_stream(filename)
+    local safe = sanitize_filename(filename)
+    if not safe then return nil, "Invalid filename" end
+    local tmp_name = ".tmp_" .. os.time() .. "_" .. math.random(1000, 9999)
+    local tmp_path = self.dir .. "/" .. tmp_name
+    local f, err = io.open(tmp_path, "wb")
+    if not f then return nil, err or "Failed to open temporary file" end
+    local final_path = self.dir .. "/" .. safe
+    return {
+        write = function(_, chunk) f:write(chunk) end,
+        finish = function(_)
+            f:close()
+            os.remove(final_path)
+            local ok = os.rename(tmp_path, final_path)
+            if not ok then
+                local src = io.open(tmp_path, "rb")
+                local dst = io.open(final_path, "wb")
+                if src and dst then
+                    dst:write(src:read("*a"))
+                    src:close()
+                    dst:close()
+                    os.remove(tmp_path)
+                end
+            end
+            return true, safe
+        end,
+        abort = function(_)
+            f:close()
+            os.remove(tmp_path)
+        end,
+    }
+end
+
 function Storage:read_file(filename)
     local safe = sanitize_filename(filename)
     if not safe then return nil, "Invalid filename" end
@@ -941,12 +974,13 @@ local function run_server(host, port, storage_dir)
             end
         end
         header = header .. "\r\n"
+        local MSG_NOSIGNAL = is_windows and 0 or 0x4000
         if is_windows then
             ws2.send(client_sock, header, #header, 0)
             if #body > 0 then ws2.send(client_sock, body, #body, 0) end
         else
-            C.send(client_sock, header, #header, 0)
-            if #body > 0 then C.send(client_sock, body, #body, 0) end
+            C.send(client_sock, header, #header, MSG_NOSIGNAL)
+            if #body > 0 then C.send(client_sock, body, #body, MSG_NOSIGNAL) end
         end
     end
 
@@ -971,9 +1005,10 @@ local function run_server(host, port, storage_dir)
                 else
                     n = C.recv(client_sock, buf, buf_size, 0)
                 end
-                if n <= 0 then break end
+                n = tonumber(n)
+                if not n or n <= 0 then break end
                 req_raw = req_raw .. ffi.string(buf, n)
-                header_end = req_raw:find("\r\n\r\n")
+                header_end = req_raw:find("\r\n\r\n", 1, true)
             end
 
             if header_end then
@@ -981,45 +1016,24 @@ local function run_server(host, port, storage_dir)
                 local body_so_far = req_raw:sub(header_end + 4)
                 local method, path = header_part:match("^(%u+)%s+([^%s]+)")
 
-                local content_length = tonumber(header_part:match("[Cc]ontent%-[Ll]ength:%s*(%d+)")) or 0
-                local needed = content_length - #body_so_far
-                local full_body = body_so_far
-                while needed > 0 do
-                    local to_read = math.min(needed, buf_size)
-                    local n
-                    if is_windows then
-                        n = ws2.recv(client_sock, buf, to_read, 0)
-                    else
-                        n = C.recv(client_sock, buf, to_read, 0)
-                    end
-                    if n <= 0 then break end
-                    full_body = full_body .. ffi.string(buf, n)
-                    needed = needed - n
-                end
-
                 method = method or "GET"
                 path = path or "/"
                 local url_path, query_str = path:match("^([^?]+)%??(.*)")
                 url_path = url_path or path
                 query_str = query_str or ""
 
-                -- Route handling
-                if url_path == "/" or url_path == "/index.html" then
-                    send_response(client_sock, 200, "text/html; charset=utf-8", get_index_html(lan_ip, port))
-                elseif url_path == "/api/status" then
-                    local files = storage:list_files()
-                    local resp = {
-                        lan_ip = lan_ip,
-                        port = port,
-                        dir = storage.dir,
-                        files_count = #files,
-                        version = LANDROP_VERSION,
-                    }
-                    send_response(client_sock, 200, "application/json", json.encode(resp))
-                elseif url_path == "/api/files" then
-                    local files = storage:list_files()
-                    send_response(client_sock, 200, "application/json", json.encode(files))
-                elseif url_path == "/api/upload" and method == "POST" then
+                -- Respond to Expect: 100-continue if requested by client
+                if header_part:find("[Ee]xpect:%s*100%-continue") then
+                    local cont = "HTTP/1.1 100 Continue\r\n\r\n"
+                    local MSG_NOSIGNAL = is_windows and 0 or 0x4000
+                    if is_windows then ws2.send(client_sock, cont, #cont, 0) else C.send(client_sock, cont, #cont, MSG_NOSIGNAL) end
+                end
+
+                local content_length = tonumber(header_part:match("[Cc]ontent%-[Ll]ength:%s*(%d+)")) or 0
+                local needed = content_length - #body_so_far
+
+                -- Handle file uploads via streaming write directly to disk
+                if url_path == "/api/upload" and method == "POST" then
                     local name = query_str:match("name=([^&]+)")
                     if name then
                         name = name:gsub("%%(%x%x)", function(hex) return string.char(tonumber(hex, 16)) end)
@@ -1027,12 +1041,72 @@ local function run_server(host, port, storage_dir)
                     if not name or #name == 0 then
                         name = "upload_" .. os.time() .. ".bin"
                     end
-                    local ok, res = storage:save_file(name, full_body)
-                    if ok then
-                        send_response(client_sock, 200, "application/json", json.encode({ ok = true, file = res }))
+                    local stream, s_err = storage:save_file_stream(name)
+                    if not stream then
+                        send_response(client_sock, 400, "application/json", json.encode({ ok = false, error = s_err or "Invalid filename" }))
                     else
-                        send_response(client_sock, 400, "application/json", json.encode({ ok = false, error = res }))
+                        if #body_so_far > 0 then
+                            stream:write(body_so_far)
+                        end
+                        while needed > 0 do
+                            local to_read = math.min(needed, buf_size)
+                            local n
+                            if is_windows then
+                                n = ws2.recv(client_sock, buf, to_read, 0)
+                            else
+                                n = C.recv(client_sock, buf, to_read, 0)
+                            end
+                            n = tonumber(n)
+                            if not n or n <= 0 then break end
+                            stream:write(ffi.string(buf, n))
+                            needed = needed - n
+                        end
+                        if needed <= 0 then
+                            local ok_fin, res_name = stream:finish()
+                            if ok_fin then
+                                send_response(client_sock, 200, "application/json", json.encode({ ok = true, file = res_name }))
+                            else
+                                send_response(client_sock, 500, "application/json", json.encode({ ok = false, error = "Save failed" }))
+                            end
+                        else
+                            stream:abort()
+                            send_response(client_sock, 400, "application/json", json.encode({ ok = false, error = "Incomplete upload" }))
+                        end
                     end
+                else
+                    -- For non-streaming endpoints, buffer body chunks
+                    local chunks = { body_so_far }
+                    while needed > 0 do
+                        local to_read = math.min(needed, buf_size)
+                        local n
+                        if is_windows then
+                            n = ws2.recv(client_sock, buf, to_read, 0)
+                        else
+                            n = C.recv(client_sock, buf, to_read, 0)
+                        end
+                        n = tonumber(n)
+                        if not n or n <= 0 then break end
+                        table.insert(chunks, ffi.string(buf, n))
+                        needed = needed - n
+                    end
+                    local full_body = table.concat(chunks)
+
+                    -- Route handling
+                    if url_path == "/" or url_path == "/index.html" then
+                        send_response(client_sock, 200, "text/html; charset=utf-8", get_index_html(lan_ip, port))
+                    elseif url_path == "/api/status" then
+                        local files = storage:list_files()
+                        local resp = {
+                            lan_ip = lan_ip,
+                            port = port,
+                            dir = storage.dir,
+                            files_count = #files,
+                            version = LANDROP_VERSION,
+                        }
+                        send_response(client_sock, 200, "application/json", json.encode(resp))
+                    elseif url_path == "/api/files" then
+                        local files = storage:list_files()
+                        send_response(client_sock, 200, "application/json", json.encode(files))
                 elseif url_path:find("^/download/") then
                     local req_file = url_path:sub(11)
                     req_file = req_file:gsub("%%(%x%x)", function(hex) return string.char(tonumber(hex, 16)) end)
@@ -1084,7 +1158,8 @@ local function run_server(host, port, storage_dir)
                     send_response(client_sock, 404, "application/json", json.encode({ error = "Not Found" }))
                 end
             end
-            close_socket(client_sock)
+        end
+        close_socket(client_sock)
         end
     end
 end
