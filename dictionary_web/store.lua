@@ -157,20 +157,20 @@ function Store:proverbs(query)
     return self.web:proverbs(query)
 end
 
-function Store:random_proverb(fetch_fn)
-    -- Pick a random offset between 1 and 365 days ago
+function Store:random_proverb(fetch_fn, source)
+    -- Try fetching from online quote / proverb services first
+    local online = content.fetch_quote(fetch_fn or net.fetch, source)
+    if online and online.text and online.text ~= '' then
+        online.date = os.date('!%Y-%m-%d %H:%M:%S', os.time()) .. '-' .. math.random(100, 999)
+        local saved = self.web:save_proverb(online)
+        if saved then return saved end
+        return online
+    end
+    -- Fallback: pick a historical or curated proverb
     local offset = math.random(1, 365) * 86400
     local target_date = os.date('!%Y-%m-%d', os.time() - offset)
     local proverb = self.web:get_proverb(target_date)
     if not proverb then
-        local online = content.fetch_online(fetch_fn or net.fetch, target_date)
-        if online then
-            online.date = target_date
-            proverb = self.web:save_proverb(online)
-        end
-    end
-    if not proverb then
-        -- Fallback to curated proverbs list
         local curated = content.daily(os.time() - offset).proverb
         curated.date = target_date
         proverb = self.web:save_proverb(curated)

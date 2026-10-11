@@ -227,6 +227,19 @@ test('Proverb database persistence and online fetching', function()
     local rand_res, rcode = service.route(db, 'POST', '/api/proverb/random', {}, {})
     assert(rcode == 200 and rand_res.proverb and rand_res.proverb.text)
 
+    -- Verify new quote providers: ZenQuotes, DummyJSON, FavQs, and Wikiquote
+    local zq = content.fetch_zenquotes(function() return '[{"q":"Live and learn.","a":"Anon"}]', 200 end)
+    assert(zq and zq.text == 'Live and learn.' and zq.explanation:find('ZenQuotes'))
+
+    local dj = content.fetch_dummyjson(function() return '{"quote":"Stay hungry, stay foolish.","author":"Jobs"}', 200 end)
+    assert(dj and dj.text == 'Stay hungry, stay foolish.' and dj.explanation:find('Jobs'))
+
+    local fq = content.fetch_favqs(function() return '{"quote":{"body":"Be yourself.","author":"Wilde"}}', 200 end)
+    assert(fq and fq.text == 'Be yourself.' and fq.explanation:find('Wilde'))
+
+    local wq = content.fetch_wikiquote(function() return '{"parse":{"text":{"*":"<li>Practice makes perfect.</li>"}}}', 200 end)
+    assert(wq and wq.text == 'Practice makes perfect.' and wq.explanation:find('Wikiquote'))
+
     -- Verify service route for /api/word/random
     local rand_word, wcode = service.route(db, 'GET', '/api/word/random', {}, {})
     assert(wcode == 200 and rand_word.word and rand_word.word.word and rand_word.word.meaning)

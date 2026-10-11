@@ -78,4 +78,96 @@ function M.fetch_online(fetch_fn, date_str)
     }
 end
 
+function M.fetch_zenquotes(fetch_fn)
+    if not fetch_fn then return nil, 'No fetch function provided' end
+    local ok, res, code = pcall(fetch_fn, 'https://zenquotes.io/api/random')
+    if not ok or not res or (code ~= nil and code ~= 200) then return nil end
+    local parse_ok, data = pcall(json.decode, res)
+    if not parse_ok or type(data) ~= 'table' or not data[1] or not data[1].q then return nil end
+    local item = data[1]
+    return {
+        text = item.q,
+        chinese = '',
+        explanation = (item.a and item.a ~= '') and ('— ' .. item.a .. ' · ZenQuotes') or 'ZenQuotes',
+        audio_url = nil,
+    }
+end
+
+function M.fetch_dummyjson(fetch_fn)
+    if not fetch_fn then return nil, 'No fetch function provided' end
+    local ok, res, code = pcall(fetch_fn, 'https://dummyjson.com/quotes/random')
+    if not ok or not res or (code ~= nil and code ~= 200) then return nil end
+    local parse_ok, data = pcall(json.decode, res)
+    if not parse_ok or type(data) ~= 'table' or not data.quote then return nil end
+    return {
+        text = data.quote,
+        chinese = '',
+        explanation = (data.author and data.author ~= '') and ('— ' .. data.author .. ' · Quotes') or 'Quotes',
+        audio_url = nil,
+    }
+end
+
+function M.fetch_favqs(fetch_fn)
+    if not fetch_fn then return nil, 'No fetch function provided' end
+    local ok, res, code = pcall(fetch_fn, 'https://favqs.com/api/qotd')
+    if not ok or not res or (code ~= nil and code ~= 200) then return nil end
+    local parse_ok, data = pcall(json.decode, res)
+    if not parse_ok or type(data) ~= 'table' or not data.quote or not data.quote.body then return nil end
+    local q = data.quote
+    local author = q.author and q.author ~= '' and ('— ' .. q.author) or ''
+    return {
+        text = q.body,
+        chinese = '',
+        explanation = author ~= '' and (author .. ' · FavQs') or 'FavQs',
+        audio_url = nil,
+    }
+end
+
+function M.fetch_wikiquote(fetch_fn)
+    if not fetch_fn then return nil, 'No fetch function provided' end
+    local url = 'https://en.wikiquote.org/w/api.php?action=parse&format=json&page=English_proverbs&prop=text'
+    local ok, res, code = pcall(fetch_fn, url)
+    if not ok or not res or (code ~= nil and code ~= 200) then return nil end
+    local parse_ok, data = pcall(json.decode, res)
+    if not parse_ok or type(data) ~= 'table' or not data.parse or not data.parse.text or not data.parse.text['*'] then
+        return nil
+    end
+    local html = data.parse.text['*']
+    local proverbs_list = {}
+    for li in html:gmatch('<li>(.-)</li>') do
+        local clean_text = li:gsub('<[^>]+>', ''):gsub('%s+', ' '):gsub('^%s+', ''):gsub('%s+$', '')
+        clean_text = clean_text:gsub('^["“”\']', ''):gsub('["“”\']$', '')
+        if #clean_text >= 15 and #clean_text <= 140 and not clean_text:find('^Adapted') and not clean_text:find('^Source') then
+            proverbs_list[#proverbs_list + 1] = clean_text
+        end
+    end
+    if #proverbs_list == 0 then return nil end
+    local selected = proverbs_list[math.random(1, #proverbs_list)]
+    return {
+        text = selected,
+        chinese = '',
+        explanation = 'English Proverb · Wikiquote',
+        audio_url = nil,
+    }
+end
+
+function M.fetch_quote(fetch_fn, source)
+    if source == 'zenquotes' then return M.fetch_zenquotes(fetch_fn) end
+    if source == 'dummyjson' then return M.fetch_dummyjson(fetch_fn) end
+    if source == 'favqs' then return M.fetch_favqs(fetch_fn) end
+    if source == 'wikiquote' then return M.fetch_wikiquote(fetch_fn) end
+    if source == 'iciba' then return M.fetch_online(fetch_fn) end
+    -- Randomly choose among available quote services
+    local choices = {M.fetch_online, M.fetch_zenquotes, M.fetch_dummyjson, M.fetch_favqs, M.fetch_wikiquote}
+    local start_idx = math.random(1, #choices)
+    for i = 0, #choices - 1 do
+        local fn = choices[(start_idx + i - 1) % #choices + 1]
+        local quote = fn(fetch_fn)
+        if quote and quote.text and quote.text ~= '' then
+            return quote
+        end
+    end
+    return nil
+end
+
 return M

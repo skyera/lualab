@@ -95,7 +95,11 @@ function M.route(db, method, path, params, payload)
         if method ~= 'GET' and method ~= 'POST' then
             return {error = 'Method not allowed.'}, 405
         end
-        local proverb = db.random_proverb and db:random_proverb()
+        local src = (params and params.source) or (payload and payload.source)
+        local proverb = db.random_proverb and db:random_proverb(nil, src)
+        if not proverb then
+            proverb = content.fetch_quote and content.fetch_quote(nil, src)
+        end
         if not proverb then
             proverb = content.daily(os.time() - math.random(1, 365) * 86400).proverb
         end
