@@ -284,6 +284,80 @@ if run_test("Live HTTP Server Headless Integration (Port 8079)", function()
     if not ok then error(err) end
 end) then passed = passed + 1 end
 
+-- Test 10: Unicode & Suffix Range Media Streaming (Live Integration)
+total = total + 1
+if run_test("Unicode & Suffix Range Media Streaming (Port 8078)", function()
+    local test_dir = "_pix_unicode_test"
+    local test_port = 8078
+    remove_tree(test_dir)
+    make_dir(test_dir)
+
+    -- Create a Unicode video file using open_media_file
+    local test_content = "0123456789ABCDEF_VIDEO_BYTES_9999"
+    local f_uni = pix_web.open_media_file(test_dir .. "/测试视频.mp4", "wb")
+    check(f_uni ~= nil, "Create Unicode named MP4 file")
+    f_uni:write(test_content)
+    f_uni:close()
+
+    -- Verify open_media_file read & seek
+    local f_read = pix_web.open_media_file(test_dir .. "/测试视频.mp4", "rb")
+    check(f_read ~= nil, "open_media_file read Unicode MP4")
+    local sz = f_read:seek("end")
+    check(sz == #test_content, "Unicode MP4 file size matches: " .. tostring(sz))
+    f_read:seek("set", 0)
+    local prefix = f_read:read(10)
+    check(prefix == "0123456789", "Prefix matches: " .. tostring(prefix))
+    f_read:close()
+
+    -- Start server
+    local pid = nil
+    if is_windows then
+        os.execute(string.format('start /B luajit pix-web.lua --port %d --dir %s >nul 2>nul', test_port, test_dir))
+    else
+        local pid_p = io.popen(string.format("luajit pix-web.lua --port %d --dir %s >/dev/null 2>&1 & echo $!", test_port, test_dir), "r")
+        pid = pid_p:read("*l")
+        pid_p:close()
+    end
+    portable_sleep(350)
+
+    local function cleanup_uni()
+        if is_windows then
+            os.execute(string.format('for /f "tokens=5" %%a in (\'netstat -aon ^| findstr :%d\') do @taskkill /F /PID %%a >nul 2>nul', test_port))
+        else
+            if pid and tonumber(pid) then os.execute("kill -9 " .. pid .. " >/dev/null 2>&1") end
+        end
+        remove_tree(test_dir)
+    end
+
+    local ok, err = pcall(function()
+        -- 1. Verify /api/media discovers the Unicode MP4
+        local p_media = io.popen(string.format("curl -s http://127.0.0.1:%d/api/media", test_port), "r")
+        local media_json = p_media:read("*a")
+        p_media:close()
+        check(media_json:find("测试视频.mp4") ~= nil, "API discovers Unicode MP4")
+
+        -- 2. Range request on Unicode filename: bytes=0-9
+        local url_enc = "http://127.0.0.1:" .. test_port .. "/media/%E6%B5%8B%E8%AF%95%E8%A7%86%E9%A2%91.mp4"
+        local p_range = io.popen("curl -s -i -r 0-9 " .. url_enc, "r")
+        local range_res = p_range:read("*a")
+        p_range:close()
+        check(range_res:find("HTTP/1.1 206 Partial Content", 1, true) ~= nil, "Unicode stream returns 206")
+        check(range_res:find("Content-Range: bytes 0-9/" .. #test_content, 1, true) ~= nil, "Content-Range matches 0-9")
+
+        -- 3. Suffix Range request: bytes=-4 (last 4 bytes: '9999')
+        local p_suffix = io.popen("curl -s -i -H \"Range: bytes=-4\" " .. url_enc, "r")
+        local suffix_res = p_suffix:read("*a")
+        p_suffix:close()
+        check(suffix_res:find("HTTP/1.1 206 Partial Content", 1, true) ~= nil, "Suffix range returns 206")
+        local exp_cr = string.format("Content-Range: bytes %d-%d/%d", #test_content - 4, #test_content - 1, #test_content)
+        check(suffix_res:find(exp_cr, 1, true) ~= nil, "Content-Range matches suffix range: " .. exp_cr)
+        check(suffix_res:find("9999", 1, true) ~= nil, "Suffix payload contains trailing bytes '9999'")
+    end)
+
+    cleanup_uni()
+    if not ok then error(err) end
+end) then passed = passed + 1 end
+
 print(string.format("\n========================================================"))
 print(string.format("PixWeb Test Summary: %d / %d tests passed (%.1f%%)", passed, total, (passed / total) * 100))
 print(string.format("========================================================"))

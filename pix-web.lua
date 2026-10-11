@@ -245,6 +245,15 @@ if is_windows then
         void* __stdcall GetStdHandle(uint32_t nStdHandle);
         int   __stdcall GetConsoleMode(void *hConsoleHandle, uint32_t *lpMode);
         int   __stdcall SetConsoleMode(void *hConsoleHandle, uint32_t dwMode);
+        int   __stdcall DeleteFileW(const wchar_t *lpFileName);
+
+        void* _wfopen(const wchar_t *filename, const wchar_t *mode);
+        int   fclose(void *stream);
+        size_t fread(void *ptr, size_t size, size_t n, void *stream);
+        size_t fwrite(const void *ptr, size_t size, size_t n, void *stream);
+        int   _fseeki64(void *stream, int64_t offset, int origin);
+        int   _fileno(void *stream);
+        int64_t _telli64(int fd);
     ]]
     ws2 = ffi.load("ws2_32")
     local wsa_data = ffi.new("WSADATA")
@@ -345,6 +354,7 @@ end
 
 local C = ffi.C
 local kernel32 = is_windows and ffi.load("kernel32") or nil
+local msvcrt = is_windows and ffi.load("msvcrt") or nil
 
 if is_windows and kernel32 then
     pcall(function()
@@ -372,6 +382,98 @@ local function close_socket(s)
         if ws2 and s ~= INVALID_SOCK and s ~= 0 then ws2.closesocket(s) end
     else
         if s >= 0 then C.close(s) end
+    end
+end
+
+local function to_win_wide(str)
+    if not is_windows or type(str) ~= "string" then return nil end
+    local len = kernel32.MultiByteToWideChar(65001, 0, str, #str, nil, 0)
+    if len <= 0 then
+        len = kernel32.MultiByteToWideChar(0, 0, str, #str, nil, 0)
+        if len <= 0 then return nil end
+    end
+    local wbuf = ffi.new("wchar_t[?]", len + 1)
+    kernel32.MultiByteToWideChar(65001, 0, str, #str, wbuf, len)
+    wbuf[len] = 0
+    return wbuf
+end
+
+local function win_wide_to_utf8(wstr)
+    if not is_windows or not wstr then return "" end
+    local len = kernel32.WideCharToMultiByte(65001, 0, wstr, -1, nil, 0, nil, nil)
+    if len <= 0 then return "" end
+    local buf = ffi.new("char[?]", len)
+    kernel32.WideCharToMultiByte(65001, 0, wstr, -1, buf, len, nil, nil)
+    return ffi.string(buf, len - 1)
+end
+
+local function open_media_file(path, mode)
+    mode = mode or "rb"
+    if is_windows and msvcrt and kernel32 then
+        local norm = path:gsub("/", "\\")
+        local wpath = to_win_wide(norm)
+        local wmode = to_win_wide(mode)
+        if not wpath or not wmode then return nil end
+        local fp = msvcrt._wfopen(wpath, wmode)
+        if fp == nil then return nil end
+        local f = { fp = fp }
+        function f:seek(whence, offset)
+            offset = offset or 0
+            local origin = 0
+            if whence == "cur" then origin = 1
+            elseif whence == "end" then origin = 2 end
+            msvcrt._fseeki64(self.fp, ffi.cast("int64_t", offset), origin)
+            local fd = msvcrt._fileno(self.fp)
+            return tonumber(msvcrt._telli64(fd))
+        end
+        function f:read(fmt)
+            if not fmt or type(fmt) == "number" then
+                local n = fmt or 1
+                if n <= 0 then return "" end
+                local buf = ffi.new("char[?]", n)
+                local read_n = tonumber(msvcrt.fread(buf, 1, n, self.fp))
+                if not read_n or read_n <= 0 then return nil end
+                return ffi.string(buf, read_n)
+            elseif fmt == "*a" or fmt == "*all" or fmt == "a" then
+                local buf_sz = 65536
+                local buf = ffi.new("char[?]", buf_sz)
+                local chunks = {}
+                while true do
+                    local n = tonumber(msvcrt.fread(buf, 1, buf_sz, self.fp))
+                    if not n or n <= 0 then break end
+                    table.insert(chunks, ffi.string(buf, n))
+                end
+                return table.concat(chunks)
+            elseif fmt == "*l" or fmt == "*line" or fmt == "l" then
+                local line_chars = {}
+                local buf = ffi.new("char[1]")
+                while true do
+                    local n = tonumber(msvcrt.fread(buf, 1, 1, self.fp))
+                    if not n or n <= 0 then
+                        if #line_chars == 0 then return nil end
+                        break
+                    end
+                    local c = ffi.string(buf, 1)
+                    if c == "\n" then break end
+                    if c ~= "\r" then table.insert(line_chars, c) end
+                end
+                return table.concat(line_chars)
+            end
+            return nil
+        end
+        function f:write(data)
+            if not data or #data == 0 then return end
+            msvcrt.fwrite(data, 1, #data, self.fp)
+        end
+        function f:close()
+            if self.fp then
+                msvcrt.fclose(self.fp)
+                self.fp = nil
+            end
+        end
+        return f
+    else
+        return io.open(path, mode)
     end
 end
 
@@ -453,7 +555,7 @@ local function format_date(timestamp)
 end
 
 local function is_animated_gif(path)
-    local f = io.open(path, "rb")
+    local f = open_media_file(path, "rb")
     if not f then return false end
     local head = f:read(6)
     if head ~= "GIF89a" and head ~= "GIF87a" then f:close(); return false end
@@ -510,7 +612,7 @@ local function is_animated_gif(path)
 end
 
 local function is_animated_webp(path)
-    local f = io.open(path, "rb")
+    local f = open_media_file(path, "rb")
     if not f then return false end
     local head = f:read(12)
     if not head or #head < 12 or head:sub(1, 4) ~= "RIFF" or head:sub(9, 12) ~= "WEBP" then
@@ -630,28 +732,6 @@ end
 -- =========================================================================
 -- 4. Media Scanner Engine
 -- =========================================================================
-local function to_win_wide(str)
-    if not is_windows or type(str) ~= "string" then return nil end
-    local len = kernel32.MultiByteToWideChar(65001, 0, str, #str, nil, 0)
-    if len <= 0 then
-        len = kernel32.MultiByteToWideChar(0, 0, str, #str, nil, 0)
-        if len <= 0 then return nil end
-    end
-    local wbuf = ffi.new("wchar_t[?]", len + 1)
-    kernel32.MultiByteToWideChar(65001, 0, str, #str, wbuf, len)
-    wbuf[len] = 0
-    return wbuf
-end
-
-local function win_wide_to_utf8(wstr)
-    if not is_windows or not wstr then return "" end
-    local len = kernel32.WideCharToMultiByte(65001, 0, wstr, -1, nil, 0, nil, nil)
-    if len <= 0 then return "" end
-    local buf = ffi.new("char[?]", len)
-    kernel32.WideCharToMultiByte(65001, 0, wstr, -1, buf, len, nil, nil)
-    return ffi.string(buf, len - 1)
-end
-
 local function posix_stat(path, st)
     if pcall(function() return C.stat end) then
         return C.stat(path, st)
@@ -1703,10 +1783,16 @@ local function get_index_html(lan_ip, port, default_dir)
       } else if (item.type === 'video') {
         video.src = streamUrl;
         video.style.display = 'block';
+        video.load();
+        const vp = video.play();
+        if (vp !== undefined) { vp.catch(() => {}); }
       } else if (item.type === 'audio') {
         document.getElementById('audio-title').textContent = item.name;
         audio.src = streamUrl;
         audioCard.style.display = 'block';
+        audio.load();
+        const ap = audio.play();
+        if (ap !== undefined) { ap.catch(() => {}); }
       }
 
       modal.classList.add('open');
@@ -1942,8 +2028,30 @@ local function run_server(host, port, root_dir)
     local buf_size = 65536
     local buf = ffi.new("char[?]", buf_size)
 
+    local function send_all(sock, data, len)
+        len = len or #data
+        local total_sent = 0
+        local MSG_NOSIGNAL = is_windows and 0 or 0x4000
+        while total_sent < len do
+            local ptr = ffi.cast("const char*", data) + total_sent
+            local to_send = len - total_sent
+            local n
+            if is_windows then
+                n = ws2.send(sock, ptr, to_send, 0)
+            else
+                n = C.send(sock, ptr, to_send, MSG_NOSIGNAL)
+            end
+            n = tonumber(n)
+            if not n or n <= 0 then
+                return false, total_sent
+            end
+            total_sent = total_sent + n
+        end
+        return true, total_sent
+    end
+
     local function send_response(client_sock, status_code, content_type, body, extra_headers)
-        local status_text = (status_code == 200 and "OK") or (status_code == 206 and "Partial Content") or (status_code == 404 and "Not Found") or (status_code == 400 and "Bad Request") or "Server Error"
+        local status_text = (status_code == 200 and "OK") or (status_code == 206 and "Partial Content") or (status_code == 404 and "Not Found") or (status_code == 400 and "Bad Request") or (status_code == 416 and "Range Not Satisfiable") or "Server Error"
         local header = string.format("HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n", status_code, status_text, content_type, #body)
         if extra_headers then
             for k, v in pairs(extra_headers) do
@@ -1951,18 +2059,14 @@ local function run_server(host, port, root_dir)
             end
         end
         header = header .. "\r\n"
-        local MSG_NOSIGNAL = is_windows and 0 or 0x4000
-        if is_windows then
-            ws2.send(client_sock, header, #header, 0)
-            if #body > 0 then ws2.send(client_sock, body, #body, 0) end
-        else
-            C.send(client_sock, header, #header, MSG_NOSIGNAL)
-            if #body > 0 then C.send(client_sock, body, #body, MSG_NOSIGNAL) end
+        send_all(client_sock, header, #header)
+        if #body > 0 then
+            send_all(client_sock, body, #body)
         end
     end
 
     local function stream_file_range(client_sock, file_path, mime_type, range_header, is_download)
-        local f = io.open(file_path, "rb")
+        local f = open_media_file(file_path, "rb")
         if not f then
             send_response(client_sock, 404, "application/json", json.encode({ ok = false, error = "File not found" }))
             return
@@ -1981,6 +2085,14 @@ local function run_server(host, port, root_dir)
                     end_byte = math.min(tonumber(r_end) or end_byte, total_size - 1)
                 end
                 is_partial = true
+            else
+                local suffix = range_header:match("bytes=%-(%d+)")
+                if suffix then
+                    local s_len = tonumber(suffix) or 0
+                    start_byte = math.max(0, total_size - s_len)
+                    end_byte = total_size - 1
+                    is_partial = true
+                end
             end
         end
 
@@ -2005,11 +2117,9 @@ local function run_server(host, port, root_dir)
         end
         header = header .. "\r\n"
 
-        local MSG_NOSIGNAL = is_windows and 0 or 0x4000
-        if is_windows then
-            ws2.send(client_sock, header, #header, 0)
-        else
-            C.send(client_sock, header, #header, MSG_NOSIGNAL)
+        if not send_all(client_sock, header, #header) then
+            f:close()
+            return
         end
 
         f:seek("set", start_byte)
@@ -2018,13 +2128,8 @@ local function run_server(host, port, root_dir)
             local chunk_sz = math.min(remaining, buf_size)
             local chunk = f:read(chunk_sz)
             if not chunk or #chunk == 0 then break end
-            local sent_n
-            if is_windows then
-                sent_n = ws2.send(client_sock, chunk, #chunk, 0)
-            else
-                sent_n = C.send(client_sock, chunk, #chunk, MSG_NOSIGNAL)
-            end
-            if not sent_n or sent_n <= 0 then break end
+            local ok = send_all(client_sock, chunk, #chunk)
+            if not ok then break end
             remaining = remaining - #chunk
         end
         f:close()
@@ -2081,7 +2186,7 @@ local function run_server(host, port, root_dir)
                     local safe_file_name = (name and name:match("[^/\\]+$")) or ("upload_" .. os.time() .. ".bin")
                     local dest_path = safe_target_dir .. "/" .. safe_file_name
 
-                    local out_f = io.open(dest_path, "wb")
+                    local out_f = open_media_file(dest_path, "wb")
                     if not out_f then
                         send_response(client_sock, 500, "application/json", json.encode({ ok = false, error = "Cannot write to destination" }))
                     else
@@ -2185,7 +2290,14 @@ local function run_server(host, port, root_dir)
                         else
                             local safe_sub = sanitize_subpath(target_file)
                             local full_target = root_dir .. "/" .. safe_sub
-                            local rm_res = is_windows and C.remove(full_target) or C.remove(full_target)
+                            local rm_res
+                            if is_windows and kernel32 then
+                                local norm = full_target:gsub("/", "\\")
+                                local wpath = to_win_wide(norm)
+                                rm_res = (wpath and kernel32.DeleteFileW(wpath) ~= 0) and 0 or -1
+                            else
+                                rm_res = C.remove(full_target)
+                            end
                             if rm_res == 0 then
                                 send_response(client_sock, 200, "application/json", json.encode({ ok = true }))
                             else
@@ -2274,6 +2386,7 @@ return {
     get_local_lan_ip = get_local_lan_ip,
     get_index_html = get_index_html,
     render_banner = render_banner,
+    open_media_file = open_media_file,
     IMAGE_EXTENSIONS = IMAGE_EXTENSIONS,
     VIDEO_EXTENSIONS = VIDEO_EXTENSIONS,
     AUDIO_EXTENSIONS = AUDIO_EXTENSIONS,
