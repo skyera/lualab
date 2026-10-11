@@ -196,8 +196,9 @@ async function searchAll(word) {
   const saved = results.filter(data => data.saved).length;
   $('search-status').textContent = `${found} of ${dictionarySources.length} dictionaries returned definitions. ${saved ? 'Successful lookups saved; failed lookups were not added.' : 'No new history saved.'}`;
 }
-async function searchWord(word, source = selectedSource()) {
+async function searchWord(word, source) {
   if (state.busy || state.grading) return;
+  source = source || selectedSource();
   if (source !== 'all' && !dictionarySources.includes(source)) source = 'all';
   state.busy = true;
   $('query').value = word;
@@ -340,7 +341,7 @@ function renderWords() {
     const actions = element('div', undefined, 'word-actions');
     const remove = button('Delete', () => deleteWord(word, remove), 'secondary delete-button');
     remove.setAttribute('aria-label', `Delete ${word.word}`);
-    actions.append(button('Look up ↗', () => searchWord(word.word, word.source)), remove);
+    actions.append(button('Look up ↗', () => searchWord(word.word)), remove);
     row.append(copy, actions);
     fragment.append(row);
   }
@@ -384,7 +385,7 @@ function renderReview() {
   if (word.note) target.append(element('p', word.note, 'study-answer'));
   definitions(word.entry, target);
   if (!word.note && !word.entry) {
-    target.append(element('p', 'This word has no saved meaning. Look it up and add a study note.', 'study-answer'), button('Look up & add note ↗', () => searchWord(word.word, word.source)));
+    target.append(element('p', 'This word has no saved meaning. Look it up and add a study note.', 'study-answer'), button('Look up & add note ↗', () => searchWord(word.word)));
   }
   const actions = element('div', undefined, 'review-actions');
   const grades = word.collection === 'tui'
@@ -588,7 +589,7 @@ $('search-form').addEventListener('submit', event => {
   searchWord($('query').value);
 });
 $('word-filter').addEventListener('input', renderWords);
-$('daily-lookup').addEventListener('click', () => { if (state.daily) searchWord(state.daily.word.word, state.daily.word.source || selectedSource()); });
+$('daily-lookup').addEventListener('click', () => { if (state.daily) searchWord(state.daily.word.word); });
 $('daily-example-audio')?.addEventListener('click', () => {
   if (state.daily?.word?.example) {
     pronounceWord(state.daily.word.example);
