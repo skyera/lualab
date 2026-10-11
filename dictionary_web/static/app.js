@@ -1,6 +1,6 @@
 'use strict';
 const $ = (id) => document.getElementById(id);
-const state = { view: 'search', busy: false, daily: null, words: [], queue: [], proverbs: [], reviewed: 0, total: 0, revealed: false, grading: false, reviewRequest: 0 };
+const state = { view: 'search', busy: false, daily: null, words: [], queue: [], proverbs: [], reviewed: 0, total: 0, revealed: false, grading: false, reviewLoading: false, reviewRequest: 0 };
 const sourceNames = { all: 'All dictionaries', local: 'Local dictionary', 'dict.cn': 'dict.cn · 海词', youdao: 'Youdao · 有道', iciba: 'Iciba · 词霸', 'merriam-webster': 'Merriam-Webster (archived)' };
 const dictionarySources = ['local', 'dict.cn', 'youdao', 'iciba'];
 function element(tag, text, className) {
@@ -54,20 +54,28 @@ function pronounceWord(text) {
   window.speechSynthesis.cancel();
   window.speechSynthesis.speak(speech);
 }
+function providerAudioUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const allowed = ['audio.dict.cn', 'dict.youdao.com', 'iciba.com'].includes(parsed.hostname)
+      || parsed.hostname.endsWith('.iciba.com');
+    if (!allowed || !['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password
+        || (parsed.port && parsed.port !== '443')) return null;
+    parsed.protocol = 'https:';
+    return parsed.href;
+  } catch (_) { return null; }
+}
 function playProverbAudio(url, fallbackText) {
-  if (url) {
-    let secureUrl = url;
-    if (secureUrl.startsWith('http://')) {
-      secureUrl = 'https://' + secureUrl.slice(7);
-    }
-    const audio = new Audio(secureUrl);
-    const promise = audio.play();
-    if (promise !== undefined) {
-      promise.catch(() => {
-        pronounceWord(fallbackText);
-      });
-      return;
-    }
+  const secureUrl = providerAudioUrl(url);
+  if (secureUrl) {
+    try {
+      const audio = new Audio(secureUrl);
+      const promise = audio.play();
+      if (promise !== undefined) {
+        promise.catch(() => pronounceWord(fallbackText));
+        return;
+      }
+    } catch (_) { /* Fall back when browser audio is unavailable. */ }
   }
   pronounceWord(fallbackText);
 }
@@ -200,6 +208,7 @@ async function searchWord(word, source) {
   source = source || selectedSource();
   if (source !== 'all' && !dictionarySources.includes(source)) source = 'all';
   state.busy = true;
+  hideSuggestions();
   $('query').value = word;
   const sourceInput = [...document.querySelectorAll('input[name="source"]')].find(input => input.value === source);
   if (sourceInput) sourceInput.checked = true;
@@ -352,13 +361,17 @@ function renderWords() {
   $('word-list').replaceChildren(fragment);
 }
 async function gradeWord(word, remembered, gradeValue) {
-  if (state.grading) return;
+  if (state.grading || state.reviewLoading || state.view !== 'review') return;
+  const sameCard = item => item.id === word.id && (item.collection || 'web') === (word.collection || 'web');
+  if (!state.queue.length || !sameCard(state.queue[0])) return;
   state.grading = true;
   const actions = document.querySelector('.review-actions');
   if (actions) actions.querySelectorAll('button').forEach(node => { node.disabled = true; });
   try {
     await api('/api/review', { id: word.id, collection: word.collection, remembered, grade: gradeValue });
-    state.queue.shift();
+    const index = state.queue.findIndex(sameCard);
+    if (index < 0) return;
+    state.queue.splice(index, 1);
     state.reviewed++;
     state.revealed = false;
     renderReview();
@@ -373,6 +386,11 @@ async function gradeWord(word, remembered, gradeValue) {
 
 function renderReview() {
   const target = $('review-card'); target.replaceChildren();
+  if (state.reviewLoading) {
+    $('review-progress').textContent = 'Preparing your words…';
+    target.append(element('p', 'Preparing your words…', 'study-answer'));
+    return;
+  }
   $('review-progress').textContent = `${state.reviewed} of ${state.total} reviewed this session`;
   if (!state.queue.length) {
     target.append(empty(state.total ? 'A little wiser already.' : 'You’re all caught up.', state.total ? 'Your next reviews are scheduled. Come back for another small step.' : 'New words appear here as soon as you look them up.', true));
@@ -405,6 +423,8 @@ async function showView(view) {
   if (state.grading) return;
   const reviewRequest = ++state.reviewRequest;
   state.view = view;
+  state.reviewLoading = view === 'review';
+  if (view !== 'search') hideSuggestions();
   $('app-message').textContent = '';
   for (const name of ['search', 'words', 'review', 'proverbs']) {
     const section = $(name + '-view');
@@ -419,14 +439,20 @@ async function showView(view) {
     if (view === 'words') { renderWords(); await refreshCounts(); }
     if (view === 'proverbs') { renderProverbs(); await refreshCounts(); }
     if (view === 'review') {
-      $('review-progress').textContent = 'Preparing your words…';
+      renderReview();
       const data = await api('/api/words?due=1');
       if (state.view !== 'review' || reviewRequest !== state.reviewRequest) return;
+      state.reviewLoading = false;
       $('due-count').textContent = String(data.words.length);
       state.queue = data.words; state.reviewed = 0; state.total = data.words.length; state.revealed = false;
       renderReview();
     }
-  } catch (error) { report(error); }
+  } catch (error) {
+    if (reviewRequest !== state.reviewRequest) return;
+    report(error);
+    state.reviewLoading = false;
+    if (view === 'review') renderReview();
+  }
 }
 async function loadDaily() {
   const data = await api('/api/daily'); state.daily = data;
@@ -452,10 +478,13 @@ async function loadDaily() {
 }
 
 let suggestTimer = null;
+let suggestRequest = 0;
 state.suggestIndex = -1;
 state.suggestions = [];
 
 function hideSuggestions() {
+  clearTimeout(suggestTimer);
+  suggestRequest++;
   const box = $('search-suggest');
   if (box) {
     box.hidden = true;
@@ -506,20 +535,28 @@ async function fetchSuggestions(query) {
     hideSuggestions();
     return;
   }
+  const request = ++suggestRequest;
   try {
     const data = await api('/api/suggest?q=' + encodeURIComponent(query));
+    if (request !== suggestRequest || query !== $('query').value.trim()
+        || state.view !== 'search' || state.busy) return;
     renderSuggestions(data.suggestions || []);
   } catch (_) {
-    hideSuggestions();
+    if (request === suggestRequest) hideSuggestions();
   }
 }
 
 $('query').addEventListener('input', () => {
-  clearTimeout(suggestTimer);
+  hideSuggestions();
   suggestTimer = setTimeout(() => fetchSuggestions($('query').value), 120);
 });
 
 $('query').addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    hideSuggestions();
+    return;
+  }
   const box = $('search-suggest');
   if (box && !box.hidden && state.suggestions.length) {
     if (event.key === 'ArrowDown') {
@@ -541,11 +578,6 @@ $('query').addEventListener('keydown', (event) => {
       searchWord(chosen);
       return;
     }
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      hideSuggestions();
-      return;
-    }
   }
 });
 
@@ -557,7 +589,7 @@ document.addEventListener('click', (event) => {
 
 window.addEventListener('keydown', (event) => {
   if (['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
-  if (state.view !== 'review' || !state.queue.length || state.grading) return;
+  if (state.view !== 'review' || !state.queue.length || state.grading || state.reviewLoading) return;
   const word = state.queue[0];
   if (event.key === 'p' || event.key === 'P' || event.key === 'l' || event.key === 'L') {
     event.preventDefault();

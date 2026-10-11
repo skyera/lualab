@@ -73,7 +73,10 @@ test('real LuaJIT HTTP server, static UI, SQLite round trip and clean signals', 
       const response = await fetch(url + route);
       assert.equal(response.status, 200); assert.ok(response.headers.get('content-type').startsWith(type));
       assert.ok((await response.text()).length > 100);
-      assert.ok(response.headers.get('content-security-policy').includes("script-src 'self'"));
+      const policy = response.headers.get('content-security-policy');
+      assert.ok(policy.includes("script-src 'self'"));
+      assert.ok(policy.includes("media-src 'self' https://audio.dict.cn https://dict.youdao.com https://iciba.com https://*.iciba.com;"));
+      assert.ok(policy.includes("default-src 'self'"));
     }
     assert.equal((await fetch(url + '/', { method: 'HEAD' })).status, 200);
     assert.equal((await fetch(url + '/api/daily')).status, 200);
@@ -90,6 +93,10 @@ test('real LuaJIT HTTP server, static UI, SQLite round trip and clean signals', 
     assert.equal(result.data.saved, true);
     result = await post(url, '/api/search', { word: 'hello', source: 'youdao' });
     assert.equal(result.data.id, id); assert.equal(result.data.lookup_count, 2);
+    assert.equal((await post(url, '/api/note', { id, note: '你好 <script>alert(1)</script>' })).status, 200);
+    const completeNote = 'before\0after · 学习';
+    assert.equal((await post(url, '/api/note', { id, note: completeNote })).status, 200);
+    assert.equal((await (await fetch(url + '/api/words')).json()).words[0].note, completeNote);
     assert.equal((await post(url, '/api/note', { id, note: '你好 <script>alert(1)</script>' })).status, 200);
     assert.equal((await post(url, '/api/review', { id, remembered: true })).status, 200);
     assert.deepEqual((await (await fetch(url + '/api/words?due=1')).json()).words, []);
@@ -249,6 +256,24 @@ test('both launchers automatically invoke setup and expose manual/disabled setup
     assert.notEqual(result.status, 0); assert.match(result.stderr, /requires a local dictionary/);
   } finally {
     if (server && server.child.exitCode === null) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('All-source Fortune executes its default command runner', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wordbook-fortune-'));
+  try {
+    const executable = path.join(directory, 'fortune');
+    fs.writeFileSync(executable, "#!/bin/sh\nprintf 'Practice daily.\\n    -- Test teacher\\n'\n", { mode: 0o755 });
+    const setup = `package.path=${JSON.stringify(path.join(root, '?.lua') + ';' + path.join(root, '..', '?.lua') + ';')}..package.path; local c=require('content'); local q=assert(c.fetch_quote(function() return nil,'offline' end,'all')); print(require('json').encode(q))`;
+    const result = spawnSync('luajit', ['-e', setup], {
+      encoding: 'utf8', env: { ...process.env, PATH: directory + path.delimiter + process.env.PATH }
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const quote = JSON.parse(result.stdout);
+    assert.equal(quote.text, 'Practice daily.');
+    assert.match(quote.explanation, /Test teacher.*Fortune/);
+  } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });

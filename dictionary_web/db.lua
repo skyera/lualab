@@ -19,6 +19,7 @@ int sqlite3_column_type(sqlite3_stmt *, int);
 const char *sqlite3_column_name(sqlite3_stmt *, int);
 const unsigned char *sqlite3_column_text(sqlite3_stmt *, int);
 double sqlite3_column_double(sqlite3_stmt *, int);
+int sqlite3_column_bytes(sqlite3_stmt *, int);
 int sqlite3_exec(sqlite3 *, const char *, void *, void *, char **);
 void sqlite3_free(void *);
 ]]
@@ -99,7 +100,8 @@ function DB:query(sql, params)
                 if kind == SQLITE_INTEGER or kind == SQLITE_FLOAT then
                     row[name] = sqlite.sqlite3_column_double(stmt, index)
                 elseif kind == SQLITE_TEXT then
-                    row[name] = ffi.string(sqlite.sqlite3_column_text(stmt, index))
+                    local text = sqlite.sqlite3_column_text(stmt, index)
+                    row[name] = ffi.string(text, sqlite.sqlite3_column_bytes(stmt, index))
                 end
             end
             rows[#rows + 1] = row

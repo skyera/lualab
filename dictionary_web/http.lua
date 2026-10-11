@@ -148,7 +148,9 @@ function M.respond(fd, status, body, content_type, head)
         .. 'Content-Type: ' .. (content_type or 'application/json; charset=utf-8') .. '\r\n'
         .. 'Content-Length: ' .. #body .. '\r\nConnection: close\r\nCache-Control: no-store\r\n'
         .. 'X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n'
-        .. "Content-Security-Policy: default-src 'self'; style-src 'self'; script-src 'self'; frame-ancestors 'none'\r\n\r\n"
+        .. "Content-Security-Policy: default-src 'self'; style-src 'self'; script-src 'self'; "
+        .. "media-src 'self' https://audio.dict.cn https://dict.youdao.com https://iciba.com https://*.iciba.com; "
+        .. "frame-ancestors 'none'\r\n\r\n"
         .. (head and '' or body)
     local offset, deadline = 0, os.time() + 5
     local pointer = ffi.cast('const char *', frame)

@@ -175,7 +175,7 @@ luajit dictionary_web/tests/test_app.lua
 luajit dictionary_web/tests/test_shared.lua
 luajit test_ffi_dict.lua
 luajit test_download_dict.lua
-node --test dictionary_web/tests/test_http.js
+node --test dictionary_web/tests/test_http.js dictionary_web/tests/test_ui.js
 node --check dictionary_web/static/app.js
 ```
 
@@ -184,7 +184,10 @@ UTF-8 queries, parsing, signing, failure paths, study notes, scheduling, and
 daily rotation. The Node suite launches the actual LuaJIT server with temporary
 SQLite storage, exercises HTTP requests, restarts it to check persistence,
 checks clean signal exits, and analyzes LuaJIT bytecode for undeclared globals.
-Provider tests use controlled responses and do not require API keys. Shared-data
+Provider tests use controlled responses and do not require API keys. Browser-state
+tests feed actual keyboard events and reverse asynchronous responses to check review
+loading and autocomplete cancellation. Audio playback permits only HTTPS media on
+`audio.dict.cn`, `dict.youdao.com`, and Iciba domains, with browser speech as fallback. Shared-data
 tests use temporary TUI databases to verify two-way notes/reviews, all four
 SM-2 grades, duplicate handling, overlapping IDs, and persistence. HTTP tests
 disable the real `.dict.db` unless a temporary fixture is explicitly supplied.

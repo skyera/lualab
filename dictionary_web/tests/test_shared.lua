@@ -1,3 +1,5 @@
+#!/usr/bin/env luajit
+-- Wordbook and TUI shared vocabulary, note and scheduling regression tests.
 local directory = (arg[0]:match('^(.*)/') or '.') .. '/..'
 package.path = directory .. '/?.lua;' .. directory .. '/../?.lua;' .. package.path
 local Store = require('store')
@@ -252,4 +254,17 @@ test('shared dictionary provides prefix suggestions and merges with web words', 
         assert(words['horizon'] and words['horoscope'] and words['horse'])
     end)
 end)
+test('Shared notes preserve embedded NULs across web and TUI reads', function()
+    fixture(function(store, native, id)
+        local note = 'web\0note · 学习'
+        local result, status = service.route(store, 'POST', '/api/note', {},
+            { id = id, collection = 'tui', note = note })
+        assert(status == 200 and result.saved)
+        assert(native:deck_get('hello').mnem == note)
+        assert(store:words('hello')[1].note == note)
+        assert(native:run('UPDATE words SET mnem=? WHERE id=?', { 'TUI\0note', id }))
+        assert(store:words('hello')[1].note == 'TUI\0note')
+    end)
+end)
+
 print('Passed ' .. count .. ' shared-data tests.')

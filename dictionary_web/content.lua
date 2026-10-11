@@ -197,15 +197,18 @@ function M.fetch_fortune(runner)
     }
 end
 
-function M.fetch_quote(fetch_fn, source)
+function M.fetch_quote(fetch_fn, source, fortune_runner)
     if source == 'zenquotes' then return M.fetch_zenquotes(fetch_fn) end
     if source == 'dummyjson' then return M.fetch_dummyjson(fetch_fn) end
     if source == 'favqs' then return M.fetch_favqs(fetch_fn) end
     if source == 'wikiquote' then return M.fetch_wikiquote(fetch_fn) end
-    if source == 'fortune' then return M.fetch_fortune() end
+    if source == 'fortune' then return M.fetch_fortune(fortune_runner) end
     if source == 'iciba' then return M.fetch_random_iciba(fetch_fn) end
     -- Randomly choose among available quote services
-    local choices = {M.fetch_random_iciba, M.fetch_zenquotes, M.fetch_dummyjson, M.fetch_favqs, M.fetch_wikiquote, M.fetch_fortune}
+    local choices = {
+        M.fetch_random_iciba, M.fetch_zenquotes, M.fetch_dummyjson, M.fetch_favqs, M.fetch_wikiquote,
+        function() return M.fetch_fortune(fortune_runner) end,
+    }
     local start_idx = math.random(1, #choices)
     for i = 0, #choices - 1 do
         local fn = choices[(start_idx + i - 1) % #choices + 1]

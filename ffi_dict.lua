@@ -55,6 +55,7 @@ ffi.cdef[[
     int64_t sqlite3_column_int64(sqlite3_stmt *pStmt, int iCol);
     double sqlite3_column_double(sqlite3_stmt *pStmt, int iCol);
     const unsigned char *sqlite3_column_text(sqlite3_stmt *pStmt, int iCol);
+    int sqlite3_column_bytes(sqlite3_stmt *pStmt, int iCol);
 
     int64_t sqlite3_last_insert_rowid(sqlite3 *db);
 ]]
@@ -436,7 +437,7 @@ Database.__index = Database
 local function col_text(stmt, i)
     local p = sqlite.sqlite3_column_text(stmt, i)
     if p == nil then return nil end
-    return ffi.string(p)
+    return ffi.string(p, sqlite.sqlite3_column_bytes(stmt, i))
 end
 
 function Database.open(path)

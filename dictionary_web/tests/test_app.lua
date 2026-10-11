@@ -1,3 +1,5 @@
+#!/usr/bin/env luajit
+-- Wordbook provider, persistence, API and failure-path regression tests.
 local directory = (arg[0]:match('^(.*)/') or '.') .. '/..'
 package.path = directory .. '/?.lua;' .. directory .. '/../?.lua;' .. package.path
 local json = require('json')
@@ -500,6 +502,45 @@ test('Iciba public SSR parsing isolates definitions, phonetics, synonyms and exa
     assert(res.word == 'resilient' and res.source == 'iciba')
     assert(res.source_url == 'https://www.iciba.com/word?w=resilient')
     assert(res.audio_url == 'https://res.iciba.com/sample_am.mp3')
+end)
+
+test('SQLite notes preserve embedded NULs, empty text and Unicode after reopening', function()
+    local path = os.tmpname()
+    local db = DB.open(path, schema)
+    local row = db:save('note-test', 'dict.cn', entry('note-test'), 100)
+    local note = 'before\0after · 学习'
+    local saved, status = service.route(db, 'POST', '/api/note', {}, { id = row.id, note = note })
+    assert(status == 200 and saved.saved)
+    assert(db:get('note-test', 'dict.cn').note == note)
+    assert(db:words()[1].note == note)
+    assert(db:suggest('note')[1].snippet == note)
+    db:close()
+    db = DB.open(path, schema)
+    assert(db:get('note-test', 'dict.cn').note == note)
+    assert(db:note(row.id, '').saved and db:get('note-test', 'dict.cn').note == '')
+    db:close()
+    os.remove(path)
+end)
+
+test('All quote sources use the Fortune command runner independently of HTTPS', function()
+    local requests, commands = 0, 0
+    local function offline(url)
+        assert(url:find('https://', 1, true) == 1, 'Command passed to HTTPS fetcher')
+        requests = requests + 1
+        return nil, 'offline'
+    end
+    local function fortune(command)
+        assert(command == 'fortune -s wisdom literature fortunes computers 2>/dev/null')
+        commands = commands + 1
+        return 'Practice every day.\n    -- A teacher\n'
+    end
+    local quote = assert(content.fetch_quote(offline, 'all', fortune))
+    assert(quote.text == 'Practice every day.' and quote.explanation:find('A teacher', 1, true))
+    assert(commands == 1)
+    local explicit = assert(content.fetch_quote(offline, 'fortune', fortune))
+    assert(explicit.text == quote.text and commands == 2)
+    assert(not content.fetch_quote(offline, 'all', function() return nil end))
+    assert(requests >= 5)
 end)
 
 print('Passed ' .. count .. ' tests.')
