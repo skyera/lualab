@@ -56,11 +56,15 @@ function M.fetch_online(fetch_fn, date_str)
     if not parse_ok or type(data) ~= 'table' or not data.content or data.content == '' then
         return nil, 'Invalid response from proverb service'
     end
+    local audio = (data.tts and data.tts ~= '') and data.tts or nil
+    if audio and audio:sub(1, 7) == 'http://' then
+        audio = 'https://' .. audio:sub(8)
+    end
     return {
         text = data.content,
         chinese = data.note or '',
         explanation = (data.translation and data.translation ~= '' and data.translation ~= '新版每日一句') and data.translation or '',
-        audio_url = (data.tts and data.tts ~= '') and data.tts or nil,
+        audio_url = audio,
     }
 end
 

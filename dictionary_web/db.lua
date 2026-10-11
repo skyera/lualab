@@ -119,11 +119,40 @@ function DB:get_proverb(date)
     local row = self:query('SELECT * FROM proverbs WHERE date=?', {date})[1]
     if not row then return nil end
     return {
+        id = row.id,
+        date = row.date,
         text = row.text,
         chinese = row.chinese,
         explanation = row.explanation,
         audio_url = row.audio_url,
+        created_at = row.created_at,
     }
+end
+
+function DB:proverbs(query)
+    local sql = 'SELECT * FROM proverbs'
+    local params = {}
+    if query and query ~= '' then
+        local escaped = query:gsub('\\', '\\\\'):gsub('%%', '\\%%'):gsub('_', '\\_')
+        sql = sql .. " WHERE (text LIKE ? ESCAPE '\\' OR chinese LIKE ? ESCAPE '\\')"
+        params[1] = '%' .. escaped .. '%'
+        params[2] = '%' .. escaped .. '%'
+    end
+    sql = sql .. ' ORDER BY date DESC, id DESC'
+    local rows = self:query(sql, params)
+    local list = {}
+    for _, row in ipairs(rows) do
+        list[#list + 1] = {
+            id = row.id,
+            date = row.date,
+            text = row.text,
+            chinese = row.chinese,
+            explanation = row.explanation,
+            audio_url = row.audio_url,
+            created_at = row.created_at,
+        }
+    end
+    return list
 end
 
 function DB:save_proverb(p, stamp)

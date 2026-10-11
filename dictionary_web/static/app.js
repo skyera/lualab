@@ -1,6 +1,6 @@
 'use strict';
 const $ = (id) => document.getElementById(id);
-const state = { view: 'search', busy: false, daily: null, words: [], queue: [], reviewed: 0, total: 0, revealed: false, grading: false, reviewRequest: 0 };
+const state = { view: 'search', busy: false, daily: null, words: [], queue: [], proverbs: [], reviewed: 0, total: 0, revealed: false, grading: false, reviewRequest: 0 };
 const sourceNames = { all: 'All dictionaries', local: 'Local dictionary', 'dict.cn': 'dict.cn · 海词', youdao: 'Youdao · 有道', iciba: 'Iciba · 词霸', 'merriam-webster': 'Merriam-Webster (archived)' };
 const dictionarySources = ['local', 'dict.cn', 'youdao', 'iciba'];
 function element(tag, text, className) {
@@ -25,6 +25,23 @@ function pronounceWord(text) {
   speech.lang = /[\u3400-\u9fff]/.test(text) ? 'zh-CN' : 'en-US';
   window.speechSynthesis.cancel();
   window.speechSynthesis.speak(speech);
+}
+function playProverbAudio(url, fallbackText) {
+  if (url) {
+    let secureUrl = url;
+    if (secureUrl.startsWith('http://')) {
+      secureUrl = 'https://' + secureUrl.slice(7);
+    }
+    const audio = new Audio(secureUrl);
+    const promise = audio.play();
+    if (promise !== undefined) {
+      promise.catch(() => {
+        pronounceWord(fallbackText);
+      });
+      return;
+    }
+  }
+  pronounceWord(fallbackText);
 }
 async function api(path, payload) {
   const response = await fetch(path, payload === undefined ? {} : {
@@ -58,7 +75,18 @@ function definitions(entry, target) {
   }
   if (entry.examples?.length) {
     const examples = element('div', undefined, 'examples');
-    for (const text of entry.examples) examples.append(element('p', text));
+    for (const item of entry.examples) {
+      const isObj = typeof item === 'object' && item !== null;
+      const text = isObj ? item.text : String(item);
+      const enText = isObj ? (item.en || text.split(' / ')[0]) : text.split(' / ')[0];
+      const audioUrl = isObj ? item.audio_url : null;
+      const row = element('div', undefined, 'example-row');
+      row.append(element('p', text));
+      const listenBtn = button('🔊 Listen', () => playProverbAudio(audioUrl, enText), 'example-audio-btn');
+      listenBtn.setAttribute('aria-label', `Listen to sentence: ${enText}`);
+      row.append(listenBtn);
+      examples.append(row);
+    }
     target.append(examples);
   }
 }
@@ -169,11 +197,57 @@ async function searchWord(word, source = selectedSource()) {
   }
 }
 async function refreshCounts() {
-  const data = await api('/api/words');
+  const [data, proverbsData] = await Promise.all([api('/api/words'), api('/api/proverbs')]);
   state.words = data.words;
+  state.proverbs = proverbsData.proverbs || [];
   $('word-count').textContent = String(data.words.length);
   $('due-count').textContent = String(data.words.filter(word => word.due_at <= Date.now() / 1000).length);
+  if ($('proverbs-count')) $('proverbs-count').textContent = String(state.proverbs.length);
   if (state.view === 'words') renderWords();
+  if (state.view === 'proverbs') renderProverbs();
+}
+function renderProverbs() {
+  const filter = ($('proverb-filter')?.value || '').trim().toLocaleLowerCase();
+  const proverbs = state.proverbs.filter(p => (p.text && p.text.toLocaleLowerCase().includes(filter)) || (p.chinese && p.chinese.toLocaleLowerCase().includes(filter)));
+  if ($('proverbs-status')) $('proverbs-status').textContent = `${proverbs.length} saved proverb${proverbs.length === 1 ? '' : 's'}`;
+  const fragment = document.createDocumentFragment();
+  for (const p of proverbs) {
+    const row = element('article', undefined, 'word-row');
+    const copy = element('div');
+    copy.append(element('h2', `“${p.text}”`), element('p', p.chinese, 'chinese'));
+    if (p.explanation) copy.append(element('p', p.explanation));
+    copy.append(element('p', `${p.date || 'Saved'} · Collected Wisdom`, 'word-meta'));
+    const actions = element('div', undefined, 'word-actions');
+    const listen = button('🔊 Listen', () => playProverbAudio(p.audio_url, p.text), 'secondary');
+    listen.setAttribute('aria-label', `Listen to proverb: ${p.text}`);
+    actions.append(listen);
+    row.append(copy, actions);
+    fragment.append(row);
+  }
+  if (!proverbs.length) {
+    fragment.append(empty(filter ? 'No matching proverbs.' : 'No proverbs saved yet.', filter ? 'Try a different keyword.' : 'Proverbs are saved automatically when fetched.', false));
+  }
+  if ($('proverb-list')) $('proverb-list').replaceChildren(fragment);
+}
+async function fetchNextProverb(trigger) {
+  if (trigger) trigger.disabled = true;
+  $('app-message').textContent = '';
+  try {
+    const res = await api('/api/proverb/random');
+    if (res.proverb) {
+      if (state.daily) state.daily.proverb = res.proverb;
+      $('daily-proverb').textContent = `“${res.proverb.text}”`;
+      $('daily-chinese').textContent = res.proverb.chinese;
+      $('daily-explanation').textContent = res.proverb.explanation || '';
+      const audioBtn = $('daily-proverb-audio');
+      if (audioBtn) audioBtn.hidden = false;
+      await refreshCounts();
+    }
+  } catch (err) {
+    report(err);
+  } finally {
+    if (trigger) trigger.disabled = false;
+  }
 }
 function empty(title, subtitle, action) {
   const container = element('div', undefined, 'empty');
@@ -278,7 +352,10 @@ async function showView(view) {
   const reviewRequest = ++state.reviewRequest;
   state.view = view;
   $('app-message').textContent = '';
-  for (const name of ['search', 'words', 'review']) $(name + '-view').hidden = name !== view;
+  for (const name of ['search', 'words', 'review', 'proverbs']) {
+    const section = $(name + '-view');
+    if (section) section.hidden = name !== view;
+  }
   document.querySelectorAll('.nav-button').forEach(node => {
     node.classList.toggle('active', node.dataset.view === view);
     if (node.dataset.view === view) node.setAttribute('aria-current', 'page');
@@ -286,6 +363,7 @@ async function showView(view) {
   });
   try {
     if (view === 'words') { renderWords(); await refreshCounts(); }
+    if (view === 'proverbs') { renderProverbs(); await refreshCounts(); }
     if (view === 'review') {
       $('review-progress').textContent = 'Preparing your words…';
       const data = await api('/api/words?due=1');
@@ -301,13 +379,16 @@ async function loadDaily() {
   $('daily-date').textContent = new Date(data.date + 'T12:00:00Z').toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
   $('daily-word').textContent = data.word.word; $('daily-meaning').textContent = data.word.meaning;
   $('daily-label').textContent = data.word.source === 'local' ? '01 / FROM YOUR LOCAL VOCABULARY' : '01 / WORD OF THE DAY';
-  $('daily-example').textContent = `“${data.word.example}”`;
-  $('daily-example').hidden = !data.word.example;
+  $('daily-example').textContent = data.word.example ? `“${data.word.example}”` : '';
+  const exampleAudioBtn = $('daily-example-audio');
+  if (exampleAudioBtn) {
+    exampleAudioBtn.hidden = !data.word.example;
+  }
   $('daily-proverb').textContent = `“${data.proverb.text}”`; $('daily-chinese').textContent = data.proverb.chinese;
-  $('daily-explanation').textContent = data.proverb.explanation;
+  $('daily-explanation').textContent = data.proverb.explanation || '';
   const audioBtn = $('daily-proverb-audio');
   if (audioBtn) {
-    audioBtn.hidden = !data.proverb.audio_url;
+    audioBtn.hidden = false;
   }
 }
 
@@ -458,11 +539,20 @@ $('search-form').addEventListener('submit', event => {
 });
 $('word-filter').addEventListener('input', renderWords);
 $('daily-lookup').addEventListener('click', () => { if (state.daily) searchWord(state.daily.word.word, state.daily.word.source || selectedSource()); });
-$('daily-proverb-audio')?.addEventListener('click', () => {
-  if (state.daily?.proverb?.audio_url) {
-    new Audio(state.daily.proverb.audio_url).play().catch(report);
+$('daily-example-audio')?.addEventListener('click', () => {
+  if (state.daily?.word?.example) {
+    pronounceWord(state.daily.word.example);
   }
 });
+$('daily-proverb-audio')?.addEventListener('click', () => {
+  if (state.daily?.proverb) {
+    playProverbAudio(state.daily.proverb.audio_url, state.daily.proverb.text);
+  }
+});
+$('daily-proverb-next')?.addEventListener('click', (e) => {
+  fetchNextProverb(e.currentTarget);
+});
+$('proverb-filter')?.addEventListener('input', renderProverbs);
 document.querySelectorAll('.nav-button').forEach(node => node.addEventListener('click', () => showView(node.dataset.view)));
 Promise.all([loadDaily(), refreshCounts()]).catch(report);
 setInterval(() => {

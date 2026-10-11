@@ -153,6 +153,31 @@ function Store:daily(stamp, fetch_fn)
     return daily
 end
 
+function Store:proverbs(query)
+    return self.web:proverbs(query)
+end
+
+function Store:random_proverb(fetch_fn)
+    -- Pick a random offset between 1 and 365 days ago
+    local offset = math.random(1, 365) * 86400
+    local target_date = os.date('!%Y-%m-%d', os.time() - offset)
+    local proverb = self.web:get_proverb(target_date)
+    if not proverb then
+        local online = content.fetch_online(fetch_fn or net.fetch, target_date)
+        if online then
+            online.date = target_date
+            proverb = self.web:save_proverb(online)
+        end
+    end
+    if not proverb then
+        -- Fallback to curated proverbs list
+        local curated = content.daily(os.time() - offset).proverb
+        curated.date = target_date
+        proverb = self.web:save_proverb(curated)
+    end
+    return proverb
+end
+
 function Store:save(word, source, entry, stamp)
     local saved = self.web:save(word, source, entry, stamp)
     saved.collection = 'web'

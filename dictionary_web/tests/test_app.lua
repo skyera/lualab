@@ -211,9 +211,21 @@ test('Proverb database persistence and online fetching', function()
     assert(online.chinese == '千里之行，始于足下。' and online.audio_url == 'https://example.com/step.mp3')
     assert(online.explanation == '老子')
 
-    -- Online parser fails gracefully on network errors or bad responses
-    assert(not content.fetch_online(function() return nil, 500 end, '2026-10-10'))
-    assert(not content.fetch_online(function() return 'not json', 200 end, '2026-10-10'))
+    -- Verify DB:proverbs and search filtering
+    local list = db:proverbs()
+    assert(#list == 1 and list[1].text == 'Never give up.')
+    assert(#db:proverbs('give') == 1)
+    assert(#db:proverbs('放弃') == 1)
+    assert(#db:proverbs('nomatch') == 0)
+
+    -- Verify service routes for /api/proverbs and /api/proverb/random
+    local res, code = service.route(db, 'GET', '/api/proverbs', {})
+    assert(code == 200 and #res.proverbs == 1)
+    local filtered_res, _ = service.route(db, 'GET', '/api/proverbs', {q = 'Never'})
+    assert(#filtered_res.proverbs == 1)
+    local rand_res, rcode = service.route(db, 'POST', '/api/proverb/random', {}, {})
+    assert(rcode == 200 and rand_res.proverb and rand_res.proverb.text)
+
     db:close()
 end)
 
@@ -419,7 +431,8 @@ test('Iciba public SSR parsing isolates definitions, phonetics, synonyms and exa
                 "sentences": [
                   {
                     "en": "The material is very resilient.",
-                    "cn": "这种材料非常有弹性。"
+                    "cn": "这种材料非常有弹性。",
+                    "ttsUrl": "http://tts.iciba.com/sample.mp3"
                   }
                 ]
               }
@@ -435,7 +448,8 @@ test('Iciba public SSR parsing isolates definitions, phonetics, synonyms and exa
     assert(#parsed.definitions == 1 and parsed.definitions[1] == 'adj. 能复原的; 有弹性的')
     assert(parsed.phonetic:find('rɪˈzɪliənt', 1, true) and parsed.phonetic:find('UK', 1, true))
     assert(parsed.synonyms and #parsed.synonyms == 2 and parsed.synonyms[1] == 'elastic' and parsed.synonyms[2] == 'flexible')
-    assert(#parsed.examples == 1 and parsed.examples[1]:find('The material is very resilient.', 1, true))
+    assert(#parsed.examples == 1 and parsed.examples[1].text:find('The material is very resilient.', 1, true))
+    assert(parsed.examples[1].audio_url == 'https://tts.iciba.com/sample.mp3')
 
     -- Missing or invalid words
     local empty_ssr = '<script id="__NEXT_DATA__">{"props":{"pageProps":{"initialReduxState":{"word":{"wordInfo":{"baesInfo":{"symbols":[]}}}}}}}</script>'

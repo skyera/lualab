@@ -303,7 +303,15 @@ function M.parse_iciba(html)
             if s.en and s.en ~= '' and #examples < 4 then
                 local en = clean(s.en)
                 local cn = s.cn and clean(s.cn) or ''
-                examples[#examples + 1] = cn ~= '' and (en .. ' / ' .. cn) or en
+                local tts = s.ttsUrl
+                if tts and tts ~= '' and tts:sub(1, 7) == 'http://' then
+                    tts = 'https://' .. tts:sub(8)
+                end
+                examples[#examples + 1] = {
+                    text = cn ~= '' and (en .. ' / ' .. cn) or en,
+                    en = en,
+                    audio_url = tts,
+                }
             end
         end
     end

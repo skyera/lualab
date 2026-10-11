@@ -77,6 +77,8 @@ test('real LuaJIT HTTP server, static UI, SQLite round trip and clean signals', 
     }
     assert.equal((await fetch(url + '/', { method: 'HEAD' })).status, 200);
     assert.equal((await fetch(url + '/api/daily')).status, 200);
+    assert.equal((await fetch(url + '/api/proverbs')).status, 200);
+    assert.equal((await post(url, '/api/proverb/random', {})).status, 200);
     assert.deepEqual((await (await fetch(url + '/api/words')).json()).words, []);
     let result = await post(url, '/api/search', { word: '  HELLO ', source: 'merriam-webster' });
     assert.equal(result.status, 400); assert.match(result.data.error, /valid dictionary source/);

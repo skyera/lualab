@@ -91,12 +91,25 @@ function M.search(db, payload, provider, stamp)
 end
 
 function M.route(db, method, path, params, payload)
+    if path == '/api/proverb/random' or path == '/api/proverbs/random' then
+        if method ~= 'GET' and method ~= 'POST' then
+            return {error = 'Method not allowed.'}, 405
+        end
+        local proverb = db.random_proverb and db:random_proverb()
+        if not proverb then
+            proverb = content.daily(os.time() - math.random(1, 365) * 86400).proverb
+        end
+        return {proverb = proverb}, 200
+    end
     if method == 'GET' then
         if path == '/api/daily' then
             return db.daily and db:daily() or content.daily(), 200
         end
         if path == '/api/words' then
             return {words = db:words(params.q, params.due == '1')}, 200
+        end
+        if path == '/api/proverbs' then
+            return {proverbs = db.proverbs and db:proverbs(params.q) or {}}, 200
         end
         if path == '/api/suggest' then
             return {suggestions = db.suggest and db:suggest(params.q, 6) or {}}, 200
