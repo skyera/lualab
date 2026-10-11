@@ -366,6 +366,7 @@ end
 local function windows_cmd_launcher(app, luajit_path)
     return table.concat({
         "@echo off",
+        "chcp 65001 >nul 2>nul",
         "rem " .. app.name .. " - " .. app.desc .. " (installed by deploy.lua)",
         'set "' .. app.name:upper() .. '_FALLBACK_LUAJIT=' .. luajit_path .. '"',
         'set "LUAJIT=%' .. app.env_var .. '%"',

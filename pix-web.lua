@@ -239,6 +239,12 @@ if is_windows then
         int   __stdcall MultiByteToWideChar(uint32_t CodePage, uint32_t dwFlags, const char *lpMultiByteStr, int cbMultiByte, wchar_t *lpWideCharStr, int cchWideChar);
         int   __stdcall WideCharToMultiByte(uint32_t CodePage, uint32_t dwFlags, const wchar_t *lpWideCharStr, int cchWideChar, char *lpMultiByteStr, int cbMultiByte, const char *lpDefaultChar, int *lpUsedDefaultChar);
         uint32_t __stdcall GetACP(void);
+        int   __stdcall SetConsoleOutputCP(uint32_t wCodePageID);
+        int   __stdcall SetConsoleCP(uint32_t wCodePageID);
+        uint32_t __stdcall GetConsoleOutputCP(void);
+        void* __stdcall GetStdHandle(uint32_t nStdHandle);
+        int   __stdcall GetConsoleMode(void *hConsoleHandle, uint32_t *lpMode);
+        int   __stdcall SetConsoleMode(void *hConsoleHandle, uint32_t dwMode);
     ]]
     ws2 = ffi.load("ws2_32")
     local wsa_data = ffi.new("WSADATA")
@@ -339,6 +345,20 @@ end
 
 local C = ffi.C
 local kernel32 = is_windows and ffi.load("kernel32") or nil
+
+if is_windows and kernel32 then
+    pcall(function()
+        kernel32.SetConsoleOutputCP(65001)
+        kernel32.SetConsoleCP(65001)
+        local STD_OUTPUT_HANDLE = 0xFFFFFFF5
+        local hOut = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        local mode = ffi.new("uint32_t[1]")
+        if kernel32.GetConsoleMode(hOut, mode) ~= 0 then
+            local ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+            kernel32.SetConsoleMode(hOut, bit.bor(mode[0], ENABLE_VIRTUAL_TERMINAL_PROCESSING))
+        end
+    end)
+end
 
 local AF_INET      = 2
 local SOCK_STREAM  = 1
@@ -1835,6 +1855,48 @@ end
 -- =========================================================================
 -- 6. HTTP Server Engine & Request Handler
 -- =========================================================================
+local function render_banner(port, lan_ip, root_dir, is_utf8)
+    if is_utf8 == nil then
+        is_utf8 = not is_windows or (kernel32 and kernel32.GetConsoleOutputCP() == 65001)
+    end
+    local b_tl = is_utf8 and "╔" or "+"
+    local b_tr = is_utf8 and "╗" or "+"
+    local b_bl = is_utf8 and "╚" or "+"
+    local b_br = is_utf8 and "╝" or "+"
+    local b_ml = is_utf8 and "╠" or "+"
+    local b_mr = is_utf8 and "╣" or "+"
+    local b_h  = is_utf8 and "═" or "-"
+    local b_v  = is_utf8 and "║" or "|"
+    local b_dot = is_utf8 and "•" or "*"
+    local b_dash = is_utf8 and "—" or "--"
+    local inner_w = 75
+
+    local function pad_row(content)
+        local visual_len = #content:gsub("[\128-\191]", "")
+        local pad = math.max(0, inner_w - 2 - visual_len)
+        return b_v .. "  " .. content .. string.rep(" ", pad) .. b_v
+    end
+
+    local title = "PixWeb " .. b_dash .. " In-Browser Media Gallery & Server"
+    local title_len = #title:gsub("[\128-\191]", "")
+    local t_pad_left = math.max(0, math.floor((inner_w - title_len) / 2))
+    local t_pad_right = math.max(0, inner_w - title_len - t_pad_left)
+    local t_row = b_v .. string.rep(" ", t_pad_left) .. title .. string.rep(" ", t_pad_right) .. b_v
+
+    local lines = {
+        b_tl .. string.rep(b_h, inner_w) .. b_tr,
+        t_row,
+        b_ml .. string.rep(b_h, inner_w) .. b_mr,
+        pad_row(string.format("%s Local:      http://127.0.0.1:%d", b_dot, port)),
+        pad_row(string.format("%s LAN WiFi:   http://%s:%d", b_dot, lan_ip, port)),
+        pad_row(string.format("%s Media Root: %s", b_dot, root_dir)),
+        b_v .. string.rep(" ", inner_w) .. b_v,
+        pad_row("Open the link on your browser or phone to view photos, videos & audio!"),
+        b_bl .. string.rep(b_h, inner_w) .. b_br,
+    }
+    return table.concat(lines, "\n")
+end
+
 local function run_server(host, port, root_dir)
     root_dir = root_dir or "."
     root_dir = root_dir:gsub("[/\\]+$", "")
@@ -1874,15 +1936,7 @@ local function run_server(host, port, root_dir)
     end
 
     -- Startup banner
-    print("╔═══════════════════════════════════════════════════════════════════════════╗")
-    print("║                 PixWeb — In-Browser Media Gallery & Server                ║")
-    print("╠═══════════════════════════════════════════════════════════════════════════╣")
-    print(string.format("║  • Local:      http://127.0.0.1:%-43d║", port))
-    print(string.format("║  • LAN WiFi:   http://%s:%-37d║", lan_ip, port))
-    print(string.format("║  • Media Root: %-58s║", root_dir))
-    print("║                                                                           ║")
-    print("║  Open the link on your browser or phone to view photos, videos & audio!   ║")
-    print("╚═══════════════════════════════════════════════════════════════════════════╝")
+    print(render_banner(port, lan_ip, root_dir))
     io.stdout:flush()
 
     local buf_size = 65536
@@ -2219,6 +2273,7 @@ return {
     sanitize_subpath = sanitize_subpath,
     get_local_lan_ip = get_local_lan_ip,
     get_index_html = get_index_html,
+    render_banner = render_banner,
     IMAGE_EXTENSIONS = IMAGE_EXTENSIONS,
     VIDEO_EXTENSIONS = VIDEO_EXTENSIONS,
     AUDIO_EXTENSIONS = AUDIO_EXTENSIONS,

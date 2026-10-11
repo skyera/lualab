@@ -9,11 +9,50 @@
 -- 3. Path sanitization and directory traversal guards
 -- 4. LAN IP discovery
 -- 5. Directory media scanning (types, sizes, extensions, animated flags)
--- 6. Live HTTP Endpoints (GET /, GET /api/status, GET /api/media, Range streaming)
--- 7. Undeclared globals assertion (0 unwhitelisted GGETs)
+-- 6. HTML Template Generation
+-- 7. Adaptive Startup Banner & Mojibake Prevention (UTF-8 & ASCII)
+-- 8. Bytecode Scoping Assertion (Zero Undeclared Globals)
+-- 9. Live HTTP Server Headless Integration (Port 8079)
 -- =========================================================================
 
 local ffi = require("ffi")
+local is_windows = (ffi.os == "Windows")
+
+if is_windows then
+    pcall(function()
+        ffi.cdef[[void Sleep(uint32_t);]]
+    end)
+else
+    pcall(function()
+        ffi.cdef[[int usleep(unsigned int);]]
+    end)
+end
+
+local function portable_sleep(ms)
+    if is_windows then
+        pcall(function() ffi.C.Sleep(ms) end)
+    else
+        pcall(function() ffi.C.usleep(ms * 1000) end)
+    end
+end
+
+local function make_dir(path)
+    if is_windows then
+        local win_path = path:gsub("/", "\\")
+        os.execute(string.format('if not exist "%s" mkdir "%s" >nul 2>nul', win_path, win_path))
+    else
+        os.execute("mkdir -p " .. path .. " 2>/dev/null")
+    end
+end
+
+local function remove_tree(path)
+    if is_windows then
+        local win_path = path:gsub("/", "\\")
+        os.execute(string.format('if exist "%s" rmdir /s /q "%s" >nul 2>nul', win_path, win_path))
+    else
+        os.execute("rm -rf " .. path .. " 2>/dev/null")
+    end
+end
 
 local function run_test(name, fn)
     io.write(string.format("[TEST] %-55s ... ", name))
@@ -83,14 +122,17 @@ end) then passed = passed + 1 end
 -- Test 5: Directory Media Scanning
 total = total + 1
 if run_test("Directory Media Scanning", function()
-    -- Create temporary test folder with mock media files
-    os.execute("mkdir -p _test_pix_web_dir/subdir")
-    local f1 = io.open("_test_pix_web_dir/img1.png", "wb"); f1:write("FAKE_PNG"); f1:close()
-    local f2 = io.open("_test_pix_web_dir/track1.mp3", "wb"); f2:write("FAKE_MP3"); f2:close()
-    local f3 = io.open("_test_pix_web_dir/subdir/clip1.mp4", "wb"); f3:write("FAKE_MP4"); f3:close()
-    local f4 = io.open("_test_pix_web_dir/ignore.txt", "wb"); f4:write("TXT"); f4:close()
+    local test_dir = "_test_pix_web_dir"
+    remove_tree(test_dir)
+    make_dir(test_dir)
+    make_dir(test_dir .. "/subdir")
 
-    local entries, folders = pix_web.scan_media_dir("_test_pix_web_dir", "", false)
+    local f1 = io.open(test_dir .. "/img1.png", "wb"); check(f1, "open img1.png"); f1:write("FAKE_PNG"); f1:close()
+    local f2 = io.open(test_dir .. "/track1.mp3", "wb"); check(f2, "open track1.mp3"); f2:write("FAKE_MP3"); f2:close()
+    local f3 = io.open(test_dir .. "/subdir/clip1.mp4", "wb"); check(f3, "open clip1.mp4"); f3:write("FAKE_MP4"); f3:close()
+    local f4 = io.open(test_dir .. "/ignore.txt", "wb"); check(f4, "open ignore.txt"); f4:write("TXT"); f4:close()
+
+    local entries, folders = pix_web.scan_media_dir(test_dir, "", false)
     check(#folders >= 1, "Discovered subdirectory")
     check(#entries >= 2, "Discovered root media entries")
 
@@ -102,8 +144,7 @@ if run_test("Directory Media Scanning", function()
     check(found_png, "Discovered PNG image")
     check(found_mp3, "Discovered MP3 audio")
 
-    -- Clean up test folder
-    os.execute("rm -rf _test_pix_web_dir")
+    remove_tree(test_dir)
 end) then passed = passed + 1 end
 
 -- Test 6: HTML Template Generation
@@ -116,11 +157,47 @@ if run_test("HTML5 Template Generation", function()
     check(html:find("qr%-modal") ~= nil, "QR modal present")
 end) then passed = passed + 1 end
 
--- Test 7: Scoping Assertion (Zero Undeclared Globals)
+-- Test 7: Adaptive Banner & Mojibake Prevention
+total = total + 1
+if run_test("Adaptive Banner & Mojibake Prevention (UTF-8 & ASCII)", function()
+    check(type(pix_web.render_banner) == "function", "render_banner is exported")
+
+    -- 1. Test UTF-8 mode
+    local u_banner = pix_web.render_banner(8060, "192.168.1.108", ".", true)
+    local u_lines = {}
+    for line in u_banner:gmatch("[^\r\n]+") do table.insert(u_lines, line) end
+    check(#u_lines == 9, "UTF-8 banner has 9 rows")
+    for idx, line in ipairs(u_lines) do
+        local visual_len = #line:gsub("[\128-\191]", "")
+        check(visual_len == 77, string.format("UTF-8 banner row %d visual length is 77 (got %d)", idx, visual_len))
+    end
+    check(u_banner:find("╔") ~= nil, "Contains double top-left corner")
+    check(u_banner:find("║") ~= nil, "Contains double vertical bar")
+    check(u_banner:find("•") ~= nil, "Contains bullet glyph")
+
+    -- 2. Test ASCII fallback mode
+    local a_banner = pix_web.render_banner(8060, "192.168.1.108", ".", false)
+    local a_lines = {}
+    for line in a_banner:gmatch("[^\r\n]+") do table.insert(a_lines, line) end
+    check(#a_lines == 9, "ASCII banner has 9 rows")
+    for idx, line in ipairs(a_lines) do
+        check(#line == 77, string.format("ASCII banner row %d length is 77 (got %d)", idx, #line))
+    end
+    check(a_banner:find("+") ~= nil, "Contains + corners")
+    check(a_banner:find("|") ~= nil, "Contains | borders")
+    check(a_banner:find("*") ~= nil, "Contains * bullet")
+    -- Ensure 0 non-ASCII bytes in fallback
+    for i = 1, #a_banner do
+        local byte = a_banner:byte(i)
+        check(byte < 128, "No non-ASCII bytes in fallback mode")
+    end
+end) then passed = passed + 1 end
+
+-- Test 8: Scoping Assertion (Zero Undeclared Globals)
 total = total + 1
 if run_test("Bytecode Scoping (Zero Undeclared Globals)", function()
-    local p = io.popen("luajit -bl pix-web.lua | grep GGET | awk '{print $NF}' | tr -d '\";' | sort -u", "r")
-    check(p ~= nil, "popen bytecode dump")
+    local p = io.popen("luajit -bl pix-web.lua", "r")
+    check(p ~= nil, "popen luajit -bl pix-web.lua")
     local whitelisted = {
         arg = true, debug = true, io = true, ipairs = true,
         math = true, next = true, os = true, package = true,
@@ -128,52 +205,83 @@ if run_test("Bytecode Scoping (Zero Undeclared Globals)", function()
         string = true, table = true, tonumber = true, tostring = true,
         type = true
     }
+    local leaked = {}
     for line in p:lines() do
-        local sym = line:gsub("%s+$", "")
-        if #sym > 0 and not whitelisted[sym] then
-            p:close()
-            error("Undeclared global leaked: " .. sym)
+        if line:find("GGET") then
+            local sym = line:match(';%s*"([^"]+)"')
+            if sym and not whitelisted[sym] then
+                leaked[sym] = true
+            end
         end
     end
     p:close()
+    local leak_list = {}
+    for sym in pairs(leaked) do table.insert(leak_list, sym) end
+    check(#leak_list == 0, "Undeclared globals leaked: " .. table.concat(leak_list, ", "))
 end) then passed = passed + 1 end
 
--- Test 8: Live HTTP Server Smoke Test on Port 8069
+-- Test 9: Live HTTP Server Smoke Test on Port 8079
 total = total + 1
-if run_test("Live HTTP Server Headless Integration (Port 8069)", function()
-    -- Create test fixtures
-    os.execute("mkdir -p _pix_live_test")
-    local f = io.open("_pix_live_test/sample.jpg", "wb"); f:write("TEST_SAMPLE_JPEG_BYTES_12345"); f:close()
+if run_test("Live HTTP Server Headless Integration (Port 8079)", function()
+    local test_dir = "_pix_live_test"
+    local test_port = 8079
+    remove_tree(test_dir)
+    make_dir(test_dir)
 
-    local pid_p = io.popen("luajit pix-web.lua --port 8069 --dir _pix_live_test >/dev/null 2>&1 & echo $!", "r")
-    local pid = pid_p:read("*l")
-    pid_p:close()
+    local f = io.open(test_dir .. "/sample.jpg", "wb"); check(f, "open sample.jpg"); f:write("TEST_SAMPLE_JPEG_BYTES_12345"); f:close()
+
+    local pid = nil
+    if is_windows then
+        os.execute(string.format('start /B luajit pix-web.lua --port %d --dir %s >nul 2>nul', test_port, test_dir))
+    else
+        local pid_p = io.popen(string.format("luajit pix-web.lua --port %d --dir %s >/dev/null 2>&1 & echo $!", test_port, test_dir), "r")
+        pid = pid_p:read("*l")
+        pid_p:close()
+    end
 
     -- Allow server to bind
-    os.execute("sleep 0.3")
+    portable_sleep(350)
 
-    -- 1. Check HTTP Index
-    local idx_res = io.popen("curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8069/"):read("*l")
-    check(idx_res == "200", "GET / returns 200 OK (got " .. tostring(idx_res) .. ")")
-
-    -- 2. Check /api/status
-    local st_json = io.popen("curl -s http://127.0.0.1:8069/api/status"):read("*a")
-    check(st_json:find('"port":8069') ~= nil, "Status port matches 8069")
-
-    -- 3. Check /api/media
-    local media_json = io.popen("curl -s http://127.0.0.1:8069/api/media"):read("*a")
-    check(media_json:find("sample.jpg") ~= nil, "Discovered sample.jpg in API response")
-
-    -- 4. Check Partial Content Byte Range Streaming
-    local range_res = io.popen("curl -s -i -r 0-9 http://127.0.0.1:8069/media/sample.jpg"):read("*a")
-    check(range_res:find("HTTP/1.1 206 Partial Content", 1, true) ~= nil, "Range request returns 206 Partial Content")
-    check(range_res:find("Content-Range: bytes 0-9/", 1, true) ~= nil, "Content-Range header present")
-
-    -- Terminate test server and clean up
-    if pid and tonumber(pid) then
-        os.execute("kill -9 " .. pid .. " >/dev/null 2>&1")
+    local function cleanup_server()
+        if is_windows then
+            os.execute(string.format('for /f "tokens=5" %%a in (\'netstat -aon ^| findstr :%d\') do @taskkill /F /PID %%a >nul 2>nul', test_port))
+        else
+            if pid and tonumber(pid) then
+                os.execute("kill -9 " .. pid .. " >/dev/null 2>&1")
+            end
+        end
+        remove_tree(test_dir)
     end
-    os.execute("rm -rf _pix_live_test")
+
+    local ok, err = pcall(function()
+        -- 1. Check HTTP Index
+        local p_idx = io.popen(string.format("curl -s -o /dev/null -w \"%%{http_code}\" http://127.0.0.1:%d/", test_port), "r")
+        local idx_res = p_idx:read("*l")
+        p_idx:close()
+        check(idx_res == "200", "GET / returns 200 OK (got " .. tostring(idx_res) .. ")")
+
+        -- 2. Check /api/status
+        local p_st = io.popen(string.format("curl -s http://127.0.0.1:%d/api/status", test_port), "r")
+        local st_json = p_st:read("*a")
+        p_st:close()
+        check(st_json:find(string.format('"port":%d', test_port)) ~= nil, "Status port matches " .. test_port)
+
+        -- 3. Check /api/media
+        local p_media = io.popen(string.format("curl -s http://127.0.0.1:%d/api/media", test_port), "r")
+        local media_json = p_media:read("*a")
+        p_media:close()
+        check(media_json:find("sample.jpg") ~= nil, "Discovered sample.jpg in API response")
+
+        -- 4. Check Partial Content Byte Range Streaming
+        local p_range = io.popen(string.format("curl -s -i -r 0-9 http://127.0.0.1:%d/media/sample.jpg", test_port), "r")
+        local range_res = p_range:read("*a")
+        p_range:close()
+        check(range_res:find("HTTP/1.1 206 Partial Content", 1, true) ~= nil, "Range request returns 206 Partial Content")
+        check(range_res:find("Content-Range: bytes 0-9/", 1, true) ~= nil, "Content-Range header present")
+    end)
+
+    cleanup_server()
+    if not ok then error(err) end
 end) then passed = passed + 1 end
 
 print(string.format("\n========================================================"))
