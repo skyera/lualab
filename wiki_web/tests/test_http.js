@@ -2,15 +2,16 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { spawn, spawnSync } = require('node:child_process');
+const http = require('node:http');
 const { once } = require('node:events');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const root = path.resolve(__dirname, '../..');
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ioAAAAASUVORK5CYII=', 'base64');
-async function start(directory, flags = []) {
-  const child = spawn('luajit', [path.join(root, 'wiki_web.lua'), '--port', '0', '--cache-dir', path.join(directory, 'cache'),
-    '--config', path.join(directory, 'config.json'), ...flags], { cwd: os.tmpdir() });
+async function start(directory, flags = [], entry = path.join(root, 'wiki_web.lua'), cwd = os.tmpdir(), env = {}) {
+  const child = spawn('luajit', [entry, '--port', '0', '--cache-dir', path.join(directory, 'cache'),
+    '--config', path.join(directory, 'config.json'), ...flags], { cwd, env: { ...process.env, ...env } });
   let output = '';
   child.stderr.on('data', data => { output += data; });
   const url = await new Promise((resolve, reject) => {
@@ -32,6 +33,50 @@ async function post(server, route, data) {
   const response = await fetch(server.url + route, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
   return { status: response.status, data: await response.json() };
 }
+function getWithHeaders(url, headers) {
+  const target = new URL(url);
+  return new Promise((resolve, reject) => {
+    const request = http.request({ hostname: '127.0.0.1', port: target.port, path: '/api/state', headers }, response => {
+      response.resume(); response.on('end', () => resolve(response.statusCode));
+    });
+    request.on('error', reject); request.end();
+  });
+}
+test('app.lua can launch directly from the wiki_web directory', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-direct-'));
+  let server;
+  try {
+    server = await start(directory, ['--data-dir', path.join(directory, 'notebook')],
+      path.join(root, 'wiki_web', 'app.lua'), path.join(root, 'wiki_web'));
+    const response = await fetch(server.url + '/');
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /Leaf Wiki/);
+  } finally {
+    if (server) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+test('app.lua -h prints usage and exits successfully', () => {
+  const result = spawnSync('luajit', ['app.lua', '-h'], {
+    cwd: path.join(root, 'wiki_web'), encoding: 'utf8'
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^Usage: luajit wiki_web\.lua /);
+  assert.equal(result.stderr, '');
+});
+test('default notebook folder has no spaces in its name', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-default-'));
+  let server;
+  try {
+    server = await start(directory, [], path.join(root, 'wiki_web.lua'), os.tmpdir(), { HOME: directory });
+    const state = await (await fetch(server.url + '/api/state')).json();
+    assert.equal(state.data_dir, path.join(directory, 'LeafWiki'));
+    assert.ok(!path.basename(state.data_dir).includes(' '));
+  } finally {
+    if (server) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 test('configured folder, autosave conflicts, images, links, maintenance and clean restart', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-http-'));
   const notebook = path.join(directory, 'Google Drive', 'My notebook');
@@ -66,6 +111,13 @@ test('configured folder, autosave conflicts, images, links, maintenance and clea
     assert.equal((await post(server, '/api/restore', { token: trashed.trash[0].token })).status, 200);
     const response = await fetch(server.url + '/api/state', { headers: { Host: 'evil.invalid', Origin: 'https://evil.invalid' } });
     assert.equal(response.status, 403);
+    const lanHost = `192.168.1.50:${new URL(server.url).port}`;
+    assert.equal(await getWithHeaders(server.url, { Host: lanHost, Origin: `http://${lanHost}` }), 200);
+    const namedHost = `wiki-pc.local:${new URL(server.url).port}`;
+    assert.equal(await getWithHeaders(server.url, { Host: namedHost, Origin: `http://${namedHost}` }), 200);
+    assert.equal(await getWithHeaders(server.url, { Host: namedHost, Origin: 'https://attacker.example' }), 403);
+    assert.equal(await getWithHeaders(server.url, { Host: lanHost, Origin: 'https://attacker.example' }), 403);
+    assert.equal(await getWithHeaders(server.url, { Host: `999.1.1.1:${new URL(server.url).port}` }), 403);
     assert.equal((await post(server, '/api/page', { id: '../Escape', content: 'unsafe', revision: '' })).status, 400);
     assert.equal((await fetch(server.url + '/api/page', { method: 'POST', headers: { 'Content-Type': 'application/json-invalid' }, body: '{}' })).status, 415);
     assert.equal((await fetch(server.url + '/api/page', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{broken' })).status, 400);

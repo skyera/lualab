@@ -18,8 +18,11 @@ available Google Drive folder:
 luajit wiki_web.lua --data-dir "/path/to/Leaf Wiki" --save-config
 ```
 
-Open **http://127.0.0.1:8020**. See [the Leaf Wiki guide](wiki_web/README.md)
-for dependencies, folder configuration, and verification commands.
+Open **http://127.0.0.1:8020** on the host computer, or use its LAN IP or
+hostname with port `8020` from another device. The server listens on all network interfaces;
+allow TCP port `8020` through the host firewall for LAN access. Leaf Wiki has
+no login, so only enable LAN access on a trusted network. See
+[the Leaf Wiki guide](wiki_web/README.md) for details.
 
 ## Prerequisites
 Ensure you have the following installed on your system:

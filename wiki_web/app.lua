@@ -1,4 +1,13 @@
 -- Leaf Wiki launcher, persistent folder configuration and same-origin HTTP API.
+local direct_script = arg[0]:gsub('\\', '/'):match('([^/]+)$') == 'app.lua'
+local direct_root
+if direct_script then
+    local script_path = arg[0]:gsub('\\', '/')
+    local script_dir = script_path:match('^(.*)/[^/]+$') or '.'
+    direct_root = script_dir .. '/..'
+    package.path = script_dir .. '/?.lua;' .. direct_root .. '/dictionary_web/?.lua;'
+        .. direct_root .. '/?.lua;' .. package.path
+end
 local json = require('json')
 local Fs = require('fs')
 local Notebook = require('notebook')
@@ -17,6 +26,30 @@ local function read(path)
     local value = file:read('*a'); file:close(); return value
 end
 
+local function is_allowed_host(host, port)
+    if host == '127.0.0.1:' .. port or host == 'localhost:' .. port then return true end
+    local first, second, third, fourth, supplied_port = host:match(
+        '^(%d+)%.(%d+)%.(%d+)%.(%d+):(%d+)$')
+    if first then
+        if tonumber(supplied_port) ~= port then return false end
+        for _, octet in ipairs({ first, second, third, fourth }) do
+            local value = tonumber(octet)
+            if value < 0 or value > 255 then return false end
+        end
+        return true
+    end
+    local name, name_port = host:match('^([%a%d%.%-]+):(%d+)$')
+    if not name or tonumber(name_port) ~= port or #name > 253
+        or name:sub(1, 1) == '.' or name:sub(-1) == '.'
+        or name:match('^[%d%.%-]+$') then return false end
+    for label in name:gmatch('[^.]+') do
+        if #label > 63 or label:sub(1, 1) == '-' or label:sub(-1) == '-' then
+            return false
+        end
+    end
+    return not name:find('%.%.')
+end
+
 function M.run(root)
     local home = os.getenv('HOME') or '.'
     local config_path = (os.getenv('XDG_CONFIG_HOME') or home .. '/.config') .. '/leaf-wiki/config.json'
@@ -25,7 +58,7 @@ function M.run(root)
     local index = 1
     while index <= #arg do
         local flag = arg[index]
-        if flag == '--help' then
+        if flag == '-h' or flag == '--help' then
             print('Usage: luajit wiki_web.lua [--data-dir PATH] [--cache-dir PATH] '
                 .. '[--config FILE] [--save-config] [--port 8020]')
             return
@@ -41,7 +74,7 @@ function M.run(root)
     local raw = read(config_path)
     local config = raw and json.decode(raw) or {}
     assert(type(config) == 'table', 'Configuration must be a JSON object')
-    local data_dir = options.data_dir or os.getenv('LEAF_WIKI_DATA_DIR') or config.data_dir or home .. '/Leaf Wiki'
+    local data_dir = options.data_dir or os.getenv('LEAF_WIKI_DATA_DIR') or config.data_dir or home .. '/LeafWiki'
     local port = tonumber(options.port)
     assert(port and port >= 0 and port <= 65535 and port % 1 == 0, 'Invalid port')
     local notebook = Notebook.open(data_dir, options.cache_dir or cache)
@@ -54,7 +87,7 @@ function M.run(root)
     local function reply(value, status) return json.encode(value), status or 200, 'application/json; charset=utf-8' end
     local function route(request, actual_port)
         local host = request.headers.host
-        if host ~= '127.0.0.1:' .. actual_port and host ~= 'localhost:' .. actual_port then
+        if not is_allowed_host(host, actual_port) then
             return reply({ error = 'Invalid Host header.' }, 403)
         end
         if request.headers.origin and request.headers.origin ~= 'http://' .. host then
@@ -105,10 +138,12 @@ function M.run(root)
         return result[2], result[3], result[4], result[5]
     end
     local ok, err = pcall(http.serve, port, handler, function(actual_port)
-        print('Leaf Wiki: http://127.0.0.1:' .. actual_port .. ' | Notebook: ' .. notebook.fs.root)
+        print('Leaf Wiki: http://127.0.0.1:' .. actual_port
+            .. ' (listening on 0.0.0.0) | Notebook: ' .. notebook.fs.root)
         io.stdout:flush()
-    end, '127.0.0.1', nil, { body_limits = { ['/api/page'] = 7 * 1024 * 1024, ['/api/image'] = 5 * 1024 * 1024 } })
+    end, '0.0.0.0', nil, { body_limits = { ['/api/page'] = 7 * 1024 * 1024, ['/api/image'] = 5 * 1024 * 1024 } })
     notebook:close()
     if not ok then error(err) end
 end
+if direct_script then M.run(direct_root) end
 return M

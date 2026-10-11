@@ -13,9 +13,13 @@ sudo apt install luajit libsqlite3-0 libcurl4 libssl3
 luajit wiki_web.lua
 ```
 
-Open **http://127.0.0.1:8020**. The default notebook is `~/Leaf Wiki`.
-The server listens on localhost. Ctrl-C and SIGTERM close the server and index.
-An absolute launcher path works from any working directory.
+Open **http://127.0.0.1:8020** on the host computer, or open
+`http://<host-LAN-IP>:8020` or `http://<host-name>:8020` from another device
+on the network. The default
+notebook is `~/LeafWiki`. The server binds to `0.0.0.0`; allow inbound TCP
+port `8020` through the host firewall for LAN access. Leaf Wiki has no login,
+so only enable LAN access on a trusted network. Ctrl-C and SIGTERM close the
+server and index. An absolute launcher path works from any working directory.
 
 Choose another notebook folder:
 
