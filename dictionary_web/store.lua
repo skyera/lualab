@@ -178,6 +178,22 @@ function Store:random_proverb(fetch_fn)
     return proverb
 end
 
+function Store:random_word()
+    if self.shared then
+        local now = os.time() - math.random(1, 10000) * 86400
+        local word = self.shared:wotd(now)
+        if word then
+            return {
+                word = word.word,
+                meaning = word.definition or '',
+                example = word.example or '',
+                source = 'local',
+            }
+        end
+    end
+    return content.random_word()
+end
+
 function Store:save(word, source, entry, stamp)
     local saved = self.web:save(word, source, entry, stamp)
     saved.collection = 'web'

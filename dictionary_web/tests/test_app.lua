@@ -226,6 +226,10 @@ test('Proverb database persistence and online fetching', function()
     local rand_res, rcode = service.route(db, 'POST', '/api/proverb/random', {}, {})
     assert(rcode == 200 and rand_res.proverb and rand_res.proverb.text)
 
+    -- Verify service route for /api/word/random
+    local rand_word, wcode = service.route(db, 'GET', '/api/word/random', {}, {})
+    assert(wcode == 200 and rand_word.word and rand_word.word.word and rand_word.word.meaning)
+
     db:close()
 end)
 

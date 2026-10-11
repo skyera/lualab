@@ -45,6 +45,16 @@ function M.daily(stamp)
     }
 end
 
+function M.random_word()
+    local idx = math.random(1, #words)
+    local item = words[idx]
+    return {
+        word = item[1],
+        meaning = item[2],
+        example = item[3],
+    }
+end
+
 function M.fetch_online(fetch_fn, date_str)
     if not fetch_fn then return nil, 'No fetch function provided' end
     local url = 'https://open.iciba.com/dsapi/' .. (date_str and ('?date=' .. date_str) or '')

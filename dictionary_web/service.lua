@@ -101,6 +101,16 @@ function M.route(db, method, path, params, payload)
         end
         return {proverb = proverb}, 200
     end
+    if path == '/api/word/random' or path == '/api/words/random' then
+        if method ~= 'GET' and method ~= 'POST' then
+            return {error = 'Method not allowed.'}, 405
+        end
+        local word = db.random_word and db:random_word()
+        if not word then
+            word = content.random_word and content.random_word() or content.daily().word
+        end
+        return {word = word}, 200
+    end
     if method == 'GET' then
         if path == '/api/daily' then
             return db.daily and db:daily() or content.daily(), 200

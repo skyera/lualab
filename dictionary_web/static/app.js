@@ -277,6 +277,28 @@ async function fetchNextProverb(trigger) {
     if (trigger) trigger.disabled = false;
   }
 }
+async function fetchNextWord(trigger) {
+  if (trigger) trigger.disabled = true;
+  $('app-message').textContent = '';
+  try {
+    const res = await api('/api/word/random');
+    if (res.word) {
+      if (state.daily) state.daily.word = res.word;
+      $('daily-word').textContent = res.word.word;
+      $('daily-meaning').textContent = res.word.meaning;
+      $('daily-label').textContent = res.word.source === 'local' ? '01 / FROM YOUR LOCAL VOCABULARY' : '01 / WORD OF THE DAY';
+      $('daily-example').textContent = res.word.example ? `“${res.word.example}”` : '';
+      const exampleAudioBtn = $('daily-example-audio');
+      if (exampleAudioBtn) {
+        exampleAudioBtn.hidden = !res.word.example;
+      }
+    }
+  } catch (err) {
+    report(err);
+  } finally {
+    if (trigger) trigger.disabled = false;
+  }
+}
 function empty(title, subtitle, action) {
   const container = element('div', undefined, 'empty');
   container.append(element('h2', title), element('p', subtitle));
@@ -579,6 +601,9 @@ $('daily-proverb-audio')?.addEventListener('click', () => {
 });
 $('daily-proverb-next')?.addEventListener('click', (e) => {
   fetchNextProverb(e.currentTarget);
+});
+$('daily-word-next')?.addEventListener('click', (e) => {
+  fetchNextWord(e.currentTarget);
 });
 $('proverb-filter')?.addEventListener('input', renderProverbs);
 const voiceSelect = $('voice-select');
