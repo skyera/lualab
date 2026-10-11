@@ -132,9 +132,8 @@ function buildResultCard(data) {
   top.append(element('h2', data.word), element('span', sourceNames[data.source], 'source-tag'));
   card.append(top);
   if (data.entry?.via === 'public-page') card.append(element('p', 'Public-page lookup', 'source-tag'));
-  if ('speechSynthesis' in window) {
-    card.append(button('Listen to this word ♫', () => pronounceWord(data.word), 'text-button speak'));
-  }
+  const wordAudioUrl = data.entry?.audio_url || data.stale?.audio_url;
+  card.append(button('Listen to this word ♫', () => playProverbAudio(wordAudioUrl, data.word), 'text-button speak'));
   if (data.error) card.append(element('p', data.error, 'error'));
   if (data.stale) card.append(element('p', 'Showing an earlier saved definition.', 'source-tag'));
   definitions(data.entry || data.stale, card);

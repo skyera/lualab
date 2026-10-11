@@ -78,9 +78,16 @@ function M.parse_dict(html)
             synonyms[#synonyms + 1] = text
         end
     end
+    local audio_url
+    local naudio = html:match('<i[^>]*class=["\'][^"\']*sound[^"\']*["\'][^>]*naudio=["\']([^"\']+)["\']')
+        or html:match('naudio=["\']([^"\']+)["\']')
+    if naudio and naudio ~= '' then
+        audio_url = 'https://audio.dict.cn/' .. naudio
+    end
     return {
         definitions = definitions,
         phonetic = table.concat(phonetics, ' · '),
+        audio_url = audio_url,
         examples = examples,
         synonyms = #synonyms > 0 and synonyms or nil,
     }
@@ -251,6 +258,7 @@ function M.parse_iciba(html)
 
     local definitions, phonetics, examples, synonyms = {}, {}, {}, {}
     local seen_def, seen_syn = {}, {}
+    local audio_url
 
     for _, symbol in ipairs(symbols) do
         local ph_list = {}
@@ -261,6 +269,15 @@ function M.parse_iciba(html)
         end
         for _, ph in ipairs(ph_list) do
             if #phonetics < 4 then phonetics[#phonetics + 1] = ph end
+        end
+        if not audio_url then
+            local audio = (symbol.ph_am_mp3 and symbol.ph_am_mp3 ~= '') and symbol.ph_am_mp3
+                or (symbol.ph_en_mp3 and symbol.ph_en_mp3 ~= '') and symbol.ph_en_mp3
+                or (symbol.ph_tts_mp3 and symbol.ph_tts_mp3 ~= '') and symbol.ph_tts_mp3
+            if audio then
+                if audio:sub(1, 7) == 'http://' then audio = 'https://' .. audio:sub(8) end
+                audio_url = audio
+            end
         end
 
         for _, part in ipairs(symbol.parts or {}) do
@@ -319,6 +336,7 @@ function M.parse_iciba(html)
     return {
         definitions = definitions,
         phonetic = table.concat(phonetics, ' · '),
+        audio_url = audio_url,
         examples = examples,
         synonyms = #synonyms > 0 and synonyms or nil,
         via = 'public-page',
@@ -327,6 +345,11 @@ end
 
 local function decorate(entry, source, word)
     entry.word, entry.source, entry.source_url = word, source, M.source_url(source, word)
+    if not entry.audio_url then
+        if source == 'youdao' then
+            entry.audio_url = 'https://dict.youdao.com/dictvoice?audio=' .. net.encode(word) .. '&type=2'
+        end
+    end
     return entry
 end
 

@@ -33,7 +33,7 @@ test('UTF-8 validation and normalized queries', function()
 end)
 
 test('HTML parsing isolates definitions, pronunciation and bilingual examples', function()
-    local html = [[<div class="phonetic"><bdo>[test]</bdo><bdo>[test]</bdo></div>
+    local html = [[<div class="phonetic"><bdo>[test]</bdo><bdo>[test]</bdo><i class="sound" naudio="testaudio.mp3?t=test"></i></div>
         <ul class="dict-basic-ul"><li><strong>n. &lt;meaning&gt; &amp; &#x4e2d;&#25991;</strong></li></ul>
         <div class="section rel"><ol><li><a href="/syn1">synonym1</a></li><li><a href="/syn2">synonym2</a></li></ol></div>
         <div class="section sent"><ol><li>Example.<br/>例句。</li></ol></div>
@@ -41,6 +41,7 @@ test('HTML parsing isolates definitions, pronunciation and bilingual examples', 
     local result = assert(providers.parse_dict(html))
     assert(result.definitions[1] == 'n. <meaning> & 中文')
     assert(result.phonetic == '[test]')
+    assert(result.audio_url == 'https://audio.dict.cn/testaudio.mp3?t=test')
     assert(result.examples[1] == 'Example. / 例句。')
     assert(result.synonyms and result.synonyms[1] == 'synonym1' and result.synonyms[2] == 'synonym2')
     assert(not providers.parse_dict('<html>Not found</html>'))
@@ -411,6 +412,7 @@ test('Iciba public SSR parsing isolates definitions, phonetics, synonyms and exa
                 {
                   "ph_en": "rɪˈzɪliənt",
                   "ph_am": "rɪˈzɪljənt",
+                  "ph_am_mp3": "http://res.iciba.com/sample_am.mp3",
                   "parts": [
                     {
                       "part": "adj.",
@@ -468,6 +470,7 @@ test('Iciba public SSR parsing isolates definitions, phonetics, synonyms and exa
     end}))
     assert(res.word == 'resilient' and res.source == 'iciba')
     assert(res.source_url == 'https://www.iciba.com/word?w=resilient')
+    assert(res.audio_url == 'https://res.iciba.com/sample_am.mp3')
 end)
 
 print('Passed ' .. count .. ' tests.')
