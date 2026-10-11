@@ -78,6 +78,33 @@ For any TUI application or terminal utility in the repository, the agent MUST ad
    *   **Buffer Flash & Overwrite Prevention**: Never flip screen buffers (`\27[?1049h` / `\27[?1049l`) around an inline subprocess, as switching buffers instantly hides command stdout/stderr.
    *   **Input Drainage Before Confirmation**: Always flush the terminal input buffer (`tcflush` or OS equivalent) before prompting `Press Enter to continue...`, preventing queued or burst keystrokes from unintentionally skipping command output.
 
+## Lua Code Formatting & Style Standards
+
+All Lua files created or modified in the repository MUST adhere to consistent, clean, and idiomatic formatting:
+
+1. **Indentation & Spacing**:
+   * **4 spaces per indentation level** (never tabs, never 2-space or mixed indentation).
+   * **Spaces around binary operators**: Use `a = b + c`, `x == y`, `key = value` (not `a=b+c`).
+   * **Table spacing**: Space inside curly braces for single-line tables: `{ id = 1, name = "app" }`.
+   * **Function arguments & commas**: Always place a single space after commas: `fn(a, b, c)`.
+
+2. **File Structure & Clean Headers**:
+   * **Hashbang**: Executable scripts start with `#!/usr/bin/env luajit`.
+   * **Module / Script Banner**: Include a clear, top-of-file descriptive comment banner outlining the purpose and key features.
+   * **Section Dividers**: Use consistent 80-character comment dividers (e.g., `-- =========================================================================` or `--------------------------------------------------------------------------------`) between logical module sections.
+
+3. **Line Length & Whitespace Discipline**:
+   * **No Trailing Whitespace**: Strip all trailing whitespace from ends of lines.
+   * **Single Final Newline**: Ensure every file ends with exactly one newline (`\n`).
+   * **Max Line Width**: Keep code comfortably readable (aim for <= 100-120 columns where practical).
+   * **No Redundant Blank Lines**: Use at most 1-2 blank lines between major functions or sections; never consecutive runs of 3+ blank lines.
+
+4. **Naming & Scoping Conventions**:
+   * **Local by Default**: Always declare variables and helper functions as `local`. Never leak symbols into global `_G`.
+   * **Constants**: Use `UPPER_SNAKE_CASE` for file-level constants and static configuration tables.
+   * **Functions & Variables**: Use `snake_case` for functions and variables (`load_config`, `parse_args`).
+   * **Classes / Metatables**: Use `PascalCase` for OOP-like metatables or types (`Database`, `Indexer`).
+
 ## Commit Workflow
 
 *   **One commit per issue**: Each fix should be its own atomic commit with a descriptive message.
