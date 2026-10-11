@@ -24,3 +24,5 @@ lan_names.json
 lan_inventory.json
 lan_inventory.json.tmp
 shared_files/
+yt_downloads/
+test_yt_downloads/
