@@ -101,6 +101,14 @@ local APPS = {
         env_var = "YTWEB_LUAJIT",
         aliases = { "yt-web" },
     },
+    pixweb = {
+        id = "pixweb",
+        name = "pixweb",
+        script = "pix-web.lua",
+        desc = "In-Browser Media Gallery & Streaming Web Server",
+        env_var = "PIXWEB_LUAJIT",
+        aliases = { "pix-web" },
+    },
 }
 
 local opts = {
@@ -113,9 +121,9 @@ local opts = {
 local function print_usage()
     print("lualab deploy — Cross-Platform Tools Deployer (LuaJIT FFI)")
     print("Usage:")
-    print("  luajit deploy.lua [--app all|pix|lumina|yt|weblite|luatop|codefind|codefind_web|landrop|ytweb|logexplorer] [--dir <path>] [--os linux|windows] [--check]")
+    print("  luajit deploy.lua [--app all|pix|lumina|yt|weblite|luatop|codefind|codefind_web|landrop|ytweb|pixweb|logexplorer] [--dir <path>] [--os linux|windows] [--check]")
     print("")
-    print("  --app <name>    App to deploy: all (default), pix, lumina, yt, weblite (wl), luatop (ltop), codefind, codefind_web (cfweb), landrop (ldrop), ytweb (yt-web), or logexplorer")
+    print("  --app <name>    App to deploy: all (default), pix, lumina, yt, weblite (wl), luatop (ltop), codefind, codefind_web (cfweb), landrop (ldrop), ytweb (yt-web), pixweb (pix-web), or logexplorer")
     print("  --dir <path>    Target directory (default: C:\\app\\bin on Windows, ~/bin elsewhere)")
     print("  --os <name>     Force the target layout: linux (POSIX) or windows")
     print("  --check         Show what would be installed without writing anything")
