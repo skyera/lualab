@@ -41,8 +41,15 @@
         <div class="page-heading"><h1 id="title"></h1><span id="save-status" role="status">Saved</span></div>
         <div class="toolbar">
           <div class="modes" aria-label="Editor layout"><button data-mode="edit">Edit</button><button data-mode="split" class="selected">Split</button><button data-mode="preview">Preview</button></div>
+          <button id="dictionary-open" aria-controls="dictionary-panel" aria-expanded="false">Look up</button>
           <button id="save">Save</button><button id="rename">Rename</button><button id="delete">Trash page</button>
         </div>
+        <section id="dictionary-panel" class="dictionary-panel" aria-label="Dictionary lookup" hidden>
+          <div class="dictionary-heading"><h2>Dictionary</h2><button id="dictionary-close" type="button">Close</button></div>
+          <form id="dictionary-form"><label for="dictionary-word" class="sr-only">Word to look up</label><input id="dictionary-word" maxlength="240" placeholder="Word or short phrase" autocomplete="off"><button type="submit">Find</button></form>
+          <p id="dictionary-status" role="status" aria-live="polite">Select a word in your page or type one above.</p>
+          <div id="dictionary-results"></div>
+        </section>
         <div id="conflict" hidden><p>Your draft is still in the editor. Copy it before loading the changed file.</p><button id="copy-draft">Copy draft</button><button id="reload-page">Load saved file…</button></div>
         <div id="panes" class="split">
           <div class="editor-pane"><label for="editor">MARKDOWN</label><textarea id="editor" spellcheck="true" placeholder="# A new thought…"></textarea><p class="editor-tip">Link with [[Page]] · Paste an image · Ctrl S to save</p></div>

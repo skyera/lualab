@@ -12,6 +12,7 @@ class Node {
     this.classList = { toggle(name, value) { const enabled = value ?? !classes.has(name); if (enabled) classes.add(name); else classes.delete(name); return enabled; }, remove: name => classes.delete(name), contains: name => classes.has(name) };
   }
   append(...nodes) { this.children.push(...nodes); }
+  contains(node) { return this === node || this.children.some(child => child.contains?.(node)); }
   replaceChildren(...nodes) { this.children = nodes; this.textContent = ''; }
   addEventListener(name, run) { this.handlers[name] = run; }
   setAttribute() {}
@@ -26,13 +27,72 @@ class Node {
 }
 const texts = node => [node.textContent, ...node.children.map(texts)].join('');
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+test('dictionary captures editor selection and renders definitions as safe text without editing the draft', async () => {
+  const { context, state, get } = harness();
+  get('editor').value = 'An ephemeral bloom'; get('editor').selectionStart = 3; get('editor').selectionEnd = 12;
+  context.document.activeElement = get('editor'); state.dirty = true;
+  get('editor').handlers.select();
+  let route;
+  context.api = async url => { route = url; return { word: 'ephemeral', senses: [{
+    pos: 'adj.', definition: '<img src=x onerror=alert(1)>', example: 'An ephemeral bloom.', syn: 'temporary', ant: 'lasting'
+  }] }; };
+  get('dictionary-open').handlers.pointerdown();
+  await get('dictionary-open').handlers.click();
+  assert.equal(route, '/api/dictionary?word=ephemeral');
+  assert.equal(get('dictionary-panel').hidden, false);
+  assert.match(texts(get('dictionary-results')), /<img src=x onerror=alert\(1\)>/);
+  assert.match(texts(get('dictionary-results')), /Synonyms: temporary/);
+  assert.match(texts(get('dictionary-results')), /Antonyms: lasting/);
+  assert.equal(get('dictionary-results').querySelectorAll('img').length, 0);
+  assert.equal(get('editor').value, 'An ephemeral bloom'); assert.equal(state.dirty, true);
+  get('dictionary-close').handlers.click(); assert.equal(get('dictionary-panel').hidden, true);
+});
+
+test('dictionary preview selection, empty input and stale responses use actual event handlers', async () => {
+  const { context, get, events } = harness();
+  const text = new Node('#text', '学习'); get('preview').append(text);
+  context.window.getSelection = () => ({ anchorNode: text, focusNode: text, toString: () => '学习' });
+  events['document:selectionchange']();
+  const first = deferred(), second = deferred(); let calls = 0;
+  context.api = () => (++calls === 1 ? first.promise : second.promise);
+  const pending = get('dictionary-open').handlers.click();
+  assert.equal(get('dictionary-word').value, '学习');
+  get('dictionary-word').value = 'new'; get('dictionary-word').handlers.input();
+  const latest = get('dictionary-form').handlers.submit({ preventDefault() {} });
+  second.resolve({ word: 'new', senses: [{ definition: 'Newest' }] }); await latest;
+  first.resolve({ word: '学习', senses: [{ definition: 'Old' }] }); await pending;
+  assert.equal(texts(get('dictionary-results')), 'Newest');
+  get('dictionary-word').value = ''; await get('dictionary-form').handlers.submit({ preventDefault() {} });
+  assert.match(get('dictionary-status').textContent, /Enter a word/); assert.equal(calls, 2);
+  get('dictionary-word').value = '学习'.repeat(81);
+  await get('dictionary-form').handlers.submit({ preventDefault() {} });
+  assert.match(get('dictionary-status').textContent, /240 UTF-8/); assert.equal(calls, 2);
+});
+
+test('dictionary errors, missing words and close during lookup keep the editor usable', async () => {
+  const { context, get } = harness();
+  get('dictionary-word').value = 'missing';
+  context.api = async () => ({ word: 'missing', senses: [], message: 'No definition found.' });
+  await get('dictionary-open').handlers.click(); assert.match(get('dictionary-status').textContent, /No definition/);
+  context.api = async () => { throw new Error('Local dictionary unavailable'); };
+  await get('dictionary-form').handlers.submit({ preventDefault() {} });
+  assert.match(get('dictionary-status').textContent, /unavailable/);
+  const response = deferred(); context.api = () => response.promise;
+  const pending = get('dictionary-form').handlers.submit({ preventDefault() {} });
+  get('dictionary-word').handlers.keydown({ key: 'Escape' });
+  response.resolve({ word: 'late', senses: [{ definition: 'Late' }] }); await pending;
+  assert.equal(get('dictionary-panel').hidden, true);
+  assert.equal(get('dictionary-results').children.length, 0);
+  assert.equal(get('editor').value, 'Initial');
+});
 function harness() {
   const nodes = new Map(), events = {}, stored = new Map(); let serial = 0;
   const timers = new Map();
   const get = id => { if (!nodes.has(id)) nodes.set(id, new Node()); return nodes.get(id); };
   const context = { URLSearchParams, TextEncoder, console, innerWidth: 1200,
     setTimeout: fn => { timers.set(++serial, fn); return serial; }, clearTimeout: id => timers.delete(id),
-    document: { getElementById: get, createElement: tag => new Node(tag), createTextNode: text => new Node('#text', text),
+    document: { addEventListener: (name, fn) => { events['document:' + name] = fn; },
+      getElementById: get, createElement: tag => new Node(tag), createTextNode: text => new Node('#text', text),
       createDocumentFragment: () => new Node('fragment'), querySelectorAll: () => [], querySelector: () => get('workspace') },
     window: { addEventListener: (name, fn) => { events[name] = fn; } },
     localStorage: { getItem: key => stored.get(key), setItem: (key, value) => stored.set(key, value), removeItem: key => stored.delete(key) },

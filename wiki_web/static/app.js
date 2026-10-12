@@ -5,6 +5,72 @@ const state = { pages: [], trash: [], root: '', page: null, dirty: false, saving
   loading: false, uploading: false, request: 0, searchRequest: 0, mode: 'split', prompt: null,
   journalMonth: new Date(new Date().getFullYear(), new Date().getMonth(), 1), journalDate: '' };
 let saveTimer, searchTimer;
+const dictionaryState = { selection: '', request: 0 };
+
+function captureDictionarySelection() {
+  const editor = $('editor');
+  if (document.activeElement === editor) {
+    dictionaryState.selection = editor.value.slice(editor.selectionStart, editor.selectionEnd).trim();
+    return;
+  }
+  const selection = window.getSelection?.();
+  if (selection && $('preview').contains(selection.anchorNode) && $('preview').contains(selection.focusNode)) {
+    dictionaryState.selection = selection.toString().trim();
+  }
+}
+
+function closeDictionary() {
+  ++dictionaryState.request;
+  $('dictionary-panel').hidden = true;
+  $('page').classList.remove('dictionary-visible');
+  $('dictionary-open').setAttribute('aria-expanded', 'false');
+  $('dictionary-open').focus();
+}
+
+async function lookupDictionary() {
+  const word = $('dictionary-word').value.trim();
+  const request = ++dictionaryState.request;
+  $('dictionary-results').replaceChildren();
+  if (!word) { $('dictionary-status').textContent = 'Enter a word to look up.'; return; }
+  if (new TextEncoder().encode(word).length > 240 || /[\x00-\x1f\x7f]/.test(word)) {
+    $('dictionary-status').textContent = 'Enter a word or short phrase up to 240 UTF-8 bytes.'; return;
+  }
+  $('dictionary-status').textContent = 'Looking up ' + word + '…';
+  try {
+    const result = await api('/api/dictionary?word=' + encodeURIComponent(word));
+    if (request !== dictionaryState.request || $('dictionary-panel').hidden) return;
+    $('dictionary-status').textContent = result.senses.length ? result.word + ' · Local dictionary'
+      : result.message || 'No definition found in the local dictionary.';
+    const nodes = result.senses.map(sense => {
+      const node = document.createElement('section'); node.className = 'dictionary-sense';
+      const definition = document.createElement('p');
+      definition.textContent = (sense.pos ? sense.pos + ' · ' : '') + sense.definition;
+      node.append(definition);
+      for (const [key, label] of [['example', 'Example'], ['syn', 'Synonyms'], ['ant', 'Antonyms']]) {
+        if (!sense[key]) continue;
+        const text = document.createElement('p'); text.className = 'dictionary-detail';
+        text.textContent = label + ': ' + sense[key]; node.append(text);
+      }
+      return node;
+    });
+    $('dictionary-results').replaceChildren(...nodes);
+  } catch (error) {
+    if (request === dictionaryState.request && !$('dictionary-panel').hidden) {
+      $('dictionary-status').textContent = error.message;
+    }
+  }
+}
+
+function openDictionary() {
+  if (!state.page) return;
+  $('dictionary-panel').hidden = false;
+  $('page').classList.toggle('dictionary-visible', true);
+  $('dictionary-open').setAttribute('aria-expanded', 'true');
+  if (dictionaryState.selection) $('dictionary-word').value = dictionaryState.selection;
+  $('dictionary-word').focus();
+  if ($('dictionary-word').value.trim()) return lookupDictionary();
+  $('dictionary-status').textContent = 'Select a word in your page or type one above.';
+}
 async function api(path, payload) {
   const response = await fetch(path, payload === undefined ? {} : {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
@@ -176,6 +242,7 @@ async function openPage(id, anchor) {
     const page = await api('/api/page?id=' + encodeURIComponent(id));
     if (request !== state.request) return false;
     state.page = page; state.dirty = false; state.blocked = false;
+    dictionaryState.selection = '';
     $('editor').value = page.content;
     try {
       const draft = JSON.parse(localStorage.getItem(draftKey(id)) || 'null');
@@ -308,6 +375,18 @@ $('menu').addEventListener('click', () => {
   const open = document.querySelector('.workspace').classList.toggle('menu-open'); $('menu').setAttribute('aria-expanded', String(open));
 });
 document.querySelectorAll('[data-mode]').forEach(node => node.addEventListener('click', () => setMode(node.dataset.mode)));
+document.addEventListener('selectionchange', captureDictionarySelection);
+$('editor').addEventListener('select', captureDictionarySelection);
+$('dictionary-open').addEventListener('pointerdown', captureDictionarySelection);
+$('dictionary-open').addEventListener('click', openDictionary);
+$('dictionary-close').addEventListener('click', closeDictionary);
+$('dictionary-form').addEventListener('submit', event => { event.preventDefault(); return lookupDictionary(); });
+$('dictionary-word').addEventListener('input', () => {
+  ++dictionaryState.request;
+  $('dictionary-results').replaceChildren();
+  $('dictionary-status').textContent = 'Press Find to look up this word.';
+});
+$('dictionary-word').addEventListener('keydown', event => { if (event.key === 'Escape') closeDictionary(); });
 window.addEventListener('keydown', event => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); save(); }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); $('search').focus(); $('search').select(); }

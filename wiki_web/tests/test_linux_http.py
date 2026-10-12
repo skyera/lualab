@@ -20,9 +20,14 @@ class LinuxHttpTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory(prefix="leaf-linux-") as directory:
             notebook = Path(directory) / "笔记"
+            fixture = subprocess.run(["luajit", str(root / "wiki_web/tests/test_dictionary.lua"), directory],
+                                     cwd=directory, capture_output=True, text=True, timeout=10)
+            self.assertEqual(fixture.returncode, 0, fixture.stdout + fixture.stderr)
+            dictionary = Path(directory) / "词典.db"
+            original_dictionary = dictionary.read_bytes()
             command = ["luajit", str(root / "wiki_web.lua"), "--port", "0",
                        "--data-dir", str(notebook), "--cache-dir", directory + "/cache",
-                       "--config", directory + "/config.json", "--save-config"]
+                       "--config", directory + "/config.json", "--dict-db", str(dictionary), "--save-config"]
             for stop_signal in (signal.SIGTERM, signal.SIGINT):
                 child = subprocess.Popen(command, cwd=directory, stdout=subprocess.PIPE,
                                          stderr=subprocess.PIPE, text=True)
@@ -51,6 +56,11 @@ class LinuxHttpTests(unittest.TestCase):
                         status, state = request("/api/state")
                         self.assertEqual(status, 200)
                         self.assertEqual(state["data_dir"], str(notebook))
+                        status, entry = request("/api/dictionary?word=EPHEMERAL")
+                        self.assertEqual(status, 200)
+                        self.assertEqual(len(entry["senses"]), 2)
+                        self.assertEqual(entry["senses"][0]["syn"], "temporary")
+                        self.assertEqual(request("/api/dictionary?word=")[0], 400)
                         if stop_signal == signal.SIGTERM:
                             status, page = request("/api/page", {
                                 "id": "学习/日志", "content": "Hello " * 6000, "revision": ""})
@@ -67,6 +77,7 @@ class LinuxHttpTests(unittest.TestCase):
                     _, errors = child.communicate(timeout=10)
                     self.assertEqual(child.returncode, 0, errors)
                     self.assertEqual(errors, "")
+                    self.assertEqual(dictionary.read_bytes(), original_dictionary)
                 finally:
                     if child.poll() is None:
                         child.kill()

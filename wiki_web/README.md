@@ -101,6 +101,38 @@ folder, including attachments and `.leaf` if you want to retain trashed pages.
 - Search matches page paths and content. **Ctrl K** (or Cmd K) focuses search;
   **Ctrl S** (or Cmd S) saves immediately.
 
+## Dictionary lookup
+
+Select a word in the Markdown editor or rendered preview, then click **Look up**.
+The dictionary panel shows definitions, examples, synonyms, and antonyms alongside
+your page. You can also type a word or short phrase and press **Find**. On narrow
+screens the panel sits above the editor. Lookup never changes your note.
+
+Lookup reads an existing local dictionary in the `ffi_dict` SQLite format.
+By default it uses `.dict.db` next to `wiki_web.lua`. Configure another file:
+
+```powershell
+luajit .\wiki_web.lua --dict-db C:\Notes\dict.db --save-config
+```
+
+The path is saved as `dict_db` in the same configuration file as `data_dir`.
+Selection order is `--dict-db`, saved configuration, then the repository's
+`.dict.db`. Use `--dict-db none` to disable lookup. Definitions are read-only;
+the dictionary and vocabulary deck are never changed. No network request or
+additional runtime library is needed. If the database is missing or incompatible,
+the panel explains how to configure it and notebook editing remains available.
+
+Reuse a dictionary already imported with `ffi_dict` or `download_dict`. To obtain
+the Wordset dictionary on Linux (or WSL), run from this repository:
+
+```sh
+luajit download_dict.lua --db .dict.db
+```
+
+Downloading requires Git and internet access. After import, lookup works offline
+on both platforms; Windows can read the same database file. Dictionary download
+and import are separate from launching Leaf Wiki.
+
 ## Autosave and conflicting edits
 
 Typing schedules a save after a short pause. The status distinguishes unsaved
@@ -190,6 +222,12 @@ dictionary HTTP regression suite also requires Linux. Windows tests additionally
 cover Unicode command-line and configuration paths, junction confinement,
 filename aliases, notebook locking,
 and console Ctrl-C cleanup.
+
+For optional real-browser selection and desktop/mobile layout checks, install
+Playwright as test tooling and run `node --test wiki_web/tests/test_browser.js`.
+The suite skips when Playwright is unavailable. `LEAF_WIKI_PLAYWRIGHT` can point
+to an external Playwright installation; `PLAYWRIGHT_EXECUTABLE_PATH` selects a
+browser binary (Windows defaults to installed Microsoft Edge).
 
 Tests use temporary notebooks and caches. They exercise real HTTP configuration,
 large pages, revision conflicts, search, links, image serving, restart persistence,

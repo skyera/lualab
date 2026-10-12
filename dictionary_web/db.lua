@@ -5,6 +5,7 @@ ffi.cdef[[
 typedef struct sqlite3 sqlite3;
 typedef struct sqlite3_stmt sqlite3_stmt;
 int sqlite3_open(const char *, sqlite3 **);
+int sqlite3_open_v2(const char *, sqlite3 **, int, const char *);
 int sqlite3_close(sqlite3 *);
 const char *sqlite3_errmsg(sqlite3 *);
 int sqlite3_busy_timeout(sqlite3 *, int);
@@ -38,9 +39,10 @@ local SQLITE_DONE    = 101
 local DB = {}
 DB.__index = DB
 
-function DB.open(path, schema)
+function DB.open(path, schema, readonly)
     local ptr = ffi.new('sqlite3 *[1]')
-    if sqlite.sqlite3_open(path, ptr) ~= 0 then
+    local status = readonly and sqlite.sqlite3_open_v2(path, ptr, 1, nil) or sqlite.sqlite3_open(path, ptr)
+    if status ~= 0 then
         local message = ptr[0] ~= nil and ffi.string(sqlite.sqlite3_errmsg(ptr[0])) or 'SQLite open failed'
         if ptr[0] ~= nil then
             sqlite.sqlite3_close(ptr[0])

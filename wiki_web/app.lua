@@ -15,6 +15,7 @@ local json = require('json')
 local Fs = require('fs')
 local Notebook = require('notebook')
 local http = require('http')
+local dictionary = require('dictionary')
 local is_windows = package.config:sub(1, 1) == '\\'
 local M = {}
 local STATIC = {
@@ -67,10 +68,11 @@ function M.run(root)
         local flag = arg[index]
         if flag == '-h' or flag == '--help' then
             print('Usage: luajit wiki_web.lua [--data-dir PATH] [--cache-dir PATH] '
-                .. '[--config FILE] [--save-config] [--port 8020]')
+                .. '[--config FILE] [--save-config] [--dict-db PATH|none] [--port 8020]')
             return
         elseif flag == '--save-config' then options.save_config = true
-        elseif flag == '--data-dir' or flag == '--cache-dir' or flag == '--config' or flag == '--port' then
+        elseif flag == '--data-dir' or flag == '--cache-dir' or flag == '--config'
+            or flag == '--dict-db' or flag == '--port' then
             index = index + 1
             assert(arg[index] and arg[index]:sub(1, 2) ~= '--', 'Missing value for ' .. flag)
             options[flag:sub(3):gsub('-', '_')] = arg[index]
@@ -82,13 +84,23 @@ function M.run(root)
     local config = raw and json.decode(raw) or {}
     assert(type(config) == 'table', 'Configuration must be a JSON object')
     local data_dir = options.data_dir or getenv('LEAF_WIKI_DATA_DIR') or config.data_dir or home .. '/LeafWiki'
+    local dictionary_path = options.dict_db or config.dict_db or root .. '/.dict.db'
+    assert(type(dictionary_path) == 'string' and dictionary_path ~= '' and not dictionary_path:find('%z'),
+        'Invalid dictionary path')
+    if dictionary_path ~= 'none' then
+        dictionary_path = dictionary_path:gsub('\\', '/')
+        assert(dictionary_path:match('[^/]+$'), 'Dictionary path must name a file')
+        if not dictionary_path:match('^%a:/') and dictionary_path:sub(1, 1) ~= '/' then
+            dictionary_path = Fs.absolute('.') .. '/' .. dictionary_path
+        end
+    end
     local port = tonumber(options.port)
     assert(port and port >= 0 and port <= 65535 and port % 1 == 0, 'Invalid port')
     local notebook = Notebook.open(data_dir, options.cache_dir or cache)
     if options.save_config then
         local parent = config_path:match('^(.*)/[^/]+$') or '.'
         local fs = Fs.open(parent)
-        fs:write(config_path:match('[^/]+$'), json.encode({ data_dir = notebook.fs.root }))
+        fs:write(config_path:match('[^/]+$'), json.encode({ data_dir = notebook.fs.root, dict_db = dictionary_path }))
         fs:close()
     end
     local function reply(value, status) return json.encode(value), status or 200, 'application/json; charset=utf-8' end
@@ -108,6 +120,10 @@ function M.run(root)
                 return assert(read(root .. '/wiki_web/static/' .. STATIC[path][1])), 200, STATIC[path][2]
             end
             if path == '/api/state' then return reply(notebook:state(params.q)) end
+            if path == '/api/dictionary' then
+                local value, status = dictionary.lookup(dictionary_path, params.word)
+                return reply(value, status)
+            end
             if path == '/api/page' then
                 local page = notebook:page(params.id)
                 if not page then return reply({ error = 'Page not found.' }, 404) end

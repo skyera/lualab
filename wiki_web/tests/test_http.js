@@ -143,7 +143,7 @@ test('configured folder, autosave conflicts, images, links, maintenance and clea
 });
 test('all Leaf Wiki Lua modules compile without undeclared globals', () => {
   const allowed = new Set(['arg', 'require', 'assert', 'error', 'setmetatable', 'tonumber', 'tostring', 'type', 'ipairs', 'pairs', 'pcall', 'print', 'package', 'os', 'io', 'string', 'table', 'math', 'coroutine', 'debug', 'xpcall']);
-  const files = ['wiki_web.lua', ...fs.readdirSync(path.join(root, 'wiki_web')).filter(p => p.endsWith('.lua')).map(p => 'wiki_web/' + p), 'wiki_web/tests/test_notebook.lua', 'wiki_web/tests/test_console_windows.lua', 'dictionary_web/db.lua', 'dictionary_web/http.lua', 'dictionary_web/http_windows.lua'];
+  const files = ['wiki_web.lua', ...fs.readdirSync(path.join(root, 'wiki_web')).filter(p => p.endsWith('.lua')).map(p => 'wiki_web/' + p), 'wiki_web/tests/test_notebook.lua', 'wiki_web/tests/test_dictionary.lua', 'wiki_web/tests/test_console_windows.lua', 'dictionary_web/db.lua', 'dictionary_web/http.lua', 'dictionary_web/http_windows.lua'];
   for (const file of files) {
     const result = spawnSync('luajit', ['-bl', path.join(root, file)], { encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
@@ -249,6 +249,51 @@ test('Windows defaults and environment overrides use Unicode user folders', { sk
       { ...env, LEAF_WIKI_DATA_DIR: override }, false);
     state = await (await fetch(server.url + '/api/state')).json();
     assert.equal(state.data_dir, normalized(override));
+  } finally {
+    if (server) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('dictionary lookup uses a read-only database, validates words and persists configuration', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-dictionary-'));
+  const dictionary = path.join(directory, '词典.db');
+  let server;
+  try {
+    const fixture = spawnSync('luajit', [path.join(root, 'wiki_web/tests/test_dictionary.lua'), directory], { encoding: 'utf8' });
+    assert.equal(fixture.status, 0, fixture.stdout + fixture.stderr);
+    const original = fs.readFileSync(dictionary);
+    server = await start(directory, ['--data-dir', path.join(directory, 'notebook'), '--dict-db', dictionary, '--save-config']);
+    let response = await fetch(server.url + '/api/dictionary?word=%20EPHEMERAL%20');
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.equal(result.source, 'local'); assert.equal(result.senses.length, 2);
+    assert.equal(result.senses[0].syn, 'temporary'); assert.equal(result.senses[0].ant, 'lasting');
+    response = await fetch(server.url + '/api/dictionary?word=' + encodeURIComponent('学习'));
+    assert.equal((await response.json()).senses[0].definition, 'Study and learn.');
+    response = await fetch(server.url + '/api/dictionary?word=' + encodeURIComponent("' OR 1=1 --"));
+    assert.deepEqual((await response.json()).senses, []);
+    for (const word of ['', '\0', '\n', 'x'.repeat(241)]) {
+      assert.equal((await fetch(server.url + '/api/dictionary?word=' + encodeURIComponent(word))).status, 400);
+    }
+    assert.equal((await fetch(server.url + '/api/dictionary')).status, 400);
+    assert.equal((await post(server, '/api/dictionary', { word: 'ephemeral' })).status, 404);
+    assert.equal((await post(server, '/api/page', { id: 'Study', content: 'ephemeral', revision: '' })).status, 200);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(directory, 'config.json'))).dict_db, normalized(dictionary));
+    await stop(server); server = undefined;
+    server = await start(directory);
+    assert.equal((await (await fetch(server.url + '/api/dictionary?word=ephemeral')).json()).senses.length, 2);
+    assert.deepEqual(fs.readFileSync(dictionary), original);
+    await stop(server); server = undefined;
+    const missing = path.join(directory, 'missing.db');
+    server = await start(directory, ['--dict-db', missing]);
+    response = await fetch(server.url + '/api/dictionary?word=ephemeral');
+    assert.equal(response.status, 503); assert.match((await response.json()).error, /--dict-db/);
+    assert.equal(fs.existsSync(missing), false);
+    assert.equal((await fetch(server.url + '/api/state')).status, 200);
+    await stop(server); server = undefined;
+    server = await start(directory, ['--dict-db', 'none']);
+    assert.equal((await fetch(server.url + '/api/dictionary?word=ephemeral')).status, 503);
   } finally {
     if (server) await stop(server);
     fs.rmSync(directory, { recursive: true, force: true });
