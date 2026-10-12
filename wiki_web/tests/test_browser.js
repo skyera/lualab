@@ -128,6 +128,32 @@ test('real browser selects words in editor/preview and keeps dictionary within d
       assert.match(await page.locator('#switcher-status').innerText(), /No matching/);
       await page.locator('#switcher-query').press('Escape');
       await page.locator('#switcher-dialog').waitFor({ state: 'hidden' });
+      await page.locator('#new-page').click();
+      await page.locator('#prompt-value').fill('Meetings/Design review');
+      await page.locator('#page-template').selectOption('meeting');
+      assert.match(await page.locator('#template-preview').innerText(), /# Design review/);
+      assert.match(await page.locator('#template-preview').innerText(), /## Action items/);
+      for (const width of [1440, 650, 320]) {
+        await page.setViewportSize({ width, height: 850 });
+        const bounds = await page.locator('#prompt-dialog').boundingBox();
+        assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width, 'Template dialog outside viewport: ' + width);
+      }
+      if (screenshots) await page.screenshot({ path: path.join(screenshots, 'template-mobile.png') });
+      await page.locator('#prompt-form button[type="submit"]').click();
+      await page.locator('#prompt-dialog').waitFor({ state: 'hidden' });
+      await page.waitForFunction(() => document.getElementById('editor').value.includes('## Action items'));
+      const meeting = await (await fetch(url + '/api/page?id=Meetings%2FDesign%20review')).json();
+      assert.match(meeting.content, /# Design review/);
+      assert.equal((await fetch(url + '/api/page', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: 'Templates/学习', content: '# {{title}}\nPath: {{path}}\n## 学习', revision: '' }) })).status, 200);
+      await page.reload(); await page.locator('#editor').waitFor({ state: 'visible' });
+      await page.locator('#new-page').click(); await page.locator('#prompt-value').fill('Notes/新课');
+      await page.locator('#page-template').selectOption('page:Templates/学习');
+      await page.waitForFunction(() => document.getElementById('template-preview').textContent.includes('## 学习'));
+      await page.locator('#prompt-form button[type="submit"]').click();
+      await page.locator('#prompt-dialog').waitFor({ state: 'hidden' });
+      await page.waitForFunction(() => document.getElementById('editor').value.includes('## 学习'));
+      assert.equal(await page.locator('#editor').inputValue(), '# 新课\nPath: Notes/新课\n## 学习');
       assert.deepEqual(errors, []);
     } finally {
       if (browser) await browser.close();

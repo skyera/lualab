@@ -61,7 +61,18 @@
       <footer><span id="word-count">Your notebook, your files.</span><span>Markdown · Local notebook</span></footer>
     </main>
   </div>
-  <dialog id="prompt-dialog"><form id="prompt-form"><h2 id="prompt-title"></h2><label for="prompt-value">Page name <span class="hint">Use / for nested pages</span></label><input id="prompt-value" required maxlength="240"><p id="prompt-error" role="alert"></p><div class="dialog-actions"><button type="button" id="prompt-cancel">Cancel</button><button class="primary" type="submit">Continue</button></div></form></dialog>
+  <dialog id="prompt-dialog"><form id="prompt-form">
+    <h2 id="prompt-title"></h2>
+    <label for="prompt-value">Page name <span class="hint">Use / for nested pages</span></label>
+    <input id="prompt-value" required maxlength="240">
+    <section id="template-fields">
+      <label for="page-template">Template</label><select id="page-template"></select>
+      <p class="template-help">Reuse a page from Templates/ or choose a starter.</p>
+      <pre id="template-preview" aria-label="New page Markdown preview"></pre>
+    </section>
+    <p id="prompt-error" role="alert"></p>
+    <div class="dialog-actions"><button type="button" id="prompt-cancel">Cancel</button><button class="primary" type="submit">Continue</button></div>
+  </form></dialog>
   <dialog id="trash-dialog"><h2>Trashed pages</h2><div id="trashed-pages"></div><button id="trash-close">Close</button></dialog>
   <dialog id="switcher-dialog" aria-labelledby="switcher-title">
     <div class="switcher-heading"><h2 id="switcher-title">Open page</h2><button id="switcher-close">Close</button></div>

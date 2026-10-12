@@ -27,6 +27,65 @@ class Node {
 }
 const texts = node => [node.textContent, ...node.children.map(texts)].join('');
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+test('built-in templates preview and create Markdown through actual form handlers', async () => {
+  const { context, get } = harness();
+  const expected = { blank: '# 设计\n\n', study: '## Key ideas', meeting: '## Action items', journal: '## Highlights' };
+  for (const [template, text] of Object.entries(expected)) {
+    context.ask('create', 'Projects/设计');
+    get('page-template').value = template; await get('page-template').handlers.change();
+    assert.ok(get('template-preview').textContent.includes(text));
+    let saved;
+    context.api = async (route, payload) => { saved = payload; return {}; };
+    context.openPage = async () => true;
+    await get('prompt-form').handlers.submit({ preventDefault() {} });
+    assert.equal(saved.id, 'Projects/设计'); assert.equal(saved.revision, '');
+    assert.equal(saved.content, get('template-preview').textContent);
+    assert.equal(get('prompt-dialog').open, false);
+  }
+  const expanded = context.templateText('{{title}} {{path}} {{date}} {{weekday}} {{unknown}}', 'Journal/2024/02/2024-02-29');
+  assert.equal(expanded, '2024-02-29 Journal/2024/02/2024-02-29 2024-02-29 Thursday {{unknown}}');
+  context.ask('rename', 'Home'); assert.equal(get('template-fields').hidden, true);
+});
+
+test('custom templates load safely, expand once and ignore stale responses', async () => {
+  const { context, state, get } = harness();
+  state.pages.push({ id: 'Templates/学习', title: '学习' });
+  context.ask('create', 'Notes/$&{{date}}');
+  assert.equal(get('page-template').children.length, 5);
+  const pending = deferred(); context.api = () => pending.promise;
+  get('page-template').value = 'page:Templates/学习';
+  const loading = get('page-template').handlers.change();
+  assert.match(get('template-preview').textContent, /Loading/);
+  await get('prompt-form').handlers.submit({ preventDefault() {} });
+  assert.match(get('prompt-error').textContent, /finish loading/);
+  get('page-template').value = 'study'; await get('page-template').handlers.change();
+  pending.resolve({ content: 'Stale template' }); await loading;
+  assert.match(get('template-preview').textContent, /Key ideas/);
+  context.api = async () => ({ content: '# {{title}}\n{{path}}\n<script>unsafe</script>\n{{date}}' });
+  get('page-template').value = 'page:Templates/学习'; await get('page-template').handlers.change();
+  assert.match(get('template-preview').textContent, /# \$&\{\{date\}\}/);
+  assert.equal(get('template-preview').children.length, 0);
+  get('prompt-value').value = 'New/Name'; get('prompt-value').handlers.input();
+  assert.match(get('template-preview').textContent, /# Name\nNew\/Name/);
+});
+
+test('template load failures and creation conflicts preserve the dialog and never overwrite a page', async () => {
+  const { context, state, get } = harness();
+  state.pages.push({ id: 'Templates/Bad', title: 'Bad' });
+  context.ask('create', 'Home');
+  context.api = async () => { throw new Error('Template missing'); };
+  get('page-template').value = 'page:Templates/Bad'; await get('page-template').handlers.change();
+  assert.match(get('prompt-error').textContent, /missing/);
+  let calls = 0; context.api = async () => { calls++; return {}; };
+  await get('prompt-form').handlers.submit({ preventDefault() {} }); assert.equal(calls, 0);
+  get('page-template').value = 'blank'; await get('page-template').handlers.change();
+  context.api = async (route, payload) => {
+    assert.equal(payload.revision, ''); throw new Error('This page already exists');
+  };
+  await get('prompt-form').handlers.submit({ preventDefault() {} });
+  assert.equal(get('prompt-dialog').open, true); assert.match(get('prompt-error').textContent, /already exists/);
+  assert.equal(get('editor').value, 'Initial'); assert.equal(get('page-template').disabled, false);
+});
 test('page switcher filters locally, ranks names and handles keyboard boundary tokens', async () => {
   const { context, state, get, events } = harness();
   state.pages = [state.page, { id: 'Projects/Design', title: 'Design' },

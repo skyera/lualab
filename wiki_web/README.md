@@ -107,6 +107,50 @@ folder, including attachments and `.leaf` if you want to retain trashed pages.
 - Search matches page paths and content. **Ctrl K** (or Cmd K) focuses search;
   **Ctrl S** (or Cmd S) saves immediately.
 
+## Page templates
+
+Click **+ Page**, enter a page name, and choose a template. Built-in starters are
+**Blank**, **Journal**, **Study notes**, and **Meeting notes**. The dialog previews
+the Markdown before creation. Templates apply only to new pages; an existing
+page is never overwritten, and renaming does not apply a template.
+
+For a custom template, create an ordinary page such as `Templates/Study`, choose
+Blank, then edit and save its Markdown. It appears as **Custom · Study** in the
+template selector the next time you create a page. Nested names such as
+`Templates/Work/Meeting` are supported. Custom templates remain searchable,
+editable Markdown pages and are included in normal notebook backups.
+
+Supported placeholders:
+
+| Placeholder | Value |
+|---|---|
+| `{{title}}` | New page's final name component |
+| `{{path}}` | Full new page path |
+| `{{date}}` | Local date as `YYYY-MM-DD` |
+| `{{weekday}}` | English weekday name |
+
+For a valid `Journal/YYYY/MM/YYYY-MM-DD` page, date placeholders use that page's
+date. Other pages use today's local date. Unknown placeholders remain literal.
+For example, save this in `Templates/Study`:
+
+```markdown
+# {{title}}
+Date: {{date}} · {{weekday}}
+
+## Key ideas
+
+## Questions
+
+## Summary
+```
+
+Custom templates are loaded when selected. If a template cannot be read, choose
+another template or correct its page before creating the new note. The journal
+calendar continues to create its usual daily heading; select the Journal starter
+in **+ Page** when you want its additional sections. Template links and image
+references are copied literally, so use notebook wiki links for shared references
+and add owning-page images after creation.
+
 ## Quick page switcher
 
 Press **Ctrl P** (Cmd P on macOS), or click **Open page**, to find a page by name

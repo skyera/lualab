@@ -6,6 +6,69 @@ const state = { pages: [], trash: [], root: '', page: null, dirty: false, saving
   journalMonth: new Date(new Date().getFullYear(), new Date().getMonth(), 1), journalDate: '' };
 let saveTimer, searchTimer;
 const dictionaryState = { selection: '', request: 0 };
+const PAGE_TEMPLATES = {
+  blank: { name: 'Blank', text: '# {{title}}\n\n' },
+  journal: { name: 'Journal', text: '# {{title}}\n\n{{date}} · {{weekday}}\n\n## Highlights\n\n## Notes\n\n## Tomorrow\n\n' },
+  study: { name: 'Study notes', text: '# {{title}}\n\n## Topic\n\n## Key ideas\n\n## Examples\n\n## Questions\n\n## Summary\n\n' },
+  meeting: { name: 'Meeting notes', text: '# {{title}}\n\nDate: {{date}}\n\n## Attendees\n\n## Agenda\n\n## Decisions\n\n## Action items\n\n- [ ] \n' }
+};
+const templateState = { request: 0, source: PAGE_TEMPLATES.blank.text, loading: false, error: '' };
+
+function templateText(source, id) {
+  let date = new Date();
+  const journal = id.match(/^Journal\/(\d{4})\/(\d{2})\/(\d{4}-\d{2}-\d{2})$/);
+  if (journal && journal[3].startsWith(journal[1] + '-' + journal[2] + '-')) {
+    const [year, month, day] = journal[3].split('-').map(Number);
+    const candidate = new Date(year, month - 1, day);
+    if (dateKey(candidate) === journal[3]) date = candidate;
+  }
+  const values = { title: id.split('/').at(-1), path: id, date: dateKey(date),
+    weekday: date.toLocaleDateString('en-US', { weekday: 'long' }) };
+  return source.replace(/\{\{(title|path|date|weekday)\}\}/g, (_, key) => values[key]);
+}
+
+function previewTemplate() {
+  if (state.prompt !== 'create') return;
+  const id = $('prompt-value').value.trim().replaceAll(':', '/') || 'Untitled';
+  $('template-preview').textContent = templateState.loading ? 'Loading template…'
+    : templateState.error ? '' : templateText(templateState.source, id);
+}
+
+function setupTemplates() {
+  ++templateState.request; templateState.loading = false; templateState.error = '';
+  templateState.source = PAGE_TEMPLATES.blank.text;
+  const options = Object.entries(PAGE_TEMPLATES).map(([value, template]) => {
+    const node = document.createElement('option'); node.value = value; node.textContent = template.name; return node;
+  });
+  for (const page of state.pages.filter(page => page.id.startsWith('Templates/'))) {
+    const node = document.createElement('option'); node.value = 'page:' + page.id;
+    node.textContent = 'Custom · ' + page.id.slice('Templates/'.length); options.push(node);
+  }
+  $('page-template').replaceChildren(...options); $('page-template').value = 'blank';
+  previewTemplate();
+}
+
+async function loadTemplate() {
+  const value = $('page-template').value, request = ++templateState.request;
+  templateState.loading = true; templateState.error = ''; $('prompt-error').textContent = ''; previewTemplate();
+  try {
+    let source;
+    if (PAGE_TEMPLATES[value]) source = PAGE_TEMPLATES[value].text;
+    else {
+      const id = value.startsWith('page:') ? value.slice(5) : '';
+      if (!id.startsWith('Templates/') || !state.pages.some(page => page.id === id)) throw new Error('Select an available template.');
+      source = (await api('/api/page?id=' + encodeURIComponent(id))).content;
+    }
+    if (typeof source !== 'string') throw new Error('This template has no Markdown text.');
+    if (request !== templateState.request || state.prompt !== 'create' || !$('prompt-dialog').open) return;
+    templateState.source = source;
+  } catch (error) {
+    if (request !== templateState.request) return;
+    templateState.error = error.message; $('prompt-error').textContent = error.message;
+  } finally {
+    if (request === templateState.request) { templateState.loading = false; previewTemplate(); }
+  }
+}
 const switcherState = { matches: [], selected: 0, busy: false, focus: null };
 
 function renderSwitcher(preserveSelection = false) {
@@ -370,9 +433,12 @@ function setMode(mode) {
   document.querySelectorAll('[data-mode]').forEach(node => node.classList.toggle('selected', node.dataset.mode === mode));
 }
 function ask(kind, value = '') {
+  ++templateState.request;
   state.prompt = kind;
   $('prompt-title').textContent = kind === 'rename' ? 'Rename this page' : 'Create a page';
   $('prompt-value').value = value; $('prompt-error').textContent = '';
+  $('template-fields').hidden = kind !== 'create';
+  if (kind === 'create') setupTemplates();
   $('prompt-dialog').showModal(); $('prompt-value').focus();
 }
 async function openPage(id, anchor) {
@@ -472,21 +538,31 @@ $('new-page').addEventListener('click', async () => { if (await ensureSaved()) a
 $('first-page').addEventListener('click', () => ask('create', 'Home'));
 $('rename').addEventListener('click', async () => { if (state.page && await ensureSaved()) ask('rename', state.page.id); });
 $('prompt-cancel').addEventListener('click', () => $('prompt-dialog').close());
+$('page-template').addEventListener('change', loadTemplate);
+$('prompt-value').addEventListener('input', previewTemplate);
 $('prompt-form').addEventListener('submit', async event => {
   event.preventDefault();
   const id = $('prompt-value').value.trim().replaceAll(':', '/');
   const resolved = WikiMarkdown.resolve('', id);
   if (!resolved || resolved.id !== id) { $('prompt-error').textContent = 'Use a valid page name, with / between folders.'; return; }
   const button = $('prompt-form').querySelector('button[type="submit"]'); button.disabled = true;
+  $('prompt-value').disabled = true; $('page-template').disabled = true; $('prompt-cancel').disabled = true;
   try {
+    if (state.prompt === 'create' && (templateState.loading || templateState.error)) {
+      throw new Error(templateState.loading ? 'Wait for the template to finish loading.' : templateState.error);
+    }
+    const content = state.prompt === 'create' ? templateText(templateState.source, id) : null;
     if (!(await ensureSaved())) throw new Error('Save your current draft first.');
     if (state.prompt === 'rename') {
       const old = state.page.id;
       await api('/api/rename', { id: old, destination: id, revision: state.page.revision }); clearDraft(old);
-    } else await api('/api/page', { id, content: '# ' + id.split('/').at(-1) + '\n\n', revision: '' });
+    } else await api('/api/page', { id, content, revision: '' });
     $('prompt-dialog').close(); await refresh(); await openPage(id);
   } catch (error) { $('prompt-error').textContent = error.message; }
-  finally { button.disabled = false; }
+  finally {
+    button.disabled = false; $('prompt-value').disabled = false;
+    $('page-template').disabled = false; $('prompt-cancel').disabled = false;
+  }
 });
 $('delete').addEventListener('click', async () => {
   if (!state.page || !(await ensureSaved())) return;
