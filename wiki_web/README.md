@@ -107,6 +107,20 @@ folder, including attachments and `.leaf` if you want to retain trashed pages.
 - Search matches page paths and content. **Ctrl K** (or Cmd K) focuses search;
   **Ctrl S** (or Cmd S) saves immediately.
 
+## Quick page switcher
+
+Press **Ctrl P** (Cmd P on macOS), or click **Open page**, to find a page by name
+or path. Type to filter immediately, use **↑ / ↓** to select, and press **Enter**
+to open it. **Esc** closes the switcher and returns focus to where you were.
+Results prioritize exact names and prefixes; spaces match multiple path fragments,
+and `:` can stand in for `/`. Unicode names are supported. Up to 50 results are
+shown; narrow the query to reach a page in a larger notebook.
+
+Filtering uses the loaded notebook list without network requests. Opening a page
+saves your current draft first; a save failure or revision conflict keeps the
+draft and switcher open. A removed or unreadable page reports an error. The
+switcher is unavailable while another modal dialog is open.
+
 ## Dictionary lookup
 
 Select a word in the Markdown editor or rendered preview, then click **Look up**.

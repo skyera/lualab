@@ -99,6 +99,35 @@ test('real browser selects words in editor/preview and keeps dictionary within d
       await page.locator('.history-entry').nth(1).waitFor({ state: 'visible' });
       assert.ok(await page.locator('.history-entry').count() >= 2);
       await page.locator('#history-close').click();
+      assert.equal((await fetch(url + '/api/page', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: 'Projects/Design', content: '# Design', revision: '' }) })).status, 200);
+      await page.reload(); await page.locator('#editor').waitFor({ state: 'visible' });
+      await page.keyboard.press('Control+p');
+      await page.locator('#switcher-dialog').waitFor({ state: 'visible' });
+      await page.locator('#switcher-query').pressSequentially('Design');
+      assert.equal(await page.locator('.switcher-option').count(), 1);
+      for (const width of [1440, 650, 375, 320]) {
+        await page.setViewportSize({ width, height: 850 });
+        const bounds = await page.locator('#switcher-dialog').boundingBox();
+        assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width, 'Switcher outside viewport: ' + width);
+      }
+      if (screenshots) await page.screenshot({ path: path.join(screenshots, 'switcher-mobile.png') });
+      await page.locator('#switcher-query').press('Enter');
+      await page.locator('#switcher-dialog').waitFor({ state: 'hidden' });
+      assert.equal(await page.locator('#editor').inputValue(), '# Design');
+      await page.locator('#editor').fill('# Design\nAn unsaved thought');
+      await page.keyboard.press('Control+p');
+      await page.locator('#switcher-query').pressSequentially('Study');
+      await page.locator('#switcher-query').press('Enter');
+      await page.locator('#switcher-dialog').waitFor({ state: 'hidden' });
+      assert.equal(await page.locator('#editor').inputValue(), '# Study\nAn ephemeral bloom.');
+      const savedDesign = await (await fetch(url + '/api/page?id=Projects%2FDesign')).json();
+      assert.equal(savedDesign.content, '# Design\nAn unsaved thought');
+      await page.locator('#switcher-open').click();
+      await page.locator('#switcher-query').fill('missing');
+      assert.match(await page.locator('#switcher-status').innerText(), /No matching/);
+      await page.locator('#switcher-query').press('Escape');
+      await page.locator('#switcher-dialog').waitFor({ state: 'hidden' });
       assert.deepEqual(errors, []);
     } finally {
       if (browser) await browser.close();

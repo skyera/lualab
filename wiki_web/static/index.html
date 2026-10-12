@@ -14,6 +14,7 @@
     <a class="brand" href="/">Leaf<span> Wiki</span></a>
     <label class="search"><span class="sr-only">Search pages</span><input id="search" type="search" placeholder="Search pages…" autocomplete="off"><kbd>Ctrl K</kbd></label>
     <button id="new-page" class="primary">+ Page</button>
+    <button id="switcher-open" title="Open page (Ctrl P / Cmd P)">Open page</button>
   </header>
   <div class="workspace">
     <aside id="sidebar">
@@ -62,6 +63,14 @@
   </div>
   <dialog id="prompt-dialog"><form id="prompt-form"><h2 id="prompt-title"></h2><label for="prompt-value">Page name <span class="hint">Use / for nested pages</span></label><input id="prompt-value" required maxlength="240"><p id="prompt-error" role="alert"></p><div class="dialog-actions"><button type="button" id="prompt-cancel">Cancel</button><button class="primary" type="submit">Continue</button></div></form></dialog>
   <dialog id="trash-dialog"><h2>Trashed pages</h2><div id="trashed-pages"></div><button id="trash-close">Close</button></dialog>
+  <dialog id="switcher-dialog" aria-labelledby="switcher-title">
+    <div class="switcher-heading"><h2 id="switcher-title">Open page</h2><button id="switcher-close">Close</button></div>
+    <label class="sr-only" for="switcher-query">Find a page by name or path</label>
+    <input id="switcher-query" type="search" placeholder="Page name or path…" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="switcher-results" aria-expanded="false">
+    <p id="switcher-status" role="status" aria-live="polite"></p>
+    <div id="switcher-results" role="listbox" aria-label="Matching pages"></div>
+    <p class="switcher-help">↑ ↓ Select · Enter Open · Esc Close</p>
+  </dialog>
   <dialog id="history-dialog" aria-labelledby="history-title">
     <div class="history-heading"><h2 id="history-title">Page history</h2><button id="history-close">Close</button></div>
     <p id="history-status" role="status" aria-live="polite"></p>

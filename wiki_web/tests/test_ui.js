@@ -27,6 +27,69 @@ class Node {
 }
 const texts = node => [node.textContent, ...node.children.map(texts)].join('');
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+test('page switcher filters locally, ranks names and handles keyboard boundary tokens', async () => {
+  const { context, state, get, events } = harness();
+  state.pages = [state.page, { id: 'Projects/Design', title: 'Design' },
+    { id: 'Notes/Design ideas', title: 'Design ideas' }, { id: '学习/笔记', title: '笔记' }];
+  context.document.activeElement = get('editor');
+  context.api = async () => { throw new Error('Typing must not request the network'); };
+  let prevented = false;
+  events.keydown({ ctrlKey: true, key: 'p', preventDefault() { prevented = true; } });
+  assert.equal(prevented, true); assert.equal(get('switcher-dialog').open, true);
+  get('switcher-query').value = 'design'; get('switcher-query').handlers.input();
+  assert.equal(get('switcher-results').children.length, 2);
+  assert.match(texts(get('switcher-results').children[0]), /Projects \/ Design/);
+  const key = value => get('switcher-query').handlers.keydown({ key: value, preventDefault() {} });
+  key('ArrowUp'); assert.equal(get('switcher-results').children[0].classList.contains('selected'), true);
+  key('ArrowDown'); key('ArrowDown'); assert.equal(get('switcher-results').children[1].classList.contains('selected'), true);
+  let opened;
+  context.openPage = async id => { opened = id; return true; };
+  await key('Enter'); assert.equal(opened, 'Notes/Design ideas'); assert.equal(get('switcher-dialog').open, false);
+  get('switcher-open').handlers.click();
+  get('switcher-query').value = '学习:笔记'; get('switcher-query').handlers.input();
+  assert.equal(get('switcher-results').children.length, 1);
+  key('Escape'); assert.equal(get('switcher-dialog').open, false); assert.equal(get('editor').focused, true);
+});
+
+test('page switcher renders empty, long and hostile names and preserves unsaved drafts on failure', async () => {
+  const { context, state, get } = harness();
+  state.pages = []; get('switcher-open').handlers.click();
+  assert.match(get('switcher-status').textContent, /No pages yet/);
+  await get('switcher-query').handlers.keydown({ key: 'Enter', preventDefault() {} });
+  state.pages = Array.from({ length: 80 }, (_, i) => ({ id: 'Folder/Page' + i, title: 'Page' + i }));
+  state.pages.push({ id: '学习/<img src=x>/' + 'x'.repeat(150), title: '<img src=x>' });
+  context.renderSwitcher(); assert.equal(get('switcher-results').children.length, 50);
+  assert.match(get('switcher-status').textContent, /50 of 81/);
+  get('switcher-query').value = '<img'; get('switcher-query').handlers.input();
+  assert.equal(get('switcher-results').querySelectorAll('img').length, 0);
+  assert.match(texts(get('switcher-results')), /<img src=x>/);
+  get('switcher-query').value = 'missing'; get('switcher-query').handlers.input();
+  assert.match(get('switcher-status').textContent, /No matching/);
+  get('switcher-query').value = 'Page1'; get('switcher-query').handlers.input();
+  state.dirty = true; get('editor').value = 'Unsaved draft';
+  context.api = async () => { throw new Error('Injected save failure'); };
+  await get('switcher-results').children[0].handlers.click();
+  assert.equal(get('switcher-dialog').open, true); assert.equal(get('editor').value, 'Unsaved draft');
+  assert.equal(state.page.id, 'Home'); assert.equal(state.dirty, true);
+  assert.match(get('switcher-status').textContent, /save failure/);
+  assert.equal(get('switcher-query').disabled, false);
+});
+
+test('page switcher preserves selection on refresh, avoids other modals and ignores IME Enter', async () => {
+  const { context, get, events } = harness();
+  get('history-dialog').open = true; get('switcher-open').handlers.click();
+  assert.equal(get('switcher-dialog').open, false);
+  get('history-dialog').open = false;
+  events.keydown({ metaKey: true, key: 'p', preventDefault() {} });
+  get('switcher-query').handlers.keydown({ key: 'ArrowDown', preventDefault() {} });
+  context.renderSwitcher(true);
+  assert.equal(get('switcher-results').children[1].classList.contains('selected'), true);
+  let calls = 0; context.openPage = async () => { calls++; return true; };
+  await get('switcher-query').handlers.keydown({ key: 'Enter', isComposing: true, preventDefault() {} });
+  assert.equal(calls, 0);
+  get('switcher-dialog').handlers.cancel({ preventDefault() {} });
+  assert.equal(get('switcher-dialog').open, false);
+});
 test('history lists empty and populated versions, previews safe text and restores through handlers', async () => {
   const { context, state, get } = harness();
   const old = 'a'.repeat(64); let payload;

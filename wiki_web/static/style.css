@@ -35,3 +35,12 @@ dialog{border:1px solid var(--line);border-radius:12px;background:var(--surface)
 .history-entry{text-align:left;overflow-wrap:anywhere}
 #history-preview{margin:0;padding:14px;background:var(--paper);border:1px solid var(--line);border-radius:7px;min-height:140px;max-height:55vh;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.6 monospace}
 @media(max-width:650px){.history-layout{grid-template-columns:minmax(0,1fr)}#history-list{max-height:20vh}#history-preview{max-height:35vh}#history-dialog{padding:16px}}
+#switcher-dialog{width:min(620px,calc(100vw - 32px));max-width:620px}
+.switcher-heading{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.switcher-heading h2{margin:0}
+#switcher-query{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:7px;margin-top:16px}
+#switcher-status,.switcher-help{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+#switcher-results{display:flex;flex-direction:column;gap:4px;max-height:50vh;overflow:auto}
+.switcher-option{text-align:left;overflow-wrap:anywhere;flex-shrink:0}
+.switcher-option.selected{background:var(--soft);border-color:var(--green)}
+@media(max-width:650px){#switcher-dialog{padding:16px}#switcher-open{font-size:13px;padding:6px 9px}}

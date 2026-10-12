@@ -6,6 +6,75 @@ const state = { pages: [], trash: [], root: '', page: null, dirty: false, saving
   journalMonth: new Date(new Date().getFullYear(), new Date().getMonth(), 1), journalDate: '' };
 let saveTimer, searchTimer;
 const dictionaryState = { selection: '', request: 0 };
+const switcherState = { matches: [], selected: 0, busy: false, focus: null };
+
+function renderSwitcher(preserveSelection = false) {
+  const query = $('switcher-query').value.trim().replaceAll(':', '/').normalize('NFC').toLowerCase();
+  const tokens = query.split(/\s+/).filter(Boolean);
+  const previous = preserveSelection && switcherState.matches[switcherState.selected]?.id;
+  const matches = state.pages.map(page => {
+    const path = page.id.normalize('NFC').toLowerCase(), title = page.title.normalize('NFC').toLowerCase();
+    const rank = path === query ? 0 : title === query ? 1 : title.startsWith(query) ? 2
+      : path.startsWith(query) ? 3 : title.includes(query) ? 4 : 5;
+    return { page, path, rank };
+  }).filter(item => tokens.every(token => item.path.includes(token)))
+    .sort((a, b) => a.rank - b.rank || a.page.id.localeCompare(b.page.id));
+  switcherState.matches = matches.slice(0, 50).map(item => item.page);
+  switcherState.selected = Math.max(0, switcherState.matches.findIndex(page => page.id === previous));
+  $('switcher-results').replaceChildren(...switcherState.matches.map((page, index) => {
+    const node = button(page.id.replaceAll('/', ' / '), () => activateSwitcher(index), 'switcher-option');
+    node.id = 'switcher-option-' + index; node.type = 'button'; node.tabIndex = -1;
+    node.setAttribute('role', 'option'); node.title = page.id;
+    if (page.id === state.page?.id) node.textContent += ' · Current';
+    return node;
+  }));
+  $('switcher-status').textContent = !state.pages.length ? 'No pages yet. Create your first page to get started.'
+    : !matches.length ? 'No matching pages.' : matches.length > 50
+      ? 'Showing 50 of ' + matches.length + ' pages. Type to narrow the list.'
+      : matches.length + (matches.length === 1 ? ' page' : ' pages');
+  updateSwitcherSelection();
+}
+
+function updateSwitcherSelection() {
+  const nodes = $('switcher-results').children;
+  Array.from(nodes).forEach((node, index) => {
+    const selected = index === switcherState.selected;
+    node.classList.toggle('selected', selected); node.setAttribute('aria-selected', String(selected));
+  });
+  const selected = nodes[switcherState.selected];
+  $('switcher-query').setAttribute('aria-activedescendant', selected?.id || '');
+  selected?.scrollIntoView({ block: 'nearest' });
+}
+
+function openSwitcher() {
+  if ($('prompt-dialog').open || $('trash-dialog').open || $('history-dialog').open) return;
+  if (!$('switcher-dialog').open) {
+    switcherState.focus = document.activeElement;
+    $('switcher-query').value = ''; $('switcher-dialog').showModal(); renderSwitcher();
+  }
+  $('switcher-query').setAttribute('aria-expanded', 'true'); $('switcher-query').focus();
+}
+
+function closeSwitcher() {
+  if (switcherState.busy) return;
+  $('switcher-dialog').close(); $('switcher-query').setAttribute('aria-expanded', 'false');
+  (switcherState.focus || $('switcher-open')).focus();
+}
+
+async function activateSwitcher(index = switcherState.selected) {
+  const page = switcherState.matches[index];
+  if (!page || switcherState.busy) return;
+  switcherState.busy = true; $('switcher-query').disabled = true; $('switcher-close').disabled = true;
+  $('switcher-status').textContent = 'Saving edits and opening page…';
+  try {
+    const opened = await openPage(page.id);
+    if (opened) {
+      switcherState.busy = false; closeSwitcher();
+      if (state.mode === 'preview') $('switcher-open').focus(); else $('editor').focus();
+    } else $('switcher-status').textContent = $('message').textContent || 'Page could not be opened. Your draft is preserved.';
+  } catch (error) { $('switcher-status').textContent = error.message; }
+  finally { switcherState.busy = false; $('switcher-query').disabled = false; $('switcher-close').disabled = false; }
+}
 const historyState = { id: '', revision: '', selected: null, request: 0, restoring: false, stale: false };
 
 function closeHistory() {
@@ -261,7 +330,9 @@ async function openJournalDate(key) {
 }
 async function refresh() {
   const data = await api('/api/state'); state.pages = data.pages; state.trash = data.trash; state.root = data.data_dir;
-  $('data-path').textContent = state.root; renderTree(); renderJournal(); preview(); return data;
+  $('data-path').textContent = state.root; renderTree(); renderJournal(); preview();
+  if ($('switcher-dialog').open && !switcherState.busy) renderSwitcher(true);
+  return data;
 }
 async function save() {
   clearTimeout(saveTimer);
@@ -374,6 +445,20 @@ $('page-history').addEventListener('click', openHistory);
 $('history-close').addEventListener('click', closeHistory);
 $('history-restore').addEventListener('click', restoreHistoryVersion);
 $('history-dialog').addEventListener('cancel', event => { event.preventDefault(); closeHistory(); });
+$('switcher-open').addEventListener('click', openSwitcher);
+$('switcher-close').addEventListener('click', closeSwitcher);
+$('switcher-dialog').addEventListener('cancel', event => { event.preventDefault(); closeSwitcher(); });
+$('switcher-query').addEventListener('input', () => { if (!switcherState.busy) renderSwitcher(); });
+$('switcher-query').addEventListener('keydown', event => {
+  if (event.isComposing || switcherState.busy) return;
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault();
+    switcherState.selected = Math.max(0, Math.min(switcherState.matches.length - 1,
+      switcherState.selected + (event.key === 'ArrowDown' ? 1 : -1)));
+    updateSwitcherSelection();
+  } else if (event.key === 'Enter') { event.preventDefault(); return activateSwitcher(); }
+  else if (event.key === 'Escape') { event.preventDefault(); closeSwitcher(); }
+});
 $('journal-today').addEventListener('click', () => openJournalDate(dateKey(new Date())));
 $('journal-prev').addEventListener('click', () => {
   state.journalMonth = new Date(state.journalMonth.getFullYear(), state.journalMonth.getMonth() - 1, 1);
@@ -463,6 +548,11 @@ $('dictionary-word').addEventListener('input', () => {
 });
 $('dictionary-word').addEventListener('keydown', event => { if (event.key === 'Escape') closeDictionary(); });
 window.addEventListener('keydown', event => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'p') {
+    if (!$('prompt-dialog').open && !$('trash-dialog').open && !$('history-dialog').open) {
+      event.preventDefault(); openSwitcher();
+    }
+  }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); save(); }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); $('search').focus(); $('search').select(); }
 });
