@@ -127,7 +127,7 @@ test('configured folder, autosave conflicts, images, links, maintenance and clea
   try {
     server = await start(directory, ['--data-dir', notebook, '--save-config']);
     assert.equal(JSON.parse(fs.readFileSync(path.join(directory, 'config.json'))).data_dir, normalized(notebook));
-    for (const route of ['/', '/app.js', '/markdown.js', '/style.css']) assert.equal((await fetch(server.url + route)).status, 200);
+    for (const route of ['/', '/app.js', '/markdown.js', '/export.js', '/style.css']) assert.equal((await fetch(server.url + route)).status, 200);
     const state = await (await fetch(server.url + '/api/state')).json();
     assert.deepEqual(state.pages, []); assert.equal(state.data_dir, normalized(notebook));
     assert.ok(!state.index_path.startsWith(normalized(notebook)));

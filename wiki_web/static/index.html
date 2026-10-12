@@ -6,6 +6,7 @@
   <title>Leaf Wiki</title>
   <link rel="stylesheet" href="/style.css">
   <script src="/markdown.js" defer></script>
+  <script src="/export.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -15,6 +16,7 @@
     <label class="search"><span class="sr-only">Search pages</span><input id="search" type="search" placeholder="Search pages…" autocomplete="off"><kbd>Ctrl K</kbd></label>
     <button id="new-page" class="primary">+ Page</button>
     <button id="switcher-open" title="Open page (Ctrl P / Cmd P)">Open page</button>
+    <button id="export-open">Export</button>
   </header>
   <div class="workspace">
     <aside id="sidebar">
@@ -75,6 +77,13 @@
     <div class="dialog-actions"><button type="button" id="prompt-cancel">Cancel</button><button class="primary" type="submit">Continue</button></div>
   </form></dialog>
   <dialog id="trash-dialog"><h2>Trashed pages</h2><div id="trashed-pages"></div><button id="trash-close">Close</button></dialog>
+  <dialog id="export-dialog" aria-labelledby="export-title">
+    <h2 id="export-title">Export HTML</h2>
+    <label for="export-scope">Scope</label><select id="export-scope"><option id="export-page-option" value="page">Current page</option><option value="notebook">Whole notebook</option></select>
+    <p>Includes saved Markdown and local images in one HTML file. Maximum 64 MiB.</p>
+    <p id="export-status" role="status" aria-live="polite"></p>
+    <div class="dialog-actions"><button id="export-cancel">Cancel</button><button id="export-start" class="primary">Export</button></div>
+  </dialog>
   <dialog id="switcher-dialog" aria-labelledby="switcher-title">
     <div class="switcher-heading"><h2 id="switcher-title">Open page</h2><button id="switcher-close">Close</button></div>
     <label class="sr-only" for="switcher-query">Find a page by name or path</label>

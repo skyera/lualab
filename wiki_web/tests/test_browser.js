@@ -165,6 +165,36 @@ test('real browser selects words in editor/preview and keeps dictionary within d
       await page.locator('#tag-filter').selectOption('学习');
       assert.equal(await page.locator('#tree .tree-page').count(), 2);
       await page.locator('#tag-filter').selectOption('');
+      const exportPage = (await (await fetch(url + '/api/page?id=Notes%2F%E6%96%B0%E8%AF%BE')).json());
+      const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ioAAAAASUVORK5CYII=', 'base64');
+      const image = await (await fetch(url + '/api/image?page=' + encodeURIComponent(exportPage.id), { method: 'POST', body: png })).json();
+      const changed = await fetch(url + '/api/page', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: exportPage.id, content: exportPage.content + '\n[[Projects/Design]]\n<script>unsafe</script>\n' + image.markdown,
+          revision: exportPage.revision }) }); assert.equal(changed.status, 200);
+      await page.reload(); await page.locator('#editor').waitFor({ state: 'visible' });
+      await page.locator('#export-open').click(); await page.locator('#export-scope').selectOption('notebook');
+      if (screenshots) await page.screenshot({ path: path.join(screenshots, 'export-mobile.png') });
+      const downloadEvent = page.waitForEvent('download'); await page.locator('#export-start').click();
+      const download = await downloadEvent; assert.equal(download.suggestedFilename(), 'LeafWiki.html');
+      const htmlFile = path.join(directory, 'export.html'); await download.saveAs(htmlFile);
+      const html = fs.readFileSync(htmlFile, 'utf8');
+      assert.match(html, /data:image\/png;base64,/); assert.doesNotMatch(html, /<script[\s>]/i);
+      assert.doesNotMatch(html, /\/api\/attachment/); assert.match(html, /&lt;script&gt;unsafe/);
+      const offline = await browser.newPage();
+      await offline.goto(require('node:url').pathToFileURL(htmlFile).href);
+      assert.ok(await offline.locator('article').count() > 1);
+      assert.equal(await offline.locator('img').first().evaluate(image => image.complete && image.naturalWidth > 0), true);
+      assert.equal(await offline.locator('script').count(), 0);
+      const link = offline.locator('article a[href^="#page-"]').first();
+      const target = await link.getAttribute('href'); assert.ok(await offline.locator(target).count() > 0);
+      await offline.close();
+      await page.locator('#export-cancel').click();
+      await page.locator('#export-open').click(); await page.locator('#export-scope').selectOption('page');
+      const singleEvent = page.waitForEvent('download'); await page.locator('#export-start').click();
+      const single = await singleEvent; const singleFile = path.join(directory, 'single.html'); await single.saveAs(singleFile);
+      const singleView = await browser.newPage(); await singleView.goto(require('node:url').pathToFileURL(singleFile).href);
+      assert.equal(await singleView.locator('article').count(), 1); await singleView.close();
+      await page.locator('#export-cancel').click();
       assert.deepEqual(errors, []);
     } finally {
       if (browser) await browser.close();

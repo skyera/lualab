@@ -6,6 +6,40 @@ const state = { pages: [], trash: [], root: '', page: null, dirty: false, saving
   journalMonth: new Date(new Date().getFullYear(), new Date().getMonth(), 1), journalDate: '' };
 let saveTimer, searchTimer;
 let selectedTag = '', treePages = null;
+const exportState = { controller: null };
+function openExport() {
+  if ($('prompt-dialog').open || $('history-dialog').open || $('switcher-dialog').open || $('trash-dialog').open) return;
+  $('export-page-option').disabled = !state.page;
+  $('export-scope').value = state.page ? 'page' : 'notebook';
+  $('export-status').textContent = ''; $('export-dialog').showModal();
+}
+function closeExport() {
+  if (exportState.controller) { exportState.controller.abort(); $('export-status').textContent = 'Cancelling…'; }
+  else { $('export-dialog').close(); $('export-open').focus(); }
+}
+async function runExport() {
+  if (exportState.controller) return;
+  const controller = new AbortController(); exportState.controller = controller;
+  $('export-start').disabled = true; $('export-scope').disabled = true;
+  let loading = false;
+  try {
+    if (!(await ensureSaved())) throw new Error('Save your draft successfully before exporting.');
+    if (controller.signal.aborted) throw new Error('Export cancelled.');
+    state.loading = true; loading = true; $('editor').readOnly = true;
+    const scope = $('export-scope').value;
+    const html = await WikiExport.generate(scope, state.page?.id, controller.signal,
+      text => { $('export-status').textContent = text; });
+    if (controller.signal.aborted) throw new Error('Export cancelled.');
+    const filename = scope === 'notebook' ? 'LeafWiki.html'
+      : (state.page.title.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_') || 'Page') + '.html';
+    WikiExport.download(html, filename); $('export-status').textContent = 'HTML download ready.';
+  } catch (error) { $('export-status').textContent = controller.signal.aborted ? 'Export cancelled.' : error.message; }
+  finally {
+    exportState.controller = null; $('export-start').disabled = false; $('export-scope').disabled = false;
+    if (loading) { state.loading = false; $('editor').readOnly = false; }
+    if (controller.signal.aborted) closeExport();
+  }
+}
 function renderTagFilter() {
   const counts = new Map();
   for (const page of state.pages) for (const tag of page.tags || []) counts.set(tag, (counts.get(tag) || 0) + 1);
@@ -121,7 +155,7 @@ function updateSwitcherSelection() {
 }
 
 function openSwitcher() {
-  if ($('prompt-dialog').open || $('trash-dialog').open || $('history-dialog').open) return;
+  if ($('prompt-dialog').open || $('trash-dialog').open || $('history-dialog').open || $('export-dialog').open) return;
   if (!$('switcher-dialog').open) {
     switcherState.focus = document.activeElement;
     $('switcher-query').value = ''; $('switcher-dialog').showModal(); renderSwitcher();
@@ -524,6 +558,10 @@ $('editor').addEventListener('drop', event => {
   if (files.length) { event.preventDefault(); uploadImages(files); }
 });
 $('save').addEventListener('click', save);
+$('export-open').addEventListener('click', openExport);
+$('export-start').addEventListener('click', runExport);
+$('export-cancel').addEventListener('click', closeExport);
+$('export-dialog').addEventListener('cancel', event => { event.preventDefault(); closeExport(); });
 $('tag-filter').addEventListener('change', () => { selectedTag = $('tag-filter').value; renderTree(treePages || state.pages); });
 $('page-history').addEventListener('click', openHistory);
 $('history-close').addEventListener('click', closeHistory);
@@ -643,7 +681,7 @@ $('dictionary-word').addEventListener('input', () => {
 $('dictionary-word').addEventListener('keydown', event => { if (event.key === 'Escape') closeDictionary(); });
 window.addEventListener('keydown', event => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'p') {
-    if (!$('prompt-dialog').open && !$('trash-dialog').open && !$('history-dialog').open) {
+    if (!$('prompt-dialog').open && !$('trash-dialog').open && !$('history-dialog').open && !$('export-dialog').open) {
       event.preventDefault(); openSwitcher();
     }
   }
@@ -656,7 +694,7 @@ window.addEventListener('beforeunload', event => {
 window.addEventListener('resize', () => { if (innerWidth <= 950 && state.mode === 'split') setMode('edit'); });
 async function checkExternal() {
   if (state.loading || state.uploading || state.saving || $('search').value || $('prompt-dialog').open
-      || $('history-dialog').open) return;
+      || $('history-dialog').open || $('export-dialog').open) return;
   const page = state.page, revision = page?.revision;
   try {
     await refresh();

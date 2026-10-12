@@ -27,6 +27,54 @@ class Node {
 }
 const texts = node => [node.textContent, ...node.children.map(texts)].join('');
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+test('export generator rejects empty scopes, changed revisions, missing files and oversized content', async () => {
+  const { context } = harness();
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../static/export.js'), 'utf8'), context);
+  const exporter = vm.runInContext('WikiExport', context);
+  const controller = new AbortController();
+  await assert.rejects(exporter.generate('invalid', 'Home', controller.signal), /valid export scope/);
+  context.fetch = async () => ({ ok: true, json: async () => ({ pages: [] }) });
+  await assert.rejects(exporter.generate('notebook', '', controller.signal), /no saved pages/);
+  const row = { id: 'Home', revision: 'expected' };
+  context.fetch = async route => ({ ok: true, json: async () => route === '/api/state' ? { pages: [row] }
+    : { id: 'Home', revision: 'changed', content: 'Text' } });
+  await assert.rejects(exporter.generate('page', 'Home', controller.signal), /changed during export/);
+  context.fetch = async route => route === '/api/state' ? { ok: true, json: async () => ({ pages: [row] }) }
+    : { ok: false, json: async () => ({ error: 'Page missing' }) };
+  await assert.rejects(exporter.generate('page', 'Home', controller.signal), /Page missing/);
+  context.fetch = async route => ({ ok: true, json: async () => route === '/api/state' ? { pages: [row] }
+    : { id: 'Home', revision: 'expected', content: 'x'.repeat(64 * 1024 * 1024 + 1) } });
+  await assert.rejects(exporter.generate('page', 'Home', controller.signal), /64 MiB/);
+});
+test('HTML export uses saved content, downloads the requested scope and restores editor state', async () => {
+  const { context, state, get } = harness();
+  let args, downloaded;
+  context.WikiExport = { generate: async (...values) => { args = values; return '<!doctype html>'; },
+    download: (...values) => { downloaded = values; } };
+  get('export-open').handlers.click();
+  assert.equal(get('export-scope').value, 'page');
+  await get('export-start').handlers.click();
+  assert.equal(args[0], 'page'); assert.equal(args[1], 'Home');
+  assert.equal(downloaded[1], 'Home.html'); assert.equal(get('editor').readOnly, false); assert.equal(state.loading, false);
+  get('export-scope').value = 'notebook'; await get('export-start').handlers.click();
+  assert.equal(downloaded[1], 'LeafWiki.html');
+});
+
+test('export cancellation, failures and unsaved conflicts never download partial data', async () => {
+  const { context, state, get } = harness(); let downloads = 0;
+  const pending = deferred();
+  context.WikiExport = { generate: () => pending.promise, download() { downloads++; } };
+  get('export-open').handlers.click(); const running = get('export-start').handlers.click();
+  await Promise.resolve(); await Promise.resolve();
+  get('export-cancel').handlers.click(); pending.resolve('Partial'); await running;
+  assert.equal(downloads, 0); assert.equal(get('export-dialog').open, false);
+  assert.equal(get('editor').readOnly, false); assert.equal(state.loading, false);
+  get('export-open').handlers.click();
+  context.WikiExport.generate = async () => { throw new Error('A page changed during export'); };
+  await get('export-start').handlers.click(); assert.match(get('export-status').textContent, /page changed/);
+  state.dirty = true; get('editor').value = 'Draft'; context.api = async () => { throw new Error('Conflict'); };
+  await get('export-start').handlers.click(); assert.equal(downloads, 0); assert.equal(get('editor').value, 'Draft');
+});
 test('tag filters group pages across folders and preserve search matches', () => {
   const { context, state, get } = harness();
   state.pages = [{ id: 'A/One', title: 'One', tags: ['work', '学习'] }, { id: 'B/Two', title: 'Two', tags: ['work'] },
@@ -298,7 +346,7 @@ function harness() {
   const nodes = new Map(), events = {}, stored = new Map(); let serial = 0;
   const timers = new Map();
   const get = id => { if (!nodes.has(id)) nodes.set(id, new Node()); return nodes.get(id); };
-  const context = { URLSearchParams, TextEncoder, console, innerWidth: 1200,
+  const context = { URLSearchParams, TextEncoder, AbortController, console, innerWidth: 1200,
     setTimeout: fn => { timers.set(++serial, fn); return serial; }, clearTimeout: id => timers.delete(id),
     document: { addEventListener: (name, fn) => { events['document:' + name] = fn; },
       getElementById: get, createElement: tag => new Node(tag), createTextNode: text => new Node('#text', text),

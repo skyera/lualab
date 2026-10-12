@@ -44,6 +44,7 @@ const WikiMarkdown = (() => {
         const resolved = resolve(page, address);
         if (resolved) {
           node = element('a', label); node.href = '#page=' + encodeURIComponent(resolved.id);
+          node.dataset.wikiPage = resolved.id; node.dataset.wikiAnchor = resolved.anchor || '';
           if (!pages.has(resolved.id)) { node.className = 'missing'; node.title = 'Create this page'; }
           node.addEventListener('click', event => { event.preventDefault(); navigate(resolved.id, resolved.anchor); });
         } else node = element('span', match[0]);

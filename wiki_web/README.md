@@ -298,7 +298,24 @@ case of existing filenames must match exactly to prevent duplicate index entries
 
 The app does not read Zim's wiki-text format. Existing `.md` files can be placed
 in the notebook and indexed automatically. Zim import, weekly/monthly journal
-views, task aggregation, and HTML export remain future work.
+views and task aggregation remain future work.
+
+## HTML export
+
+Click **Export** and choose **Current page** or **Whole notebook**. Leaf Wiki
+saves your draft first, then downloads a standalone HTML file with local images
+embedded. Open it in a browser without running Leaf Wiki. Notebook exports
+include all active pages, regardless of the current search or tag filter; trash
+and revision history are excluded. Links between included pages work offline.
+Links to pages outside the export are shown without a clickable target. External
+web links still require network access. The exported file contains no scripts.
+
+Export uses the same safe Markdown subset as the preview. Raw HTML remains text.
+The complete HTML file is limited to 64 MiB; export individual pages if your
+notebook exceeds that limit. A missing image, unreadable page, or page revision
+that changes during retrieval stops the export without downloading a partial
+file. **Cancel** aborts the operation. Images and page contents are included in
+the download, so review it before sharing it. Browser print can produce a PDF.
 
 ## Verify
 
@@ -310,6 +327,7 @@ python3 wiki_web/tests/test_linux_http.py
 node --test wiki_web/tests/test_http.js wiki_web/tests/test_ui.js
 node --check wiki_web/static/app.js
 node --check wiki_web/static/markdown.js
+node --check wiki_web/static/export.js
 node --test dictionary_web/tests/test_http.js dictionary_web/tests/test_ui.js dictionary_web/tests/test_theme.js
 ```
 
