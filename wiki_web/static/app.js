@@ -66,6 +66,11 @@ function dateKey(date) {
 function journalPageId(date) {
   return 'Journal/' + date.slice(0, 4) + '/' + date.slice(5, 7) + '/' + date;
 }
+function journalHeading(date) {
+  const [year, month, day] = date.split('-').map(Number);
+  const weekday = new Date(year, month - 1, day).toLocaleDateString('en-US', { weekday: 'long' });
+  return '# ' + date + ' (' + weekday + ')';
+}
 function renderJournal() {
   const month = state.journalMonth;
   const year = month.getFullYear(), monthIndex = month.getMonth();
@@ -98,13 +103,23 @@ async function openJournalDate(key) {
   if (!(await ensureSaved())) return false;
   state.journalDate = key; state.journalMonth = new Date(year, month - 1, 1); renderJournal();
   const id = journalPageId(key);
-  if (!state.pages.some(page => page.id === id)) {
-    try { await api('/api/page', { id, content: '# ' + key + '\n\n', revision: '' }); }
-    catch (error) {
-      if (error.status !== 409) { message(error.message); return false; }
+  const exists = state.pages.some(page => page.id === id);
+  try {
+    if (!exists) {
+      try { await api('/api/page', { id, content: journalHeading(key) + '\n\n', revision: '' }); }
+      catch (error) { if (error.status !== 409) throw error; }
+      await refresh();
+    } else {
+      const page = await api('/api/page?id=' + encodeURIComponent(id));
+      const oldHeading = '# ' + key;
+      if (page.content.split(/\r?\n/, 1)[0] === oldHeading) {
+        await api('/api/page', {
+          id, content: journalHeading(key) + page.content.slice(oldHeading.length), revision: page.revision
+        });
+        await refresh();
+      }
     }
-    await refresh();
-  }
+  } catch (error) { message(error.message); return false; }
   return openPage(id);
 }
 async function refresh() {

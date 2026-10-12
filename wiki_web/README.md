@@ -65,7 +65,9 @@ folder, including attachments and `.leaf` if you want to retain trashed pages.
   as `Projects/Wiki/Design`. Pages are ordinary UTF-8 `.md` files.
 - The **Journal** calendar opens or creates a daily page for the selected date.
   Entries use `Journal/YYYY/MM/YYYY-MM-DD.md` and remain regular searchable,
-  linkable Markdown pages. **Today** jumps to the current date.
+  linkable Markdown pages. New entries have a date-and-weekday heading, such as
+  `# 2026-10-11 (Sunday)`. Opening an older default journal heading adds the
+  weekday while preserving its entry text. **Today** jumps to the current date.
 - Choose **Edit**, **Split**, or **Preview**. Narrow screens default to Edit;
   the notebook tree opens with the menu button.
 - Supported Markdown includes headings, paragraphs, lists, task checkboxes,
