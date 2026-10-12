@@ -26,12 +26,18 @@ luajit .\wiki_web.lua --data-dir C:\Notes\LeafWiki --save-config
 Notebook names and paths support UTF-8, including Chinese characters. Examples
 use folders without spaces; paths containing spaces also work when quoted.
 
-Open **http://127.0.0.1:8020** on the host computer, or open
-`http://<host-LAN-IP>:8020` or `http://<host-name>:8020` from another device
-on the network. The default
-notebook is `~/LeafWiki`. The server binds to `0.0.0.0`; allow inbound TCP
-port `8020` through the host firewall for LAN access. Leaf Wiki has no login,
-so only enable LAN access on a trusted network. Ctrl-C closes the server and
+Open **http://127.0.0.1:8020** on the host computer. By default the server listens
+only on `127.0.0.1`, so it is accessible from this computer. The default notebook
+is `~/LeafWiki`. To enable LAN access explicitly:
+
+```powershell
+luajit .\wiki_web.lua --host 0.0.0.0
+```
+
+Then open `http://<host-LAN-IP>:8020` or `http://<host-name>:8020` from another
+device and allow inbound TCP port `8020` through the host firewall. Leaf Wiki has
+no login, so only enable LAN access on a trusted network. `--host` applies to the
+current launch and is not saved by `--save-config`. Ctrl-C closes the server and
 index on both platforms; SIGTERM also does so on Linux. Windows process termination
 (for example, Node's `child.kill()`) is a forced exit; transaction recovery runs
 on the next launch. An absolute launcher path works from any working directory.

@@ -73,6 +73,39 @@ test('app.lua -h prints usage and exits successfully', () => {
   assert.match(result.stdout, /^Usage: luajit wiki_web\.lua /);
   assert.equal(result.stderr, '');
 });
+
+test('default binding is loopback; LAN access requires an explicit host each launch', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-bind-'));
+  let server;
+  const checkBinding = host => {
+    assert.match(server.logs(), new RegExp('listening on ' + host.replaceAll('.', '\\.')));
+    if (windows) {
+      const result = spawnSync('netstat', ['-ano', '-p', 'tcp'], { encoding: 'utf8' });
+      assert.equal(result.status, 0, result.stderr);
+      const address = host + ':' + new URL(server.url).port;
+      assert.ok(result.stdout.split(/\r?\n/).some(line => {
+        const columns = line.trim().split(/\s+/);
+        return columns[1] === address && columns.at(-1) === String(server.child.pid);
+      }), 'Actual listening address must be ' + address);
+    }
+  };
+  try {
+    server = await start(directory, ['--data-dir', path.join(directory, 'notebook'), '--save-config']);
+    checkBinding('127.0.0.1');
+    await stop(server); server = undefined;
+    server = await start(directory, ['--host', '0.0.0.0', '--save-config']);
+    checkBinding('0.0.0.0');
+    await stop(server); server = undefined;
+    server = await start(directory); checkBinding('127.0.0.1');
+    await stop(server); server = undefined;
+    const invalid = spawnSync('luajit', [path.join(root, 'wiki_web.lua'), '--host', 'invalid',
+      '--data-dir', path.join(directory, 'notebook'), '--config', path.join(directory, 'config.json')], { encoding: 'utf8' });
+    assert.notEqual(invalid.status, 0); assert.match(invalid.stderr, /Host must be/);
+  } finally {
+    if (server) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 test('default notebook folder has no spaces in its name', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-default-'));
   let server;

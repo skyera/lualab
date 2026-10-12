@@ -29,7 +29,9 @@ class LinuxHttpTests(unittest.TestCase):
                        "--data-dir", str(notebook), "--cache-dir", directory + "/cache",
                        "--config", directory + "/config.json", "--dict-db", str(dictionary), "--save-config"]
             for stop_signal in (signal.SIGTERM, signal.SIGINT):
-                child = subprocess.Popen(command, cwd=directory, stdout=subprocess.PIPE,
+                host = "127.0.0.1" if stop_signal == signal.SIGTERM else "0.0.0.0"
+                launch = command if stop_signal == signal.SIGTERM else command + ["--host", host]
+                child = subprocess.Popen(launch, cwd=directory, stdout=subprocess.PIPE,
                                          stderr=subprocess.PIPE, text=True)
                 try:
                     with selectors.DefaultSelector() as selector:
@@ -38,6 +40,11 @@ class LinuxHttpTests(unittest.TestCase):
                     line = child.stdout.readline()
                     match = re.search(r"http://127\.0\.0\.1:(\d+)", line)
                     self.assertIsNotNone(match, line)
+                    self.assertIn("listening on " + host, line)
+                    address = ("0100007F" if host == "127.0.0.1" else "00000000") + ":" + format(int(match.group(1)), "04X")
+                    sockets = Path("/proc/{}/net/tcp".format(child.pid)).read_text().splitlines()
+                    self.assertTrue(any(row.split()[1] == address and row.split()[3] == "0A"
+                                        for row in sockets[1:]), "Actual socket binding differs from " + host)
                     url = match.group(0)
 
                     def request(route, body=None):

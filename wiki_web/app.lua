@@ -62,17 +62,18 @@ function M.run(root)
     local cache_base = (is_windows and getenv('LOCALAPPDATA')) or getenv('XDG_CACHE_HOME') or home .. '/.cache'
     local config_path = config_base .. '/leaf-wiki/config.json'
     local cache = cache_base .. '/leaf-wiki'
-    local options = { port = 8020 }
+    local options = { port = 8020, host = '127.0.0.1' }
     local index = 1
     while index <= #arg do
         local flag = arg[index]
         if flag == '-h' or flag == '--help' then
             print('Usage: luajit wiki_web.lua [--data-dir PATH] [--cache-dir PATH] '
-                .. '[--config FILE] [--save-config] [--dict-db PATH|none] [--port 8020]')
+                .. '[--config FILE] [--save-config] [--dict-db PATH|none] '
+                .. '[--host 127.0.0.1|0.0.0.0] [--port 8020]')
             return
         elseif flag == '--save-config' then options.save_config = true
         elseif flag == '--data-dir' or flag == '--cache-dir' or flag == '--config'
-            or flag == '--dict-db' or flag == '--port' then
+            or flag == '--dict-db' or flag == '--host' or flag == '--port' then
             index = index + 1
             assert(arg[index] and arg[index]:sub(1, 2) ~= '--', 'Missing value for ' .. flag)
             options[flag:sub(3):gsub('-', '_')] = arg[index]
@@ -96,6 +97,7 @@ function M.run(root)
     end
     local port = tonumber(options.port)
     assert(port and port >= 0 and port <= 65535 and port % 1 == 0, 'Invalid port')
+    assert(options.host == '127.0.0.1' or options.host == '0.0.0.0', 'Host must be 127.0.0.1 or 0.0.0.0')
     local notebook = Notebook.open(data_dir, options.cache_dir or cache)
     if options.save_config then
         local parent = config_path:match('^(.*)/[^/]+$') or '.'
@@ -170,9 +172,9 @@ function M.run(root)
     end
     local ok, err = pcall(http.serve, port, handler, function(actual_port)
         print('Leaf Wiki: http://127.0.0.1:' .. actual_port
-            .. ' (listening on 0.0.0.0) | Notebook: ' .. notebook.fs.root)
+            .. ' (listening on ' .. options.host .. ') | Notebook: ' .. notebook.fs.root)
         io.stdout:flush()
-    end, '0.0.0.0', nil, { body_limits = { ['/api/page'] = 7 * 1024 * 1024, ['/api/image'] = 5 * 1024 * 1024 } })
+    end, options.host, nil, { body_limits = { ['/api/page'] = 7 * 1024 * 1024, ['/api/image'] = 5 * 1024 * 1024 } })
     notebook:close()
     if not ok then error(err) end
 end
