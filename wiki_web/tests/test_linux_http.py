@@ -71,6 +71,16 @@ class LinuxHttpTests(unittest.TestCase):
                                 "id": page["id"], "destination": "Projects/Log", "revision": page["revision"]})
                             self.assertEqual(status, 200)
                             self.assertEqual(renamed["content"], page["content"])
+                            status, changed = request("/api/page", {"id": renamed["id"],
+                                "content": "Changed text", "revision": renamed["revision"]})
+                            self.assertEqual(status, 200)
+                            status, versions = request("/api/history?id=Projects%2FLog")
+                            self.assertEqual(status, 200)
+                            self.assertTrue(versions["versions"])
+                            status, recovered = request("/api/history/restore", {"id": renamed["id"],
+                                "selected": renamed["revision"], "revision": changed["revision"]})
+                            self.assertEqual(status, 200)
+                            self.assertEqual(recovered["content"], renamed["content"])
                         else:
                             self.assertEqual(state["pages"][0]["id"], "Projects/Log")
                     child.send_signal(stop_signal)

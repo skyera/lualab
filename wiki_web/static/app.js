@@ -6,6 +6,77 @@ const state = { pages: [], trash: [], root: '', page: null, dirty: false, saving
   journalMonth: new Date(new Date().getFullYear(), new Date().getMonth(), 1), journalDate: '' };
 let saveTimer, searchTimer;
 const dictionaryState = { selection: '', request: 0 };
+const historyState = { id: '', revision: '', selected: null, request: 0, restoring: false, stale: false };
+
+function closeHistory() {
+  if (historyState.restoring) return;
+  ++historyState.request; historyState.selected = null;
+  $('history-dialog').close(); $('page-history').focus();
+}
+
+async function selectHistoryVersion(entry) {
+  const request = ++historyState.request;
+  historyState.selected = null; $('history-restore').disabled = true;
+  $('history-preview').textContent = ''; $('history-status').textContent = 'Loading version…';
+  try {
+    const version = await api('/api/version?' + new URLSearchParams({ id: historyState.id, revision: entry.revision }));
+    if (request !== historyState.request || !$('history-dialog').open) return;
+    historyState.selected = version;
+    $('history-preview').textContent = version.content;
+    $('history-status').textContent = historyState.stale ? 'The page changed. Close history and load the saved file first.'
+      : version.revision === historyState.revision
+      ? 'This version matches the current page.' : 'Restore saves your current text in history first.';
+    $('history-restore').disabled = historyState.stale || version.revision === historyState.revision;
+  } catch (error) { if (request === historyState.request) $('history-status').textContent = error.message; }
+}
+
+async function openHistory() {
+  if (!state.page || !(await ensureSaved())) return;
+  historyState.id = state.page.id; historyState.selected = null;
+  historyState.revision = state.page.revision; historyState.stale = false;
+  const request = ++historyState.request;
+  $('history-list').replaceChildren(); $('history-preview').textContent = '';
+  $('history-restore').disabled = true; $('history-status').textContent = 'Loading history…';
+  $('history-dialog').showModal();
+  try {
+    const result = await api('/api/history?id=' + encodeURIComponent(historyState.id));
+    if (request !== historyState.request || !$('history-dialog').open) return;
+    historyState.stale = result.current_revision !== historyState.revision;
+    $('history-list').replaceChildren(...result.versions.map(entry => {
+      const label = new Date(entry.saved_at * 1000).toLocaleString() + ' · ' + entry.bytes + ' bytes · ' + entry.revision.slice(0, 8);
+      return button(label, () => selectHistoryVersion(entry), 'history-entry');
+    }));
+    $('history-status').textContent = historyState.stale ? 'The page changed. Close history and load the saved file first.'
+      : result.versions.length ? 'Choose a version to preview.'
+      : 'No earlier versions yet. History appears after you change and save this page.';
+  } catch (error) { if (request === historyState.request) $('history-status').textContent = error.message; }
+}
+
+async function restoreHistoryVersion() {
+  const selected = historyState.selected, page = state.page;
+  if (!selected || historyState.restoring || historyState.stale || page?.id !== historyState.id) return;
+  if (!confirm('Restore this version? Your current saved text will remain in history.')) return;
+  historyState.restoring = true; $('editor').readOnly = true;
+  $('history-restore').disabled = true; $('history-close').disabled = true;
+  let loading = false;
+  try {
+    if (!(await ensureSaved())) throw new Error('Save your draft before restoring a version.');
+    state.loading = true; loading = true;
+    const restored = await api('/api/history/restore', { id: historyState.id,
+      selected: selected.revision, revision: historyState.revision });
+    page.revision = restored.revision; page.content = restored.content;
+    $('editor').value = restored.content; state.dirty = false; state.blocked = false;
+    clearDraft(page.id); status('✓ Restored'); $('conflict').hidden = true;
+    historyState.restoring = false; closeHistory();
+    preview(); await refresh(); message('Version restored. Your previous text remains in History.');
+  } catch (error) { $('history-status').textContent = error.message; }
+  finally {
+    historyState.restoring = false; $('editor').readOnly = false;
+    if (loading) state.loading = false;
+    $('history-close').disabled = false;
+    $('history-restore').disabled = !historyState.selected || selected.revision === historyState.revision;
+  }
+}
 
 function captureDictionarySelection() {
   const editor = $('editor');
@@ -299,6 +370,10 @@ $('editor').addEventListener('drop', event => {
   if (files.length) { event.preventDefault(); uploadImages(files); }
 });
 $('save').addEventListener('click', save);
+$('page-history').addEventListener('click', openHistory);
+$('history-close').addEventListener('click', closeHistory);
+$('history-restore').addEventListener('click', restoreHistoryVersion);
+$('history-dialog').addEventListener('cancel', event => { event.preventDefault(); closeHistory(); });
 $('journal-today').addEventListener('click', () => openJournalDate(dateKey(new Date())));
 $('journal-prev').addEventListener('click', () => {
   state.journalMonth = new Date(state.journalMonth.getFullYear(), state.journalMonth.getMonth() - 1, 1);
@@ -396,7 +471,8 @@ window.addEventListener('beforeunload', event => {
 });
 window.addEventListener('resize', () => { if (innerWidth <= 950 && state.mode === 'split') setMode('edit'); });
 async function checkExternal() {
-  if (state.loading || state.uploading || state.saving || $('search').value || $('prompt-dialog').open) return;
+  if (state.loading || state.uploading || state.saving || $('search').value || $('prompt-dialog').open
+      || $('history-dialog').open) return;
   const page = state.page, revision = page?.revision;
   try {
     await refresh();

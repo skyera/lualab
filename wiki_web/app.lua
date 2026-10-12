@@ -130,6 +130,12 @@ function M.run(root)
                 page.backlinks = notebook:backlinks(page.id)
                 return reply(page)
             end
+            if path == '/api/history' or path == '/api/version' then
+                local value, err, status
+                if path == '/api/history' then value, err, status = notebook:versions(params.id)
+                else value, err, status = notebook:version(params.id, params.revision) end
+                return reply(value or { error = err }, status or 200)
+            end
             if path == '/api/attachment' then
                 local bytes, mime = notebook:attachment(params.page, params.file)
                 if not bytes then return reply({ error = 'Attachment not found.' }, 404) end
@@ -146,6 +152,8 @@ function M.run(root)
             assert(type(payload) == 'table', 'Expected a JSON object')
             local value, err, status
             if path == '/api/page' then value, err, status = notebook:save(payload.id, payload.content, payload.revision)
+            elseif path == '/api/history/restore' then
+                value, err, status = notebook:restore_version(payload.id, payload.selected, payload.revision)
             elseif path == '/api/rename' then
                 value, err, status = notebook:rename(payload.id, payload.destination, payload.revision)
             elseif path == '/api/trash' then value, err, status = notebook:trash(payload.id, payload.revision)

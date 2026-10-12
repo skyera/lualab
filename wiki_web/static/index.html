@@ -42,7 +42,7 @@
         <div class="toolbar">
           <div class="modes" aria-label="Editor layout"><button data-mode="edit">Edit</button><button data-mode="split" class="selected">Split</button><button data-mode="preview">Preview</button></div>
           <button id="dictionary-open" aria-controls="dictionary-panel" aria-expanded="false">Look up</button>
-          <button id="save">Save</button><button id="rename">Rename</button><button id="delete">Trash page</button>
+          <button id="page-history">History</button><button id="save">Save</button><button id="rename">Rename</button><button id="delete">Trash page</button>
         </div>
         <section id="dictionary-panel" class="dictionary-panel" aria-label="Dictionary lookup" hidden>
           <div class="dictionary-heading"><h2>Dictionary</h2><button id="dictionary-close" type="button">Close</button></div>
@@ -62,5 +62,11 @@
   </div>
   <dialog id="prompt-dialog"><form id="prompt-form"><h2 id="prompt-title"></h2><label for="prompt-value">Page name <span class="hint">Use / for nested pages</span></label><input id="prompt-value" required maxlength="240"><p id="prompt-error" role="alert"></p><div class="dialog-actions"><button type="button" id="prompt-cancel">Cancel</button><button class="primary" type="submit">Continue</button></div></form></dialog>
   <dialog id="trash-dialog"><h2>Trashed pages</h2><div id="trashed-pages"></div><button id="trash-close">Close</button></dialog>
+  <dialog id="history-dialog" aria-labelledby="history-title">
+    <div class="history-heading"><h2 id="history-title">Page history</h2><button id="history-close">Close</button></div>
+    <p id="history-status" role="status" aria-live="polite"></p>
+    <div class="history-layout"><nav id="history-list" aria-label="Earlier page versions"></nav><pre id="history-preview" tabindex="0" aria-label="Version Markdown"></pre></div>
+    <div class="dialog-actions"><button id="history-restore" class="primary" disabled>Restore this version</button></div>
+  </dialog>
 </body>
 </html>

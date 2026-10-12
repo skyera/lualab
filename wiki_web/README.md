@@ -151,6 +151,30 @@ origin, including its port, and may be disabled or cleared. Revision checks cove
 cooperating browser clients and already-visible edits; an external writer that
 changes a file during the final atomic-save window can still race the save.
 
+## Page revision history
+
+Open **History** on a page to browse earlier Markdown versions. Select a version
+to preview its text, then choose **Restore this version** and confirm. Unsaved
+edits must save successfully before opening history. Restoring archives the
+current saved text first; an external edit causes a conflict instead of being
+overwritten. Versions matching the current text cannot be restored again.
+
+Before a changed save, rename, backlink rewrite, or trash operation replaces a
+page, Leaf Wiki writes its current Markdown into `.leaf/history`. History follows
+renames and survives trash/restore, restarts, and search-cache rebuilds. Restoring
+an older version after a rename adjusts relative wiki links and owning-page image
+references to the current page location.
+
+Snapshots contain Markdown only; image files are not versioned. Versions saved
+before this feature was installed cannot be recovered, and edits made entirely
+outside Leaf Wiki between its saves are not captured. History is associated with
+page paths: reusing an old path retains that path's earlier history. Identical
+content shares a snapshot, and history is never automatically pruned, so disk
+usage grows with distinct versions. Include `.leaf/history` in notebook backups.
+If a snapshot or history manifest is damaged, preserve it for manual recovery;
+Leaf Wiki rejects damaged snapshots and blocks changes when history cannot be
+written safely. A page's history manifest is limited to 32 MiB.
+
 ## Images
 
 Paste a copied image into the editor or drag an image file onto it. The app saves
@@ -200,7 +224,7 @@ case of existing filenames must match exactly to prevent duplicate index entries
 
 The app does not read Zim's wiki-text format. Existing `.md` files can be placed
 in the notebook and indexed automatically. Zim import, weekly/monthly journal
-views, task aggregation, revision history, and HTML export remain future work.
+views, task aggregation, and HTML export remain future work.
 
 ## Verify
 

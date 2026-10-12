@@ -78,6 +78,27 @@ test('real browser selects words in editor/preview and keeps dictionary within d
       await page.waitForFunction(() => document.getElementById('dictionary-status').textContent.includes('Local dictionary'));
       assert.match(await page.locator('#dictionary-results').innerText(), /<img src=x onerror=alert\(1\)>/);
       assert.equal(await page.locator('#dictionary-results img').count(), 0);
+      await page.locator('#dictionary-close').click();
+      await page.locator('#editor').fill('# Changed\nCurrent text');
+      await page.locator('#save').click();
+      await page.waitForFunction(() => document.getElementById('save-status').textContent.includes('Saved'));
+      await page.locator('#page-history').click();
+      await page.locator('.history-entry').first().click();
+      await page.waitForFunction(() => document.getElementById('history-preview').textContent.includes('ephemeral'));
+      for (const width of [1440, 650, 320]) {
+        await page.setViewportSize({ width, height: 850 });
+        const dialog = await page.locator('#history-dialog').boundingBox();
+        assert.ok(dialog.x >= 0 && dialog.x + dialog.width <= width, 'History dialog outside viewport: ' + width);
+      }
+      if (screenshots) await page.screenshot({ path: path.join(screenshots, 'history-mobile.png') });
+      page.once('dialog', dialog => dialog.accept());
+      await page.locator('#history-restore').click();
+      await page.locator('#history-dialog').waitFor({ state: 'hidden' });
+      assert.equal(await page.locator('#editor').inputValue(), '# Study\nAn ephemeral bloom.');
+      await page.locator('#page-history').click();
+      await page.locator('.history-entry').nth(1).waitFor({ state: 'visible' });
+      assert.ok(await page.locator('.history-entry').count() >= 2);
+      await page.locator('#history-close').click();
       assert.deepEqual(errors, []);
     } finally {
       if (browser) await browser.close();

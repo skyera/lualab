@@ -3,6 +3,7 @@ local Fs = require('fs')
 local DB = require('db')
 local links = require('links')
 local hash = require('hash')
+local History = require('history')
 local json = require('json')
 local Notebook = {}
 Notebook.__index = Notebook
@@ -18,6 +19,7 @@ function Notebook.open(data_dir, cache_dir)
     local locked, lock = pcall(fs.lock, fs)
     if not locked then fs:close(); error(lock) end
     local self = setmetatable({ fs = fs, lock = lock }, Notebook)
+    self.history = History.open(fs)
     local ok, err = pcall(function()
         local cache = Fs.absolute(cache_dir)
         local cache_key, root_key = cache, fs.root
@@ -107,9 +109,47 @@ function Notebook:save(id, content, revision)
     if (old and old.revision or '') ~= revision then
         return nil, 'This page changed outside this editor. Copy your draft before reloading.', 409
     end
+    if old and old.content ~= content then self.history:remember(old) end
     self.fs:write(id .. '.md', content)
     self:sync()
     return self:page(id)
+end
+
+function Notebook:versions(id)
+    require_id(id)
+    local page = self:page(id)
+    if not page then return nil, 'Page not found.', 404 end
+    return { id = id, current_revision = page.revision, versions = self.history:list(id) }
+end
+
+function Notebook:version(id, revision)
+    require_id(id)
+    local version = self.history:version(id, revision)
+    if not version then return nil, 'History version not found.', 404 end
+    return version
+end
+
+function Notebook:restore_version(id, selected, revision)
+    require_id(id)
+    local current = self:page(id)
+    if not current then return nil, 'Page not found.', 404 end
+    if current.revision ~= revision then return nil, 'Page changed. Reload history before restoring.', 409 end
+    local version, err, status = self:version(id, selected)
+    if not version then return nil, err, status end
+    local content = version.content
+    if version.source ~= id then
+        content = links.rename(content, version.source, version.source, id)
+        local old_name, new_name = version.source:match('[^/]+$'), id:match('[^/]+$')
+        content = links.prose(content, function(piece)
+            return (piece:gsub('(!%[[^%]]*%]%()([^%)]+)(%))', function(first, target, last)
+                if target:sub(1, #old_name + 13) == old_name .. '.attachments/' then
+                    target = new_name .. '.attachments/' .. target:sub(#old_name + 14)
+                end
+                return first .. target .. last
+            end))
+        end)
+    end
+    return self:save(id, content, revision)
 end
 
 function Notebook:image(id, bytes)
@@ -199,6 +239,13 @@ function Notebook:rename(id, destination, revision)
     local transaction = { files = files }
     local encoded = json.encode(transaction)
     assert(#encoded <= 32 * 1024 * 1024, 'Rename affects too much content; rename fewer linked pages first')
+    for _, operation in ipairs(files) do
+        if operation.before ~= false then
+            self.history:remember({ id = operation.id, content = operation.before,
+                revision = hash.sha256(operation.before) })
+        end
+    end
+    self.history:inherit(id, destination)
     self.fs:write('.leaf/transaction.json', encoded)
     local ok, err = pcall(function()
         for _, operation in ipairs(files) do
@@ -232,6 +279,7 @@ function Notebook:trash(id, revision)
     local token = hash.sha256(id .. page.revision .. os.time() .. #entries):sub(1, 24)
     local transaction = { files = { { id = id, before = page.content, after = false } },
         trash_before = json.encode(entries), trash_file = token }
+    self.history:remember(page)
     if self.fs:directory_exists(id .. '.attachments') then
         transaction.moved = { from = id .. '.attachments', to = '.leaf/trash/' .. token .. '.attachments' }
     end

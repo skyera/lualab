@@ -299,3 +299,33 @@ test('dictionary lookup uses a read-only database, validates words and persists 
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('history API previews, restores with revision checks and survives restart with a new cache', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-history-'));
+  const notebook = path.join(directory, 'notebook'); let server;
+  try {
+    server = await start(directory, ['--data-dir', notebook, '--save-config']);
+    const first = (await post(server, '/api/page', { id: '学习/Note', content: '<script>First</script>', revision: '' })).data;
+    const second = (await post(server, '/api/page', { id: first.id, content: 'Second', revision: first.revision })).data;
+    let history = await (await fetch(server.url + '/api/history?id=' + encodeURIComponent(first.id))).json();
+    assert.equal(history.versions.length, 1); assert.equal(history.versions[0].revision, first.revision);
+    const version = await (await fetch(server.url + '/api/version?' + new URLSearchParams({ id: first.id, revision: first.revision }))).json();
+    assert.equal(version.content, first.content);
+    assert.equal((await post(server, '/api/history/restore', { id: first.id, selected: first.revision, revision: 'stale' })).status, 409);
+    assert.equal((await fetch(server.url + '/api/version?' + new URLSearchParams({ id: first.id, revision: '../escape' }))).status, 400);
+    assert.equal((await fetch(server.url + '/api/version?' + new URLSearchParams({ id: first.id, revision: '0'.repeat(64) }))).status, 404);
+    const restored = await post(server, '/api/history/restore', { id: first.id, selected: first.revision, revision: second.revision });
+    assert.equal(restored.status, 200); assert.equal(restored.data.content, first.content);
+    await stop(server); server = undefined;
+    server = await start(directory, ['--cache-dir', path.join(directory, 'fresh-cache')]);
+    history = await (await fetch(server.url + '/api/history?id=' + encodeURIComponent(first.id))).json();
+    assert.equal(history.versions.length, 2);
+    assert.equal((await post(server, '/api/history/restore', { id: first.id, selected: second.revision, revision: first.revision })).data.content, 'Second');
+    fs.writeFileSync(path.join(notebook, '学习', 'Note.md'), 'External');
+    assert.equal((await post(server, '/api/history/restore', { id: first.id, selected: first.revision, revision: second.revision })).status, 409);
+    assert.equal(fs.readFileSync(path.join(notebook, '学习', 'Note.md'), 'utf8'), 'External');
+  } finally {
+    if (server) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

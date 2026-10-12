@@ -27,6 +27,79 @@ class Node {
 }
 const texts = node => [node.textContent, ...node.children.map(texts)].join('');
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+test('history lists empty and populated versions, previews safe text and restores through handlers', async () => {
+  const { context, state, get } = harness();
+  const old = 'a'.repeat(64); let payload;
+  context.api = async (route, data) => {
+    if (route.startsWith('/api/history?')) return { current_revision: 'r1', versions: [] };
+    throw new Error('Unexpected route');
+  };
+  await get('page-history').handlers.click();
+  assert.match(get('history-status').textContent, /No earlier versions/);
+  get('history-close').handlers.click();
+  context.api = async (route, data) => {
+    if (route.startsWith('/api/history?')) return { current_revision: 'r1', versions: [{ revision: old, saved_at: 1, bytes: 100 }] };
+    if (route.startsWith('/api/version?')) return { revision: old, content: '<script>学习</script>' };
+    if (route === '/api/history/restore') { payload = data; return { revision: old, content: '<script>学习</script>' }; }
+    throw new Error('Unexpected route');
+  };
+  await get('page-history').handlers.click();
+  await get('history-list').children[0].handlers.click();
+  assert.equal(get('history-preview').textContent, '<script>学习</script>');
+  assert.equal(get('history-preview').children.length, 0);
+  await get('history-restore').handlers.click();
+  assert.equal(payload.selected, old); assert.equal(payload.revision, 'r1');
+  assert.equal(get('editor').value, '<script>学习</script>');
+  assert.equal(state.dirty, false); assert.equal(get('editor').readOnly, false);
+  assert.equal(get('history-dialog').open, false);
+});
+
+test('history ignores stale previews and closed-dialog responses; restore conflicts keep the current text', async () => {
+  const { context, state, get } = harness();
+  const first = deferred(), second = deferred(); let calls = 0;
+  context.api = async route => route.startsWith('/api/history?')
+    ? { current_revision: 'r1', versions: [{ revision: 'a', saved_at: 1, bytes: 0 }, { revision: 'b', saved_at: 2, bytes: 999999 }] }
+    : (++calls === 1 ? first.promise : second.promise);
+  await get('page-history').handlers.click();
+  const one = get('history-list').children[0].handlers.click();
+  const two = get('history-list').children[1].handlers.click();
+  second.resolve({ revision: 'b', content: 'Newest preview' }); await two;
+  first.resolve({ revision: 'a', content: 'Stale' }); await one;
+  assert.equal(get('history-preview').textContent, 'Newest preview');
+  context.api = async () => { throw new Error('Page changed. Reload history before restoring.'); };
+  await get('history-restore').handlers.click();
+  assert.match(get('history-status').textContent, /Page changed/);
+  assert.equal(get('editor').value, 'Initial'); assert.equal(state.page.revision, 'r1');
+  assert.equal(get('editor').readOnly, false);
+  const pending = deferred(); context.api = () => pending.promise;
+  const opening = get('page-history').handlers.click();
+  await Promise.resolve(); await Promise.resolve();
+  get('history-dialog').handlers.cancel({ preventDefault() {} });
+  pending.resolve({ current_revision: 'r1', versions: [{ revision: 'late', saved_at: 1, bytes: 1 }] });
+  await opening; assert.equal(get('history-dialog').open, false);
+  assert.equal(get('history-list').children.length, 0);
+});
+
+test('history detects edits made before opening and protects drafts when saving fails', async () => {
+  const { context, state, get } = harness();
+  const old = 'a'.repeat(64);
+  context.api = async route => route.startsWith('/api/history?')
+    ? { current_revision: 'external', versions: [{ revision: old, saved_at: 1, bytes: 1024 * 1024 }] }
+    : { revision: old, content: '学习<script>'.repeat(20000) };
+  await get('page-history').handlers.click();
+  await get('history-list').children[0].handlers.click();
+  assert.match(get('history-status').textContent, /page changed/i);
+  assert.equal(get('history-restore').disabled, true);
+  assert.equal(get('history-preview').textContent.length, '学习<script>'.repeat(20000).length);
+  await get('history-restore').handlers.click();
+  assert.equal(get('editor').value, 'Initial');
+  get('history-close').handlers.click();
+  state.dirty = true; get('editor').value = 'Unsaved draft';
+  context.api = async () => { throw new Error('Injected save failure'); };
+  await get('page-history').handlers.click();
+  assert.equal(get('history-dialog').open, false);
+  assert.equal(get('editor').value, 'Unsaved draft'); assert.equal(state.dirty, true);
+});
 test('dictionary captures editor selection and renders definitions as safe text without editing the draft', async () => {
   const { context, state, get } = harness();
   get('editor').value = 'An ephemeral bloom'; get('editor').selectionStart = 3; get('editor').selectionEnd = 12;
