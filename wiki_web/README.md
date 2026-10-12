@@ -63,6 +63,9 @@ folder, including attachments and `.leaf` if you want to retain trashed pages.
 
 - **+ Page** creates a page. Use `/` or `:` between namespace components, such
   as `Projects/Wiki/Design`. Pages are ordinary UTF-8 `.md` files.
+- The **Journal** calendar opens or creates a daily page for the selected date.
+  Entries use `Journal/YYYY/MM/YYYY-MM-DD.md` and remain regular searchable,
+  linkable Markdown pages. **Today** jumps to the current date.
 - Choose **Edit**, **Split**, or **Preview**. Narrow screens default to Edit;
   the notebook tree opens with the menu button.
 - Supported Markdown includes headings, paragraphs, lists, task checkboxes,
@@ -140,8 +143,8 @@ components. Notebook symlinks are not followed. Invalid or oversized existing
 pages produce an error so they can be corrected externally.
 
 The app does not read Zim's wiki-text format. Existing `.md` files can be placed
-in the notebook and indexed automatically. Zim import, templates, journal
-shortcuts, task aggregation, revision history, and HTML export remain future work.
+in the notebook and indexed automatically. Zim import, weekly/monthly journal
+views, task aggregation, revision history, and HTML export remain future work.
 
 ## Verify
 

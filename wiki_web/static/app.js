@@ -2,7 +2,8 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const state = { pages: [], trash: [], root: '', page: null, dirty: false, saving: null, blocked: false,
-  loading: false, uploading: false, request: 0, searchRequest: 0, mode: 'split', prompt: null };
+  loading: false, uploading: false, request: 0, searchRequest: 0, mode: 'split', prompt: null,
+  journalMonth: new Date(new Date().getFullYear(), new Date().getMonth(), 1), journalDate: '' };
 let saveTimer, searchTimer;
 async function api(path, payload) {
   const response = await fetch(path, payload === undefined ? {} : {
@@ -58,9 +59,57 @@ function backlinks(rows) {
   $('backlinks').replaceChildren(...rows.map(row => button(row.id.replaceAll('/', ' › '), () => openPage(row.id))));
   if (!rows.length) $('backlinks').textContent = 'No incoming links yet.';
 }
+function dateKey(date) {
+  return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'),
+    String(date.getDate()).padStart(2, '0')].join('-');
+}
+function journalPageId(date) {
+  return 'Journal/' + date.slice(0, 4) + '/' + date.slice(5, 7) + '/' + date;
+}
+function renderJournal() {
+  const month = state.journalMonth;
+  const year = month.getFullYear(), monthIndex = month.getMonth();
+  const first = new Date(year, monthIndex, 1);
+  const today = dateKey(new Date());
+  $('journal-month-name').textContent = first.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  const existing = new Set(state.pages.map(page => page.id));
+  const days = [];
+  const date = new Date(year, monthIndex, 1 - first.getDay());
+  for (let index = 0; index < 42; index++) {
+    const key = dateKey(date), id = journalPageId(key);
+    const node = button(String(date.getDate()), () => openJournalDate(key), 'journal-day');
+    node.dataset.date = key;
+    node.setAttribute('aria-label', key);
+    node.classList.toggle('outside-month', date.getMonth() !== monthIndex);
+    node.classList.toggle('today', key === today);
+    node.classList.toggle('selected', key === state.journalDate);
+    node.classList.toggle('has-entry', existing.has(id));
+    days.push(node);
+    date.setDate(date.getDate() + 1);
+  }
+  $('journal-days').replaceChildren(...days);
+}
+async function openJournalDate(key) {
+  const match = key.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return false;
+  const year = Number(match[1]), month = Number(match[2]), day = Number(match[3]);
+  const check = new Date(year, month - 1, day);
+  if (month < 1 || month > 12 || dateKey(check) !== key) return false;
+  if (!(await ensureSaved())) return false;
+  state.journalDate = key; state.journalMonth = new Date(year, month - 1, 1); renderJournal();
+  const id = journalPageId(key);
+  if (!state.pages.some(page => page.id === id)) {
+    try { await api('/api/page', { id, content: '# ' + key + '\n\n', revision: '' }); }
+    catch (error) {
+      if (error.status !== 409) { message(error.message); return false; }
+    }
+    await refresh();
+  }
+  return openPage(id);
+}
 async function refresh() {
   const data = await api('/api/state'); state.pages = data.pages; state.trash = data.trash; state.root = data.data_dir;
-  $('data-path').textContent = state.root; renderTree(); preview(); return data;
+  $('data-path').textContent = state.root; renderTree(); renderJournal(); preview(); return data;
 }
 async function save() {
   clearTimeout(saveTimer);
@@ -168,6 +217,15 @@ $('editor').addEventListener('drop', event => {
   if (files.length) { event.preventDefault(); uploadImages(files); }
 });
 $('save').addEventListener('click', save);
+$('journal-today').addEventListener('click', () => openJournalDate(dateKey(new Date())));
+$('journal-prev').addEventListener('click', () => {
+  state.journalMonth = new Date(state.journalMonth.getFullYear(), state.journalMonth.getMonth() - 1, 1);
+  renderJournal();
+});
+$('journal-next').addEventListener('click', () => {
+  state.journalMonth = new Date(state.journalMonth.getFullYear(), state.journalMonth.getMonth() + 1, 1);
+  renderJournal();
+});
 $('new-page').addEventListener('click', async () => { if (await ensureSaved()) ask('create'); });
 $('first-page').addEventListener('click', () => ask('create', 'Home'));
 $('rename').addEventListener('click', async () => { if (state.page && await ensureSaved()) ask('rename', state.page.id); });

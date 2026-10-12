@@ -9,7 +9,7 @@ class Node {
     this.tagName = tag.toUpperCase(); this.textContent = text; this.children = []; this.handlers = {};
     this.value = ''; this.hidden = false; this.dataset = {}; this.className = ''; this.open = false;
     const classes = new Set();
-    this.classList = { toggle(name, value) { const enabled = value ?? !classes.has(name); if (enabled) classes.add(name); else classes.delete(name); return enabled; }, remove: name => classes.delete(name) };
+    this.classList = { toggle(name, value) { const enabled = value ?? !classes.has(name); if (enabled) classes.add(name); else classes.delete(name); return enabled; }, remove: name => classes.delete(name), contains: name => classes.has(name) };
   }
   append(...nodes) { this.children.push(...nodes); }
   replaceChildren(...nodes) { this.children = nodes; this.textContent = ''; }
@@ -67,6 +67,42 @@ test('safe preview renders empty, Unicode, code, tasks, links, images and hostil
   assert.equal(markdown.render('', 'Home', pages, () => {}).children.length, 0);
   assert.equal(markdown.resolve('Projects/Design', './Tasks').id, 'Projects/Tasks');
   assert.equal(markdown.resolve('Home', '../escape'), null);
+});
+test('journal calendar marks existing dates and navigates across month boundaries', () => {
+  const { context, state, get } = harness();
+  state.journalMonth = new Date(2026, 9, 1);
+  state.journalDate = '2026-10-11';
+  state.pages.push({ id: 'Journal/2026/10/2026-10-03', title: '2026-10-03' });
+  context.renderJournal();
+  assert.equal(get('journal-month-name').textContent, 'October 2026');
+  assert.equal(get('journal-days').children.length, 42);
+  const entry = get('journal-days').children.find(node => node.dataset.date === '2026-10-03');
+  assert.equal(entry.classList.contains('has-entry'), true);
+  assert.equal(get('journal-days').children.find(node => node.dataset.date === '2026-10-11')
+    .classList.contains('selected'), true);
+  get('journal-prev').handlers.click();
+  assert.equal(get('journal-month-name').textContent, 'September 2026');
+  get('journal-prev').handlers.click();
+  assert.equal(get('journal-month-name').textContent, 'August 2026');
+  get('journal-next').handlers.click(); get('journal-next').handlers.click();
+  assert.equal(get('journal-month-name').textContent, 'October 2026');
+});
+test('selecting an empty journal date creates and opens a Markdown page', async () => {
+  const { context, state, get } = harness();
+  const id = 'Journal/2026/10/2026-10-11'; let created;
+  state.journalMonth = new Date(2026, 9, 1);
+  context.renderJournal();
+  context.api = async (route, payload) => {
+    if (route === '/api/page' && payload) { created = payload; return { id, revision: 'r2' }; }
+    if (route.startsWith('/api/page?id=')) return { id, title: '2026-10-11', content: '# 2026-10-11\n\n', revision: 'r2', backlinks: [] };
+    throw new Error('Unexpected request: ' + route);
+  };
+  context.refresh = async () => { state.pages.push({ id, title: '2026-10-11', revision: 'r2' }); };
+  const day = get('journal-days').children.find(node => node.dataset.date === '2026-10-11');
+  assert.equal(await day.handlers.click(), true);
+  assert.equal(created.id, id); assert.equal(created.content, '# 2026-10-11\n\n');
+  assert.equal(state.page.id, id); assert.equal(get('title').textContent, '2026-10-11');
+  assert.equal(await context.openJournalDate('2026-02-30'), false);
 });
 test('actual input and Ctrl S handlers preserve edits typed while a save is pending', async () => {
   const { context, state, get, events } = harness();

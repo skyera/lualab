@@ -17,6 +17,12 @@
   </header>
   <div class="workspace">
     <aside id="sidebar">
+      <section class="journal" aria-label="Journal calendar">
+        <div class="journal-heading"><h2>JOURNAL</h2><button id="journal-today">Today</button></div>
+        <div class="journal-month"><button id="journal-prev" aria-label="Previous month">‹</button><strong id="journal-month-name"></strong><button id="journal-next" aria-label="Next month">›</button></div>
+        <div class="journal-weekdays" aria-hidden="true"><span>Su</span><span>Mo</span><span>Tu</span><span>We</span><span>Th</span><span>Fr</span><span>Sa</span></div>
+        <div id="journal-days" class="journal-days" role="group" aria-label="Days in month"></div>
+      </section>
       <div class="sidebar-heading">YOUR NOTEBOOK <span id="page-count">0</span></div>
       <nav id="tree" aria-label="Notebook pages"></nav>
       <div class="sidebar-bottom"><button id="trash-list">Trash</button><p id="data-path"></p></div>

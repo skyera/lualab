@@ -51,6 +51,7 @@ test('app.lua can launch directly from the wiki_web directory', async () => {
     const response = await fetch(server.url + '/');
     assert.equal(response.status, 200);
     assert.match(await response.text(), /Leaf Wiki/);
+    assert.match(await (await fetch(server.url + '/')).text(), /Journal calendar/);
   } finally {
     if (server) await stop(server);
     fs.rmSync(directory, { recursive: true, force: true });
