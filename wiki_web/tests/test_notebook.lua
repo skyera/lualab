@@ -1,20 +1,25 @@
 #!/usr/bin/env luajit
 -- Temporary-notebook verification of files, links, conflicts and maintenance recovery.
-local root = (arg[0]:match('^(.*)/') or '.') .. '/../..'
+local root = (arg[0]:gsub('\\', '/'):match('^(.*)/') or '.') .. '/../..'
 package.path = root .. '/wiki_web/?.lua;' .. root .. '/dictionary_web/?.lua;' .. root .. '/?.lua;' .. package.path
 local Notebook = require('notebook')
 local links = require('links')
 local json = require('json')
 local ffi = require('ffi')
-ffi.cdef[[int symlink(const char *, const char *);]]
+if ffi.os ~= 'Windows' then ffi.cdef[[int symlink(const char *, const char *);]] end
+local managed = arg[1] and arg[1]:gsub('\\', '/')
+assert(ffi.os ~= 'Windows' or managed, 'On Windows run node --test wiki_web/tests/test_http.js')
+local serial = 0
 local count = 0
 local function fixture(run)
-    local directory, cache = os.tmpname(), os.tmpname()
-    os.remove(directory); os.remove(cache)
+    serial = serial + 1
+    local directory = managed and managed .. '/notebook-' .. serial or os.tmpname()
+    local cache = managed and managed .. '/cache-' .. serial or os.tmpname()
+    if not managed then os.remove(directory); os.remove(cache) end
     local notebook = Notebook.open(directory, cache)
     local ok, err = pcall(run, notebook, directory, cache)
     notebook:close()
-    os.execute("rm -rf -- '" .. directory .. "' '" .. cache .. "'")
+    if not managed then os.execute("rm -rf -- '" .. directory .. "' '" .. cache .. "'") end
     assert(ok, err)
 end
 local function test(name, run)
@@ -60,6 +65,7 @@ test('notebook lock and symlink confinement protect external files', function()
     fixture(function(n, directory, cache)
         assert(not pcall(Notebook.open, directory, cache))
         assert(not pcall(Notebook.open, directory .. '/Other', directory .. '/Other/cache'))
+        if ffi.os == 'Windows' then return end -- junction confinement is exercised by the Node integration test
         local outside = os.tmpname()
         local file = assert(io.open(outside, 'w')); file:write('outside'); file:close()
         assert(ffi.C.symlink(outside, directory .. '/Escape.md') == 0)
@@ -139,6 +145,26 @@ test('trash collision never overwrites a newly created page and restore failures
         n.fs.write = original
         assert(not n:page('Page') and #n:trash_list() == 1)
         assert(n:restore(token).content == 'Original')
+    end)
+end)
+
+test('known SHA-256 vectors and Windows aliases are rejected', function()
+    local hash = require('hash')
+    assert(hash.sha256('') == 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
+    assert(hash.sha256('abc') == 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
+    if ffi.os ~= 'Windows' then return end
+    fixture(function(n, directory, cache)
+        for _, id in ipairs({ 'CON', 'nul', 'Aux.txt', 'COM1', 'LPT9', 'bad.', 'bad*', 'bad?', 'bad<', 'A:stream' }) do
+            assert(not pcall(n.save, n, id, 'text', ''))
+        end
+        n:save('Page', 'original', '')
+        assert(not pcall(n.save, n, 'page', 'overwrite', ''))
+        assert(n:page('Page').content == 'original')
+        n:close()
+        assert(not pcall(Notebook.open, directory:upper(), (directory .. '/CACHE'):upper()))
+        local reopened = Notebook.open(directory, cache)
+        assert(reopened:page('Page').content == 'original')
+        reopened:close()
     end)
 end)
 print('Passed ' .. count .. ' notebook tests.')

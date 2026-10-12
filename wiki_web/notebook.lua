@@ -1,9 +1,8 @@
 -- Markdown source files, recoverable maintenance operations and local SQLite index.
-local ffi = require('ffi')
 local Fs = require('fs')
 local DB = require('db')
 local links = require('links')
-local net = require('net')
+local hash = require('hash')
 local json = require('json')
 local Notebook = {}
 Notebook.__index = Notebook
@@ -16,18 +15,18 @@ CREATE INDEX IF NOT EXISTS links_target ON links(target);
 
 function Notebook.open(data_dir, cache_dir)
     local fs = Fs.open(data_dir)
-    local lock_parent, lock_name = fs:parent('.leaf/lock', true)
-    local lock = ffi.C.openat(lock_parent, lock_name, 2 + 64 + 131072 + 524288, ffi.new('int', 384))
-    ffi.C.close(lock_parent)
-    if lock < 0 or ffi.C.flock(lock, 2 + 4) ~= 0 then
-        if lock >= 0 then ffi.C.close(lock) end
-        fs:close(); error('Notebook is already open or its lock cannot be acquired')
-    end
+    local locked, lock = pcall(fs.lock, fs)
+    if not locked then fs:close(); error(lock) end
     local self = setmetatable({ fs = fs, lock = lock }, Notebook)
     local ok, err = pcall(function()
         local cache = Fs.absolute(cache_dir)
-        assert(cache ~= fs.root and cache:sub(1, #fs.root + 1) ~= fs.root .. '/', 'Cache must be outside the notebook')
-        local index_dir = Fs.absolute(cache .. '/' .. net.sha256(fs.root):sub(1, 24))
+        local cache_key, root_key = cache, fs.root
+        if package.config:sub(1, 1) == '\\' then
+            cache_key, root_key = cache:lower(), fs.root:lower()
+        end
+        assert(cache_key ~= root_key and cache_key:sub(1, #root_key + 1) ~= root_key .. '/',
+            'Cache must be outside the notebook')
+        local index_dir = Fs.absolute(cache .. '/' .. hash.sha256(fs.root):sub(1, 24))
         self.index_path = index_dir .. '/index.db'
         self.db = DB.open(self.index_path, SCHEMA)
         self:recover()
@@ -47,7 +46,7 @@ function Notebook:page(id)
     local text = self.fs:read(id .. '.md')
     if not text then return nil end
     assert(links.valid_utf8(text) and not text:find('%z'), 'Page must be UTF-8 text without NUL bytes')
-    return { id = id, title = id:match('[^/]+$'), content = text, revision = net.sha256(text) }
+    return { id = id, title = id:match('[^/]+$'), content = text, revision = hash.sha256(text) }
 end
 
 function Notebook:sync()
@@ -123,7 +122,7 @@ function Notebook:image(id, bytes)
     elseif bytes:sub(1, 6) == 'GIF87a' or bytes:sub(1, 6) == 'GIF89a' then extension = 'gif'
     elseif bytes:sub(1, 4) == 'RIFF' and bytes:sub(9, 12) == 'WEBP' then extension = 'webp' end
     assert(extension, 'Use a PNG, JPEG, GIF or WebP image')
-    local name = net.sha256(bytes):sub(1, 24) .. '.' .. extension
+    local name = hash.sha256(bytes):sub(1, 24) .. '.' .. extension
     self.fs:write(id .. '.attachments/' .. name, bytes)
     return { file = name, markdown = '![' .. 'Image' .. '](' .. id:match('[^/]+$') .. '.attachments/' .. name .. ')' }
 end
@@ -230,7 +229,7 @@ function Notebook:trash(id, revision)
     assert(page, 'Page not found')
     if page.revision ~= revision then return nil, 'Page changed. Reload before deleting.', 409 end
     local entries = self:trash_list()
-    local token = net.sha256(id .. page.revision .. os.time() .. #entries):sub(1, 24)
+    local token = hash.sha256(id .. page.revision .. os.time() .. #entries):sub(1, 24)
     local transaction = { files = { { id = id, before = page.content, after = false } },
         trash_before = json.encode(entries), trash_file = token }
     if self.fs:directory_exists(id .. '.attachments') then
@@ -286,7 +285,7 @@ end
 
 function Notebook:close()
     if self.db then self.db:close(); self.db = nil end
-    if self.lock then ffi.C.close(self.lock); self.lock = nil end
+    if self.lock then self.lock(); self.lock = nil end
     if self.fs then self.fs:close() end
 end
 return Notebook

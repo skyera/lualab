@@ -2,35 +2,50 @@
 
 A local personal wiki: LuaJIT serves a browser editor, Markdown files hold your
 pages, and a local SQLite index supplies search and backlinks. No npm install or
-Python backend is needed. The first version supports Linux x86-64.
+Python backend is needed. Supports Linux x86-64 and Windows 10/11 with LuaJIT.
 
 ## Run
 
-Install LuaJIT and the SQLite, libcurl, and OpenSSL shared libraries:
+On Linux, install LuaJIT and the SQLite and OpenSSL shared libraries:
 
 ```sh
-sudo apt install luajit libsqlite3-0 libcurl4 libssl3
+sudo apt install luajit libsqlite3-0 libssl3
 luajit wiki_web.lua
 ```
+
+On Windows, install LuaJIT and put a matching-architecture `sqlite3.dll` beside
+`luajit.exe` or on `PATH`. The SQLite DLL is available from
+[SQLite's Windows downloads](https://www.sqlite.org/download.html).
+Windows uses built-in Winsock and BCrypt; libcurl and OpenSSL are not required.
+Run from PowerShell:
+
+```powershell
+luajit .\wiki_web.lua --data-dir C:\Notes\LeafWiki --save-config
+```
+
+Notebook names and paths support UTF-8, including Chinese characters. Examples
+use folders without spaces; paths containing spaces also work when quoted.
 
 Open **http://127.0.0.1:8020** on the host computer, or open
 `http://<host-LAN-IP>:8020` or `http://<host-name>:8020` from another device
 on the network. The default
 notebook is `~/LeafWiki`. The server binds to `0.0.0.0`; allow inbound TCP
 port `8020` through the host firewall for LAN access. Leaf Wiki has no login,
-so only enable LAN access on a trusted network. Ctrl-C and SIGTERM close the
-server and index. An absolute launcher path works from any working directory.
+so only enable LAN access on a trusted network. Ctrl-C closes the server and
+index on both platforms; SIGTERM also does so on Linux. Windows process termination
+(for example, Node's `child.kill()`) is a forced exit; transaction recovery runs
+on the next launch. An absolute launcher path works from any working directory.
 
 Choose another notebook folder:
 
 ```sh
-luajit wiki_web.lua --data-dir "/home/zliu/Google Drive/Leaf Wiki"
+luajit wiki_web.lua --data-dir /home/zliu/LeafWiki
 ```
 
 Save the selected path for subsequent launches:
 
 ```sh
-luajit wiki_web.lua --data-dir "/home/zliu/Google Drive/Leaf Wiki" --save-config
+luajit wiki_web.lua --data-dir /home/zliu/LeafWiki --save-config
 luajit wiki_web.lua
 ```
 
@@ -39,9 +54,13 @@ Configuration lives in `$XDG_CONFIG_HOME/leaf-wiki/config.json`, or
 
 ```json
 {
-  "data_dir": "/home/zliu/Google Drive/Leaf Wiki"
+  "data_dir": "/home/zliu/LeafWiki"
 }
 ```
+
+On Windows the default notebook is `%USERPROFILE%\LeafWiki`, configuration is
+`%APPDATA%\leaf-wiki\config.json`, and the rebuildable index cache is under
+`%LOCALAPPDATA%\leaf-wiki`. Explicit command options override these defaults.
 
 Selection order is `--data-dir`, `LEAF_WIKI_DATA_DIR`, saved configuration, then
 the default. `--config FILE`, `--cache-dir PATH`, and `--port NUMBER` override
@@ -142,7 +161,10 @@ Pages are limited to 1 MiB, names to 240 UTF-8 bytes, nesting to 16 components,
 and notebook indexing to 2,000 pages. Names cannot contain control characters,
 backslashes, wiki syntax delimiters, hidden components, or `.attachments`
 components. Notebook symlinks are not followed. Invalid or oversized existing
-pages produce an error so they can be corrected externally.
+pages produce an error so they can be corrected externally. On Windows, junctions
+and other reparse points are also excluded. Windows device names, reserved
+filename characters, and names ending in a dot are rejected; the spelling and
+case of existing filenames must match exactly to prevent duplicate index entries.
 
 The app does not read Zim's wiki-text format. Existing `.md` files can be placed
 in the notebook and indexed automatically. Zim import, weekly/monthly journal
@@ -154,11 +176,20 @@ From the repository root:
 
 ```sh
 luajit wiki_web/tests/test_notebook.lua
+python3 wiki_web/tests/test_linux_http.py
 node --test wiki_web/tests/test_http.js wiki_web/tests/test_ui.js
 node --check wiki_web/static/app.js
 node --check wiki_web/static/markdown.js
 node --test dictionary_web/tests/test_http.js dictionary_web/tests/test_ui.js dictionary_web/tests/test_theme.js
 ```
+
+On Windows, run the Wiki Web Node commands above. The HTTP suite also runs all notebook
+unit tests and cleans their temporary folders; the standalone Lua unit-test
+command and the optional Python signal regression are for Linux. The shared
+dictionary HTTP regression suite also requires Linux. Windows tests additionally
+cover Unicode command-line and configuration paths, junction confinement,
+filename aliases, notebook locking,
+and console Ctrl-C cleanup.
 
 Tests use temporary notebooks and caches. They exercise real HTTP configuration,
 large pages, revision conflicts, search, links, image serving, restart persistence,

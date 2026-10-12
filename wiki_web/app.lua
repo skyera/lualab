@@ -8,10 +8,14 @@ if direct_script then
     package.path = script_dir .. '/?.lua;' .. direct_root .. '/dictionary_web/?.lua;'
         .. direct_root .. '/?.lua;' .. package.path
 end
+local windows_args = require('windows_args')
+windows_args.normalize()
+local getenv = windows_args.getenv
 local json = require('json')
 local Fs = require('fs')
 local Notebook = require('notebook')
 local http = require('http')
+local is_windows = package.config:sub(1, 1) == '\\'
 local M = {}
 local STATIC = {
     ['/'] = { 'index.html', 'text/html; charset=utf-8' },
@@ -21,6 +25,7 @@ local STATIC = {
 }
 
 local function read(path)
+    if is_windows then return Fs.read_file(path) end
     local file = io.open(path, 'rb')
     if not file then return nil end
     local value = file:read('*a'); file:close(); return value
@@ -51,9 +56,11 @@ local function is_allowed_host(host, port)
 end
 
 function M.run(root)
-    local home = os.getenv('HOME') or '.'
-    local config_path = (os.getenv('XDG_CONFIG_HOME') or home .. '/.config') .. '/leaf-wiki/config.json'
-    local cache = (os.getenv('XDG_CACHE_HOME') or home .. '/.cache') .. '/leaf-wiki'
+    local home = (is_windows and getenv('USERPROFILE')) or getenv('HOME') or '.'
+    local config_base = (is_windows and getenv('APPDATA')) or getenv('XDG_CONFIG_HOME') or home .. '/.config'
+    local cache_base = (is_windows and getenv('LOCALAPPDATA')) or getenv('XDG_CACHE_HOME') or home .. '/.cache'
+    local config_path = config_base .. '/leaf-wiki/config.json'
+    local cache = cache_base .. '/leaf-wiki'
     local options = { port = 8020 }
     local index = 1
     while index <= #arg do
@@ -70,11 +77,11 @@ function M.run(root)
         else error('Unknown option: ' .. flag) end
         index = index + 1
     end
-    config_path = options.config or config_path
+    config_path = (options.config or config_path):gsub('\\', '/')
     local raw = read(config_path)
     local config = raw and json.decode(raw) or {}
     assert(type(config) == 'table', 'Configuration must be a JSON object')
-    local data_dir = options.data_dir or os.getenv('LEAF_WIKI_DATA_DIR') or config.data_dir or home .. '/LeafWiki'
+    local data_dir = options.data_dir or getenv('LEAF_WIKI_DATA_DIR') or config.data_dir or home .. '/LeafWiki'
     local port = tonumber(options.port)
     assert(port and port >= 0 and port <= 65535 and port % 1 == 0, 'Invalid port')
     local notebook = Notebook.open(data_dir, options.cache_dir or cache)

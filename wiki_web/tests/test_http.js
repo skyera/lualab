@@ -7,11 +7,18 @@ const { once } = require('node:events');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const net = require('node:net');
 const root = path.resolve(__dirname, '../..');
+const windows = process.platform === 'win32';
+const normalized = value => value.replace(/\\/g, '/');
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ioAAAAASUVORK5CYII=', 'base64');
-async function start(directory, flags = [], entry = path.join(root, 'wiki_web.lua'), cwd = os.tmpdir(), env = {}) {
-  const child = spawn('luajit', [entry, '--port', '0', '--cache-dir', path.join(directory, 'cache'),
-    '--config', path.join(directory, 'config.json'), ...flags], { cwd, env: { ...process.env, ...env } });
+async function start(directory, flags = [], entry = path.join(root, 'wiki_web.lua'), cwd = os.tmpdir(), env = {}, explicitLocations = true) {
+  const locations = explicitLocations ? ['--cache-dir', path.join(directory, 'cache'),
+    '--config', path.join(directory, 'config.json')] : [];
+  const environment = { ...process.env, ...env };
+  if (!Object.hasOwn(env, 'LEAF_WIKI_DATA_DIR')) delete environment.LEAF_WIKI_DATA_DIR;
+  const child = spawn('luajit', [entry, '--port', '0', ...locations, ...flags],
+    { cwd, env: environment });
   let output = '';
   child.stderr.on('data', data => { output += data; });
   const url = await new Promise((resolve, reject) => {
@@ -27,7 +34,8 @@ async function start(directory, flags = [], entry = path.join(root, 'wiki_web.lu
 }
 async function stop(server) {
   const exit = once(server.child, 'exit'); server.child.kill('SIGTERM');
-  assert.deepEqual(await exit, [0, null], server.logs());
+  // Node terminates Windows processes forcibly; console Ctrl-C has a separate test.
+  assert.deepEqual(await exit, windows ? [null, 'SIGTERM'] : [0, null], server.logs());
 }
 async function post(server, route, data) {
   const response = await fetch(server.url + route, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
@@ -69,9 +77,10 @@ test('default notebook folder has no spaces in its name', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-default-'));
   let server;
   try {
-    server = await start(directory, [], path.join(root, 'wiki_web.lua'), os.tmpdir(), { HOME: directory });
+    server = await start(directory, [], path.join(root, 'wiki_web.lua'), os.tmpdir(),
+      { HOME: directory, USERPROFILE: directory });
     const state = await (await fetch(server.url + '/api/state')).json();
-    assert.equal(state.data_dir, path.join(directory, 'LeafWiki'));
+    assert.equal(state.data_dir, normalized(path.join(directory, 'LeafWiki')));
     assert.ok(!path.basename(state.data_dir).includes(' '));
   } finally {
     if (server) await stop(server);
@@ -84,10 +93,11 @@ test('configured folder, autosave conflicts, images, links, maintenance and clea
   let server;
   try {
     server = await start(directory, ['--data-dir', notebook, '--save-config']);
-    assert.equal(JSON.parse(fs.readFileSync(path.join(directory, 'config.json'))).data_dir, notebook);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(directory, 'config.json'))).data_dir, normalized(notebook));
     for (const route of ['/', '/app.js', '/markdown.js', '/style.css']) assert.equal((await fetch(server.url + route)).status, 200);
     const state = await (await fetch(server.url + '/api/state')).json();
-    assert.deepEqual(state.pages, []); assert.equal(state.data_dir, notebook); assert.ok(!state.index_path.startsWith(notebook));
+    assert.deepEqual(state.pages, []); assert.equal(state.data_dir, normalized(notebook));
+    assert.ok(!state.index_path.startsWith(normalized(notebook)));
     let page = (await post(server, '/api/page', { id: 'Projects/Design', content: '# Design\n[[Home]]', revision: '' })).data;
     const long = 'Long page. '.repeat(3000);
     page = (await post(server, '/api/page', { id: page.id, content: page.content + '\n' + long, revision: page.revision })).data;
@@ -128,16 +138,119 @@ test('configured folder, autosave conflicts, images, links, maintenance and clea
     assert.equal((await (await fetch(server.url + '/api/state?q=External')).json()).pages.length, 1);
     await stop(server); server = await start(directory);
     assert.equal((await (await fetch(server.url + '/api/page?id=Projects%2FPlan')).json()).content, 'External change');
-    assert.equal((await (await fetch(server.url + '/api/state')).json()).data_dir, notebook);
+    assert.equal((await (await fetch(server.url + '/api/state')).json()).data_dir, normalized(notebook));
   } finally { if (server) await stop(server); fs.rmSync(directory, { recursive: true, force: true }); }
 });
 test('all Leaf Wiki Lua modules compile without undeclared globals', () => {
-  const allowed = new Set(['arg', 'require', 'assert', 'error', 'setmetatable', 'tonumber', 'tostring', 'type', 'ipairs', 'pairs', 'pcall', 'print', 'package', 'os', 'io', 'string', 'table', 'math']);
-  const files = ['wiki_web.lua', ...fs.readdirSync(path.join(root, 'wiki_web')).filter(p => p.endsWith('.lua')).map(p => 'wiki_web/' + p), 'wiki_web/tests/test_notebook.lua'];
+  const allowed = new Set(['arg', 'require', 'assert', 'error', 'setmetatable', 'tonumber', 'tostring', 'type', 'ipairs', 'pairs', 'pcall', 'print', 'package', 'os', 'io', 'string', 'table', 'math', 'coroutine', 'debug', 'xpcall']);
+  const files = ['wiki_web.lua', ...fs.readdirSync(path.join(root, 'wiki_web')).filter(p => p.endsWith('.lua')).map(p => 'wiki_web/' + p), 'wiki_web/tests/test_notebook.lua', 'wiki_web/tests/test_console_windows.lua', 'dictionary_web/db.lua', 'dictionary_web/http.lua', 'dictionary_web/http_windows.lua'];
   for (const file of files) {
     const result = spawnSync('luajit', ['-bl', path.join(root, file)], { encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
     const undeclared = [...result.stdout.matchAll(/\bGGET\b[^\n]*;\s*"([^"]+)"/g)].map(m => m[1]).filter(p => !allowed.has(p));
     assert.deepEqual(undeclared, [], file); assert.doesNotMatch(result.stdout, /\bGSET\b/, file);
+  }
+});
+
+test('notebook unit tests run with managed temporary folders', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-units-'));
+  try {
+    const result = spawnSync('luajit', [path.join(root, 'wiki_web/tests/test_notebook.lua'), directory],
+      { cwd: os.tmpdir(), encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /Passed \d+ notebook tests/);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Windows console Ctrl-C closes the server and restores console mode', { skip: !windows }, () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-console-'));
+  try {
+    const result = spawnSync('luajit', [path.join(root, 'wiki_web/tests/test_console_windows.lua'), directory],
+      { encoding: 'utf8', windowsHide: true, timeout: 10000 });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /Console Ctrl-C restored input mode and released notebook lock/);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Unicode folders/configuration, lock contention and junction confinement', { skip: !windows }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-windows-'));
+  const notebook = path.join(directory, '笔记');
+  const config = path.join(directory, '配置', 'config.json');
+  const outside = path.join(directory, 'outside');
+  let server;
+  try {
+    fs.mkdirSync(path.dirname(config)); fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'Secret.md'), 'outside');
+    server = await start(directory, ['--data-dir', notebook, '--config', config, '--save-config']);
+    let page = await post(server, '/api/page', { id: '学习/日志', content: '你好', revision: '' });
+    assert.equal(page.status, 200); assert.equal(page.data.content, '你好');
+    const locked = spawnSync('luajit', [path.join(root, 'wiki_web.lua'), '--data-dir', notebook,
+      '--cache-dir', path.join(directory, 'cache'), '--config', config], { encoding: 'utf8' });
+    assert.notEqual(locked.status, 0); assert.match(locked.stderr, /already open/);
+    fs.symlinkSync(outside, path.join(notebook, 'Linked'), 'junction');
+    assert.equal((await post(server, '/api/page', { id: 'Linked/Secret', content: 'overwrite', revision: '' })).status, 400);
+    assert.equal((await fetch(server.url + '/api/page?id=Linked%2FSecret')).status, 400);
+    assert.equal(fs.readFileSync(path.join(outside, 'Secret.md'), 'utf8'), 'outside');
+    const state = await (await fetch(server.url + '/api/state')).json();
+    assert.deepEqual(state.pages.map(p => p.id), ['学习/日志']);
+    await stop(server); server = undefined;
+    server = await start(directory, ['--config', config]);
+    assert.equal((await (await fetch(server.url + '/api/state')).json()).data_dir, normalized(notebook));
+  } finally {
+    if (server) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('idle clients do not block requests; malformed and oversized requests are rejected', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-sockets-'));
+  let server, idle;
+  const sockets = [];
+  try {
+    server = await start(directory, ['--data-dir', path.join(directory, 'notebook')]);
+    const port = Number(new URL(server.url).port);
+    idle = net.connect(port, '127.0.0.1'); await once(idle, 'connect');
+    idle.write('GET /api/state HTTP/1.1\r\n');
+    assert.equal((await fetch(server.url + '/api/state')).status, 200);
+    const raw = async frame => {
+      const socket = net.connect(port, '127.0.0.1'); sockets.push(socket);
+      let data = ''; socket.on('data', bytes => { data += bytes; });
+      const closed = once(socket, 'close');
+      await once(socket, 'connect'); socket.write(frame); await closed; return data;
+    };
+    const host = 'Host: 127.0.0.1:' + port + '\r\n';
+    assert.match(await raw('POST /api/image HTTP/1.1\r\n' + host + 'Content-Length: 5242881\r\n\r\n'), /^HTTP\/1.1 413/);
+    assert.match(await raw('GET /api/state HTTP/1.1\r\n' + host + host + '\r\n'), /^HTTP\/1.1 400/);
+    assert.match(await raw('POST /api/page HTTP/1.1\r\n' + host + 'Transfer-Encoding: chunked\r\n\r\n'), /^HTTP\/1.1 400/);
+  } finally {
+    if (idle) idle.destroy(); sockets.forEach(socket => socket.destroy());
+    if (server) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('Windows defaults and environment overrides use Unicode user folders', { skip: !windows }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-defaults-'));
+  const home = path.join(directory, '用户');
+  const roaming = path.join(directory, '配置');
+  const local = path.join(directory, '缓存');
+  const env = { USERPROFILE: home, APPDATA: roaming, LOCALAPPDATA: local };
+  let server;
+  try {
+    server = await start(directory, ['--save-config'], path.join(root, 'wiki_web.lua'), os.tmpdir(), env, false);
+    let state = await (await fetch(server.url + '/api/state')).json();
+    assert.equal(state.data_dir, normalized(path.join(home, 'LeafWiki')));
+    assert.ok(state.index_path.startsWith(normalized(path.join(local, 'leaf-wiki')) + '/'));
+    const config = path.join(roaming, 'leaf-wiki', 'config.json');
+    assert.equal(JSON.parse(fs.readFileSync(config, 'utf8')).data_dir, state.data_dir);
+    await stop(server); server = undefined;
+    const override = path.join(directory, '环境笔记');
+    server = await start(directory, [], path.join(root, 'wiki_web.lua'), os.tmpdir(),
+      { ...env, LEAF_WIKI_DATA_DIR: override }, false);
+    state = await (await fetch(server.url + '/api/state')).json();
+    assert.equal(state.data_dir, normalized(override));
+  } finally {
+    if (server) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });

@@ -22,6 +22,12 @@ function M.page_id(value)
         count = count + 1
         if part:sub(1, 1) == '.' or part:match('^%s') or part:match('%s$')
             or part:match('%.attachments$') then return nil end
+        if package.config:sub(1, 1) == '\\' then
+            local stem = part:match('^([^.]*)'):upper()
+            if part:find('[<>"|?*]') or part:match('[ .]$') or stem == 'CON' or stem == 'PRN'
+                or stem == 'AUX' or stem == 'NUL' or stem:match('^COM[1-9]$')
+                or stem:match('^LPT[1-9]$') then return nil end
+        end
     end
     return count <= 16 and value or nil
 end

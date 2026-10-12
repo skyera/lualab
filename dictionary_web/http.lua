@@ -1,13 +1,17 @@
--- Linux HTTP/1.1 server through POSIX FFI. Concurrent bounded requests and coroutine-based I/O.
+-- HTTP/1.1 through POSIX or Winsock FFI; bounded concurrent requests and coroutine I/O.
 local ffi = require('ffi')
 local json = require('json')
 local bit = require('bit')
 ffi.cdef[[
 struct wb_sockaddr_in { uint16_t family; uint16_t port; uint32_t address; unsigned char zero[8]; };
-struct wb_pollfd { int fd; short events; short revents; };
 struct wb_timespec { long seconds; long nanoseconds; };
-int clock_gettime(int, struct wb_timespec *);
 typedef struct { unsigned long bits[16]; } wb_sigset;
+]]
+ffi.cdef(ffi.os == 'Windows'
+    and 'struct wb_pollfd { uintptr_t fd; short events; short revents; };'
+    or 'struct wb_pollfd { int fd; short events; short revents; };')
+if ffi.os ~= 'Windows' then ffi.cdef[[
+int clock_gettime(int, struct wb_timespec *);
 int socket(int, int, int);
 int setsockopt(int, int, int, const void *, unsigned int);
 int bind(int, const void *, unsigned int);
@@ -26,10 +30,12 @@ int sigemptyset(wb_sigset *);
 int sigaddset(wb_sigset *, int);
 int sigprocmask(int, const wb_sigset *, wb_sigset *);
 int signalfd(int, const wb_sigset *, int);
-]]
-local C = ffi.C
+]] end
+local windows = ffi.os == 'Windows' and require('http_windows') or nil
+local C = windows and windows.C or ffi.C
+local socket_errno = windows and windows.errno or ffi.errno
 -- ffi_dict also declares poll with its own identically laid-out pollfd type.
-local poll_fds = ffi.cast('int (*)(struct wb_pollfd *, unsigned long, int)', C.poll)
+local poll_fds = windows and windows.poll or ffi.cast('int (*)(struct wb_pollfd *, unsigned long, int)', C.poll)
 
 local AF_INET         = 2
 local SOCK_STREAM     = 1
@@ -49,8 +55,9 @@ local SIG_SETMASK     = 2
 
 local M = {}
 local owned_fds = {}
-local clock_gettime = ffi.cast('int (*)(int, struct wb_timespec *)', C.clock_gettime)
+local clock_gettime = not windows and ffi.cast('int (*)(int, struct wb_timespec *)', C.clock_gettime)
 local function now_seconds()
+    if windows then return windows.now() end
     local stamp = ffi.new('struct wb_timespec[1]')
     assert(clock_gettime(1, stamp) == 0, 'Cannot read monotonic clock')
     return tonumber(stamp[0].seconds) + tonumber(stamp[0].nanoseconds) / 1e9
@@ -179,13 +186,13 @@ function M.respond(fd, status, body, content_type, head, extra_headers)
         if coroutine.yield({ events = POLLOUT, deadline = deadline }) == false then return false end
         local bytes = tonumber(C.send(fd, pointer + offset, #frame - offset, MSG_NOSIGNAL + MSG_DONTWAIT))
         if bytes > 0 then offset = offset + bytes
-        elseif bytes == 0 or (ffi.errno() ~= 4 and ffi.errno() ~= 11) then return false end
+        elseif bytes == 0 or (socket_errno() ~= 4 and socket_errno() ~= 11) then return false end
     end
     return offset == #frame
 end
 
 function M.serve(port, handler, ready, host, workers, options)
-    assert(ffi.os == 'Linux', 'This HTTP server currently supports Linux.')
+    assert(ffi.os == 'Linux' or windows, 'This HTTP server supports Linux and Windows.')
     host = host or '127.0.0.1'
     assert(host == '127.0.0.1' or host == '0.0.0.0', 'Host must be 127.0.0.1 or 0.0.0.0.')
     local listener, signals = -1, -1
@@ -244,7 +251,7 @@ function M.serve(port, handler, ready, host, workers, options)
                 fds[i + 1].events = client.pending.events or (client.eof and 0 or POLLIN)
             end
             local result = poll_fds(fds, count + 2, 50)
-            if result < 0 and ffi.errno() ~= 4 then error('Server poll failed') end
+            if result < 0 and socket_errno() ~= 4 then error('Server poll failed') end
             if fds[1].revents ~= 0 then
                 local signal = ffi.new('char[128]')
                 C.read(signals, signal, 128)
@@ -307,6 +314,7 @@ function M.serve(port, handler, ready, host, workers, options)
     if listener >= 0 then C.close(listener) end
     if signals >= 0 then C.close(signals) end
     if blocked then C.sigprocmask(SIG_SETMASK, previous, nil) end
+    if windows then windows.cleanup() end
     if not ok then error(err) end
 end
 return M

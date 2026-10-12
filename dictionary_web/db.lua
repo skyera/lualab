@@ -23,7 +23,10 @@ int sqlite3_column_bytes(sqlite3_stmt *, int);
 int sqlite3_exec(sqlite3 *, const char *, void *, void *, char **);
 void sqlite3_free(void *);
 ]]
-local sqlite = ffi.load('sqlite3')
+local loaded, sqlite = pcall(ffi.load, 'sqlite3')
+if not loaded then
+    sqlite = ffi.load(ffi.os == 'Linux' and 'libsqlite3.so.0' or 'sqlite3')
+end
 local transient = ffi.cast('void (*)(void *)', -1)
 
 local SQLITE_INTEGER = 1

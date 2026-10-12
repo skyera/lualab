@@ -1,5 +1,6 @@
 -- Linux filesystem operations confined to a notebook, with atomic file writes.
 local ffi = require('ffi')
+if ffi.os == 'Windows' then return require('fs_windows') end
 local bit = require('bit')
 ffi.cdef[[
 typedef struct leaf_directory leaf_directory;
@@ -209,5 +210,16 @@ end
 
 function Fs:close()
     if self.fd then C.close(self.fd); self.fd = nil end
+end
+
+function Fs:lock()
+    local parent, name = self:parent('.leaf/lock', true)
+    local fd = C.openat(parent, name, 2 + 64 + 131072 + 524288, ffi.new('int', 384))
+    C.close(parent)
+    if fd < 0 or C.flock(fd, 2 + 4) ~= 0 then
+        if fd >= 0 then C.close(fd) end
+        error('Notebook is already open or its lock cannot be acquired')
+    end
+    return function() C.close(fd) end
 end
 return Fs
