@@ -4,6 +4,7 @@ local DB = require('db')
 local links = require('links')
 local hash = require('hash')
 local History = require('history')
+local tags = require('tags')
 local json = require('json')
 local Notebook = {}
 Notebook.__index = Notebook
@@ -48,17 +49,18 @@ function Notebook:page(id)
     local text = self.fs:read(id .. '.md')
     if not text then return nil end
     assert(links.valid_utf8(text) and not text:find('%z'), 'Page must be UTF-8 text without NUL bytes')
-    return { id = id, title = id:match('[^/]+$'), content = text, revision = hash.sha256(text) }
+    return { id = id, title = id:match('[^/]+$'), content = text, revision = hash.sha256(text), tags = tags.parse(text) }
 end
 
 function Notebook:sync()
-    local seen = {}
+    local seen, page_tags = {}, {}
     self.db:query('BEGIN;')
     local ok, err = pcall(function()
         for _, path in ipairs(self.fs:list()) do
             local id = path:sub(1, -4)
             if links.page_id(id) then
                 local page = self:page(id)
+                page_tags[id] = page.tags
                 seen[id] = true
                 local old = self.db:query('SELECT revision FROM pages WHERE id=?', { id })[1]
                 if not old or old.revision ~= page.revision then
@@ -81,6 +83,7 @@ function Notebook:sync()
         self.db:query('COMMIT;')
     end)
     if not ok then self.db:query('ROLLBACK;'); error(err) end
+    self.page_tags = page_tags
 end
 
 function Notebook:state(query)
@@ -92,6 +95,7 @@ function Notebook:state(query)
             WHERE id LIKE ? ESCAPE '\' OR content LIKE ? ESCAPE '\' ORDER BY id]],
             { '%' .. escaped .. '%', '%' .. escaped .. '%' })
     else rows = self.db:query('SELECT id,title,revision FROM pages ORDER BY id') end
+    for _, row in ipairs(rows) do row.tags = self.page_tags[row.id] or {} end
     return { pages = rows, data_dir = self.fs.root, index_path = self.index_path, trash = self:trash_list() }
 end
 

@@ -27,6 +27,20 @@ class Node {
 }
 const texts = node => [node.textContent, ...node.children.map(texts)].join('');
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+test('tag filters group pages across folders and preserve search matches', () => {
+  const { context, state, get } = harness();
+  state.pages = [{ id: 'A/One', title: 'One', tags: ['work', '学习'] }, { id: 'B/Two', title: 'Two', tags: ['work'] },
+    { id: 'C/Other', title: 'Other', tags: [] }];
+  context.renderTagFilter(); context.renderTree();
+  assert.match(texts(get('tag-filter')), /#work \(2\)/);
+  get('tag-filter').value = 'work'; get('tag-filter').handlers.change();
+  assert.equal(get('tree').querySelectorAll('button').length, 2);
+  context.renderTree([state.pages[0]]);
+  get('tag-filter').value = '学习'; get('tag-filter').handlers.change();
+  assert.equal(get('tree').querySelectorAll('button').length, 1);
+  get('tag-filter').value = 'missing'; get('tag-filter').handlers.change();
+  assert.match(texts(get('tree')), /No matching pages tagged/);
+});
 test('built-in templates preview and create Markdown through actual form handlers', async () => {
   const { context, get } = harness();
   const expected = { blank: '# 设计\n\n', study: '## Key ideas', meeting: '## Action items', journal: '## Highlights' };

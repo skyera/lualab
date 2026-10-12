@@ -5,6 +5,17 @@ const state = { pages: [], trash: [], root: '', page: null, dirty: false, saving
   loading: false, uploading: false, request: 0, searchRequest: 0, mode: 'split', prompt: null,
   journalMonth: new Date(new Date().getFullYear(), new Date().getMonth(), 1), journalDate: '' };
 let saveTimer, searchTimer;
+let selectedTag = '', treePages = null;
+function renderTagFilter() {
+  const counts = new Map();
+  for (const page of state.pages) for (const tag of page.tags || []) counts.set(tag, (counts.get(tag) || 0) + 1);
+  if (selectedTag && !counts.has(selectedTag)) counts.set(selectedTag, 0);
+  const all = document.createElement('option'); all.value = ''; all.textContent = 'All tags';
+  $('tag-filter').replaceChildren(all, ...Array.from(counts).sort(([a], [b]) => a.localeCompare(b)).map(([tag, count]) => {
+    const option = document.createElement('option'); option.value = tag; option.textContent = '#' + tag + ' (' + count + ')'; return option;
+  }));
+  $('tag-filter').value = selectedTag;
+}
 const dictionaryState = { selection: '', request: 0 };
 const PAGE_TEMPLATES = {
   blank: { name: 'Blank', text: '# {{title}}\n\n' },
@@ -304,6 +315,8 @@ function button(text, action, className) {
   node.addEventListener('click', action); return node;
 }
 function renderTree(pages = state.pages) {
+  treePages = pages;
+  if (selectedTag) pages = pages.filter(page => (page.tags || []).includes(selectedTag));
   const nodes = [], groups = new Set();
   for (const page of pages) {
     const parts = page.id.split('/');
@@ -320,7 +333,8 @@ function renderTree(pages = state.pages) {
     if (page.snippet) node.title += '\n' + page.snippet;
     nodes.push(node);
   }
-  if (!nodes.length) { const node = document.createElement('p'); node.textContent = $('search').value ? 'No matching pages.' : 'No pages yet.'; nodes.push(node); }
+  if (!nodes.length) { const node = document.createElement('p'); node.textContent = selectedTag
+    ? 'No matching pages tagged #' + selectedTag + '.' : $('search').value ? 'No matching pages.' : 'No pages yet.'; nodes.push(node); }
   $('tree').replaceChildren(...nodes); $('page-count').textContent = state.pages.length;
 }
 function backlinks(rows) {
@@ -393,7 +407,7 @@ async function openJournalDate(key) {
 }
 async function refresh() {
   const data = await api('/api/state'); state.pages = data.pages; state.trash = data.trash; state.root = data.data_dir;
-  $('data-path').textContent = state.root; renderTree(); renderJournal(); preview();
+  $('data-path').textContent = state.root; renderTagFilter(); renderTree(); renderJournal(); preview();
   if ($('switcher-dialog').open && !switcherState.busy) renderSwitcher(true);
   return data;
 }
@@ -408,6 +422,9 @@ async function save() {
       const saved = await api('/api/page', { id: page.id, content, revision: page.revision });
       if (state.page !== page) return false;
       page.revision = saved.revision; page.content = content;
+      page.tags = saved.tags || [];
+      for (const item of [...state.pages, ...(treePages || [])]) if (item.id === page.id) item.tags = page.tags;
+      renderTagFilter(); renderTree(treePages || state.pages);
       state.dirty = $('editor').value !== content;
       if (state.dirty) { rememberDraft(); status('Unsaved edits'); saveTimer = setTimeout(save, 500); }
       else { clearDraft(page.id); status('✓ Saved'); }
@@ -507,6 +524,7 @@ $('editor').addEventListener('drop', event => {
   if (files.length) { event.preventDefault(); uploadImages(files); }
 });
 $('save').addEventListener('click', save);
+$('tag-filter').addEventListener('change', () => { selectedTag = $('tag-filter').value; renderTree(treePages || state.pages); });
 $('page-history').addEventListener('click', openHistory);
 $('history-close').addEventListener('click', closeHistory);
 $('history-restore').addEventListener('click', restoreHistoryVersion);

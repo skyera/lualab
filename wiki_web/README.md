@@ -107,6 +107,16 @@ folder, including attachments and `.leaf` if you want to retain trashed pages.
 - Search matches page paths and content. **Ctrl K** (or Cmd K) focuses search;
   **Ctrl S** (or Cmd S) saves immediately.
 
+## Tags
+
+Add hashtags such as `#work`, `#team-one`, or `#学习` to your page's Markdown.
+Choose a tag from **Filter by tag** in the sidebar to group pages across folders.
+Tag filters also apply to search results. Editing, renaming, trashing, and restoring
+pages updates their tags automatically. Tags inside inline or fenced code are
+ignored, as are heading markers and URL fragments. ASCII tags are case-insensitive;
+Unicode spelling is preserved. Tags can contain letters, digits, underscores,
+and hyphens, up to 64 UTF-8 bytes. They remain ordinary Markdown in your backups.
+
 ## Page templates
 
 Click **+ Page**, enter a page name, and choose a template. Built-in starters are

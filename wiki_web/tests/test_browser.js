@@ -154,6 +154,17 @@ test('real browser selects words in editor/preview and keeps dictionary within d
       await page.locator('#prompt-dialog').waitFor({ state: 'hidden' });
       await page.waitForFunction(() => document.getElementById('editor').value.includes('## 学习'));
       assert.equal(await page.locator('#editor').inputValue(), '# 新课\nPath: Notes/新课\n## 学习');
+      for (const id of ['Work/One', 'Elsewhere/Two']) {
+        assert.equal((await fetch(url + '/api/page', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, content: '#Work #学习', revision: '' }) })).status, 200);
+      }
+      await page.reload(); await page.locator('#editor').waitFor({ state: 'visible' });
+      await page.locator('#menu').click();
+      await page.locator('#tag-filter').selectOption('work');
+      assert.equal(await page.locator('#tree .tree-page').count(), 2);
+      await page.locator('#tag-filter').selectOption('学习');
+      assert.equal(await page.locator('#tree .tree-page').count(), 2);
+      await page.locator('#tag-filter').selectOption('');
       assert.deepEqual(errors, []);
     } finally {
       if (browser) await browser.close();
