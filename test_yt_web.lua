@@ -143,6 +143,7 @@ test("Live HTTP server responds to UI, status, search, stream, and download APIs
         assert(ui_html:find("YouTube Web", 1, true), "Expected 'YouTube Web' in HTML")
         assert(ui_html:find("qr-modal", 1, true), "Expected 'qr-modal' in HTML")
         assert(ui_html:find("bottom-player", 1, true), "Expected 'bottom-player' in HTML")
+        assert(ui_html:find("filter-insecure", 1, true), "Expected 'filter-insecure' checkbox in HTML")
 
         -- 2. Check /api/status Endpoint
         local p_st = io.popen("curl -s http://127.0.0.1:" .. test_port .. "/api/status")
@@ -154,8 +155,8 @@ test("Live HTTP server responds to UI, status, search, stream, and download APIs
         assert(st.version == "0.1.0")
         assert(type(st.lan_ip) == "string")
 
-        -- 3. Check /api/search Endpoint
-        local p_sr = io.popen("curl -s 'http://127.0.0.1:" .. test_port .. "/api/search?q=rick+astley&site=youtube'")
+        -- 3. Check /api/search Endpoint with insecure=1
+        local p_sr = io.popen("curl -s 'http://127.0.0.1:" .. test_port .. "/api/search?q=rick+astley&site=youtube&insecure=1'")
         local sr_raw = p_sr:read("*a")
         p_sr:close()
         local results = json.decode(sr_raw)

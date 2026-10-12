@@ -478,7 +478,7 @@ local function scrape_youtube_search(query, max_results, proxy, insecure)
     max_results = max_results or 20
     local encoded = url_encode(query)
     local proxy_opt = (proxy and #proxy > 0) and string.format(" -x %q", proxy) or ""
-    local sec_opt = insecure and " -k" or ""
+    local sec_opt = insecure and " -k --ssl-no-revoke" or ""
     local url = "https://www.youtube.com/results?search_query=" .. encoded
     local cmd = string.format('curl -s -L --max-time 8%s%s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" %q',
         sec_opt, proxy_opt, url)
@@ -486,6 +486,10 @@ local function scrape_youtube_search(query, max_results, proxy, insecure)
     if not p then return nil end
     local html = p:read("*a")
     p:close()
+    if (not html or #html < 500) and not insecure then
+        -- Corporate firewall SSL inspection fallback retry
+        return scrape_youtube_search(query, max_results, proxy, true)
+    end
     if not html or #html < 500 then return nil end
 
     local items = {}
@@ -602,6 +606,19 @@ local function fetch_search_results(query, mode, browser, cookies_file, max_resu
                 end
             end
             p:close()
+        end
+
+        if #items == 0 and not insecure and #err_lines > 0 then
+            local ssl_err = false
+            for _, el in ipairs(err_lines) do
+                if el:find("CERTIFICATE_VERIFY_FAILED", 1, true) or el:find("SSL", 1, true) or el:find("certificate", 1, true) then
+                    ssl_err = true
+                    break
+                end
+            end
+            if ssl_err then
+                return fetch_search_results(query, mode, browser, cookies_file, max_results, proxy, true, filters, site)
+            end
         end
     end
 
@@ -1239,6 +1256,9 @@ local function get_index_html(lan_ip, port, default_mode)
         <option value="views">Sort: View Count</option>
         <option value="rating">Sort: Rating</option>
       </select>
+      <label style="display:inline-flex; align-items:center; gap:5px; font-size:12px; color:var(--text-muted); cursor:pointer;" title="Bypass corporate firewall SSL inspection errors">
+        <input type="checkbox" id="filter-insecure" onchange="executeSearch()"> 🔓 Office SSL
+      </label>
       <button class="btn" onclick="clearFilters()" style="padding:4px 10px; font-size:12px;">Reset</button>
     </div>
 
@@ -1475,6 +1495,8 @@ local function get_index_html(lan_ip, port, default_mode)
       document.getElementById('filter-site').value = 'youtube';
       document.getElementById('filter-duration').value = 'all';
       document.getElementById('filter-sort').value = 'relevance';
+      const secEl = document.getElementById('filter-insecure');
+      if (secEl) secEl.checked = false;
       executeSearch();
     }
 
@@ -1484,11 +1506,12 @@ local function get_index_html(lan_ip, port, default_mode)
       const site = document.getElementById('filter-site').value;
       const dur = document.getElementById('filter-duration').value;
       const sort = document.getElementById('filter-sort').value;
+      const insecure = document.getElementById('filter-insecure')?.checked ? '1' : '0';
       const container = document.getElementById('results-container');
       container.innerHTML = '<p style="color:var(--text-muted); grid-column:1/-1; text-align:center; padding:40px 0;">Searching ' + site + ' for &quot;' + q + '&quot;...</p>';
 
       try {
-        const url = `/api/search?q=${encodeURIComponent(q)}&mode=${activeMode}&site=${site}&duration=${dur}&sort=${sort}`;
+        const url = `/api/search?q=${encodeURIComponent(q)}&mode=${activeMode}&site=${site}&duration=${dur}&sort=${sort}&insecure=${insecure}`;
         const res = await fetch(url);
         const data = await res.json();
         renderResults(data);
@@ -1545,8 +1568,9 @@ local function get_index_html(lan_ip, port, default_mode)
       renderQueue();
 
       showToast('Resolving stream for ' + track.title + '...');
+      const isInsecure = document.getElementById('filter-insecure')?.checked ? '1' : '0';
       try {
-        const res = await fetch(`/api/stream?id=${encodeURIComponent(track.id)}&mode=${activeMode}`);
+        const res = await fetch(`/api/stream?id=${encodeURIComponent(track.id)}&mode=${activeMode}&insecure=${isInsecure}`);
         const data = await res.json();
         if (data.ok) {
           if (data.is_embed || activeMode === 'video') {
@@ -1718,7 +1742,8 @@ local function get_index_html(lan_ip, port, default_mode)
 
     function downloadTrack(track) {
       showToast('Downloading ' + track.title + ' via server...');
-      window.open(`/api/download?id=${encodeURIComponent(track.id)}&mode=${activeMode}`, '_blank');
+      const isInsecure = document.getElementById('filter-insecure')?.checked ? '1' : '0';
+      window.open(`/api/download?id=${encodeURIComponent(track.id)}&mode=${activeMode}&insecure=${isInsecure}`, '_blank');
     }
 
     // Audio element event listeners
@@ -1842,10 +1867,16 @@ local function run_server(host, port, default_mode, browser, cookies_file, proxy
     end
 
     local lan_ip = get_local_lan_ip()
+    local is_localhost = (host == "127.0.0.1" or host == "localhost")
     io.write(string.format("\27[1;36m▶ YouTube Web Server v%s\27[0m\n", YTWEB_VERSION))
-    io.write(string.format("  * Local URL:  \27[1;32mhttp://localhost:%d\27[0m\n", port))
-    io.write(string.format("  * Wi-Fi / LAN: \27[1;32mhttp://%s:%d\27[0m\n", lan_ip, port))
+    io.write(string.format("  * Local URL:  \27[1;32mhttp://localhost:%d\27[0m%s\n", port, is_localhost and " (Safe Localhost - No Firewall/Admin Required)" or ""))
+    if not is_localhost then
+        io.write(string.format("  * Wi-Fi / LAN: \27[1;32mhttp://%s:%d\27[0m\n", lan_ip, port))
+    end
     io.write(string.format("  * Engine:     %s\n", HAS_YTDLP and "\27[32myt-dlp (Installed)\27[0m" or "\27[33mcurl scraper fallback\27[0m"))
+    if insecure then
+        io.write("  * SSL Mode:   \27[1;33mInsecure (Office SSL Inspection Bypass Active)\27[0m\n")
+    end
     io.write(string.format("  * Downloads:  %s\n", download_dir))
     io.write("  * Press Ctrl+C to terminate\n\n")
     io.flush()
@@ -1895,12 +1926,14 @@ local function run_server(host, port, default_mode, browser, cookies_file, proxy
                         local req_mode = params.mode or default_mode
                         local site = params.site or "youtube"
                         local filters = { duration = params.duration, sort = params.sort }
-                        local items, s_err = fetch_search_results(q, req_mode, browser, cookies_file, 24, proxy, insecure, filters, site)
+                        local req_insecure = insecure or (params.insecure == "1" or params.insecure == "true")
+                        local items, s_err = fetch_search_results(q, req_mode, browser, cookies_file, 24, proxy, req_insecure, filters, site)
                         send_response(client_sock, 200, "application/json", json.encode(items or {}))
                     elseif url_path == "/api/stream" then
                         local track_id = params.id or ""
                         local req_mode = params.mode or default_mode
-                        local s_data, s_err = resolve_stream_url(track_id, req_mode, browser, cookies_file, proxy, insecure)
+                        local req_insecure = insecure or (params.insecure == "1" or params.insecure == "true")
+                        local s_data, s_err = resolve_stream_url(track_id, req_mode, browser, cookies_file, proxy, req_insecure)
                         if s_data then
                             send_response(client_sock, 200, "application/json", json.encode(s_data))
                         else
@@ -1909,11 +1942,14 @@ local function run_server(host, port, default_mode, browser, cookies_file, proxy
                     elseif url_path == "/api/download" then
                         local track_id = params.id or ""
                         local req_mode = params.mode or default_mode
+                        local req_insecure = insecure or (params.insecure == "1" or params.insecure == "true")
                         if HAS_YTDLP and #track_id > 0 then
                             local fmt = (req_mode == "music")
                                 and '-x --audio-format mp3 --add-metadata'
                                 or '-f "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best" --merge-output-format mp4'
-                            local dl_cmd = string.format('yt-dlp %s -P %q %q >/dev/null 2>&1 &', fmt, download_dir, "https://www.youtube.com/watch?v=" .. track_id)
+                            local sec_opt = req_insecure and " --no-check-certificates" or ""
+                            local prx_opt = (proxy and #proxy > 0) and string.format(" --proxy %q", proxy) or ""
+                            local dl_cmd = string.format('yt-dlp %s%s%s -P %q %q >/dev/null 2>&1 &', fmt, sec_opt, prx_opt, download_dir, "https://www.youtube.com/watch?v=" .. track_id)
                             os.execute(dl_cmd)
                             send_response(client_sock, 200, "application/json", json.encode({ ok = true, message = "Download queued in " .. download_dir }))
                         else
@@ -1943,12 +1979,13 @@ Usage:
 
 Options:
   --port <p>          Port to listen on (default: 8050)
-  --host <ip>         Host address to bind to (default: 0.0.0.0)
+  --host <ip>         Host address to bind to (default: 127.0.0.1, no admin/firewall required)
+  --lan               Bind to 0.0.0.0 for LAN/Wi-Fi phone access
   --mode <m>          Default mode: 'music' (default) or 'video'
   --browser <b>       Extract cookies from browser (chrome, firefox, edge, brave)
   --cookies <file>    Path to cookies.txt file
   --proxy <url>       HTTP/SOCKS proxy URL
-  --insecure          Skip SSL certificate verification
+  --insecure, --office Skip SSL certificate verification (bypasses corporate firewall inspection)
   --dir <path>        Download destination directory (default: ./yt_downloads)
   --test              Run internal unit and integration test suite
   -h, --help          Show this help message
@@ -1957,7 +1994,7 @@ end
 
 local function main(args)
     local port = 8050
-    local host = "0.0.0.0"
+    local host = "127.0.0.1"
     local mode = "music"
     local browser = nil
     local cookies_file = nil
@@ -1974,6 +2011,8 @@ local function main(args)
         elseif a == "--host" and i < #args then
             host = args[i + 1]
             i = i + 1
+        elseif a == "--lan" then
+            host = "0.0.0.0"
         elseif a == "--mode" and i < #args then
             mode = args[i + 1]:lower() == "video" and "video" or "music"
             i = i + 1
@@ -1986,7 +2025,7 @@ local function main(args)
         elseif a == "--proxy" and i < #args then
             proxy = args[i + 1]
             i = i + 1
-        elseif a == "--insecure" then
+        elseif a == "--insecure" or a == "--office" then
             insecure = true
         elseif a == "--dir" and i < #args then
             download_dir = args[i + 1]
