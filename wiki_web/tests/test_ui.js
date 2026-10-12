@@ -100,7 +100,7 @@ test('selecting an empty journal date creates and opens a Markdown page', async 
   context.refresh = async () => { state.pages.push({ id, title: '2026-10-11', revision: 'r2' }); };
   const day = get('journal-days').children.find(node => node.dataset.date === '2026-10-11');
   assert.equal(await day.handlers.click(), true);
-  assert.equal(created.id, id); assert.equal(created.content, '# 2026-10-11 (Sunday)\n\n');
+  assert.equal(created.id, id); assert.equal(created.content, '# 2026-10-11 Sunday\n\n');
   assert.equal(state.page.id, id); assert.equal(get('title').textContent, '2026-10-11');
   assert.equal(await context.openJournalDate('2026-02-30'), false);
 });
@@ -120,7 +120,7 @@ test('opening an older default journal heading adds weekday and keeps its entry'
   };
   context.refresh = async () => {};
   assert.equal(await context.openJournalDate('2026-10-11'), true);
-  assert.equal(saved, '# 2026-10-11 (Sunday)\n\nMeeting notes\n');
+  assert.equal(saved, '# 2026-10-11 Sunday\n\nMeeting notes\n');
   assert.equal(state.page.content, saved);
 });
 test('actual input and Ctrl S handlers preserve edits typed while a save is pending', async () => {

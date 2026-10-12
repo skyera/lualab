@@ -69,7 +69,7 @@ function journalPageId(date) {
 function journalHeading(date) {
   const [year, month, day] = date.split('-').map(Number);
   const weekday = new Date(year, month - 1, day).toLocaleDateString('en-US', { weekday: 'long' });
-  return '# ' + date + ' (' + weekday + ')';
+  return '# ' + date + ' ' + weekday;
 }
 function renderJournal() {
   const month = state.journalMonth;
