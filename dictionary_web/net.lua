@@ -12,8 +12,29 @@ int curl_easy_getinfo(WB_CURL *, int, ...);
 const char *curl_easy_strerror(int);
 unsigned char *SHA256(const unsigned char *, size_t, unsigned char *);
 ]]
-local curl = ffi.load('curl')
-assert(curl.curl_global_init(3) == 0, 'libcurl initialization failed')
+local curl_names = {
+    'libcurl.so.4',
+    'libcurl.so',
+    'libcurl-gnutls.so.4',
+    'curl',
+    'libcurl',
+    'libcurl.dll',
+    'libcurl-4.dll',
+    'curl.dll',
+    'libcurl.4.dylib',
+    'libcurl.dylib',
+}
+local curl
+for _, name in ipairs(curl_names) do
+    local ok, lib = pcall(ffi.load, name)
+    if ok and lib then
+        curl = lib
+        break
+    end
+end
+if curl then
+    pcall(curl.curl_global_init, 3)
+end
 
 local CURLOPT = {
     TIMEOUT         = 13,
@@ -35,6 +56,20 @@ local CURLPROTO_HTTPS = 2
 local M = {}
 
 function M.fetch(url, body)
+    if not curl then
+        local cmd
+        if body then
+            cmd = string.format("curl -s -L --max-time 12 -A 'Wordbook/1.0' -d %q %q", body, url)
+        else
+            cmd = string.format("curl -s -L --max-time 12 -A 'Wordbook/1.0' %q", url)
+        end
+        local p = io.popen(cmd, 'r')
+        if not p then return nil, 'Could not execute system curl.' end
+        local out = p:read('*a')
+        p:close()
+        if not out or #out == 0 then return nil, 'Empty response from curl.' end
+        return out
+    end
     local handle = curl.curl_easy_init()
     if handle == nil then
         return nil, 'Could not initialize HTTPS request.'
@@ -89,10 +124,32 @@ end
 -- curl_easy_perform invokes Lua callbacks; keep this FFI call off JIT traces.
 jit.off(M.fetch, true)
 
+local crypto_names = {
+    'crypto',
+    'libcrypto.so.3',
+    'libcrypto.so',
+    'libcrypto-3.dll',
+    'libcrypto.dll',
+    'libcrypto.dylib',
+}
+local crypto
+local function get_crypto()
+    if crypto ~= nil then return crypto end
+    for _, name in ipairs(crypto_names) do
+        local ok, lib = pcall(ffi.load, name)
+        if ok and lib then
+            crypto = lib
+            return crypto
+        end
+    end
+    return nil
+end
+
 function M.sha256(text)
-    local crypto = ffi.load('crypto')
+    local crypt = get_crypto()
+    if not crypt then error('OpenSSL crypto library not found') end
     local digest = ffi.new('unsigned char[32]')
-    assert(crypto.SHA256(text, #text, digest) ~= nil, 'SHA256 failed')
+    assert(crypt.SHA256(text, #text, digest) ~= nil, 'SHA256 failed')
     local hex = {}
     for index = 0, 31 do
         hex[#hex + 1] = string.format('%02x', digest[index])
