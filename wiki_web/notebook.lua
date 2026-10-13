@@ -6,6 +6,7 @@ local hash = require('hash')
 local History = require('history')
 local tags = require('tags')
 local tasks = require('tasks')
+local capture = require('capture')
 local json = require('json')
 local Notebook = {}
 Notebook.__index = Notebook
@@ -133,6 +134,25 @@ function Notebook:tasks()
         end
     end
     return { tasks = result }
+end
+
+function Notebook:capture(date, text, kind, revision)
+    local id, heading, entry = capture.entry(date, text, kind)
+    assert(type(revision) == 'string', 'Revision is required')
+    local page = self:page(id)
+    if (page and page.revision or '') ~= revision then
+        return nil, 'Journal changed. Your capture was not added; try again to append to the latest version.', 409
+    end
+    local content = page and page.content or heading
+    local newline = content:find('\r\n', 1, true) and '\r\n' or '\n'
+    entry = entry:gsub('\n', newline)
+    local ending = content:gsub('\r\n', '\n')
+    local separator = ending == '' and '' or ending:sub(-2) == '\n\n' and '' or ending:sub(-1) == '\n' and newline or newline .. newline
+    content = content .. separator .. entry .. newline
+    local saved, err, status = self:save(id, content, revision)
+    if not saved then return nil, err, status end
+    assert(saved.content == content, 'Capture write verification failed for ' .. id .. '.md; inspect the journal before retrying')
+    return saved
 end
 
 function Notebook:update_task(id, line, done, revision)

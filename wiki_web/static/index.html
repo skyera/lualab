@@ -18,6 +18,7 @@
     <button id="switcher-open" title="Open page (Ctrl P / Cmd P)">Open page</button>
     <button id="export-open">Export</button>
     <button id="tasks-open">Tasks</button>
+    <button id="capture-open" title="Quick capture (Ctrl / Cmd + Shift + J)">Capture</button>
   </header>
   <div class="workspace">
     <aside id="sidebar">
@@ -113,6 +114,20 @@
     <p id="tasks-error" role="alert"></p>
     <div id="tasks-results"></div>
     <button id="tasks-more" hidden>Show more</button>
+  </dialog>
+  <dialog id="capture-dialog" aria-labelledby="capture-title">
+    <form id="capture-form">
+      <h2 id="capture-title">Quick capture</h2>
+      <p id="capture-target"></p>
+      <label for="capture-kind">Add as</label>
+      <select id="capture-kind"><option value="note">Note</option><option value="task">Task</option></select>
+      <label for="capture-text">Thought or task</label>
+      <textarea id="capture-text" rows="6" maxlength="4000" placeholder="What would you like to remember?"></textarea>
+      <p class="capture-help">Ctrl / Cmd + Enter to add · Esc to close. Your current page stays open.</p>
+      <p id="capture-status" role="status" aria-live="polite"></p>
+      <p id="capture-error" role="alert"></p>
+      <div class="dialog-actions"><button type="button" id="capture-close">Cancel</button><button id="capture-save" class="primary" type="submit">Add to journal</button></div>
+    </form>
   </dialog>
 </body>
 </html>

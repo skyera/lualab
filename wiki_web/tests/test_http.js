@@ -50,6 +50,31 @@ function getWithHeaders(url, headers) {
     request.on('error', reject); request.end();
   });
 }
+test('capture API creates a journal, appends safely and validates request bodies', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-capture-'));
+  let server;
+  try {
+    server = await start(directory, ['--data-dir', path.join(directory, 'notebook'), '--dict-db', 'none']);
+    const note = await post(server, '/api/capture', { date: '2026-10-13', kind: 'note', text: '学习', revision: '' });
+    assert.equal(note.status, 200); assert.match(note.data.content, /Tuesday\n\n学习\n$/);
+    const payload = { date: '2026-10-13', kind: 'task', text: 'Review due:2026-10-15', revision: note.data.revision };
+    const results = await Promise.all([post(server, '/api/capture', payload), post(server, '/api/capture', payload)]);
+    assert.deepEqual(results.map(result => result.status).sort(), [200, 409]);
+    const saved = await (await fetch(server.url + '/api/page?id=' + encodeURIComponent(note.data.id))).json();
+    assert.equal(saved.content.match(/Review/g).length, 1);
+    assert.equal((await post(server, '/api/capture', { ...payload, date: '2026-02-30' })).status, 400);
+    assert.equal((await post(server, '/api/capture', { ...payload, kind: 'invalid' })).status, 400);
+    assert.equal((await post(server, '/api/capture', { ...payload, text: ' ' })).status, 400);
+    const large = await post(server, '/api/capture', { date: '2026-10-14', kind: 'note', text: '中'.repeat(4000), revision: '' });
+    assert.equal(large.status, 200);
+    assert.equal((await post(server, '/api/capture', { ...payload, text: 'x'.repeat(16001) })).status, 400);
+    const tasks = (await (await fetch(server.url + '/api/tasks')).json()).tasks;
+    assert.equal(tasks.length, 1); assert.equal(tasks[0].due, '2026-10-15');
+  } finally {
+    if (server) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 test('task API lists source lines and rejects stale, missing and malformed updates', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-tasks-'));
   let server;

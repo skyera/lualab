@@ -7,6 +7,71 @@ const state = { pages: [], trash: [], root: '', page: null, dirty: false, saving
 let saveTimer, searchTimer;
 let selectedTag = '', treePages = null;
 const exportState = { controller: null };
+const captureState = { date: '', busy: false };
+const MODAL_DIALOGS = ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks', 'capture'];
+function anyDialogOpen() { return MODAL_DIALOGS.some(id => $(id + '-dialog').open); }
+
+function openCapture() {
+  if (state.loading || state.uploading || anyDialogOpen()) return;
+  captureState.date = dateKey(new Date());
+  $('capture-target').textContent = 'Today’s journal · ' + captureState.date;
+  $('capture-status').textContent = ''; $('capture-error').textContent = '';
+  $('capture-dialog').showModal(); $('capture-text').focus();
+}
+function closeCapture() {
+  if (captureState.busy) return;
+  $('capture-dialog').close(); $('capture-open').focus();
+}
+async function submitCapture() {
+  if (captureState.busy) return;
+  const text = $('capture-text').value, kind = $('capture-kind').value, date = captureState.date;
+  $('capture-error').textContent = ''; $('capture-status').textContent = '';
+  if (!text.trim()) { $('capture-error').textContent = 'Enter a thought or task first.'; return; }
+  const id = journalPageId(date);
+  captureState.busy = true;
+  $('capture-save').disabled = true; $('capture-close').disabled = true;
+  $('capture-text').readOnly = true; $('capture-kind').disabled = true;
+  let locked = false, submitted = false, saved = false;
+  try {
+    if (state.loading || state.uploading) throw new Error('Finish the current operation before capturing.');
+    if (state.page?.id === id && !(await ensureSaved())) {
+      throw new Error('Save or resolve today’s journal draft first. Your capture text is kept here.');
+    }
+    state.loading = true; locked = true; $('editor').readOnly = true;
+    $('capture-status').textContent = 'Adding to journal…';
+    let revision = '';
+    if (state.page?.id === id) revision = state.page.revision;
+    else {
+      try { revision = (await api('/api/page?id=' + encodeURIComponent(id))).revision; }
+      catch (error) { if (error.status !== 404) throw error; }
+    }
+    submitted = true;
+    const page = await api('/api/capture', { date, text, kind, revision });
+    saved = true; $('capture-text').value = '';
+    if (state.page?.id === id) {
+      state.page = { ...state.page, ...page }; $('editor').value = page.content;
+      state.dirty = false; clearDraft(id); preview(); status('✓ Saved');
+    }
+    $('capture-status').textContent = 'Added to ' + date + ' journal.';
+    await refresh();
+  } catch (error) {
+    if (saved) $('capture-error').textContent = 'Capture saved, but the notebook list could not refresh: ' + error.message;
+    else {
+      $('capture-status').textContent = '';
+      if (error.status === 409 && state.page?.id === id) {
+        state.blocked = true; $('conflict').hidden = false; status('Conflict · Draft kept', true);
+        message('Today’s journal changed. Close Capture and resolve the editor conflict before retrying.');
+      }
+      $('capture-error').textContent = error.message + (submitted && error.status !== 409
+        ? ' Text kept. Check the journal before retrying; the save may have completed.' : ' Text kept.');
+    }
+  } finally {
+    if (locked) { state.loading = false; $('editor').readOnly = false; }
+    captureState.busy = false; $('capture-save').disabled = false; $('capture-close').disabled = false;
+    $('capture-text').readOnly = false; $('capture-kind').disabled = false; $('capture-text').focus();
+  }
+}
+
 const taskState = { items: [], request: 0, busy: false, action: false, limit: 100 };
 
 function taskOptions(id, values, label) {
@@ -70,7 +135,7 @@ async function loadTasks() {
   }
 }
 async function openTasks() {
-  if (state.loading || state.uploading || ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks'].some(id => $(id + '-dialog').open)) return;
+  if (state.loading || state.uploading || anyDialogOpen()) return;
   if (!(await ensureSaved())) return;
   $('tasks-dialog').showModal(); $('tasks-query').focus(); await loadTasks();
 }
@@ -119,7 +184,7 @@ async function openTask(task) {
 }
 
 function openExport() {
-  if ($('prompt-dialog').open || $('history-dialog').open || $('switcher-dialog').open || $('trash-dialog').open) return;
+  if (anyDialogOpen()) return;
   $('export-page-option').disabled = !state.page;
   $('export-scope').value = state.page ? 'page' : 'notebook';
   $('export-status').textContent = ''; $('export-dialog').showModal();
@@ -266,7 +331,7 @@ function updateSwitcherSelection() {
 }
 
 function openSwitcher() {
-  if ($('prompt-dialog').open || $('trash-dialog').open || $('history-dialog').open || $('export-dialog').open) return;
+  if (anyDialogOpen()) return;
   if (!$('switcher-dialog').open) {
     switcherState.focus = document.activeElement;
     $('switcher-query').value = ''; $('switcher-dialog').showModal(); renderSwitcher();
@@ -671,6 +736,15 @@ $('editor').addEventListener('drop', event => {
 $('save').addEventListener('click', save);
 $('export-open').addEventListener('click', openExport);
 $('tasks-open').addEventListener('click', openTasks);
+$('capture-open').addEventListener('click', openCapture);
+$('capture-close').addEventListener('click', closeCapture);
+$('capture-dialog').addEventListener('cancel', event => { event.preventDefault(); closeCapture(); });
+$('capture-form').addEventListener('submit', event => { event.preventDefault(); return submitCapture(); });
+$('capture-text').addEventListener('keydown', event => {
+  if (!event.isComposing && (event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+    event.preventDefault(); return submitCapture();
+  }
+});
 $('tasks-close').addEventListener('click', closeTasks);
 $('tasks-dialog').addEventListener('cancel', event => { event.preventDefault(); closeTasks(); });
 $('tasks-refresh').addEventListener('click', () => { if (!taskState.busy) return loadTasks(); });
@@ -800,9 +874,13 @@ $('dictionary-word').addEventListener('input', () => {
 });
 $('dictionary-word').addEventListener('keydown', event => { if (event.key === 'Escape') closeDictionary(); });
 window.addEventListener('keydown', event => {
+  if ($('capture-dialog').open) return;
+  if (!event.isComposing && (event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'j') {
+    event.preventDefault(); openCapture(); return;
+  }
   if ($('tasks-dialog').open) return;
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'p') {
-    if (!$('prompt-dialog').open && !$('trash-dialog').open && !$('history-dialog').open && !$('export-dialog').open) {
+    if (!anyDialogOpen()) {
       event.preventDefault(); openSwitcher();
     }
   }
@@ -810,12 +888,13 @@ window.addEventListener('keydown', event => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); $('search').focus(); $('search').select(); }
 });
 window.addEventListener('beforeunload', event => {
-  if (state.dirty || state.uploading) { rememberDraft(); event.preventDefault(); event.returnValue = ''; }
+  if (state.dirty || state.uploading || captureState.busy || $('capture-text').value.trim()) {
+    rememberDraft(); event.preventDefault(); event.returnValue = '';
+  }
 });
 window.addEventListener('resize', () => { if (innerWidth <= 950 && state.mode === 'split') setMode('edit'); });
 async function checkExternal() {
-  if (state.loading || state.uploading || state.saving || $('search').value || $('prompt-dialog').open
-      || $('history-dialog').open || $('export-dialog').open || $('tasks-dialog').open) return;
+  if (state.loading || state.uploading || state.saving || $('search').value || anyDialogOpen()) return;
   const page = state.page, revision = page?.revision;
   try {
     await refresh();

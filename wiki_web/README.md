@@ -238,6 +238,34 @@ saves your current draft first; a save failure or revision conflict keeps the
 draft and switcher open. A removed or unreadable page reports an error. The
 switcher is unavailable while another modal dialog is open.
 
+## Quick capture
+
+Click **Capture** or press **Ctrl Shift J** (Cmd Shift J on macOS). Enter a thought,
+choose **Note** or **Task**, then click **Add to journal** or press **Ctrl Enter**
+(Cmd Enter). Capture appends to `Journal/YYYY/MM/YYYY-MM-DD.md` and creates its
+dated heading when the page is missing. Your current page stays open. Tasks use
+`- [ ]` Markdown and appear in the task dashboard; additional lines become indented
+continuations of the same task. Notes keep their Markdown formatting.
+
+The destination date uses your browser's local date when you open Capture and is
+shown in the dialog. It stays fixed while the dialog is open, including across
+midnight. Reopen Capture to use a new date. Input is limited to 4,000 characters
+in the browser and 16,000 UTF-8 bytes on the server.
+
+An unrelated editor draft stays intact. If today's journal is already open,
+Capture saves that draft before appending and updates the editor after success.
+Conflicting journal edits are rejected without overwriting either version.
+Resolve an open journal's editor conflict before retrying; captures to another
+page read its latest revision on each attempt. Appending saves page history and
+reads the file back before reporting success.
+
+Failures retain capture text, and **Cancel** or **Esc** closes the dialog while
+keeping it for the next opening in this tab. After success the input clears and
+the dialog confirms the saved date. Capture text is kept in memory only; the
+browser warns before leaving with pending text, but a reload or closed tab can
+lose it. If a connection fails during submission, inspect the journal before
+retrying because the save may have completed. Capture never retries automatically.
+
 ## Task dashboard
 
 Click **Tasks** to collect Markdown checklist items from all active pages. Search

@@ -262,6 +262,8 @@ function M.run(root)
             assert(type(payload) == 'table', 'Expected a JSON object')
             local value, err, status
             if path == '/api/page' then value, err, status = notebook:save(payload.id, payload.content, payload.revision)
+            elseif path == '/api/capture' then
+                value, err, status = notebook:capture(payload.date, payload.text, payload.kind, payload.revision)
             elseif path == '/api/task' then
                 value, err, status = notebook:update_task(payload.id, payload.line, payload.done, payload.revision)
             elseif path == '/api/history/restore' then
@@ -290,7 +292,8 @@ function M.run(root)
             .. ') | Notebook: ' .. notebook.fs.root)
         io.stdout:flush()
     end, options.host, nil, { dual_stack = true,
-        body_limits = { ['/api/page'] = 7 * 1024 * 1024, ['/api/image'] = 5 * 1024 * 1024 } })
+        body_limits = { ['/api/page'] = 7 * 1024 * 1024, ['/api/image'] = 5 * 1024 * 1024,
+            ['/api/capture'] = 128 * 1024 } })
     notebook:close()
     if not ok then error(err) end
 end

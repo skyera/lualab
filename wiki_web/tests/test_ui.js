@@ -28,6 +28,123 @@ class Node {
 }
 const texts = node => [node.textContent, ...node.children.map(texts)].join('');
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+test('quick capture shortcut appends a task without navigating or changing an unrelated draft', async () => {
+  const { context, state, get, events } = harness();
+  state.dirty = true; get('editor').value = 'Unrelated unsaved text';
+  let prevented = false;
+  events.keydown({ ctrlKey: true, shiftKey: true, key: 'J', preventDefault() { prevented = true; } });
+  assert.equal(prevented, true); assert.equal(get('capture-dialog').open, true);
+  const date = vm.runInContext('captureState.date', context);
+  assert.match(get('capture-target').textContent, new RegExp(date));
+  get('capture-kind').value = 'task';
+  get('capture-text').setRangeText('Remember ', 0, 0);
+  get('capture-text').setRangeText('学习', 9, 9);
+  let payload;
+  context.api = async (route, body) => {
+    if (route.startsWith('/api/page?')) { const error = new Error('Missing'); error.status = 404; throw error; }
+    assert.equal(route, '/api/capture'); payload = body;
+    return { id: `Journal/${date.slice(0, 4)}/${date.slice(5, 7)}/${date}`, revision: 'saved', content: '- [ ] Remember 学习' };
+  };
+  await get('capture-text').handlers.keydown({ ctrlKey: true, key: 'Enter', preventDefault() {} });
+  assert.equal(payload.text, 'Remember 学习'); assert.equal(payload.kind, 'task'); assert.equal(payload.revision, '');
+  assert.equal(payload.date, date); assert.equal(state.page.id, 'Home');
+  assert.equal(get('editor').value, 'Unrelated unsaved text'); assert.equal(state.dirty, true);
+  assert.equal(get('capture-text').value, ''); assert.match(get('capture-status').textContent, /Added to/);
+});
+test('capture saves the open journal draft before appending and updates its editor revision', async () => {
+  const { context, state, get } = harness();
+  get('capture-open').handlers.click();
+  const date = vm.runInContext('captureState.date', context);
+  const id = `Journal/${date.slice(0, 4)}/${date.slice(5, 7)}/${date}`;
+  state.page = { id, title: date, content: 'Old', revision: 'r1' }; state.pages = [state.page];
+  state.dirty = true; get('editor').value = 'Draft'; get('capture-text').value = 'New note'; get('capture-kind').value = 'note';
+  const routes = [];
+  context.api = async (route, body) => {
+    routes.push(route);
+    if (route === '/api/page') { assert.equal(body.content, 'Draft'); return { id, revision: 'r2', content: 'Draft' }; }
+    assert.equal(body.revision, 'r2'); return { id, revision: 'r3', content: 'Draft\n\nNew note\n' };
+  };
+  await get('capture-form').handlers.submit({ preventDefault() {} });
+  assert.deepEqual(routes, ['/api/page', '/api/capture']);
+  assert.equal(state.page.revision, 'r3'); assert.equal(get('editor').value, 'Draft\n\nNew note\n');
+  assert.equal(state.dirty, false); assert.equal(get('editor').readOnly, false);
+  state.blocked = true; get('capture-text').value = 'Keep this';
+  await get('capture-form').handlers.submit({ preventDefault() {} });
+  assert.equal(routes.length, 2); assert.equal(get('capture-text').value, 'Keep this');
+  assert.match(get('capture-error').textContent, /draft first/);
+});
+test('capture failures retain input, cancel retains it, and empty input never submits', async () => {
+  const { context, get, events } = harness(); let calls = 0;
+  get('capture-open').handlers.click();
+  context.api = async () => { calls++; throw new Error('Read failed'); };
+  get('capture-text').value = '  \n'; await get('capture-form').handlers.submit({ preventDefault() {} });
+  assert.equal(calls, 0); assert.match(get('capture-error').textContent, /Enter a thought/);
+  get('capture-text').value = 'Keep <script> literal'; get('capture-kind').value = 'note';
+  await get('capture-form').handlers.submit({ preventDefault() {} });
+  assert.equal(calls, 1); assert.match(get('capture-error').textContent, /Read failed/);
+  assert.equal(get('capture-text').value, 'Keep <script> literal');
+  context.api = async route => {
+    if (route.startsWith('/api/page?')) return { revision: 'r1' };
+    const error = new Error('Journal changed'); error.status = 409; throw error;
+  };
+  await get('capture-form').handlers.submit({ preventDefault() {} });
+  assert.match(get('capture-error').textContent, /Journal changed/);
+  get('capture-dialog').handlers.cancel({ preventDefault() {} });
+  assert.equal(get('capture-dialog').open, false); get('capture-open').handlers.click();
+  assert.equal(get('capture-text').value, 'Keep <script> literal');
+  let warned = false; events.beforeunload({ preventDefault() { warned = true; } }); assert.equal(warned, true);
+});
+test('capture blocks duplicate submits and dismissal during save, then distinguishes uncertain saves', async () => {
+  const { context, get, events } = harness(); const pending = deferred(); let writes = 0;
+  get('capture-open').handlers.click(); get('capture-text').value = 'Capture'; get('capture-kind').value = 'note';
+  context.api = async route => {
+    if (route.startsWith('/api/page?')) return { revision: 'r1' };
+    writes++; return pending.promise;
+  };
+  const saving = get('capture-form').handlers.submit({ preventDefault() {} });
+  await Promise.resolve(); await Promise.resolve();
+  await get('capture-text').handlers.keydown({ metaKey: true, key: 'Enter', preventDefault() {} });
+  get('capture-dialog').handlers.cancel({ preventDefault() {} });
+  assert.equal(writes, 1); assert.equal(get('capture-dialog').open, true);
+  events.keydown({ ctrlKey: true, key: 'p', preventDefault() {} }); assert.equal(get('switcher-dialog').open, false);
+  pending.reject(new Error('Connection lost')); await saving;
+  assert.equal(get('capture-text').value, 'Capture'); assert.match(get('capture-error').textContent, /may have completed/);
+  assert.equal(get('capture-save').disabled, false);
+  context.api = async route => route.startsWith('/api/page?') ? { revision: 'r1' } : { id: 'Journal/test', revision: 'r2' };
+  context.refresh = async () => { throw new Error('Scan failed'); };
+  await get('capture-form').handlers.submit({ preventDefault() {} });
+  assert.equal(get('capture-text').value, ''); assert.match(get('capture-status').textContent, /Added/);
+  assert.match(get('capture-error').textContent, /Capture saved.*Scan failed/);
+});
+test('capture shortcut respects existing dialogs and IME composition', () => {
+  const { get, events } = harness();
+  get('tasks-dialog').open = true;
+  events.keydown({ ctrlKey: true, shiftKey: true, key: 'J', preventDefault() {} });
+  assert.equal(get('capture-dialog').open, false);
+  get('tasks-dialog').open = false;
+  events.keydown({ ctrlKey: true, shiftKey: true, isComposing: true, key: 'J', preventDefault() {} });
+  assert.equal(get('capture-dialog').open, false);
+  get('capture-open').handlers.click();
+  assert.equal(get('capture-dialog').open, true);
+  get('tasks-open').handlers.click();
+  assert.equal(get('tasks-dialog').open, false);
+  get('export-open').handlers.click();
+  assert.equal(get('export-dialog').open, false);
+  get('switcher-open').handlers.click();
+  assert.equal(get('switcher-dialog').open, false);
+});
+test('capture conflict on the open journal blocks its editor and keeps both drafts', async () => {
+  const { context, state, get } = harness();
+  get('capture-open').handlers.click();
+  const date = vm.runInContext('captureState.date', context);
+  state.page.id = `Journal/${date.slice(0, 4)}/${date.slice(5, 7)}/${date}`;
+  get('capture-text').value = 'New thought'; get('capture-kind').value = 'note';
+  context.api = async () => { const error = new Error('Journal changed'); error.status = 409; throw error; };
+  await get('capture-form').handlers.submit({ preventDefault() {} });
+  assert.equal(state.blocked, true); assert.equal(get('conflict').hidden, false);
+  assert.equal(get('editor').value, 'Initial'); assert.equal(get('capture-text').value, 'New thought');
+  assert.match(get('message').textContent, /Close Capture/);
+});
 test('task dashboard filters, safely renders long text and paginates without losing filters', async () => {
   const { context, get } = harness();
   const today = vm.runInContext('dateKey(new Date())', context);
