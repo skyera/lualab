@@ -33,7 +33,7 @@ function M.inspect(path)
     return true
 end
 
-function M.discover(root, script_dir)
+function M.discover(root, script_dir, file_names)
     if not WINDOWS then return { { path = 'sqlite3', source = 'loader' }, { path = 'libsqlite3.so.0', source = 'loader' } } end
     ffi.cdef[[unsigned long __stdcall GetModuleFileNameW(void *, uint16_t *, unsigned long);
     int __stdcall WideCharToMultiByte(unsigned int, unsigned long, const uint16_t *, int,
@@ -58,7 +58,7 @@ function M.discover(root, script_dir)
     for _, dir in ipairs(dirs) do
         local resolved, folder = pcall(Fs.resolve, dir.path)
         if resolved then
-            for _, name in ipairs(FILE_NAMES) do
+            for _, name in ipairs(file_names or FILE_NAMES) do
                 local path = folder:gsub('/$', '') .. '/' .. name
                 local key = path:lower()
                 if not seen[key] then
@@ -76,12 +76,7 @@ function M.discover(root, script_dir)
     return candidates
 end
 
-function M.validate(path, report, require_fts5)
-    if WINDOWS then
-        local compatible, reason = M.inspect(path)
-        assert(compatible, path .. ': ' .. tostring(reason))
-    end
-    if report then report('Validating SQLite library: ' .. path) end
+function M.open_library(path)
     local load_path = path
     if WINDOWS and path:find('[\128-\255]') then
         ffi.cdef[[unsigned long __stdcall GetShortPathNameW(const uint16_t *, uint16_t *, unsigned long);]]
@@ -99,7 +94,17 @@ function M.validate(path, report, require_fts5)
         end
     end
     local loaded, library = pcall(ffi.load, load_path)
-    assert(loaded, 'Cannot load SQLite library ' .. path .. ': ' .. tostring(library))
+    assert(loaded, 'Cannot load native library ' .. path .. ': ' .. tostring(library))
+    return library
+end
+
+function M.validate(path, report, require_fts5)
+    if WINDOWS then
+        local compatible, reason = M.inspect(path)
+        assert(compatible, path .. ': ' .. tostring(reason))
+    end
+    if report then report('Validating SQLite library: ' .. path) end
+    local library = M.open_library(path)
     for _, symbol in ipairs(REQUIRED) do
         assert(pcall(function() return library[symbol] end), 'SQLite library is missing ' .. symbol .. ': ' .. path)
     end
@@ -135,8 +140,9 @@ function M.validate(path, report, require_fts5)
 end
 
 function M.load(root, options, config, report, warn)
-    local override = options.sqlite_dll or (not options.sqlite_select
-        and (windows_args.getenv(options.sqlite_env or 'LEAF_WIKI_SQLITE3') or config.sqlite_dll))
+    local environment = windows_args.getenv(options.sqlite_env or 'LEAF_WIKI_SQLITE3')
+    if environment == '' then environment = nil end
+    local override = options.sqlite_dll or (not options.sqlite_select and (environment or config.sqlite_dll))
     if override then
         local path = not WINDOWS and not override:find('/', 1, true) and override or Fs.resolve(override)
         local library, info = M.validate(path, report, options.require_fts5)

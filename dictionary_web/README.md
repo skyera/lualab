@@ -102,6 +102,26 @@ pins produce an error; `--sqlite-select` ignores old environment and saved pins 
 you can repair them. `--sqlite-list` lists paths and sources without loading DLLs.
 These settings configure the web app; standalone `ffi_dict.lua` keeps its own loader.
 
+Curl DLL selection on Windows (useful when several versions are installed):
+
+```powershell
+luajit dictionary_web/app.lua --curl-list
+luajit dictionary_web/app.lua --curl-select
+luajit dictionary_web/app.lua --curl-dll C:/Curl/libcurl.dll --save-config
+```
+
+Listing shows concrete paths and sources without loading DLLs. Selection checks
+architecture, required curl APIs, initialization, and advertised HTTPS support,
+then saves and verifies `curl_dll` in the same configuration file as `sqlite_dll`.
+Other settings are preserved. `--curl-select` exits without opening databases or
+starting the server; it ignores old saved/environment curl pins so you can repair them.
+Override precedence is `--curl-dll`, `WORDBOOK_CURL_DLL`, then saved `curl_dll`.
+Invalid pins fail clearly. Automatic discovery skips incompatible candidates and
+reports them; without a usable DLL, online lookups report the missing dependency
+and local features remain available. Startup prints the chosen path, version, and
+TLS backend. Request failures include curl's detailed error, selected DLL, and URL.
+HTTPS capability validation does not guarantee office proxy or firewall access.
+
 The default database is `dictionary_web/wordbook.db`, ignored by Git. Back up
 that file with the app stopped. Ctrl-C and SIGTERM close the server and database.
 HTTP connections are handled concurrently. On Linux, up to four background workers fetch

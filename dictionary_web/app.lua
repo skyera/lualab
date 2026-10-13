@@ -7,7 +7,6 @@ local function main()
     local windows_args = require('windows_args')
     windows_args.normalize()
     local json = require('json')
-    local service = require('service')
     local http = require('http')
     local ffi = require('ffi')
     local workers = ffi.os ~= 'Windows' and require('workers').new(http.close_inherited) or nil
@@ -30,12 +29,14 @@ local function main()
             print('Usage: luajit dictionary_web/app.lua [--host 127.0.0.1|0.0.0.0] [--port 8030] '
                 .. '[--db /path/wordbook.db] [--dict-db /path/.dict.db|none] [--import-dict] '
                 .. '[--no-auto-import] [--sqlite-list] [--sqlite-select] [--sqlite-dll PATH] '
-                .. '[--config FILE] [--save-config]')
+                .. '[--curl-list] [--curl-select] [--curl-dll PATH] [--config FILE] [--save-config]')
             os.exit(0)
         elseif arg[index] == '--sqlite-list' then sqlite_options.sqlite_list = true
         elseif arg[index] == '--sqlite-select' then sqlite_options.sqlite_select = true
+        elseif arg[index] == '--curl-list' then sqlite_options.curl_list = true
+        elseif arg[index] == '--curl-select' then sqlite_options.curl_select = true
         elseif arg[index] == '--save-config' then sqlite_options.save_config = true
-        elseif arg[index] == '--sqlite-dll' or arg[index] == '--config' then
+        elseif arg[index] == '--sqlite-dll' or arg[index] == '--curl-dll' or arg[index] == '--config' then
             local flag = arg[index]
             index = index + 1
             assert(arg[index] and arg[index]:sub(1, 2) ~= '--', 'Missing value for ' .. flag)
@@ -71,6 +72,7 @@ local function main()
     end
 
     if require('sqlite_config').configure(root .. '/..', sqlite_options) then return end
+    local service = require('service')
     local Store = require('store')
     local schema = assert(read_file(root .. '/schema.sql'))
     if ffi.os == 'Windows' then
@@ -179,7 +181,8 @@ local ok, err = xpcall(main, debug.traceback)
 if not ok then
     io.stderr:write('Wordbook failed: ' .. tostring(err) .. '\n'
         .. 'SQLite recovery: use --sqlite-list or --sqlite-select [--config FILE],\n'
-        .. 'or --sqlite-dll PATH --save-config. DLL must match LuaJIT and support FTS5.\n')
+        .. 'or --sqlite-dll PATH --save-config. DLL must match LuaJIT and support FTS5.\n'
+        .. 'Curl recovery: use --curl-list, --curl-select [--config FILE], or --curl-dll PATH --save-config.\n')
     io.stderr:flush()
     os.exit(1)
 end

@@ -12,30 +12,7 @@ int curl_easy_getinfo(WB_CURL *, int, ...);
 const char *curl_easy_strerror(int);
 unsigned char *SHA256(const unsigned char *, size_t, unsigned char *);
 ]]
-local curl_names = {
-    'libcurl.so.4',
-    'libcurl.so',
-    'libcurl-gnutls.so.4',
-    'curl',
-    'libcurl',
-    'libcurl.dll',
-    'libcurl-4.dll',
-    'curl.dll',
-    'libcurl.4.dylib',
-    'libcurl.dylib',
-}
-local curl
-for _, name in ipairs(curl_names) do
-    local ok, lib = pcall(ffi.load, name)
-    if ok and lib then
-        curl = lib
-        break
-    end
-end
-if curl then
-    pcall(curl.curl_global_init, 3)
-end
-
+local curl, curl_info
 local CURLOPT = {
     TIMEOUT         = 13,
     FOLLOWLOCATION  = 52,
@@ -46,6 +23,7 @@ local CURLOPT = {
     PROTOCOLS       = 181,
     REDIR_PROTOCOLS = 182,
     URL             = 10002,
+    ERRORBUFFER     = 10010,
     POSTFIELDS      = 10015,
     USERAGENT       = 10018,
     WRITEFUNCTION   = 20011,
@@ -55,25 +33,29 @@ local CURLPROTO_HTTPS = 2
 
 local M = {}
 
+function M.set_curl(library, info)
+    assert(not curl or curl == library, 'Curl library is already in use')
+    curl, curl_info = library, info
+end
+
+local function load_curl()
+    if curl_info then return end
+    local source = debug.getinfo(1, 'S').source:sub(2):gsub('\\', '/')
+    local directory = source:match('^(.*)/') or '.'
+    curl, curl_info = require('curl_loader').load(directory .. '/..', { script_dir = directory }, {})
+end
+
 function M.fetch(url, body)
+    load_curl()
+    if curl_info and curl_info.error then return nil, curl_info.error end
     if not curl then
-        local cmd
-        if body then
-            cmd = string.format("curl -s -L --max-time 12 -A 'Wordbook/1.0' -d %q %q", body, url)
-        else
-            cmd = string.format("curl -s -L --max-time 12 -A 'Wordbook/1.0' %q", url)
-        end
-        local p = io.popen(cmd, 'r')
-        if not p then return nil, 'Could not execute system curl.' end
-        local out = p:read('*a')
-        p:close()
-        if not out or #out == 0 then return nil, 'Empty response from curl.' end
-        return out
+        return nil, 'No HTTPS-capable curl library available. Use --curl-select.'
     end
     local handle = curl.curl_easy_init()
     if handle == nil then
         return nil, 'Could not initialize HTTPS request.'
     end
+    local error_buffer = ffi.new('char[256]')
     local chunks, size = {}, 0
     local callback = ffi.cast('size_t (*)(char *, size_t, size_t, void *)', function(data, unit, count)
         local bytes = tonumber(unit * count)
@@ -90,6 +72,7 @@ function M.fetch(url, body)
     end
     local ok, result, message = pcall(function()
         option(CURLOPT.URL, url)
+        option(CURLOPT.ERRORBUFFER, error_buffer)
         option(CURLOPT.USERAGENT, 'Wordbook/1.0 (personal dictionary)')
         option(CURLOPT.WRITEFUNCTION, callback)
         option(CURLOPT.FOLLOWLOCATION, ffi.new('long', 1))
@@ -105,7 +88,10 @@ function M.fetch(url, body)
         end
         local rc = curl.curl_easy_perform(handle)
         if rc ~= 0 then
-            return nil, 'Dictionary connection failed: ' .. ffi.string(curl.curl_easy_strerror(rc))
+            local detail = ffi.string(error_buffer)
+            if detail == '' then detail = ffi.string(curl.curl_easy_strerror(rc)) end
+            return nil, 'Dictionary connection failed: ' .. detail .. ' (curl ' .. curl_info.version
+                .. ', ' .. curl_info.path .. ', URL: ' .. url .. ')'
         end
         local status = ffi.new('long[1]')
         assert(curl.curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, status) == 0, 'Cannot read HTTP status')
@@ -117,7 +103,7 @@ function M.fetch(url, body)
     curl.curl_easy_cleanup(handle)
     callback:free()
     if not ok then
-        return nil, 'HTTPS request failed.'
+        return nil, 'HTTPS request failed: ' .. tostring(result)
     end
     return result, message
 end
