@@ -23,6 +23,20 @@ Run from PowerShell:
 luajit .\wiki_web.lua --data-dir C:\Notes\LeafWiki --save-config
 ```
 
+List SQLite DLLs, choose one, and save its verified path without starting the server:
+
+```powershell
+luajit .\wiki_web.lua --sqlite-select
+```
+
+Use `--config FILE` to select a configuration file. Existing settings are preserved;
+missing configuration directories are created. `--sqlite-list` lists candidates without
+loading them. `--sqlite-dll PATH --save-config` pins a known DLL during normal startup.
+Selection checks architecture, required SQLite APIs, and UPSERT support. FTS5 is not required.
+The override order is `--sqlite-dll`, `LEAF_WIKI_SQLITE3`, then saved `sqlite_dll`.
+Invalid overrides fail with an error rather than silently selecting another DLL.
+`--sqlite-select` ignores an old environment or saved pin so you can replace it.
+
 Notebook names and paths support UTF-8, including Chinese characters. Examples
 use folders without spaces; paths containing spaces also work when quoted.
 Windows path options accept either separator, relative paths, `.` and `..`,

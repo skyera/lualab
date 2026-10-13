@@ -5,6 +5,7 @@ ffi.cdef[[
 typedef struct sqlite3 sqlite3;
 typedef struct sqlite3_stmt sqlite3_stmt;
 int sqlite3_open(const char *, sqlite3 **);
+const char *sqlite3_libversion(void);
 int sqlite3_open_v2(const char *, sqlite3 **, int, const char *);
 int sqlite3_close(sqlite3 *);
 const char *sqlite3_errmsg(sqlite3 *);
@@ -24,10 +25,7 @@ int sqlite3_column_bytes(sqlite3_stmt *, int);
 int sqlite3_exec(sqlite3 *, const char *, void *, void *, char **);
 void sqlite3_free(void *);
 ]]
-local loaded, sqlite = pcall(ffi.load, 'sqlite3')
-if not loaded then
-    sqlite = ffi.load(ffi.os == 'Linux' and 'libsqlite3.so.0' or 'sqlite3')
-end
+local sqlite
 local transient = ffi.cast('void (*)(void *)', -1)
 
 local SQLITE_INTEGER = 1
@@ -39,7 +37,20 @@ local SQLITE_DONE    = 101
 local DB = {}
 DB.__index = DB
 
+function DB.set_library(library)
+    assert(not sqlite or sqlite == library, 'SQLite library is already in use')
+    sqlite = library
+end
+
+local function load_library()
+    if sqlite then return end
+    local loaded, library = pcall(ffi.load, 'sqlite3')
+    if not loaded then library = ffi.load(ffi.os == 'Linux' and 'libsqlite3.so.0' or 'sqlite3') end
+    sqlite = library
+end
+
 function DB.open(path, schema, readonly)
+    load_library()
     local ptr = ffi.new('sqlite3 *[1]')
     local status = readonly and sqlite.sqlite3_open_v2(path, ptr, 1, nil) or sqlite.sqlite3_open(path, ptr)
     if status ~= 0 then

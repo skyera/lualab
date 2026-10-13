@@ -21,6 +21,7 @@ local Fs = require('fs')
 local Notebook = require('notebook')
 local http = require('http')
 local dictionary = require('dictionary')
+local sqlite_loader = require('sqlite')
 local is_windows = package.config:sub(1, 1) == '\\'
 local function quote(value)
     return "'" .. value:gsub("'", is_windows and "''" or "'\\''") .. "'"
@@ -39,6 +40,24 @@ local function read(path)
     local file = io.open(path, 'rb')
     if not file then return nil end
     local value = file:read('*a'); file:close(); return value
+end
+
+local function save_config(config_path, expected)
+    startup.report('Saving configuration: ' .. config_path)
+    local fs = Fs.open(config_path:match('^(.*)/[^/]+$') or '.')
+    local name = config_path:match('[^/]+$')
+    local saved_path = fs.root .. '/' .. name
+    local saved, err = pcall(function()
+        local encoded = json.encode(expected)
+        fs:write(name, encoded)
+        startup.report('Verifying saved configuration: ' .. saved_path)
+        local contents = assert(fs:read(name), 'Saved configuration file is missing')
+        assert(contents == encoded and type(json.decode(contents)) == 'table',
+            'Saved configuration verification failed')
+    end)
+    fs:close()
+    assert(saved, err)
+    startup.report('Configuration saved and verified: ' .. saved_path)
 end
 
 local function is_allowed_host(host, port)
@@ -79,11 +98,13 @@ function M.run(root)
         if flag == '-h' or flag == '--help' then
             print('Usage: luajit wiki_web.lua [--data-dir PATH] [--cache-dir PATH] '
                 .. '[--config FILE] [--save-config] [--dict-db PATH|none] '
-                .. '[--host 127.0.0.1|0.0.0.0] [--port 8020]')
+                .. '[--sqlite-dll PATH] [--sqlite-list] [--sqlite-select] [--host 127.0.0.1|0.0.0.0] [--port 8020]')
             return
         elseif flag == '--save-config' then options.save_config = true
+        elseif flag == '--sqlite-list' then options.sqlite_list = true
+        elseif flag == '--sqlite-select' then options.sqlite_select = true; options.save_config = true
         elseif flag == '--data-dir' or flag == '--cache-dir' or flag == '--config'
-            or flag == '--dict-db' or flag == '--host' or flag == '--port' then
+            or flag == '--dict-db' or flag == '--sqlite-dll' or flag == '--host' or flag == '--port' then
             index = index + 1
             assert(arg[index] and arg[index]:sub(1, 2) ~= '--', 'Missing value for ' .. flag)
             options[flag:sub(3):gsub('-', '_')] = arg[index]
@@ -108,6 +129,16 @@ function M.run(root)
     end
     local config = raw and json.decode(raw) or {}
     assert(type(config) == 'table', 'Configuration must be a JSON object')
+    if options.sqlite_list then
+        local candidates = sqlite_loader.discover(root)
+        print('SQLite library candidates (not loaded):')
+        for index, candidate in ipairs(candidates) do
+            print(index .. '. ' .. candidate.path .. ' [' .. candidate.source .. ']'
+                .. (candidate.reason and ' — ' .. candidate.reason or ''))
+        end
+        if #candidates == 0 then print('No SQLite DLL found. Use --sqlite-dll PATH or LEAF_WIKI_SQLITE3.') end
+        io.stdout:flush(); return
+    end
     local data_dir = Fs.resolve(options.data_dir or getenv('LEAF_WIKI_DATA_DIR') or config.data_dir or home .. '/LeafWiki')
     cache = Fs.resolve(cache)
     local cache_dir = Fs.resolve(options.cache_dir or cache)
@@ -123,6 +154,20 @@ function M.run(root)
     startup.report('Validating startup options')
     assert(port and port >= 0 and port <= 65535 and port % 1 == 0, 'Invalid port')
     assert(options.host == '127.0.0.1' or options.host == '0.0.0.0', 'Host must be 127.0.0.1 or 0.0.0.0')
+    startup.set_recovery('Inspect available libraries:\n  ' .. launcher .. ' --sqlite-list'
+        .. '\nChoose a matching-architecture SQLite library:\n  ' .. launcher .. ' --sqlite-dll PATH --save-config'
+        .. '\nOr set LEAF_WIKI_SQLITE3. An invalid explicit or saved selection is never silently ignored.')
+    startup.report('Selecting SQLite library')
+    local sqlite_info = sqlite_loader.load(root, options, config, startup.report, startup.warn)
+    startup.report('SQLite ' .. sqlite_info.version .. ' selected: ' .. sqlite_info.path)
+    if options.sqlite_select then
+        config.sqlite_dll = sqlite_info.pin
+        if options.data_dir then config.data_dir = data_dir end
+        if options.dict_db then config.dict_db = dictionary_path end
+        startup.set_recovery(config_help)
+        save_config(config_path, config)
+        return
+    end
     local dictionary_help = 'Dictionary path: ' .. dictionary_path
         .. '\nA dictionary needs imported definitions; an empty SQLite file is not sufficient.'
         .. '\nFrom the repository root on Linux or WSL, create/import it with:\n  luajit download_dict.lua --db .dict.db'
@@ -164,23 +209,8 @@ function M.run(root)
     startup.track(notebook)
     if options.save_config then
         startup.set_recovery(config_help)
-        startup.report('Saving configuration: ' .. config_path)
-        local parent = config_path:match('^(.*)/[^/]+$') or '.'
-        local fs = Fs.open(parent)
-        local name = config_path:match('[^/]+$')
-        local saved_path = fs.root .. '/' .. name
-        local expected = { data_dir = notebook.fs.root, dict_db = dictionary_path }
-        local saved, err = pcall(function()
-            fs:write(name, json.encode(expected))
-            startup.report('Verifying saved configuration: ' .. saved_path)
-            local contents = assert(fs:read(name), 'Saved configuration file is missing')
-            local actual = json.decode(contents)
-            assert(type(actual) == 'table' and actual.data_dir == expected.data_dir
-                and actual.dict_db == expected.dict_db, 'Saved configuration verification failed')
-        end)
-        fs:close()
-        assert(saved, err)
-        startup.report('Configuration saved and verified: ' .. saved_path)
+        save_config(config_path, { data_dir = notebook.fs.root, dict_db = dictionary_path,
+            sqlite_dll = sqlite_info.pin })
     end
     local function reply(value, status) return json.encode(value), status or 200, 'application/json; charset=utf-8' end
     local function route(request, actual_port)
