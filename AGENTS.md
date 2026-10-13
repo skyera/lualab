@@ -24,6 +24,15 @@ Verification is the only path to finality. Do not assume success. Always double 
 * **Verify Writes Before Reporting Success**: After saving configuration or other critical files, verify the file exists and read back its expected contents. Print the resolved path only after successful verification; write or verification failures must never produce a success message.
 * **Test Failure Paths**: Verify missing files and dependencies, permission and write failures, malformed data, busy resources, and failed subprocesses. Assert visible diagnostics, correct exit status, cleanup, and preservation of user data. Test intentional fallbacks and automatic creation as well as fatal errors.
 
+## Windows SQLite DLL Selection
+
+* **Multiple Versions Are Expected**: Windows can have several SQLite DLLs with different versions, architectures, and compile options. Do not assume the first `sqlite3.dll` found by the system loader is correct.
+* **Discover and Allow Selection**: List candidate DLLs with their resolved paths and sources without loading them merely for discovery. Provide a way for the user to select a candidate or configure an explicit DLL path; use CodeFind's discovery and validation approach as a reference.
+* **Validate Before Use**: Check that the DLL architecture matches LuaJIT, then verify required SQLite APIs and the features actually used by the application. Display the selected path and SQLite version. Do not require optional features the application does not use.
+* **Persist the Selection**: Save the validated DLL path in configuration, preserve other settings, and verify the saved file by reading it back. Print the verified configuration path and reuse the saved selection on subsequent launches. Define and document precedence for command-line, environment, and saved configuration overrides.
+* **Fail Clearly on Invalid Pins**: An invalid explicit or saved DLL selection must produce a visible error and instructions for selecting or configuring a replacement. Never silently replace a user-selected DLL with another version. Selection must remain available to repair an invalid saved pin.
+* **Verify Selection and Recovery**: Test multiple candidates, architecture and API incompatibility, missing DLLs, invalid choices, configuration persistence, reuse on restart, and preservation of existing settings. Cover Windows paths containing spaces or Unicode and report loader failures clearly.
+
 ## Verification & Validation Guidelines
 
 For every change, consider how to prove correctness before concluding:
