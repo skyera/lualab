@@ -591,3 +591,21 @@ test('Windows path options normalize environment variables, separators and dot s
       fs.rmSync(directory, { recursive: true, force: true });
     }
   });
+
+test('Content-Security-Policy header allows bible-api.com for verse fetching and enforces self origins', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-csp-'));
+  let server;
+  try {
+    server = await start(directory, ['--data-dir', path.join(directory, 'notebook'), '--dict-db', 'none']);
+    const response = await fetch(server.url + '/');
+    assert.equal(response.status, 200);
+    const csp = response.headers.get('content-security-policy');
+    assert.ok(csp, 'Content-Security-Policy header must be present');
+    assert.match(csp, /default-src 'self'/);
+    assert.match(csp, /connect-src 'self' https:\/\/bible-api\.com/);
+  } finally {
+    if (server) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+

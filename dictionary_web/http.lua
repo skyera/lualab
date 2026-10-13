@@ -173,16 +173,25 @@ function M.target(target)
 end
 
 function M.respond(fd, status, body, content_type, head, extra_headers)
+    local headers = extra_headers or {}
+    local custom_csp
+    for key, value in pairs(headers) do
+        if key:lower() == 'content-security-policy' then custom_csp = value end
+    end
+    local csp = custom_csp or ("default-src 'self'; style-src 'self'; script-src 'self'; "
+        .. "connect-src 'self' https://bible-api.com; "
+        .. "media-src 'self' https://audio.dict.cn https://dict.youdao.com https://iciba.com https://*.iciba.com; "
+        .. "frame-ancestors 'none'")
     local frame = 'HTTP/1.1 ' .. status .. ' ' .. (reasons[status] or 'Error') .. '\r\n'
         .. 'Content-Type: ' .. (content_type or 'application/json; charset=utf-8') .. '\r\n'
         .. 'Content-Length: ' .. #body .. '\r\nConnection: close\r\nCache-Control: no-store\r\n'
         .. 'X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n'
-        .. "Content-Security-Policy: default-src 'self'; style-src 'self'; script-src 'self'; "
-        .. "media-src 'self' https://audio.dict.cn https://dict.youdao.com https://iciba.com https://*.iciba.com; "
-        .. "frame-ancestors 'none'\r\n"
-    for key, value in pairs(extra_headers or {}) do
-        assert(key:match('^[%w%-]+$') and not value:find('[\r\n]'), 'Invalid response header')
-        frame = frame .. key .. ': ' .. value .. '\r\n'
+        .. 'Content-Security-Policy: ' .. csp .. '\r\n'
+    for key, value in pairs(headers) do
+        if key:lower() ~= 'content-security-policy' then
+            assert(key:match('^[%w%-]+$') and not value:find('[\r\n]'), 'Invalid response header')
+            frame = frame .. key .. ': ' .. value .. '\r\n'
+        end
     end
     frame = frame .. '\r\n' .. (head and '' or body)
     local offset, deadline = 0, now_seconds() + 5
