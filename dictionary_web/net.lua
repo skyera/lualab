@@ -15,6 +15,7 @@ unsigned char *SHA256(const unsigned char *, size_t, unsigned char *);
 local curl, curl_info
 local tls_revoke_best_effort = false
 local proxy_mode = 'auto'
+local http_client = ffi.os == 'Windows' and 'native' or 'curl'
 local CURLOPT = {
     TIMEOUT         = 13,
     FOLLOWLOCATION  = 52,
@@ -44,17 +45,24 @@ local M = {}
 function M.set_curl(library, info)
     assert(not curl or curl == library, 'Curl library is already in use')
     curl, curl_info = library, info
+    http_client = 'curl'
+end
+
+function M.set_client(value)
+    assert(value == 'native' or value == 'curl', 'HTTP client must be native or curl')
+    assert(value ~= 'native' or ffi.os == 'Windows', 'Native HTTP client requires Windows')
+    http_client = value
 end
 
 function M.set_tls_revoke_best_effort(enabled)
     assert(type(enabled) == 'boolean', 'TLS revocation setting must be true or false')
-    local schannel = curl_info and curl_info.tls and curl_info.tls:find('Schannel', 1, true)
+    local schannel = http_client == 'curl' and curl_info and curl_info.tls and curl_info.tls:find('Schannel', 1, true)
     if enabled and schannel then
         assert(curl_info.version_num and curl_info.version_num >= 0x074600,
             'Best-effort revocation requires Schannel curl 7.70 or newer. Use --curl-select.')
     end
     tls_revoke_best_effort = enabled
-    return enabled and schannel ~= nil
+    return enabled and not not schannel
 end
 
 function M.set_proxy(value)
@@ -87,6 +95,7 @@ local function load_curl()
 end
 
 function M.fetch(url, body)
+    if http_client == 'native' then return require('net_windows').fetch(url, body, proxy_mode) end
     load_curl()
     if curl_info and curl_info.error then return nil, curl_info.error end
     if not curl then

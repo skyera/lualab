@@ -1,7 +1,8 @@
 # Wordbook
 
 A local vocabulary web app built with **LuaJIT and FFI**: Linux sockets or Windows Winsock serve
-the browser UI, libcurl handles HTTPS, and SQLite stores your word journal.
+the browser UI, SQLite stores your word journal, and HTTPS uses libcurl on Linux
+or the built-in WinHTTP client on Windows.
 No Python backend or npm installation is needed.
 
 ## Run
@@ -80,6 +81,25 @@ and review progress; the app has no login. Internet access also depends on
 your router's port forwarding and network configuration. This option does
 not enable IPv6 listening.
 
+Windows uses its built-in WinHTTP HTTPS client by default. No curl DLL selection
+is needed for normal lookups. It uses automatic Windows system/user proxy and
+authentication handling, browser-like headers, HTTPS-only redirects, and the normal
+Windows certificate and hostname checks. Responses are limited to 2 MB and requests
+have an 18-second total deadline. Linux continues to use libcurl.
+
+Old saved curl paths do not affect the default Windows client. To reset a saved
+client override, run:
+
+```powershell
+luajit dictionary_web/app.lua --http-client native --proxy auto --save-config
+```
+
+`--http-client curl` retains the optional libcurl transport and its existing TLS,
+proxy, and DLL settings. Explicit `--curl-select`/`--curl-dll` chooses curl; saving
+that selection also saves `http_client: "curl"`. Native proxy overrides support
+`auto`, `none`, or an HTTP proxy URL; use the curl client for SOCKS/HTTPS proxy URLs.
+The curl-specific revocation option does not alter native Windows TLS defaults.
+
 SQLite DLL selection on Windows:
 
 ```powershell
@@ -102,7 +122,7 @@ pins produce an error; `--sqlite-select` ignores old environment and saved pins 
 you can repair them. `--sqlite-list` lists paths and sources without loading DLLs.
 These settings configure the web app; standalone `ffi_dict.lua` keeps its own loader.
 
-Curl DLL selection on Windows (useful when several versions are installed):
+Optional curl client DLL selection on Windows:
 
 ```powershell
 luajit dictionary_web/app.lua --curl-list
@@ -137,7 +157,7 @@ retain their defaults and report that this setting is inactive. This configures
 web lookups, including Dict.cn and Iciba; it does not change Git's TLS settings.
 Restore the default and save it with `--tls-revoke-strict --save-config`.
 
-On Windows, HTTP requests use the current user's Windows proxy settings by default,
+With the optional curl client on Windows, HTTP requests use the current user's Windows proxy settings by default,
 including static proxies, bypass lists, and per-URL PAC resolution. Explicit curl
 proxy environment variables take precedence. PAC errors are reported with recovery
 instructions; a configured static proxy is used as a visible fallback when available.

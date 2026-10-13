@@ -67,36 +67,52 @@ function M.configure(root, options)
         report('SQLite ' .. info.version .. ' selected (FTS5 verified): ' .. info.path)
     end
     local curl_info
+    assert(not (options.curl_select or options.curl_dll) or not options.http_client
+        or options.http_client == 'curl', 'Curl selection requires --http-client curl')
+    local client = options.http_client or (options.curl_select or options.curl_dll) and 'curl'
+        or config.http_client or (ffi.os == 'Windows' and 'native' or 'curl')
     if not options.sqlite_select then
-        local library
-        library, curl_info = curl_loader.load(root, options, config, report, function(message)
-            io.stderr:write('Wordbook warning: ' .. message .. '\n'); io.stderr:flush()
-        end)
-        require('net').set_curl(library, curl_info)
+        local net = require('net')
+        net.set_client(client)
         local proxy = options.proxy or config.proxy or 'auto'
-        require('net').set_proxy(proxy)
-        if proxy == 'auto' and ffi.os == 'Windows' then
-            report('HTTP proxy: Windows settings (explicit proxy environment variables take precedence)')
+        net.set_proxy(proxy)
+        if client == 'native' then
+            report('HTTP client: Windows WinHTTP (' .. (proxy == 'auto' and 'automatic system proxy'
+                or proxy == 'none' and 'direct connection' or 'configured proxy') .. ')')
+            report('TLS: Windows defaults; certificate and hostname verification enabled')
         else
-            report('HTTP proxy: ' .. (proxy == 'auto' and 'curl defaults' or proxy == 'none' and 'direct' or 'configured'))
-        end
-        local active = require('net').set_tls_revoke_best_effort(tls_best_effort == true)
-        if active then
-            report('TLS revocation: best effort (Schannel); certificate and hostname verification enabled')
-        elseif tls_best_effort then
-            report('TLS revocation: best-effort setting inactive; selected backend is not Schannel')
-        else
-            report('TLS revocation: backend defaults; certificate and hostname verification enabled')
-        end
-        if library then
-            report('Curl ' .. curl_info.version .. ' selected (HTTPS, ' .. curl_info.tls .. '): ' .. curl_info.path)
-        else
-            io.stderr:write('Wordbook warning: ' .. curl_info.error .. '\n'); io.stderr:flush()
+            local library
+            library, curl_info = curl_loader.load(root, options, config, report, function(message)
+                io.stderr:write('Wordbook warning: ' .. message .. '\n'); io.stderr:flush()
+            end)
+            require('net').set_curl(library, curl_info)
+            local proxy = options.proxy or config.proxy or 'auto'
+            require('net').set_proxy(proxy)
+            if proxy == 'auto' and ffi.os == 'Windows' then
+                report('HTTP proxy: Windows settings (explicit proxy environment variables take precedence)')
+            else
+                report('HTTP proxy: ' .. (proxy == 'auto' and 'curl defaults' or proxy == 'none' and 'direct' or 'configured'))
+            end
+            local active = require('net').set_tls_revoke_best_effort(tls_best_effort == true)
+            if active then
+                report('TLS revocation: best effort (Schannel); certificate and hostname verification enabled')
+            elseif tls_best_effort then
+                report('TLS revocation: best-effort setting inactive; selected backend is not Schannel')
+            else
+                report('TLS revocation: backend defaults; certificate and hostname verification enabled')
+            end
+            if library then
+                report('Curl ' .. curl_info.version .. ' selected (HTTPS, ' .. curl_info.tls .. '): ' .. curl_info.path)
+            else
+                io.stderr:write('Wordbook warning: ' .. curl_info.error .. '\n'); io.stderr:flush()
+            end
         end
     end
     if options.sqlite_select or options.curl_select or options.save_config then
         if info then config.sqlite_dll = info.pin or info.path end
         if curl_info and curl_info.path then config.curl_dll = curl_info.path end
+        if options.http_client ~= nil then config.http_client = options.http_client
+        elseif options.curl_select or options.curl_dll then config.http_client = 'curl' end
         if options.proxy ~= nil then config.proxy = options.proxy end
         if options.tls_revoke_best_effort ~= nil then
             config.tls_revoke_best_effort = options.tls_revoke_best_effort

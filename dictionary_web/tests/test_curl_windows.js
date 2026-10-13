@@ -32,7 +32,7 @@ test('Windows curl candidates can be selected, pinned and repaired', { skip: pro
         assert.match(result.stdout, /Configuration saved and verified:/);
         assert.doesNotMatch(result.stdout, /Wordbook: http|SQLite .* selected/);
         const saved = JSON.parse(fs.readFileSync(config));
-        assert.deepEqual(saved, { ...existing, curl_dll: candidate[2], tls_revoke_best_effort: true, proxy: 'auto' });
+        assert.deepEqual(saved, { ...existing, curl_dll: candidate[2], tls_revoke_best_effort: true, proxy: 'auto', http_client: 'curl' });
         for (const [flags, pattern] of [[['--curl-select'], /Invalid curl selection/],
             [['--curl-select', '--curl-dll', path.join(dir, 'missing.dll')], /missing or unreadable/],
             [['--curl-select', '--curl-dll', path.join(process.env.SystemRoot, 'System32', 'kernel32.dll')], /missing curl_/]]) {
@@ -43,7 +43,7 @@ test('Windows curl candidates can be selected, pinned and repaired', { skip: pro
         result = run(['--curl-select', '--curl-dll', saved.curl_dll], undefined, undefined,
             { WORDBOOK_CURL_DLL: path.join(dir, 'missing.dll') });
         assert.equal(result.status, 0, result.stderr);
-        result = run(['--db', path.join(dir, 'unused.db'), '--dict-db', 'none'], undefined, undefined,
+        result = run(['--http-client', 'curl', '--db', path.join(dir, 'unused.db'), '--dict-db', 'none'], undefined, undefined,
             { WORDBOOK_CURL_DLL: path.join(dir, 'missing.dll') });
         assert.equal(result.status, 1); assert.match(result.stderr, /missing or unreadable/);
         assert.ok(!fs.existsSync(path.join(dir, 'unused.db')));
@@ -52,7 +52,7 @@ test('Windows curl candidates can be selected, pinned and repaired', { skip: pro
             ffi.load=function(name,...) if name=='libcurl' or name=='libcurl.dll' or name=='libcurl-4.dll' then
                 error('Unpinned curl loading forbidden') end return original(name,...) end`;
         child = spawn('luajit', ['-e', setup, app, '--config', config, '--db', path.join(dir, 'words.db'),
-            '--dict-db', 'none', '--port', '0'], { env: { ...process.env, WORDBOOK_CURL_DLL: '' } });
+            '--dict-db', 'none', '--port', '0', '--http-client', 'curl'], { env: { ...process.env, WORDBOOK_CURL_DLL: '' } });
         let logs = '';
         child.stderr.on('data', b => { logs += b; });
         const url = await new Promise((resolve, reject) => {
