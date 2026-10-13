@@ -77,6 +77,28 @@ and review progress; the app has no login. Internet access also depends on
 your router's port forwarding and network configuration. This option does
 not enable IPv6 listening.
 
+SQLite DLL selection on Windows:
+
+```powershell
+luajit dictionary_web/app.lua --sqlite-list
+luajit dictionary_web/app.lua --sqlite-select
+luajit dictionary_web/app.lua --sqlite-dll C:/SQLite/sqlite3.dll --save-config
+```
+
+`--sqlite-select` validates the chosen library, saves its path, verifies the file,
+and exits without opening application databases or starting the server. Both the
+web journal and shared vocabulary binding use the same library. Validation checks
+LuaJIT architecture, required APIs, UPSERT, and FTS5 search support.
+
+Configuration defaults to `%APPDATA%/wordbook/config.json` on Windows and
+`$XDG_CONFIG_HOME/wordbook/config.json` (or `~/.config/wordbook/config.json`) on Linux.
+Use `--config FILE` to choose another file. Existing settings are preserved and
+missing configuration directories are created when saving. Selection precedence is
+`--sqlite-dll`, `WORDBOOK_SQLITE3`, then saved `sqlite_dll`. Invalid explicit or saved
+pins produce an error; `--sqlite-select` ignores old environment and saved pins so
+you can repair them. `--sqlite-list` lists paths and sources without loading DLLs.
+These settings configure the web app; standalone `ffi_dict.lua` keeps its own loader.
+
 The default database is `dictionary_web/wordbook.db`, ignored by Git. Back up
 that file with the app stopped. Ctrl-C and SIGTERM close the server and database.
 HTTP connections are handled concurrently. On Linux, up to four background workers fetch

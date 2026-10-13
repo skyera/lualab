@@ -17,7 +17,7 @@ test('Windows daily content and provider requests avoid POSIX workers', { skip: 
             return {definitions={'Windows fixture definition'},examples={}}
         end`;
     const child = spawn('luajit', ['-e', setup, path.join(root, 'app.lua'), '--port', '0', '--db',
-        path.join(dir, 'words.db'), '--dict-db', 'none', '--no-auto-import']);
+        path.join(dir, 'words.db'), '--config', path.join(dir, 'config.json'), '--dict-db', 'none', '--no-auto-import']);
     let logs = '';
     child.stderr.on('data', b => { logs += b; });
     try {
@@ -48,6 +48,76 @@ test('Windows daily content and provider requests avoid POSIX workers', { skip: 
         assert.doesNotMatch(logs, /cannot resolve symbol|Request failed|POSIX workers/);
     } finally {
         if (child.exitCode === null && child.signalCode === null) {
+            const exited = once(child, 'exit'); child.kill(); await exited;
+        }
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+
+test('Windows dictionary SQLite selection saves, repairs pins and reuses both bindings', { skip: process.platform !== 'win32' }, async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dict-select-'));
+    const config = path.join(dir, 'settings', 'config.json');
+    const app = path.join(root, 'app.lua');
+    const run = (flags, input) => spawnSync('luajit', [app, '--config', config, ...flags],
+        { encoding: 'utf8', input, timeout: 10000, env: { ...process.env, WORDBOOK_SQLITE3: '' } });
+    let child;
+    try {
+        let result = run(['--sqlite-list']);
+        assert.equal(result.status, 0, result.stderr);
+        const found = result.stdout.match(/(\d+)\. (.+sqlite3(?:-3)?\.dll) \[/);
+        assert.ok(found, result.stdout);
+        fs.mkdirSync(path.dirname(config));
+        const existing = { custom: { value: 7 }, sqlite_dll: 'missing.dll' };
+        fs.writeFileSync(config, JSON.stringify(existing));
+        result = run(['--sqlite-select'], found[1] + '\n');
+        assert.equal(result.status, 0, result.stdout + result.stderr);
+        assert.match(result.stdout, /FTS5 verified/);
+        assert.match(result.stdout, /Configuration saved and verified:/);
+        assert.doesNotMatch(result.stdout, /Wordbook: http/);
+        const saved = JSON.parse(fs.readFileSync(config));
+        assert.deepEqual(saved, { ...existing, sqlite_dll: found[2] });
+        for (const flags of [['--sqlite-select'], ['--sqlite-select', '--sqlite-dll', path.join(dir, 'missing.dll')],
+            ['--sqlite-select', '--sqlite-dll', path.join(process.env.SystemRoot, 'System32', 'kernel32.dll')]]) {
+            result = run(flags, '99999\n');
+            assert.equal(result.status, 1); assert.match(result.stderr, /SQLite recovery:/);
+            assert.deepEqual(JSON.parse(fs.readFileSync(config)), saved);
+        }
+        const ftsSetup = `local ffi=require('ffi'); local original=ffi.load;
+            ffi.load=function(name,...)
+                local lib=original(name,...)
+                if name==${JSON.stringify(saved.sqlite_dll)} then
+                    return setmetatable({sqlite3_exec=function(db,sql,...)
+                        if sql:find('fts5',1,true) then return 1 end
+                        return lib.sqlite3_exec(db,sql,...)
+                    end},{__index=lib})
+                end
+                return lib
+            end`;
+        result = spawnSync('luajit', ['-e', ftsSetup, app, '--config', config, '--sqlite-select',
+            '--sqlite-dll', saved.sqlite_dll], { encoding: 'utf8', timeout: 10000 });
+        assert.equal(result.status, 1); assert.match(result.stderr, /FTS5/);
+        assert.deepEqual(JSON.parse(fs.readFileSync(config)), saved);
+        const setup = `package.path=${JSON.stringify(root.replaceAll('\\', '/') + '/?.lua;')}..package.path;
+            local ffi=require('ffi'); local original=ffi.load;
+            ffi.load=function(name,...) if name=='sqlite3' then error('Unpinned loading forbidden') end return original(name,...) end`;
+        child = spawn('luajit', ['-e', setup, app, '--config', config, '--db', path.join(dir, 'words.db'),
+            '--dict-db', 'none', '--port', '0']);
+        let logs = '';
+        child.stderr.on('data', b => { logs += b; });
+        const url = await new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error(logs)), 5000);
+            child.on('exit', code => { clearTimeout(timer); reject(new Error('Exited ' + code + ': ' + logs)); });
+            child.stdout.on('data', b => {
+                logs += b; const match = logs.match(/Wordbook: (http:\/\/127\.0\.0\.1:\d+)/);
+                if (match) { clearTimeout(timer); resolve(match[1]); }
+            });
+        });
+        assert.ok(logs.includes(saved.sqlite_dll));
+        assert.equal((await fetch(url + '/api/stats')).status, 200);
+        assert.doesNotMatch(logs, /Unpinned loading forbidden/);
+    } finally {
+        if (child && child.exitCode === null && child.signalCode === null) {
             const exited = once(child, 'exit'); child.kill(); await exited;
         }
         fs.rmSync(dir, { recursive: true, force: true });

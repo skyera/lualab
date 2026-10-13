@@ -171,7 +171,7 @@ local function load_sqlite_lib()
     error("Could not load SQLite3 shared library. Ensure libsqlite3 is installed.")
 end
 
-local sqlite = load_sqlite_lib()
+local sqlite
 
 local SQLITE_OK   = 0
 local SQLITE_ROW  = 100
@@ -440,7 +440,13 @@ local function col_text(stmt, i)
     return ffi.string(p, sqlite.sqlite3_column_bytes(stmt, i))
 end
 
+function Database.set_library(library)
+    assert(not sqlite or sqlite == library, 'SQLite library is already in use')
+    sqlite = library
+end
+
 function Database.open(path)
+    if not sqlite then sqlite = load_sqlite_lib() end
     local self = setmetatable({}, Database)
     local db_p = ffi.new("sqlite3*[1]")
     if sqlite.sqlite3_open(path, db_p) ~= SQLITE_OK then

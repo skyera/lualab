@@ -33,7 +33,7 @@ function M.inspect(path)
     return true
 end
 
-function M.discover(root)
+function M.discover(root, script_dir)
     if not WINDOWS then return { { path = 'sqlite3', source = 'loader' }, { path = 'libsqlite3.so.0', source = 'loader' } } end
     ffi.cdef[[unsigned long __stdcall GetModuleFileNameW(void *, uint16_t *, unsigned long);
     int __stdcall WideCharToMultiByte(unsigned int, unsigned long, const uint16_t *, int,
@@ -46,7 +46,7 @@ function M.discover(root)
     local bytes = ffi.new('char[?]', size)
     kernel.WideCharToMultiByte(65001, 0, buffer, length, bytes, size, nil, nil)
     local executable = ffi.string(bytes, size):gsub('\\', '/')
-    local dirs = { { path = root, source = 'repository' }, { path = root .. '/wiki_web', source = 'script' },
+    local dirs = { { path = root, source = 'repository' }, { path = script_dir or root .. '/wiki_web', source = 'script' },
         { path = executable:match('^(.*)/'), source = 'LuaJIT directory' }, { path = '.', source = 'current directory' } }
     local system_root = windows_args.getenv('SystemRoot')
     if system_root then dirs[#dirs + 1] = { path = system_root .. '/System32', source = 'Windows system directory' } end
@@ -76,7 +76,7 @@ function M.discover(root)
     return candidates
 end
 
-function M.validate(path, report)
+function M.validate(path, report, require_fts5)
     if WINDOWS then
         local compatible, reason = M.inspect(path)
         assert(compatible, path .. ': ' .. tostring(reason))
@@ -111,26 +111,39 @@ function M.validate(path, report)
         error('SQLite cannot open an in-memory database: ' .. path)
     end
     local err = ffi.new('char *[1]')
-    status = library.sqlite3_exec(db[0], [[CREATE TABLE probe(value TEXT PRIMARY KEY);
+    local probe_sql = [[CREATE TABLE probe(value TEXT PRIMARY KEY);
         INSERT INTO probe VALUES('test');
-        INSERT INTO probe VALUES('test') ON CONFLICT(value) DO UPDATE SET value=excluded.value;]], nil, nil, err)
-    local message = err[0] ~= nil and ffi.string(err[0]) or 'SQLite UPSERT validation failed'
+        INSERT INTO probe VALUES('test') ON CONFLICT(value) DO UPDATE SET value=excluded.value;]]
+    if require_fts5 then
+        for _, symbol in ipairs({ 'sqlite3_reset', 'sqlite3_bind_int', 'sqlite3_bind_int64',
+            'sqlite3_column_int', 'sqlite3_column_int64', 'sqlite3_last_insert_rowid' }) do
+            if not pcall(function() return library[symbol] end) then
+                library.sqlite3_close(db[0])
+                error('SQLite library is missing ' .. symbol .. ': ' .. path)
+            end
+        end
+        probe_sql = probe_sql .. [[CREATE VIRTUAL TABLE search_probe USING fts5(value);
+            INSERT INTO search_probe VALUES('test');
+            SELECT value FROM search_probe WHERE search_probe MATCH 'test';]]
+    end
+    status = library.sqlite3_exec(db[0], probe_sql, nil, nil, err)
+    local message = err[0] ~= nil and ffi.string(err[0]) or (require_fts5 and 'SQLite FTS5/UPSERT validation failed' or 'SQLite UPSERT validation failed')
     if err[0] ~= nil then library.sqlite3_free(err[0]) end
     library.sqlite3_close(db[0])
     assert(status == 0, path .. ': ' .. message)
-    return library, { path = path, version = version }
+    return library, { path = path, version = version, library = library }
 end
 
 function M.load(root, options, config, report, warn)
     local override = options.sqlite_dll or (not options.sqlite_select
-        and (windows_args.getenv('LEAF_WIKI_SQLITE3') or config.sqlite_dll))
+        and (windows_args.getenv(options.sqlite_env or 'LEAF_WIKI_SQLITE3') or config.sqlite_dll))
     if override then
         local path = not WINDOWS and not override:find('/', 1, true) and override or Fs.resolve(override)
-        local library, info = M.validate(path, report)
+        local library, info = M.validate(path, report, options.require_fts5)
         DB.set_library(library); info.pin = path
         return info
     end
-    local candidates = M.discover(root)
+    local candidates = M.discover(root, options.script_dir)
     if options.sqlite_select or (WINDOWS and #candidates > 1) then
         local interactive = options.sqlite_select
         if WINDOWS then
@@ -142,22 +155,22 @@ function M.load(root, options, config, report, warn)
         if #candidates > 0 and interactive then
             for index, candidate in ipairs(candidates) do
                 print(index .. '. ' .. candidate.path .. ' [' .. candidate.source .. ']'
-                    .. (candidate.reason and ' — ' .. candidate.reason or ''))
+                    .. (candidate.reason and ' - ' .. candidate.reason or ''))
             end
             io.write('Select SQLite library [1-' .. #candidates .. '] (default 1): '); io.stdout:flush()
             local choice = io.read('*l')
             local selected = choice == '' and 1 or tonumber(choice)
             assert(selected and selected % 1 == 0 and candidates[selected], 'Invalid SQLite selection')
-            local library, info = M.validate(candidates[selected].path, report)
+            local library, info = M.validate(candidates[selected].path, report, options.require_fts5)
             DB.set_library(library); info.pin = info.path
             return info
         end
     end
     for _, candidate in ipairs(candidates) do
-        local ok, library, info = pcall(M.validate, candidate.path, report)
+        local ok, library, info = pcall(M.validate, candidate.path, report, options.require_fts5)
         if ok then DB.set_library(library); info.pin = WINDOWS and info.path or nil; return info end
         if warn and WINDOWS then warn(tostring(library)) end
     end
-    error('No usable SQLite library found. Use --sqlite-list and --sqlite-dll PATH or LEAF_WIKI_SQLITE3.')
+    error('No usable SQLite library found. Use --sqlite-list, --sqlite-select, or --sqlite-dll PATH.')
 end
 return M
