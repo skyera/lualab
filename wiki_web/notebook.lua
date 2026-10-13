@@ -15,13 +15,17 @@ CREATE TABLE IF NOT EXISTS links(source TEXT NOT NULL, target TEXT NOT NULL, PRI
 CREATE INDEX IF NOT EXISTS links_target ON links(target);
 ]]
 
-function Notebook.open(data_dir, cache_dir)
+function Notebook.open(data_dir, cache_dir, progress)
+    progress = progress or function() end
+    progress('Opening notebook: ' .. tostring(data_dir))
     local fs = Fs.open(data_dir)
+    progress('Acquiring notebook lock')
     local locked, lock = pcall(fs.lock, fs)
     if not locked then fs:close(); error(lock) end
     local self = setmetatable({ fs = fs, lock = lock }, Notebook)
     self.history = History.open(fs)
     local ok, err = pcall(function()
+        progress('Preparing search cache: ' .. tostring(cache_dir))
         local cache = Fs.absolute(cache_dir)
         local cache_key, root_key = cache, fs.root
         if package.config:sub(1, 1) == '\\' then
@@ -31,9 +35,12 @@ function Notebook.open(data_dir, cache_dir)
             'Cache must be outside the notebook')
         local index_dir = Fs.absolute(cache .. '/' .. hash.sha256(fs.root):sub(1, 24))
         self.index_path = index_dir .. '/index.db'
+        progress('Opening SQLite index: ' .. self.index_path)
         self.db = DB.open(self.index_path, SCHEMA)
+        progress('Recovering interrupted operations')
         self:recover()
-        self:sync()
+        progress('Scanning notebook files')
+        self:sync(progress)
     end)
     if not ok then self:close(); error(err) end
     return self
@@ -52,11 +59,16 @@ function Notebook:page(id)
     return { id = id, title = id:match('[^/]+$'), content = text, revision = hash.sha256(text), tags = tags.parse(text) }
 end
 
-function Notebook:sync()
+function Notebook:sync(progress)
     local seen, page_tags = {}, {}
     self.db:query('BEGIN;')
     local ok, err = pcall(function()
-        for _, path in ipairs(self.fs:list()) do
+        local paths = self.fs:list()
+        if progress then progress('Indexing ' .. #paths .. ' pages') end
+        for index, path in ipairs(paths) do
+            if progress and (index == 1 or index % 25 == 0) then
+                progress('Indexing ' .. index .. '/' .. #paths .. ': ' .. path)
+            end
             local id = path:sub(1, -4)
             if links.page_id(id) then
                 local page = self:page(id)

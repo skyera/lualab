@@ -37,9 +37,15 @@ class LinuxHttpTests(unittest.TestCase):
                     with selectors.DefaultSelector() as selector:
                         selector.register(child.stdout, selectors.EVENT_READ)
                         self.assertTrue(selector.select(10), "Server startup timed out")
-                    line = child.stdout.readline()
+                    lines = []
+                    while True:
+                        line = child.stdout.readline()
+                        lines.append(line)
+                        if not line or "Leaf Wiki: http://" in line:
+                            break
                     match = re.search(r"http://127\.0\.0\.1:(\d+)", line)
                     self.assertIsNotNone(match, line)
+                    self.assertIn("Loading modules", "".join(lines))
                     self.assertIn("listening on " + host, line)
                     address = ("0100007F" if host == "127.0.0.1" else "00000000") + ":" + format(int(match.group(1)), "04X")
                     sockets = Path("/proc/{}/net/tcp".format(child.pid)).read_text().splitlines()

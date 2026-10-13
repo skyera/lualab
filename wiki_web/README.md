@@ -84,6 +84,26 @@ detect visible external edits, but cannot coordinate simultaneous cloud writes
 or guarantee that a sync client has uploaded them. Back up the entire notebook
 folder, including attachments and `.leaf` if you want to retain trashed pages.
 
+## Startup diagnostics
+
+Both `luajit wiki_web.lua` and `luajit app.lua` from the `wiki_web` folder print
+flushed startup phases: module loading, configuration, notebook locking, cache
+setup, indexing, and HTTP startup. Larger notebooks also show indexing progress.
+If startup fails, the app reports **Leaf Wiki failed during: ...**, prints the
+underlying error and traceback, and exits with status 1. The normal URL appears
+when the server is ready. `--help` keeps its concise usage output.
+
+Run from PowerShell to keep errors visible. Capture both output streams with:
+
+```powershell
+luajit .\wiki_web.lua 2>&1 | Tee-Object wiki-startup.log
+```
+
+If the process still exits abruptly without an error report, the last phase
+identifies where it stopped. Immediately inspect `$LASTEXITCODE`; native DLL
+crashes and forced termination cannot be caught by Lua's error handler. Verify
+that LuaJIT and `sqlite3.dll` have matching architectures.
+
 ## Writing and navigation
 
 - **+ Page** creates a page. Use `/` or `:` between namespace components, such

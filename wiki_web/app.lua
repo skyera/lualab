@@ -8,6 +8,11 @@ if direct_script then
     package.path = script_dir .. '/?.lua;' .. direct_root .. '/dictionary_web/?.lua;'
         .. direct_root .. '/?.lua;' .. package.path
 end
+local startup = require('startup')
+if direct_script and not startup.running then
+    if not startup.launch(function() require('app').run(direct_root) end) then os.exit(1) end
+    return
+end
 local windows_args = require('windows_args')
 windows_args.normalize()
 local getenv = windows_args.getenv
@@ -82,6 +87,7 @@ function M.run(root)
         index = index + 1
     end
     config_path = (options.config or config_path):gsub('\\', '/')
+    startup.report('Reading configuration: ' .. config_path)
     local raw = read(config_path)
     local config = raw and json.decode(raw) or {}
     assert(type(config) == 'table', 'Configuration must be a JSON object')
@@ -99,8 +105,10 @@ function M.run(root)
     local port = tonumber(options.port)
     assert(port and port >= 0 and port <= 65535 and port % 1 == 0, 'Invalid port')
     assert(options.host == '127.0.0.1' or options.host == '0.0.0.0', 'Host must be 127.0.0.1 or 0.0.0.0')
-    local notebook = Notebook.open(data_dir, options.cache_dir or cache)
+    local notebook = Notebook.open(data_dir, options.cache_dir or cache, startup.report)
+    startup.track(notebook)
     if options.save_config then
+        startup.report('Saving configuration: ' .. config_path)
         local parent = config_path:match('^(.*)/[^/]+$') or '.'
         local fs = Fs.open(parent)
         fs:write(config_path:match('[^/]+$'), json.encode({ data_dir = notebook.fs.root, dict_db = dictionary_path }))
@@ -171,7 +179,9 @@ function M.run(root)
         if not result[1] then return reply({ error = tostring(result[2]):gsub('^.-:%d+: ', '') }, 400) end
         return result[2], result[3], result[4], result[5]
     end
+    startup.report('Starting HTTP server on ' .. options.host .. ':' .. port)
     local ok, err = pcall(http.serve, port, handler, function(actual_port)
+        startup.report('Server running')
         print('Leaf Wiki: http://127.0.0.1:' .. actual_port
             .. ' (listening on ' .. options.host .. ') | Notebook: ' .. notebook.fs.root)
         io.stdout:flush()
@@ -179,5 +189,4 @@ function M.run(root)
     notebook:close()
     if not ok then error(err) end
 end
-if direct_script then M.run(direct_root) end
 return M

@@ -74,6 +74,58 @@ test('app.lua -h prints usage and exits successfully', () => {
   assert.equal(result.stderr, '');
 });
 
+test('both launchers print startup phases and identify configuration, file, and dependency failures', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-startup-'));
+  try {
+    const config = path.join(directory, 'config.json'); fs.writeFileSync(config, '{broken');
+    for (const entry of [path.join(root, 'wiki_web.lua'), path.join(root, 'wiki_web/app.lua')]) {
+      const result = spawnSync('luajit', [entry, '--config', config], { cwd: os.tmpdir(), encoding: 'utf8', timeout: 5000 });
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stdout, /Leaf Wiki: Loading modules/);
+      assert.match(result.stdout, /Reading configuration:/);
+      assert.match(result.stderr, /Leaf Wiki failed during: Reading configuration:/);
+      const missing = spawnSync('luajit', ['-e', "package.preload.ffi=function() error('Injected missing native dependency') end",
+        entry, '--port', '0'], { cwd: os.tmpdir(), encoding: 'utf8', timeout: 5000 });
+      assert.equal(missing.status, 1);
+      assert.match(missing.stdout, /Loading modules/);
+      assert.match(missing.stderr, /Leaf Wiki failed during: Loading modules/);
+      assert.match(missing.stderr, /Injected missing native dependency/);
+    }
+    fs.writeFileSync(config, '{}');
+    const notebook = path.join(directory, 'notebook'); fs.mkdirSync(notebook);
+    fs.writeFileSync(path.join(notebook, 'Invalid.md'), Buffer.from([255]));
+    const result = spawnSync('luajit', [path.join(root, 'wiki_web.lua'), '--config', config,
+      '--data-dir', notebook, '--cache-dir', path.join(directory, 'cache'), '--port', '0'], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stdout, /Indexing 1\/1: Invalid.md/);
+    assert.match(result.stderr, /failed during: Indexing 1\/1: Invalid.md/);
+    assert.match(result.stderr, /UTF-8/);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('lock and occupied-port failures identify their phase and print errors', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-startup-lock-'));
+  let server;
+  try {
+    const notebook = path.join(directory, 'notebook');
+    server = await start(directory, ['--data-dir', notebook]);
+    assert.match(server.logs(), /Acquiring notebook lock/); assert.match(server.logs(), /Indexing 0 pages/);
+    const flags = ['--config', path.join(directory, 'config.json'), '--cache-dir', path.join(directory, 'cache')];
+    const locked = spawnSync('luajit', [path.join(root, 'wiki_web.lua'), ...flags, '--data-dir', notebook], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(locked.status, 1); assert.match(locked.stderr, /failed during: Acquiring notebook lock/);
+    assert.match(locked.stderr, /already open/);
+    const port = new URL(server.url).port;
+    const occupied = spawnSync('luajit', [path.join(root, 'wiki_web/app.lua'), ...flags,
+      '--data-dir', path.join(directory, 'other'), '--port', port], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(occupied.status, 1);
+    assert.match(occupied.stderr, /failed during: Starting HTTP server on 127\.0\.0\.1:/);
+    assert.match(occupied.stderr, /Cannot bind port/);
+  } finally {
+    if (server) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('default binding is loopback; LAN access requires an explicit host each launch', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-bind-'));
   let server;
