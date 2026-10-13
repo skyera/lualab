@@ -73,6 +73,13 @@ function M.configure(root, options)
             io.stderr:write('Wordbook warning: ' .. message .. '\n'); io.stderr:flush()
         end)
         require('net').set_curl(library, curl_info)
+        local proxy = options.proxy or config.proxy or 'auto'
+        require('net').set_proxy(proxy)
+        if proxy == 'auto' and ffi.os == 'Windows' then
+            report('HTTP proxy: Windows settings (explicit proxy environment variables take precedence)')
+        else
+            report('HTTP proxy: ' .. (proxy == 'auto' and 'curl defaults' or proxy == 'none' and 'direct' or 'configured'))
+        end
         local active = require('net').set_tls_revoke_best_effort(tls_best_effort == true)
         if active then
             report('TLS revocation: best effort (Schannel); certificate and hostname verification enabled')
@@ -90,6 +97,7 @@ function M.configure(root, options)
     if options.sqlite_select or options.curl_select or options.save_config then
         if info then config.sqlite_dll = info.pin or info.path end
         if curl_info and curl_info.path then config.curl_dll = curl_info.path end
+        if options.proxy ~= nil then config.proxy = options.proxy end
         if options.tls_revoke_best_effort ~= nil then
             config.tls_revoke_best_effort = options.tls_revoke_best_effort
         end

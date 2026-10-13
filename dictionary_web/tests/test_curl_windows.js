@@ -26,13 +26,13 @@ test('Windows curl candidates can be selected, pinned and repaired', { skip: pro
         fs.mkdirSync(path.dirname(config));
         const existing = { custom: { value: 42 }, curl_dll: 'missing.dll' };
         fs.writeFileSync(config, JSON.stringify(existing));
-        result = run(['--curl-select', '--tls-revoke-best-effort'], candidate[1] + '\n');
+        result = run(['--curl-select', '--tls-revoke-best-effort', '--proxy', 'auto'], candidate[1] + '\n');
         assert.equal(result.status, 0, result.stdout + result.stderr);
         assert.match(result.stdout, /selected \(HTTPS/);
         assert.match(result.stdout, /Configuration saved and verified:/);
         assert.doesNotMatch(result.stdout, /Wordbook: http|SQLite .* selected/);
         const saved = JSON.parse(fs.readFileSync(config));
-        assert.deepEqual(saved, { ...existing, curl_dll: candidate[2], tls_revoke_best_effort: true });
+        assert.deepEqual(saved, { ...existing, curl_dll: candidate[2], tls_revoke_best_effort: true, proxy: 'auto' });
         for (const [flags, pattern] of [[['--curl-select'], /Invalid curl selection/],
             [['--curl-select', '--curl-dll', path.join(dir, 'missing.dll')], /missing or unreadable/],
             [['--curl-select', '--curl-dll', path.join(process.env.SystemRoot, 'System32', 'kernel32.dll')], /missing curl_/]]) {
@@ -69,9 +69,11 @@ test('Windows curl candidates can be selected, pinned and repaired', { skip: pro
         assert.equal((await fetch(url + '/api/stats')).status, 200);
         assert.doesNotMatch(logs, /Unpinned curl loading forbidden/);
         const exited = once(child, 'exit'); child.kill(); await exited;
-        result = run(['--curl-select', '--curl-dll', saved.curl_dll, '--tls-revoke-strict']);
+        result = run(['--curl-select', '--curl-dll', saved.curl_dll, '--tls-revoke-strict', '--proxy', 'none']);
         assert.equal(result.status, 0, result.stderr);
         assert.equal(JSON.parse(fs.readFileSync(config)).tls_revoke_best_effort, false);
+        assert.equal(JSON.parse(fs.readFileSync(config)).proxy, 'none');
+        assert.match(result.stdout, /HTTP proxy: direct/);
         assert.match(result.stdout, /TLS revocation: backend defaults/);
         fs.unlinkSync(config); fs.rmdirSync(path.dirname(config));
         result = run(['--curl-select', '--curl-dll', saved.curl_dll]);
@@ -121,7 +123,7 @@ test('Best-effort revocation keeps TLS verification and fails revoked certificat
             curl_easy_getinfo=function(_,_,value) value[0]=200;return 0 end,
             curl_easy_strerror=function() return 'Certificate error' end}
         local info={path='fixture.dll',version='8.11.1',version_num=0x080b01,tls='Schannel'}
-        net.set_curl(fake,info)
+        net.set_curl(fake,info);net.set_proxy('none')
         options={};assert(net.fetch('https://example.invalid/')=='')
         assert(tonumber(options[64])==1 and tonumber(options[81])==2 and options[216]==nil)
         assert(net.set_tls_revoke_best_effort(true))

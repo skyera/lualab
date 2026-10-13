@@ -14,6 +14,7 @@ unsigned char *SHA256(const unsigned char *, size_t, unsigned char *);
 ]]
 local curl, curl_info
 local tls_revoke_best_effort = false
+local proxy_mode = 'auto'
 local CURLOPT = {
     TIMEOUT         = 13,
     FOLLOWLOCATION  = 52,
@@ -26,6 +27,9 @@ local CURLOPT = {
     SSL_VERIFYPEER  = 64,
     SSL_VERIFYHOST  = 81,
     SSL_OPTIONS     = 216,
+    HTTP_VERSION    = 84,
+    PROXY           = 10004,
+    ACCEPT_ENCODING = 10102,
     URL             = 10002,
     ERRORBUFFER     = 10010,
     POSTFIELDS      = 10015,
@@ -53,6 +57,28 @@ function M.set_tls_revoke_best_effort(enabled)
     return enabled and schannel ~= nil
 end
 
+function M.set_proxy(value)
+    assert(type(value) == 'string' and #value > 0 and #value <= 2048
+        and not value:find('[%z\1-\31\127]'), 'Invalid proxy setting')
+    assert(value == 'auto' or value == 'none' or value:match('^https?://.+')
+        or value:match('^socks[45]h?://.+'), 'Proxy must be auto, none, or an HTTP/HTTPS/SOCKS URL')
+    proxy_mode = value
+end
+
+local function request_proxy(url)
+    if proxy_mode == 'none' then return '', 'direct override' end
+    if proxy_mode ~= 'auto' then return proxy_mode, 'configured proxy' end
+    if ffi.os ~= 'Windows' then return nil, 'curl defaults' end
+    local windows_args = require('windows_args')
+    for _, name in ipairs({ 'https_proxy', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY' }) do
+        local value = windows_args.getenv(name)
+        if value and value ~= '' then return nil, 'curl environment proxy' end
+    end
+    local proxy, source, warning = require('windows_proxy').resolve(url)
+    if warning then io.stderr:write('Wordbook warning: ' .. warning .. '\n'); io.stderr:flush() end
+    return proxy, source
+end
+
 local function load_curl()
     if curl_info then return end
     local source = debug.getinfo(1, 'S').source:sub(2):gsub('\\', '/')
@@ -70,6 +96,7 @@ function M.fetch(url, body)
     if handle == nil then
         return nil, 'Could not initialize HTTPS request.'
     end
+    local route = 'unresolved'
     local error_buffer = ffi.new('char[256]')
     local chunks, size = {}, 0
     local callback = ffi.cast('size_t (*)(char *, size_t, size_t, void *)', function(data, unit, count)
@@ -88,7 +115,17 @@ function M.fetch(url, body)
     local ok, result, message = pcall(function()
         option(CURLOPT.URL, url)
         option(CURLOPT.ERRORBUFFER, error_buffer)
-        option(CURLOPT.USERAGENT, 'Wordbook/1.0 (personal dictionary)')
+        local proxy
+        proxy, route = request_proxy(url)
+        if proxy ~= nil then option(CURLOPT.PROXY, proxy) end
+        local public_page = url:match('^https://www%.iciba%.com/') or url:match('^https://dict%.cn/')
+            or url:match('^https://www%.youdao%.com/')
+        local agent = public_page and 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            .. 'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+            or 'Wordbook/1.0 (personal dictionary)'
+        option(CURLOPT.USERAGENT, agent)
+        option(CURLOPT.ACCEPT_ENCODING, '')
+        if public_page then option(CURLOPT.HTTP_VERSION, ffi.new('long', 2)) end -- HTTP/1.1
         option(CURLOPT.WRITEFUNCTION, callback)
         option(CURLOPT.FOLLOWLOCATION, ffi.new('long', 1))
         option(CURLOPT.MAXREDIRS, ffi.new('long', 4))
@@ -111,7 +148,7 @@ function M.fetch(url, body)
             local detail = ffi.string(error_buffer)
             if detail == '' then detail = ffi.string(curl.curl_easy_strerror(rc)) end
             return nil, 'Dictionary connection failed: ' .. detail .. ' (curl ' .. curl_info.version
-                .. ', ' .. curl_info.path .. ', URL: ' .. url .. ')'
+                .. ', ' .. curl_info.path .. ', route: ' .. route .. ', URL: ' .. url .. ')'
         end
         local status = ffi.new('long[1]')
         assert(curl.curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, status) == 0, 'Cannot read HTTP status')

@@ -30,7 +30,8 @@ local function main()
                 .. '[--db /path/wordbook.db] [--dict-db /path/.dict.db|none] [--import-dict] '
                 .. '[--no-auto-import] [--sqlite-list] [--sqlite-select] [--sqlite-dll PATH] '
                 .. '[--curl-list] [--curl-select] [--curl-dll PATH] '
-                .. '[--tls-revoke-best-effort|--tls-revoke-strict] [--config FILE] [--save-config]')
+                .. '[--tls-revoke-best-effort|--tls-revoke-strict] [--proxy auto|none|URL] '
+                .. '[--config FILE] [--save-config]')
             os.exit(0)
         elseif arg[index] == '--sqlite-list' then sqlite_options.sqlite_list = true
         elseif arg[index] == '--sqlite-select' then sqlite_options.sqlite_select = true
@@ -39,7 +40,7 @@ local function main()
         elseif arg[index] == '--tls-revoke-best-effort' then sqlite_options.tls_revoke_best_effort = true
         elseif arg[index] == '--tls-revoke-strict' then sqlite_options.tls_revoke_best_effort = false
         elseif arg[index] == '--save-config' then sqlite_options.save_config = true
-        elseif arg[index] == '--sqlite-dll' or arg[index] == '--curl-dll' or arg[index] == '--config' then
+        elseif arg[index] == '--sqlite-dll' or arg[index] == '--curl-dll' or arg[index] == '--proxy' or arg[index] == '--config' then
             local flag = arg[index]
             index = index + 1
             assert(arg[index] and arg[index]:sub(1, 2) ~= '--', 'Missing value for ' .. flag)

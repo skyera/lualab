@@ -137,6 +137,26 @@ retain their defaults and report that this setting is inactive. This configures
 web lookups, including Dict.cn and Iciba; it does not change Git's TLS settings.
 Restore the default and save it with `--tls-revoke-strict --save-config`.
 
+On Windows, HTTP requests use the current user's Windows proxy settings by default,
+including static proxies, bypass lists, and per-URL PAC resolution. Explicit curl
+proxy environment variables take precedence. PAC errors are reported with recovery
+instructions; a configured static proxy is used as a visible fallback when available.
+Public dictionary pages use browser-like headers, HTTP/1.1, and automatic response
+decompression while retaining HTTPS and certificate verification.
+
+Override and save the proxy route when needed:
+
+```powershell
+luajit dictionary_web/app.lua --proxy http://proxy.example:8080 --save-config
+luajit dictionary_web/app.lua --proxy none --save-config
+luajit dictionary_web/app.lua --proxy auto --save-config
+```
+
+`auto` is the default; Linux retains curl's environment-based routing. `none`
+forces a direct connection. Saved `proxy` settings are overridden by `--proxy`.
+These settings affect dictionary web requests, not Git downloads. Request failures
+include the route source to help diagnose office proxy differences.
+
 The default database is `dictionary_web/wordbook.db`, ignored by Git. Back up
 that file with the app stopped. Ctrl-C and SIGTERM close the server and database.
 HTTP connections are handled concurrently. On Linux, up to four background workers fetch
