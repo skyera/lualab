@@ -22,6 +22,9 @@ local Notebook = require('notebook')
 local http = require('http')
 local dictionary = require('dictionary')
 local is_windows = package.config:sub(1, 1) == '\\'
+local function quote(value)
+    return "'" .. value:gsub("'", is_windows and "''" or "'\\''") .. "'"
+end
 local M = {}
 local STATIC = {
     ['/'] = { 'index.html', 'text/html; charset=utf-8' },
@@ -63,6 +66,7 @@ local function is_allowed_host(host, port)
 end
 
 function M.run(root)
+    root = Fs.resolve(root)
     local home = (is_windows and getenv('USERPROFILE')) or getenv('HOME') or '.'
     local config_base = (is_windows and getenv('APPDATA')) or getenv('XDG_CONFIG_HOME') or home .. '/.config'
     local cache_base = (is_windows and getenv('LOCALAPPDATA')) or getenv('XDG_CACHE_HOME') or home .. '/.cache'
@@ -86,41 +90,80 @@ function M.run(root)
         else error('Unknown option: ' .. flag) end
         index = index + 1
     end
-    config_path = (options.config or config_path):gsub('\\', '/')
+    config_path = Fs.resolve(options.config or config_path)
+    local launcher = 'luajit ' .. quote(Fs.resolve(arg[0]))
+    local config_help = 'Configuration path: ' .. config_path
+        .. '\nTo create the config and its directory automatically:\n  ' .. launcher
+        .. ' --config ' .. quote(config_path) .. ' --dict-db none --save-config'
+        .. '\nFor an existing unreadable or malformed file, check permissions and back it up before repairing it.'
+        .. '\nMinimal JSON example:\n' .. json.encode({ data_dir = home:gsub('\\', '/') .. '/LeafWiki', dict_db = 'none' })
+    startup.set_recovery(config_help)
     startup.report('Reading configuration: ' .. config_path)
     local raw = read(config_path)
     if not raw then
         local message = 'Configuration not found; using defaults: ' .. config_path
         if options.config and not options.save_config then startup.warn(message)
         else startup.report(message) end
+        if not options.save_config then startup.show_help(config_help) end
     end
     local config = raw and json.decode(raw) or {}
     assert(type(config) == 'table', 'Configuration must be a JSON object')
-    local data_dir = options.data_dir or getenv('LEAF_WIKI_DATA_DIR') or config.data_dir or home .. '/LeafWiki'
+    local data_dir = Fs.resolve(options.data_dir or getenv('LEAF_WIKI_DATA_DIR') or config.data_dir or home .. '/LeafWiki')
+    cache = Fs.resolve(cache)
+    local cache_dir = Fs.resolve(options.cache_dir or cache)
     local dictionary_path = options.dict_db or config.dict_db or root .. '/.dict.db'
     assert(type(dictionary_path) == 'string' and dictionary_path ~= '' and not dictionary_path:find('%z'),
         'Invalid dictionary path')
     if dictionary_path ~= 'none' then
-        dictionary_path = dictionary_path:gsub('\\', '/')
+        dictionary_path = Fs.resolve(dictionary_path)
         assert(dictionary_path:match('[^/]+$'), 'Dictionary path must name a file')
-        if not dictionary_path:match('^%a:/') and dictionary_path:sub(1, 1) ~= '/' then
-            dictionary_path = Fs.absolute('.') .. '/' .. dictionary_path
-        end
     end
     local port = tonumber(options.port)
+    startup.set_recovery('Use --help to check command options:\n  ' .. launcher .. ' --help')
+    startup.report('Validating startup options')
     assert(port and port >= 0 and port <= 65535 and port % 1 == 0, 'Invalid port')
     assert(options.host == '127.0.0.1' or options.host == '0.0.0.0', 'Host must be 127.0.0.1 or 0.0.0.0')
+    local dictionary_help = 'Dictionary path: ' .. dictionary_path
+        .. '\nA dictionary needs imported definitions; an empty SQLite file is not sufficient.'
+        .. '\nFrom the repository root on Linux or WSL, create/import it with:\n  luajit download_dict.lua --db .dict.db'
+        .. '\nRequires Git and internet access. Then use the imported file on Windows or Linux:\n  '
+        .. launcher .. ' --dict-db ' .. quote(root:gsub('\\', '/') .. '/.dict.db')
+        .. '\nTo use another imported file, pass its path to --dict-db. Back up invalid databases before replacing them.'
+        .. '\nTo disable lookup:\n  ' .. launcher .. ' --dict-db none'
     if dictionary_path == 'none' then startup.report('Dictionary lookup disabled')
     else
+        startup.set_recovery(dictionary_help)
         startup.report('Checking dictionary: ' .. dictionary_path)
         local available, err = dictionary.check(dictionary_path)
         if available then startup.report('Dictionary available: ' .. dictionary_path)
-        else startup.warn('Dictionary unavailable: ' .. dictionary_path .. ' (' .. err
-            .. '). Notebook editing remains available; configure --dict-db with an imported dictionary or use none.') end
+        else
+            startup.warn('Dictionary unavailable: ' .. dictionary_path .. ' (' .. err
+                .. '). Notebook editing remains available; configure --dict-db with an imported dictionary or use none.')
+            startup.show_help(dictionary_help)
+        end
     end
-    local notebook = Notebook.open(data_dir, options.cache_dir or cache, startup.report)
+    local index_help = 'The SQLite search index is created automatically; no dictionary import is needed.'
+        .. '\nChoose a fresh writable cache folder outside the notebook to rebuild it:\n  ' .. launcher
+        .. ' --config ' .. quote(config_path) .. ' --data-dir ' .. quote(data_dir)
+        .. ' --cache-dir ' .. quote(cache:gsub('\\', '/') .. '-recovery') .. ' --dict-db none'
+        .. '\nCheck folder permissions and available disk space. Preserve the old cache when diagnosing corruption.'
+        .. '\nYour Markdown pages, images, and .leaf history stay in the notebook; do not delete them.'
+    local function progress(message)
+        if message:find('SQLite', 1, true) or message:find('Preparing search cache', 1, true) then
+            startup.set_recovery(index_help)
+        elseif message == 'Acquiring notebook lock' then
+            startup.set_recovery('Close the other Leaf Wiki server using this notebook (Ctrl-C), then retry. Do not delete its lock file.')
+        elseif message:find('Opening notebook:', 1, true) then
+            startup.set_recovery('Check the notebook folder path and permissions. --data-dir selects a folder and creates it when missing.')
+        elseif message:find('Recovering', 1, true) or message:find('Indexing', 1, true) or message:find('Scanning', 1, true) then
+            startup.set_recovery('Inspect the named Markdown file or recovery journal. Preserve your notebook files and correct the reported error before retrying.')
+        end
+        startup.report(message)
+    end
+    local notebook = Notebook.open(data_dir, cache_dir, progress)
     startup.track(notebook)
     if options.save_config then
+        startup.set_recovery(config_help)
         startup.report('Saving configuration: ' .. config_path)
         local parent = config_path:match('^(.*)/[^/]+$') or '.'
         local fs = Fs.open(parent)
@@ -204,6 +247,7 @@ function M.run(root)
         if not result[1] then return reply({ error = tostring(result[2]):gsub('^.-:%d+: ', '') }, 400) end
         return result[2], result[3], result[4], result[5]
     end
+    startup.set_recovery('Close the process using this port, or choose a free port:\n  ' .. launcher .. ' --port 0')
     startup.report('Starting HTTP server on ' .. options.host .. ':' .. port)
     local ok, err = pcall(http.serve, port, handler, function(actual_port)
         startup.report('Server running')

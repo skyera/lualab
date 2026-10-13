@@ -25,6 +25,11 @@ luajit .\wiki_web.lua --data-dir C:\Notes\LeafWiki --save-config
 
 Notebook names and paths support UTF-8, including Chinese characters. Examples
 use folders without spaces; paths containing spaces also work when quoted.
+Windows path options accept either separator, relative paths, `.` and `..`,
+`~`, and environment variables such as `%USERPROFILE%`. Paths are resolved to
+absolute `C:/...` form for diagnostics and saved JSON; UNC prefixes are preserved.
+Normalization does not create a file or folder. Missing directories are created
+only by operations that require them, such as saving config or opening a notebook.
 
 Open **http://127.0.0.1:8020** on the host computer. By default the server listens
 only on `127.0.0.1`, so it is accessible from this computer. The default notebook
@@ -116,6 +121,14 @@ corrupt search index is a fatal startup error. The optional dictionary is checke
 read-only at startup: missing or incompatible databases produce a warning without
 creating an empty file. Notebook editing remains available. Use `--dict-db none`
 to disable dictionary lookup explicitly.
+
+Missing or unreadable resources include setup/recovery help. Config diagnostics
+show the `--save-config` command (which creates missing parent directories) and
+a minimal JSON example. SQLite search-index failures show how to select a fresh
+writable cache folder, which creates and rebuilds the index automatically.
+Dictionary warnings show import instructions for Linux/WSL and how to configure
+an imported file or disable lookup. Existing files are never automatically deleted
+or replaced as part of recovery advice.
 
 ## Writing and navigation
 

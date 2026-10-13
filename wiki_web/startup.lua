@@ -1,7 +1,7 @@
 -- Dependency-free startup guard: flushed phase messages, protected errors, and
 -- cleanup of opened notebooks when initialization or serving fails.
 local M = { running = false }
-local phase, cleanups = 'Loading modules', {}
+local phase, cleanups, recovery = 'Loading modules', {}, nil
 
 function M.report(message)
     phase = message
@@ -15,13 +15,20 @@ function M.warn(message)
     end
 end
 
+function M.set_recovery(message) recovery = message end
+
+function M.show_help(message)
+    if M.running then io.stderr:write('Setup help:\n' .. message .. '\n'); io.stderr:flush() end
+end
+
 function M.track(notebook)
     if M.running then cleanups[#cleanups + 1] = function() notebook:close() end end
 end
 
 function M.launch(run)
     M.running = true
-    phase, cleanups = 'Loading modules', {}
+    phase, cleanups, recovery = 'Loading modules', {},
+        'Install LuaJIT and its matching-architecture SQLite library. On Windows, put sqlite3.dll beside luajit.exe or on PATH.'
     local help = #arg == 1 and (arg[1] == '-h' or arg[1] == '--help')
     if not help then M.report(phase) end
     local ok, err = xpcall(run, debug.traceback)
@@ -32,6 +39,7 @@ function M.launch(run)
     cleanups, M.running = {}, false
     if not ok then
         io.stderr:write('\nLeaf Wiki failed during: ' .. phase .. '\n' .. tostring(err) .. '\n')
+        if recovery then io.stderr:write('\nRecovery help:\n' .. recovery .. '\n') end
         io.stderr:flush()
     end
     return ok

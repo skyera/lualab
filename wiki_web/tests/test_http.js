@@ -84,6 +84,9 @@ test('both launchers print startup phases and identify configuration, file, and 
       assert.match(result.stdout, /Leaf Wiki: Loading modules/);
       assert.match(result.stdout, /Reading configuration:/);
       assert.match(result.stderr, /Leaf Wiki failed during: Reading configuration:/);
+      assert.match(result.stderr, /Recovery help:/);
+      assert.match(result.stderr, /--save-config/);
+      assert.match(result.stderr, /Minimal JSON example:/);
       const missing = spawnSync('luajit', ['-e', "package.preload.ffi=function() error('Injected missing native dependency') end",
         entry, '--port', '0'], { cwd: os.tmpdir(), encoding: 'utf8', timeout: 5000 });
       assert.equal(missing.status, 1);
@@ -120,6 +123,9 @@ test('lock and occupied-port failures identify their phase and print errors', as
     assert.equal(occupied.status, 1);
     assert.match(occupied.stderr, /failed during: Starting HTTP server on 127\.0\.0\.1:/);
     assert.match(occupied.stderr, /Cannot bind port/);
+    assert.ok(occupied.stderr.includes('Cannot bind port ' + port + ' on 127.0.0.1'));
+    assert.match(occupied.stderr, /socket error \d+/);
+    assert.match(occupied.stderr, /--port 0/);
   } finally {
     if (server) await stop(server);
     fs.rmSync(directory, { recursive: true, force: true });
@@ -136,6 +142,9 @@ test('missing configuration and dictionaries are visible; only the search index 
     server = await start(directory, flags);
     assert.match(server.logs(), /warning: Configuration not found; using defaults:/);
     assert.match(server.logs(), /warning: Dictionary unavailable:/);
+    assert.match(server.logs(), /create the config and its directory automatically:/);
+    assert.match(server.logs(), /download_dict\.lua --db \.dict\.db/);
+    assert.match(server.logs(), /Linux or WSL/);
     assert.match(server.logs(), /unable to open database file/);
     assert.match(server.logs(), /Creating SQLite search index:/);
     const state = await (await fetch(server.url + '/api/state')).json();
@@ -162,6 +171,9 @@ test('missing configuration and dictionaries are visible; only the search index 
     assert.equal(corrupt.status, 1);
     assert.match(corrupt.stderr, /failed during: Opening SQLite index:/);
     assert.match(corrupt.stderr, /file is not a database/);
+    assert.match(corrupt.stderr, /Recovery help:/);
+    assert.match(corrupt.stderr, /--cache-dir/);
+    assert.match(corrupt.stderr, /search index is created automatically/);
   } finally {
     if (server) await stop(server);
     fs.rmSync(directory, { recursive: true, force: true });
@@ -486,3 +498,31 @@ test('history API previews, restores with revision checks and survives restart w
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('Windows path options normalize environment variables, separators and dot segments without creating unused paths',
+  { skip: !windows }, async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-normal-path-'));
+    let server;
+    const env = { LEAF_WIKI_TEST_PATH_ROOT: directory };
+    const notebook = normalized(path.join(directory, '笔记')); const config = normalized(path.join(directory, '配置', 'config.json'));
+    try {
+      server = await start(directory, ['--data-dir', '%LEAF_WIKI_TEST_PATH_ROOT%\\unused\\..\\笔记\\.',
+        '--config', '%LEAF_WIKI_TEST_PATH_ROOT%/配置/./config.json',
+        '--cache-dir', '%LEAF_WIKI_TEST_PATH_ROOT%\\缓存\\.',
+        '--dict-db', '%LEAF_WIKI_TEST_PATH_ROOT%/dictionary/../missing.db', '--save-config'],
+        path.join(root, 'wiki_web.lua'), os.tmpdir(), env);
+      const saved = JSON.parse(fs.readFileSync(config, 'utf8'));
+      assert.equal(saved.data_dir, notebook); assert.equal(saved.dict_db, normalized(path.join(directory, 'missing.db')));
+      assert.ok(server.logs().includes('Configuration saved and verified: ' + config));
+      assert.equal(fs.existsSync(path.join(directory, 'unused')), false);
+      assert.equal(fs.existsSync(path.join(directory, 'dictionary')), false);
+      assert.equal(fs.existsSync(path.join(directory, 'missing.db')), false);
+      assert.equal((await fetch(server.url + '/api/state')).status, 200);
+      await stop(server); server = undefined;
+      server = await start(directory, ['--config', config.replaceAll('/', '\\')], path.join(root, 'wiki_web.lua'), os.tmpdir(), env);
+      assert.equal((await (await fetch(server.url + '/api/state')).json()).data_dir, notebook);
+    } finally {
+      if (server) await stop(server);
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });

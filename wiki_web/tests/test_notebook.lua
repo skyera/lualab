@@ -252,4 +252,20 @@ test('hashtags ignore code and follow saves, search, rename and external edits',
         assert(n:state().pages[1].tags[1] == 'changed')
     end)
 end)
+test('path normalization is absolute and does not create missing folders', function()
+    local fs = require('fs')
+    local base = fs.resolve(managed or '/tmp')
+    local path = base .. '/unused-parent/../normalization-only/file.db'
+    assert(fs.resolve(path) == base .. '/normalization-only/file.db')
+    assert(io.open(base .. '/normalization-only/file.db', 'rb') == nil)
+    if ffi.os == 'Windows' then
+        assert(fs.resolve(path:gsub('/', '\\')) == base .. '/normalization-only/file.db')
+        assert(fs.resolve('c:\\') == 'C:/')
+        assert(fs.resolve('\\\\server\\share\\folder\\..\\file.db') == '//server/share/file.db')
+        assert(fs.resolve('\\\\server\\share\\') == '//server/share')
+        assert(fs.resolve('~\\LeafWiki') == fs.resolve(require('windows_args').getenv('USERPROFILE') .. '/LeafWiki'))
+        assert(fs.resolve('%TEMP%\\LeafWiki') == fs.resolve(require('windows_args').getenv('TEMP') .. '/LeafWiki'))
+        assert(not pcall(fs.resolve, '%LEAF_WIKI_UNDEFINED_PATH_VARIABLE%/file'))
+    end
+end)
 print('Passed ' .. count .. ' notebook tests.')

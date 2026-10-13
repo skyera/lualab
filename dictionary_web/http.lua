@@ -34,6 +34,9 @@ int signalfd(int, const wb_sigset *, int);
 local windows = ffi.os == 'Windows' and require('http_windows') or nil
 local C = windows and windows.C or ffi.C
 local socket_errno = windows and windows.errno or ffi.errno
+local function socket_failure(message)
+    error(message .. ' (socket error ' .. socket_errno() .. ')')
+end
 -- ffi_dict also declares poll with its own identically laid-out pollfd type.
 local poll_fds = windows and windows.poll or ffi.cast('int (*)(struct wb_pollfd *, unsigned long, int)', C.poll)
 
@@ -207,19 +210,23 @@ function M.serve(port, handler, ready, host, workers, options)
         signals = C.signalfd(-1, mask, SFD_NONBLOCK)
         assert(signals >= 0, 'Cannot create signal descriptor')
         listener = C.socket(AF_INET, SOCK_STREAM + SOCK_NONBLOCK, 0)
-        assert(listener >= 0, 'Cannot create server socket')
+        if listener < 0 then socket_failure('Cannot create server socket') end
         local enabled = ffi.new('int[1]', 1)
-        assert(C.setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, enabled, 4) == 0, 'Cannot configure server socket')
+        if C.setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, enabled, 4) ~= 0 then
+            socket_failure('Cannot configure server socket')
+        end
         local address = ffi.new('struct wb_sockaddr_in', {
             AF_INET,
             C.htons(port),
             C.htonl(host == '0.0.0.0' and 0 or INADDR_LOOPBACK),
             {0},
         })
-        assert(C.bind(listener, address, ffi.sizeof(address)) == 0, 'Cannot bind port ' .. port .. ' (already in use?)')
-        assert(C.listen(listener, 16) == 0, 'Cannot listen')
+        if C.bind(listener, address, ffi.sizeof(address)) ~= 0 then
+            socket_failure('Cannot bind port ' .. port .. ' on ' .. host)
+        end
+        if C.listen(listener, 16) ~= 0 then socket_failure('Cannot listen on ' .. host .. ':' .. port) end
         local length = ffi.new('unsigned int[1]', ffi.sizeof(address))
-        assert(C.getsockname(listener, address, length) == 0, 'Cannot read server port')
+        if C.getsockname(listener, address, length) ~= 0 then socket_failure('Cannot read server port') end
         port = tonumber(C.ntohs(address.port))
         ready(port)
         owned_fds[listener], owned_fds[signals] = true, true

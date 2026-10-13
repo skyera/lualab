@@ -88,11 +88,14 @@ local function open_directory(path)
     return handle
 end
 
-function Fs.absolute(path)
+function Fs.resolve(path)
     assert(type(path) == 'string' and path ~= '' and not path:find('%z'), 'Invalid folder path')
     path = path:gsub('\\', '/')
-    if path:sub(1, 2) == '~/' then
-        local getenv = require('windows_args').getenv
+    local getenv = require('windows_args').getenv
+    path = path:gsub('%%([%w_]+)%%', function(name)
+        return assert(getenv(name), 'Unknown path environment variable: ' .. name)
+    end):gsub('\\', '/')
+    if path == '~' or path:sub(1, 2) == '~/' then
         path = (getenv('USERPROFILE') or getenv('HOME') or '.') .. path:sub(2)
     end
     assert(not path:match('^//[?.]/'), 'Device paths are not supported')
@@ -100,8 +103,15 @@ function Fs.absolute(path)
     local count = C.GetFullPathNameW(wide(path), 32768, buffer, nil)
     assert(count > 0 and count < 32768, 'Cannot resolve folder path')
     path = utf8(buffer, count):gsub('\\', '/')
+    path = path:gsub('^%a:', function(drive) return drive:upper() end)
+    return path:match('^%a:/$') and path or path:gsub('/+$', '')
+end
+
+function Fs.absolute(path)
+    path = Fs.resolve(path)
+    local buffer = ffi.new('uint16_t[32768]')
     local base, rest = path:match('^(%a:/)(.*)$')
-    if not base then base, rest = path:match('^(//[^/]+/[^/]+/)(.*)$') end
+    if not base then base, rest = path:match('^(//[^/]+/[^/]+)/?(.*)$') end
     assert(base, 'Folder must have a drive or UNC share')
     local current = base:gsub('/$', '')
     for part in rest:gmatch('[^/]+') do
@@ -112,7 +122,7 @@ function Fs.absolute(path)
         end
     end
     local handle = assert(open_directory(path), 'Cannot open folder: ' .. path)
-    count = C.GetFinalPathNameByHandleW(handle, buffer, 32768, 0)
+    local count = C.GetFinalPathNameByHandleW(handle, buffer, 32768, 0)
     C.CloseHandle(handle)
     assert(count > 0 and count < 32768, 'Cannot resolve folder')
     path = utf8(buffer, count):gsub('\\', '/')
@@ -237,10 +247,7 @@ end
 
 -- Trusted launcher assets/configuration also need wide paths, without creating folders.
 function Fs.read_file(path)
-    local buffer = ffi.new('uint16_t[32768]')
-    local count = C.GetFullPathNameW(wide(path), 32768, buffer, nil)
-    assert(count > 0 and count < 32768, 'Cannot resolve file path')
-    return read_full(utf8(buffer, count):gsub('\\', '/'), 32 * 1024 * 1024)
+    return read_full(Fs.resolve(path), 32 * 1024 * 1024)
 end
 
 function Fs:write(path, text)

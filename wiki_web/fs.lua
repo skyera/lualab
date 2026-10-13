@@ -38,14 +38,24 @@ local serial = 0
 local Fs = {}
 Fs.__index = Fs
 
-function Fs.absolute(path)
+function Fs.resolve(path)
     assert(type(path) == 'string' and path ~= '' and not path:find('%z'), 'Invalid folder path')
-    if path:sub(1, 2) == '~/' then path = (os.getenv('HOME') or '.') .. path:sub(2) end
+    if path == '~' or path:sub(1, 2) == '~/' then path = (os.getenv('HOME') or '.') .. path:sub(2) end
     if path:sub(1, 1) ~= '/' then
         local cwd = ffi.new('char[4096]')
         assert(C.realpath('.', cwd) ~= nil, 'Cannot resolve current directory')
         path = ffi.string(cwd) .. '/' .. path
     end
+    local parts = {}
+    for part in path:gmatch('[^/]+') do
+        if part == '..' then table.remove(parts)
+        elseif part ~= '.' then parts[#parts + 1] = part end
+    end
+    return '/' .. table.concat(parts, '/')
+end
+
+function Fs.absolute(path)
+    path = Fs.resolve(path)
     local current = ''
     for part in path:gmatch('[^/]+') do
         current = current .. '/' .. part
