@@ -13,6 +13,7 @@ const char *curl_easy_strerror(int);
 unsigned char *SHA256(const unsigned char *, size_t, unsigned char *);
 ]]
 local curl, curl_info
+local tls_revoke_best_effort = false
 local CURLOPT = {
     TIMEOUT         = 13,
     FOLLOWLOCATION  = 52,
@@ -22,6 +23,9 @@ local CURLOPT = {
     NOSIGNAL        = 99,
     PROTOCOLS       = 181,
     REDIR_PROTOCOLS = 182,
+    SSL_VERIFYPEER  = 64,
+    SSL_VERIFYHOST  = 81,
+    SSL_OPTIONS     = 216,
     URL             = 10002,
     ERRORBUFFER     = 10010,
     POSTFIELDS      = 10015,
@@ -36,6 +40,17 @@ local M = {}
 function M.set_curl(library, info)
     assert(not curl or curl == library, 'Curl library is already in use')
     curl, curl_info = library, info
+end
+
+function M.set_tls_revoke_best_effort(enabled)
+    assert(type(enabled) == 'boolean', 'TLS revocation setting must be true or false')
+    local schannel = curl_info and curl_info.tls and curl_info.tls:find('Schannel', 1, true)
+    if enabled and schannel then
+        assert(curl_info.version_num and curl_info.version_num >= 0x074600,
+            'Best-effort revocation requires Schannel curl 7.70 or newer. Use --curl-select.')
+    end
+    tls_revoke_best_effort = enabled
+    return enabled and schannel ~= nil
 end
 
 local function load_curl()
@@ -79,6 +94,11 @@ function M.fetch(url, body)
         option(CURLOPT.MAXREDIRS, ffi.new('long', 4))
         option(CURLOPT.PROTOCOLS, ffi.new('long', CURLPROTO_HTTPS))
         option(CURLOPT.REDIR_PROTOCOLS, ffi.new('long', CURLPROTO_HTTPS))
+        option(CURLOPT.SSL_VERIFYPEER, ffi.new('long', 1))
+        option(CURLOPT.SSL_VERIFYHOST, ffi.new('long', 2))
+        if tls_revoke_best_effort and curl_info.tls and curl_info.tls:find('Schannel', 1, true) then
+            option(CURLOPT.SSL_OPTIONS, ffi.new('long', 8)) -- CURLSSLOPT_REVOKE_BEST_EFFORT
+        end
         option(CURLOPT.NOSIGNAL, ffi.new('long', 1))
         option(CURLOPT.CONNECTTIMEOUT, ffi.new('long', 5))
         option(CURLOPT.TIMEOUT, ffi.new('long', 12))

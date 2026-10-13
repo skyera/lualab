@@ -122,6 +122,21 @@ and local features remain available. Startup prints the chosen path, version, an
 TLS backend. Request failures include curl's detailed error, selected DLL, and URL.
 HTTPS capability validation does not guarantee office proxy or firewall access.
 
+For office networks where Schannel reports `CRYPT_E_NO_REVOCATION_CHECK` or
+unavailable revocation information, enable and save best-effort revocation:
+
+```powershell
+luajit dictionary_web/app.lua --tls-revoke-best-effort --save-config
+```
+
+The setting is saved as `tls_revoke_best_effort: true`. Strict backend defaults
+apply until explicitly enabled. With Schannel curl 7.70 or newer, best effort
+tolerates missing/offline revocation information; certificate trust and hostname
+verification stay enabled. Startup prints the active mode. Other TLS backends
+retain their defaults and report that this setting is inactive. This configures
+web lookups, including Dict.cn and Iciba; it does not change Git's TLS settings.
+Restore the default and save it with `--tls-revoke-strict --save-config`.
+
 The default database is `dictionary_web/wordbook.db`, ignored by Git. Back up
 that file with the app stopped. Ctrl-C and SIGTERM close the server and database.
 HTTP connections are handled concurrently. On Linux, up to four background workers fetch

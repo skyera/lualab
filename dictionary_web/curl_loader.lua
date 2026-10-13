@@ -50,7 +50,7 @@ function M.validate(path, report)
     end
     assert(https, 'Curl library lacks HTTPS support: ' .. path .. ' (protocols: ' .. table.concat(protocols, ', ') .. ')')
     assert(library.curl_global_init(ffi.new('long', 3)) == 0, 'Curl initialization failed: ' .. path)
-    return library, { path = path, version = ffi.string(info.version),
+    return library, { path = path, version = ffi.string(info.version), version_num = tonumber(info.version_num),
         tls = info.ssl_version ~= nil and ffi.string(info.ssl_version) or 'unknown TLS backend' }
 end
 

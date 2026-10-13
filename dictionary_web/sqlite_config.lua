@@ -31,6 +31,10 @@ function M.configure(root, options)
     if not text then report('Configuration not found; using defaults: ' .. path) end
     local config = text and json.decode(text) or {}
     assert(type(config) == 'table', 'Configuration must be a JSON object: ' .. path)
+    local tls_best_effort = options.tls_revoke_best_effort
+    if tls_best_effort == nil then tls_best_effort = config.tls_revoke_best_effort end
+    assert(tls_best_effort == nil or type(tls_best_effort) == 'boolean',
+        'tls_revoke_best_effort must be true or false: ' .. path)
     if options.curl_list then
         print('Curl library candidates (not loaded):')
         local candidates = curl_loader.discover(root, options.script_dir)
@@ -69,6 +73,14 @@ function M.configure(root, options)
             io.stderr:write('Wordbook warning: ' .. message .. '\n'); io.stderr:flush()
         end)
         require('net').set_curl(library, curl_info)
+        local active = require('net').set_tls_revoke_best_effort(tls_best_effort == true)
+        if active then
+            report('TLS revocation: best effort (Schannel); certificate and hostname verification enabled')
+        elseif tls_best_effort then
+            report('TLS revocation: best-effort setting inactive; selected backend is not Schannel')
+        else
+            report('TLS revocation: backend defaults; certificate and hostname verification enabled')
+        end
         if library then
             report('Curl ' .. curl_info.version .. ' selected (HTTPS, ' .. curl_info.tls .. '): ' .. curl_info.path)
         else
@@ -78,6 +90,9 @@ function M.configure(root, options)
     if options.sqlite_select or options.curl_select or options.save_config then
         if info then config.sqlite_dll = info.pin or info.path end
         if curl_info and curl_info.path then config.curl_dll = curl_info.path end
+        if options.tls_revoke_best_effort ~= nil then
+            config.tls_revoke_best_effort = options.tls_revoke_best_effort
+        end
         report('Saving configuration: ' .. path)
         local fs = Fs.open(path:match('^(.*)/[^/]+$') or '.')
         local saved, err = pcall(function()

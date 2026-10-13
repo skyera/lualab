@@ -26,13 +26,13 @@ test('Windows curl candidates can be selected, pinned and repaired', { skip: pro
         fs.mkdirSync(path.dirname(config));
         const existing = { custom: { value: 42 }, curl_dll: 'missing.dll' };
         fs.writeFileSync(config, JSON.stringify(existing));
-        result = run(['--curl-select'], candidate[1] + '\n');
+        result = run(['--curl-select', '--tls-revoke-best-effort'], candidate[1] + '\n');
         assert.equal(result.status, 0, result.stdout + result.stderr);
         assert.match(result.stdout, /selected \(HTTPS/);
         assert.match(result.stdout, /Configuration saved and verified:/);
         assert.doesNotMatch(result.stdout, /Wordbook: http|SQLite .* selected/);
         const saved = JSON.parse(fs.readFileSync(config));
-        assert.deepEqual(saved, { ...existing, curl_dll: candidate[2] });
+        assert.deepEqual(saved, { ...existing, curl_dll: candidate[2], tls_revoke_best_effort: true });
         for (const [flags, pattern] of [[['--curl-select'], /Invalid curl selection/],
             [['--curl-select', '--curl-dll', path.join(dir, 'missing.dll')], /missing or unreadable/],
             [['--curl-select', '--curl-dll', path.join(process.env.SystemRoot, 'System32', 'kernel32.dll')], /missing curl_/]]) {
@@ -65,9 +65,14 @@ test('Windows curl candidates can be selected, pinned and repaired', { skip: pro
             });
         });
         assert.ok(logs.includes(saved.curl_dll));
+        assert.match(logs, /TLS revocation: (best effort|best-effort setting inactive)/);
         assert.equal((await fetch(url + '/api/stats')).status, 200);
         assert.doesNotMatch(logs, /Unpinned curl loading forbidden/);
         const exited = once(child, 'exit'); child.kill(); await exited;
+        result = run(['--curl-select', '--curl-dll', saved.curl_dll, '--tls-revoke-strict']);
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(JSON.parse(fs.readFileSync(config)).tls_revoke_best_effort, false);
+        assert.match(result.stdout, /TLS revocation: backend defaults/);
         fs.unlinkSync(config); fs.rmdirSync(path.dirname(config));
         result = run(['--curl-select', '--curl-dll', saved.curl_dll]);
         assert.equal(result.status, 0, result.stderr);
@@ -103,4 +108,36 @@ test('Curl rejects a DLL without HTTPS and preserves detailed request errors', {
     const result = spawnSync('luajit', ['-e', script], { encoding: 'utf8', timeout: 10000 });
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.match(result.stdout, /HTTPS validation and detailed errors verified/);
+});
+
+
+test('Best-effort revocation keeps TLS verification and fails revoked certificates', () => {
+    const script = `package.path=${JSON.stringify(root.replaceAll('\\', '/') + '/?.lua;')}..package.path
+        local ffi=require('ffi');local net=require('net');local options;local closed=0;local code=0
+        local fake={curl_easy_init=function() return ffi.cast('WB_CURL *',1) end,
+            curl_easy_cleanup=function() closed=closed+1 end,
+            curl_easy_setopt=function(_,key,value) options[key]=value;return 0 end,
+            curl_easy_perform=function() if code~=0 then ffi.copy(options[10010],'Certificate is revoked') end return code end,
+            curl_easy_getinfo=function(_,_,value) value[0]=200;return 0 end,
+            curl_easy_strerror=function() return 'Certificate error' end}
+        local info={path='fixture.dll',version='8.11.1',version_num=0x080b01,tls='Schannel'}
+        net.set_curl(fake,info)
+        options={};assert(net.fetch('https://example.invalid/')=='')
+        assert(tonumber(options[64])==1 and tonumber(options[81])==2 and options[216]==nil)
+        assert(net.set_tls_revoke_best_effort(true))
+        options={};assert(net.fetch('https://example.invalid/')=='')
+        assert(tonumber(options[64])==1 and tonumber(options[81])==2 and tonumber(options[216])==8)
+        code=60;options={};local value,err=net.fetch('https://example.invalid/')
+        assert(not value and err:find('Certificate is revoked',1,true));assert(closed==3)
+        net.set_tls_revoke_best_effort(false);options={};code=0
+        assert(net.fetch('https://example.invalid/')=='' and options[216]==nil)
+        info.tls='OpenSSL';net.set_tls_revoke_best_effort(true);options={}
+        assert(net.fetch('https://example.invalid/')=='' and options[216]==nil)
+        info.tls='Schannel';info.version_num=0x074500
+        local ok,err=pcall(net.set_tls_revoke_best_effort,true)
+        assert(not ok and err:find('7.70 or newer',1,true))
+        print('Strict defaults, best effort, certificate errors and backend/version checks verified')`;
+    const result = spawnSync('luajit', ['-e', script], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /Strict defaults, best effort/);
 });

@@ -29,12 +29,15 @@ local function main()
             print('Usage: luajit dictionary_web/app.lua [--host 127.0.0.1|0.0.0.0] [--port 8030] '
                 .. '[--db /path/wordbook.db] [--dict-db /path/.dict.db|none] [--import-dict] '
                 .. '[--no-auto-import] [--sqlite-list] [--sqlite-select] [--sqlite-dll PATH] '
-                .. '[--curl-list] [--curl-select] [--curl-dll PATH] [--config FILE] [--save-config]')
+                .. '[--curl-list] [--curl-select] [--curl-dll PATH] '
+                .. '[--tls-revoke-best-effort|--tls-revoke-strict] [--config FILE] [--save-config]')
             os.exit(0)
         elseif arg[index] == '--sqlite-list' then sqlite_options.sqlite_list = true
         elseif arg[index] == '--sqlite-select' then sqlite_options.sqlite_select = true
         elseif arg[index] == '--curl-list' then sqlite_options.curl_list = true
         elseif arg[index] == '--curl-select' then sqlite_options.curl_select = true
+        elseif arg[index] == '--tls-revoke-best-effort' then sqlite_options.tls_revoke_best_effort = true
+        elseif arg[index] == '--tls-revoke-strict' then sqlite_options.tls_revoke_best_effort = false
         elseif arg[index] == '--save-config' then sqlite_options.save_config = true
         elseif arg[index] == '--sqlite-dll' or arg[index] == '--curl-dll' or arg[index] == '--config' then
             local flag = arg[index]
