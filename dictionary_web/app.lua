@@ -20,14 +20,14 @@ local function main()
         return data
     end
 
-    local port, database, bind_host = 8765, root .. '/wordbook.db', '127.0.0.1'
+    local port, database, bind_host = 8030, root .. '/wordbook.db', '127.0.0.1'
     local dictionary_path = root .. '/../.dict.db'
     local auto_import, force_import = true, false
     local sqlite_options = { script_dir = root }
     local index = 1
     while index <= #arg do
         if arg[index] == '--help' then
-            print('Usage: luajit dictionary_web/app.lua [--host 127.0.0.1|0.0.0.0] [--port 8765] '
+            print('Usage: luajit dictionary_web/app.lua [--host 127.0.0.1|0.0.0.0] [--port 8030] '
                 .. '[--db /path/wordbook.db] [--dict-db /path/.dict.db|none] [--import-dict] '
                 .. '[--no-auto-import] [--sqlite-list] [--sqlite-select] [--sqlite-dll PATH] '
                 .. '[--config FILE] [--save-config]')

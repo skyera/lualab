@@ -13,7 +13,7 @@ sudo apt install luajit libsqlite3-0 libcurl4 libssl3
 luajit dictionary_web/app.lua
 ```
 
-Open **http://127.0.0.1:8765**. From any directory, use an absolute script path.
+Open **http://127.0.0.1:8030**. From any directory, use an absolute script path.
 The server currently supports Linux and defaults to loopback for personal use.
 
 Set up the offline dictionary with one command from the repository root:
@@ -68,10 +68,10 @@ luajit dictionary_web/app.lua --help
 To allow other computers to access the app, listen on all IPv4 interfaces:
 
 ```sh
-luajit dictionary_web/app.lua --host 0.0.0.0 --port 8765
+luajit dictionary_web/app.lua --host 0.0.0.0 --port 8030
 ```
 
-Open `http://<server-IP>:8765` from another computer. Allow TCP port 8765 in
+Open `http://<server-IP>:8030` from another computer. Allow TCP port 8030 in
 the server firewall. All visitors share the same journal and can edit notes
 and review progress; the app has no login. Internet access also depends on
 your router's port forwarding and network configuration. This option does
@@ -315,7 +315,7 @@ disable the real `.dict.db` unless a temporary fixture is explicitly supplied.
 For a real dict.cn smoke test while the app is running:
 
 ```sh
-curl -sS http://127.0.0.1:8765/api/search \
+curl -sS http://127.0.0.1:8030/api/search \
   -H 'Content-Type: application/json' \
   -d '{"word":"serendipity","source":"dict.cn"}'
 ```
