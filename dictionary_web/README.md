@@ -116,6 +116,8 @@ On Windows, provider requests run inline because the Linux worker pool requires
 other requests until they complete or time out; local lookup and saved dictionary data
 remain available. Windows uses the Winsock HTTP server. Forcefully terminating
 the process does not run graceful cleanup.
+Fortune is Linux-only: Windows excludes it from All proverb sources. Selecting
+Fortune explicitly shows a message to choose another source and runs no command.
 
 ## Color themes
 

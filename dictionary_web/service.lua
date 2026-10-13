@@ -1,6 +1,7 @@
 local json = require('json')
 local providers = require('providers')
 local content = require('content')
+local ffi = require('ffi')
 local M = {}
 local SOURCE_ORDER = { iciba = 1, ['local'] = 2, ['dict.cn'] = 3, youdao = 4 }
 
@@ -105,6 +106,9 @@ function M.route(db, method, path, params, payload, background)
             return {error = 'Method not allowed.'}, 405
         end
         local src = (params and params.source) or (payload and payload.source)
+        if src == 'fortune' and ffi.os == 'Windows' then
+            return { error = 'Fortune requires Linux. Select another proverb source on Windows.' }, 400
+        end
         local quote_fn = background and function()
             local result = background.run(function() return content.fetch_quote(require('net').fetch, src) end, 75)
             if background.guard and not background.guard() then return nil end

@@ -23,6 +23,7 @@ local proverbs = {
     {'Look before you leap.', '三思而后行。', 'Consider the consequences before making a decision.'},
 }
 local json = require('json')
+local ffi = require('ffi')
 local M = {}
 
 function M.daily(stamp)
@@ -162,6 +163,9 @@ function M.fetch_wikiquote(fetch_fn)
 end
 
 function M.fetch_fortune(runner)
+    if ffi.os == 'Windows' and not runner then
+        return nil, 'Fortune requires Linux. Select another proverb source on Windows.'
+    end
     runner = runner or function(cmd)
         local p = io.popen(cmd)
         if not p then return nil end
@@ -207,8 +211,10 @@ function M.fetch_quote(fetch_fn, source, fortune_runner)
     -- Randomly choose among available quote services
     local choices = {
         M.fetch_random_iciba, M.fetch_zenquotes, M.fetch_dummyjson, M.fetch_favqs, M.fetch_wikiquote,
-        function() return M.fetch_fortune(fortune_runner) end,
     }
+    if ffi.os ~= 'Windows' or fortune_runner then
+        choices[#choices + 1] = function() return M.fetch_fortune(fortune_runner) end
+    end
     local start_idx = math.random(1, #choices)
     for i = 0, #choices - 1 do
         local fn = choices[(start_idx + i - 1) % #choices + 1]

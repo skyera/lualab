@@ -43,9 +43,13 @@ test('Windows daily content and provider requests avoid POSIX workers', { skip: 
             if (word === 'hello' && source === 'iciba') assert.equal(value.saved, true);
             else assert.ok(value.error);
         }
+        const proverb = await fetch(url + '/api/proverb/random?source=all');
+        assert.equal(proverb.status, 200); assert.ok((await proverb.json()).proverb.text);
+        const fortune = await fetch(url + '/api/proverb/random?source=fortune');
+        assert.equal(fortune.status, 400); assert.match((await fortune.json()).error, /Fortune requires Linux/);
         const stats = await fetch(url + '/api/stats');
         assert.equal(stats.status, 200); await stats.json();
-        assert.doesNotMatch(logs, /cannot resolve symbol|Request failed|POSIX workers/);
+        assert.doesNotMatch(logs, /cannot resolve symbol|Request failed|POSIX workers|The system cannot find the path specified/);
     } finally {
         if (child.exitCode === null && child.signalCode === null) {
             const exited = once(child, 'exit'); child.kill(); await exited;
@@ -122,4 +126,26 @@ test('Windows dictionary SQLite selection saves, repairs pins and reuses both bi
         }
         fs.rmSync(dir, { recursive: true, force: true });
     }
+});
+
+
+test('Windows Fortune never starts a Unix shell command and All retains online providers', { skip: process.platform !== 'win32' }, () => {
+    const script = `package.path=${JSON.stringify(root.replaceAll('\\', '/') + '/?.lua;')}..package.path;
+        local calls=0; io.popen=function() calls=calls+1; error('Unexpected shell command') end
+        local content=require('content')
+        local value,err=content.fetch_fortune(); assert(value==nil and err:find('Fortune requires Linux',1,true))
+        assert(not content.fetch_quote(function() return nil,'Offline' end,'all'))
+        assert(calls==0)
+        local quote=assert(content.fetch_quote(function(url)
+            if url=='https://zenquotes.io/api/random' then return '[{"q":"Keep learning.","a":"Teacher"}]' end
+            return nil,'Offline'
+        end,'all'))
+        assert(quote.text=='Keep learning.' and calls==0)
+        local injected=assert(content.fetch_fortune(function() return 'Injected fixture quote.' end))
+        assert(injected.text=='Injected fixture quote.' and calls==0)
+        print('Windows Fortune guard verified')`;
+    const result = spawnSync('luajit', ['-e', script], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /Windows Fortune guard verified/);
+    assert.equal(result.stderr, '');
 });
