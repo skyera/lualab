@@ -79,12 +79,18 @@ not enable IPv6 listening.
 
 The default database is `dictionary_web/wordbook.db`, ignored by Git. Back up
 that file with the app stopped. Ctrl-C and SIGTERM close the server and database.
-HTTP connections are handled concurrently. Up to four background workers fetch
+HTTP connections are handled concurrently. On Linux, up to four background workers fetch
 online dictionaries and proverbs while notes, reviews, statistics, and local
 lookups remain available. The queue holds up to 20 jobs; excess requests show
 a retry message. Each HTTPS call has a 12-second timeout, with overall worker
 limits of 30 seconds for a dictionary, 15 seconds for the daily feed, and 75
 seconds for a multi-provider proverb. Shutdown terminates and reaps workers.
+
+On Windows, provider requests run inline because the Linux worker pool requires
+`fork` and `pipe`. Startup prints this mode explicitly. Online lookups can delay
+other requests until they complete or time out; local lookup and saved dictionary data
+remain available. Windows uses the Winsock HTTP server. Forcefully terminating
+the process does not run graceful cleanup.
 
 ## Color themes
 

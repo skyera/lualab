@@ -1,5 +1,5 @@
 #!/usr/bin/env luajit
--- Local dictionary web app: LuaJIT + SQLite/libcurl/POSIX FFI.
+-- Local dictionary web app: LuaJIT + SQLite/libcurl, Linux workers or Windows inline requests.
 local script = arg[0]:gsub('\\', '/')
 local root = script:match('^(.*)/[^/]+$') or '.'
 package.path = root .. '/?.lua;' .. root .. '/../?.lua;' .. package.path
@@ -7,7 +7,8 @@ local json = require('json')
 local Store = require('store')
 local service = require('service')
 local http = require('http')
-local workers = require('workers').new(http.close_inherited)
+local ffi = require('ffi')
+local workers = ffi.os ~= 'Windows' and require('workers').new(http.close_inherited) or nil
 
 local function read_file(path)
     local file, err = io.open(path, 'rb')
@@ -56,6 +57,10 @@ while index <= #arg do
 end
 
 local schema = assert(read_file(root .. '/schema.sql'))
+if ffi.os == 'Windows' then
+    print('Windows: provider requests run inline; other requests may wait during online lookups.')
+    io.stdout:flush()
+end
 if force_import then
     assert(dictionary_path ~= 'none', '--import-dict requires a local dictionary database.')
 end
