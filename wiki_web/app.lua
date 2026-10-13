@@ -89,6 +89,11 @@ function M.run(root)
     config_path = (options.config or config_path):gsub('\\', '/')
     startup.report('Reading configuration: ' .. config_path)
     local raw = read(config_path)
+    if not raw then
+        local message = 'Configuration not found; using defaults: ' .. config_path
+        if options.config and not options.save_config then startup.warn(message)
+        else startup.report(message) end
+    end
     local config = raw and json.decode(raw) or {}
     assert(type(config) == 'table', 'Configuration must be a JSON object')
     local data_dir = options.data_dir or getenv('LEAF_WIKI_DATA_DIR') or config.data_dir or home .. '/LeafWiki'
@@ -105,14 +110,34 @@ function M.run(root)
     local port = tonumber(options.port)
     assert(port and port >= 0 and port <= 65535 and port % 1 == 0, 'Invalid port')
     assert(options.host == '127.0.0.1' or options.host == '0.0.0.0', 'Host must be 127.0.0.1 or 0.0.0.0')
+    if dictionary_path == 'none' then startup.report('Dictionary lookup disabled')
+    else
+        startup.report('Checking dictionary: ' .. dictionary_path)
+        local available, err = dictionary.check(dictionary_path)
+        if available then startup.report('Dictionary available: ' .. dictionary_path)
+        else startup.warn('Dictionary unavailable: ' .. dictionary_path .. ' (' .. err
+            .. '). Notebook editing remains available; configure --dict-db with an imported dictionary or use none.') end
+    end
     local notebook = Notebook.open(data_dir, options.cache_dir or cache, startup.report)
     startup.track(notebook)
     if options.save_config then
         startup.report('Saving configuration: ' .. config_path)
         local parent = config_path:match('^(.*)/[^/]+$') or '.'
         local fs = Fs.open(parent)
-        fs:write(config_path:match('[^/]+$'), json.encode({ data_dir = notebook.fs.root, dict_db = dictionary_path }))
+        local name = config_path:match('[^/]+$')
+        local saved_path = fs.root .. '/' .. name
+        local expected = { data_dir = notebook.fs.root, dict_db = dictionary_path }
+        local saved, err = pcall(function()
+            fs:write(name, json.encode(expected))
+            startup.report('Verifying saved configuration: ' .. saved_path)
+            local contents = assert(fs:read(name), 'Saved configuration file is missing')
+            local actual = json.decode(contents)
+            assert(type(actual) == 'table' and actual.data_dir == expected.data_dir
+                and actual.dict_db == expected.dict_db, 'Saved configuration verification failed')
+        end)
         fs:close()
+        assert(saved, err)
+        startup.report('Configuration saved and verified: ' .. saved_path)
     end
     local function reply(value, status) return json.encode(value), status or 200, 'application/json; charset=utf-8' end
     local function route(request, actual_port)

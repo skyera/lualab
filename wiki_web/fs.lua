@@ -114,6 +114,19 @@ function Fs:read(path, maximum)
     return table.concat(chunks)
 end
 
+function Fs:file_exists(path)
+    local parent, name = self:parent(path)
+    local fd = C.openat(parent, name, NOFOLLOW)
+    local err = ffi.errno()
+    C.close(parent)
+    if fd < 0 then assert(err == 2, 'Cannot inspect file: ' .. path); return false end
+    local stamp = ffi.new('struct leaf_stat[1]')
+    local regular = stat_fd(fd, stamp) == 0 and bit.band(stamp[0].mode, 61440) == 32768
+    C.close(fd)
+    assert(regular, 'Not a regular file: ' .. path)
+    return true
+end
+
 function Fs:write(path, text)
     local parent, name = self:parent(path, true)
     serial = serial + 1

@@ -218,6 +218,23 @@ function Fs:read(path, maximum)
     return result
 end
 
+function Fs:file_exists(path)
+    local full, release = self:parent(path)
+    local handle = C.CreateFileW(native(full), 0, 7, nil, 3, OPEN_FLAGS, nil)
+    if handle == INVALID then
+        local err = tonumber(C.GetLastError())
+        release()
+        assert(err == 2 or err == 3, 'Cannot inspect file: ' .. path)
+        return false
+    end
+    local inspected, stamp = pcall(info, handle)
+    local regular = inspected and C.GetFileType(handle) == 1
+        and bit.band(stamp.attributes, DIRECTORY + REPARSE) == 0
+    C.CloseHandle(handle); release()
+    assert(regular, 'Not a regular file: ' .. path)
+    return true
+end
+
 -- Trusted launcher assets/configuration also need wide paths, without creating folders.
 function Fs.read_file(path)
     local buffer = ffi.new('uint16_t[32768]')

@@ -3,6 +3,15 @@ local DB = require('db')
 local links = require('links')
 local M = {}
 
+function M.check(path)
+    local opened, db = pcall(DB.open, path, nil, true)
+    if not opened then return nil, tostring(db):gsub('^.-:%d+: ', '') end
+    local ok, err = pcall(db.query, db, 'SELECT word,pos,definition,example,syn,ant FROM dict LIMIT 0')
+    db:close()
+    if not ok then return nil, tostring(err):gsub('^.-:%d+: ', '') end
+    return true
+end
+
 function M.lookup(path, value)
     if type(value) ~= 'string' or not links.valid_utf8(value) or #value > 240
         or value:find('[%z\1-\31\127]') then

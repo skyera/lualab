@@ -126,6 +126,78 @@ test('lock and occupied-port failures identify their phase and print errors', as
   }
 });
 
+test('missing configuration and dictionaries are visible; only the search index is automatically created', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-missing-files-'));
+  const config = path.join(directory, 'missing-config', 'config.json');
+  const dictionary = path.join(directory, 'missing.db');
+  const notebook = path.join(directory, 'notebook'); let server;
+  try {
+    const flags = ['--data-dir', notebook, '--config', config, '--dict-db', dictionary];
+    server = await start(directory, flags);
+    assert.match(server.logs(), /warning: Configuration not found; using defaults:/);
+    assert.match(server.logs(), /warning: Dictionary unavailable:/);
+    assert.match(server.logs(), /unable to open database file/);
+    assert.match(server.logs(), /Creating SQLite search index:/);
+    const state = await (await fetch(server.url + '/api/state')).json();
+    assert.equal(fs.existsSync(state.index_path), true);
+    assert.equal(fs.existsSync(dictionary), false);
+    assert.equal(fs.existsSync(path.dirname(config)), false);
+    await stop(server); server = undefined;
+    fs.writeFileSync(dictionary, 'not a SQLite database');
+    server = await start(directory, flags);
+    assert.match(server.logs(), /Opening SQLite index:/);
+    assert.match(server.logs(), /warning: Dictionary unavailable:/);
+    assert.match(server.logs(), /file is not a database/);
+    assert.equal(fs.readFileSync(dictionary, 'utf8'), 'not a SQLite database');
+    await stop(server); server = undefined;
+    server = await start(directory, [...flags, '--dict-db', 'none', '--save-config']);
+    assert.match(server.logs(), /Dictionary lookup disabled/);
+    assert.equal(fs.existsSync(config), true);
+    assert.ok(server.logs().includes('Configuration saved and verified: ' + normalized(config)));
+    assert.ok(server.logs().includes('Verifying saved configuration: ' + normalized(config)));
+    await stop(server); server = undefined;
+    fs.writeFileSync(state.index_path, 'corrupt SQLite index');
+    const corrupt = spawnSync('luajit', [path.join(root, 'wiki_web.lua'), '--config', config,
+      '--cache-dir', path.join(directory, 'cache'), '--dict-db', 'none', '--port', '0'], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(corrupt.status, 1);
+    assert.match(corrupt.stderr, /failed during: Opening SQLite index:/);
+    assert.match(corrupt.stderr, /file is not a database/);
+  } finally {
+    if (server) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('config save success is printed only after read-back verification', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-verify-config-'));
+  const config = path.join(directory, 'config.json'); let server;
+  try {
+    const flags = ['--data-dir', path.join(directory, 'notebook'), '--dict-db', 'none', '--save-config'];
+    server = await start(directory, flags);
+    assert.ok(server.logs().includes('Configuration saved and verified: ' + normalized(config)));
+    await stop(server); server = undefined;
+    server = await start(directory, flags);
+    assert.ok(server.logs().includes('Configuration saved and verified: ' + normalized(config)));
+    await stop(server); server = undefined;
+    for (const fault of ['write', 'read']) {
+      const setup = 'package.path=' + JSON.stringify(normalized(path.join(root, 'wiki_web/?.lua')) + ';')
+        + '..package.path; local fs=require("fs"); local original=fs.' + fault + '; fs.' + fault
+        + '=function(self,path,...) if path=="config.json" then '
+        + (fault === 'write' ? 'error("Injected configuration write failure")'
+          : 'return "{\\\"data_dir\\\":\\\"wrong\\\",\\\"dict_db\\\":\\\"none\\\"}"')
+        + ' end return original(self,path,...) end';
+      const result = spawnSync('luajit', ['-e', setup, path.join(root, 'wiki_web.lua'), ...flags,
+        '--config', config, '--cache-dir', path.join(directory, 'cache'), '--port', '0'], { encoding: 'utf8', timeout: 5000 });
+      assert.equal(result.status, 1, result.stdout + result.stderr);
+      assert.doesNotMatch(result.stdout, /Configuration saved and verified:/);
+      assert.match(result.stderr, fault === 'write' ? /configuration write failure/ : /verification failed/);
+    }
+  } finally {
+    if (server) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('default binding is loopback; LAN access requires an explicit host each launch', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-bind-'));
   let server;

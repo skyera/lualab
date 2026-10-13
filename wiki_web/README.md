@@ -104,6 +104,19 @@ identifies where it stopped. Immediately inspect `$LASTEXITCODE`; native DLL
 crashes and forced termination cannot be caught by Lua's error handler. Verify
 that LuaJIT and `sqlite3.dll` have matching architectures.
 
+A missing default configuration is a normal first-run condition: startup explicitly
+says it is using defaults. An absent `--config` file produces a warning, unless
+`--save-config` is creating it. Configuration folders are created only when saving.
+After `--save-config`, startup reads the file back, verifies its saved settings,
+and prints **Configuration saved and verified:** followed by its absolute path.
+Write or verification failures stop startup and never print a success message.
+The rebuildable SQLite search index is created automatically; startup distinguishes
+**Creating SQLite search index** from **Opening SQLite index**. An unreadable or
+corrupt search index is a fatal startup error. The optional dictionary is checked
+read-only at startup: missing or incompatible databases produce a warning without
+creating an empty file. Notebook editing remains available. Use `--dict-db none`
+to disable dictionary lookup explicitly.
+
 ## Writing and navigation
 
 - **+ Page** creates a page. Use `/` or `:` between namespace components, such

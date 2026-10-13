@@ -8,6 +8,13 @@ function M.report(message)
     if M.running then print('Leaf Wiki: ' .. message); io.stdout:flush() end
 end
 
+function M.warn(message)
+    if M.running then
+        io.stderr:write('Leaf Wiki warning: ' .. message .. '\n')
+        io.stderr:flush()
+    end
+end
+
 function M.track(notebook)
     if M.running then cleanups[#cleanups + 1] = function() notebook:close() end end
 end
