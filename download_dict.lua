@@ -1,8 +1,16 @@
 #!/usr/bin/env luajit
 -- Download Wordset and populate the shared dictionary without changing the deck.
-local root = debug.getinfo(1, 'S').source:sub(2):match('^(.*)/') or '.'
+local source = debug.getinfo(1, 'S').source:sub(2):gsub('\\', '/')
+local root = source:match('^(.*)/') or '.'
 package.path = root .. '/?.lua;' .. package.path
 local dictionary = require('ffi_dict')
+local is_windows = require('ffi').os == 'Windows'
+local windows_process = is_windows and require('windows_process') or nil
+local windows_fs
+if is_windows then
+    package.path = root .. '/wiki_web/?.lua;' .. package.path
+    windows_fs = require('fs_windows')
+end
 local M = {}
 local repository = 'https://github.com/wordset/wordset-dictionary.git'
 local names = {}
@@ -10,10 +18,12 @@ for code = string.byte('a'), string.byte('z') do names[#names + 1] = string.char
 names[#names + 1] = 'misc.json'
 
 function M.quote(value)
+    if windows_process then return windows_process.quote(value) end
     return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
 end
 
 function M.run(argv)
+    if windows_process then return windows_process.run(argv) end
     local parts = {}
     for _, value in ipairs(argv) do parts[#parts + 1] = M.quote(value) end
     local status = os.execute(table.concat(parts, ' '))
@@ -21,14 +31,19 @@ function M.run(argv)
 end
 
 local function exists(path)
+    if is_windows then return windows_process.file_exists(path) end
     local file = io.open(path, 'rb')
     if not file then return false end
     file:close(); return true
 end
 
 local function read_object(path)
-    local file = assert(io.open(path, 'rb'), 'Missing dictionary file: ' .. path)
-    local text = file:read('*a'); file:close()
+    local text
+    if is_windows then text = assert(windows_fs.read_file(path), 'Missing dictionary file: ' .. path)
+    else
+        local file = assert(io.open(path, 'rb'), 'Missing dictionary file: ' .. path)
+        text = file:read('*a'); file:close()
+    end
     local ok, object = pcall(dictionary.JSON.decode, text)
     if not ok or type(object) ~= 'table' then error('Invalid dictionary JSON: ' .. path) end
     local words, senses = 0, 0
@@ -61,6 +76,9 @@ function M.ensure(options)
     options = options or {}
     local path = options.db or root .. '/.dict.db'
     local cache = options.cache_dir or root .. '/downloads/wordset-dictionary'
+    if is_windows then
+        path, cache = windows_fs.resolve(path), windows_fs.resolve(cache)
+    end
     local run = options.run or M.run
     local report = options.report or function(message) print(message); io.stdout:flush() end
     if exists(path) and not options.force then
@@ -76,7 +94,10 @@ function M.ensure(options)
     if exists(cache .. '/.git/config') then
         run({'git', '-C', cache, 'pull', '--ff-only', repository, 'master'})
     else
-        run({'mkdir', '-p', cache:match('^(.*)/') or '.'})
+        local parent = cache:match('^(.*)/') or '.'
+        report('Creating download directory: ' .. parent)
+        if is_windows then windows_fs.absolute(parent)
+        else run({ 'mkdir', '-p', parent }) end
         run({'git', 'clone', '--depth', '1', '--branch', 'master', '--', repository, cache})
     end
     report('Validating dictionary files…')
@@ -139,5 +160,6 @@ function M.main(args)
 end
 
 if pcall(debug.getlocal, 4, 1) then return M end
+if is_windows then require('windows_args').normalize() end
 local ok, err = pcall(M.main, arg)
 if not ok then io.stderr:write('Dictionary setup failed: ' .. tostring(err) .. '\n'); os.exit(1) end

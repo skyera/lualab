@@ -1,6 +1,6 @@
 # Wordbook
 
-A local vocabulary web app built with **LuaJIT and FFI**: Linux sockets serve
+A local vocabulary web app built with **LuaJIT and FFI**: Linux sockets or Windows Winsock serve
 the browser UI, libcurl handles HTTPS, and SQLite stores your word journal.
 No Python backend or npm installation is needed.
 
@@ -14,7 +14,7 @@ luajit dictionary_web/app.lua
 ```
 
 Open **http://127.0.0.1:8030**. From any directory, use an absolute script path.
-The server currently supports Linux and defaults to loopback for personal use.
+The server supports Linux and Windows and defaults to loopback for personal use.
 
 Set up the offline dictionary with one command from the repository root:
 
@@ -27,7 +27,10 @@ The script needs Git, LuaJIT, and SQLite. It downloads Wordset into the ignored
 definitions into `.dict.db` in one transaction, and rebuilds the full-text
 index. Saved vocabulary, notes, study plans, and reviews are preserved. If the
 dictionary is already populated, it skips downloading/importing. Use `--force`
-to refresh, or `--db PATH --cache-dir PATH` for custom locations.
+to refresh, or `--db PATH --cache-dir PATH` for custom locations. On Windows,
+download directories are created through native APIs and Git runs directly with
+Unicode arguments; Unix `mkdir` or a Unix shell is not required. Git output and
+failures remain visible.
 
 Both applications automatically run setup when their selected dictionary is
 missing or empty. Normal launches are sufficient:
