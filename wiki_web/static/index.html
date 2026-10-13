@@ -48,6 +48,7 @@
         <div class="toolbar">
           <div class="modes" aria-label="Editor layout"><button data-mode="edit">Edit</button><button data-mode="split" class="selected">Split</button><button data-mode="preview">Preview</button></div>
           <button id="outline-toggle" aria-controls="outline-panel" aria-expanded="false">Outline</button>
+          <button id="verse-open" title="Insert random Bible verse">Verse</button>
           <button id="dictionary-open" aria-controls="dictionary-panel" aria-expanded="false">Look up</button>
           <button id="page-history">History</button><button id="save">Save</button><button id="rename">Rename</button><button id="delete">Trash page</button>
         </div>
@@ -134,6 +135,26 @@
       <p id="capture-error" role="alert"></p>
       <div class="dialog-actions"><button type="button" id="capture-close">Cancel</button><button id="capture-save" class="primary" type="submit">Add to journal</button></div>
     </form>
+  <dialog id="verse-dialog" aria-labelledby="verse-title">
+    <div class="verse-heading"><h2 id="verse-title">Bible Verse</h2><button id="verse-refresh" type="button" title="Fetch another verse">Another verse</button><button id="verse-close" type="button">Close</button></div>
+    <div class="verse-controls">
+      <label for="verse-translation">Translation</label>
+      <select id="verse-translation">
+        <option value="web">World English Bible (WEB)</option>
+        <option value="kjv">King James Version (KJV)</option>
+        <option value="bbe">Bible in Basic English (BBE)</option>
+        <option value="oeb-cw">Open English Bible (OEB)</option>
+      </select>
+    </div>
+    <div id="verse-preview" class="verse-preview" role="region" aria-label="Verse preview">
+      <blockquote id="verse-text">Loading verse…</blockquote>
+      <p id="verse-ref"></p>
+    </div>
+    <p id="verse-status" role="status" aria-live="polite"></p>
+    <div class="dialog-actions">
+      <button type="button" id="verse-cancel">Cancel</button>
+      <button id="verse-insert" class="primary" type="button">Insert into note</button>
+    </div>
   </dialog>
 </body>
 </html>

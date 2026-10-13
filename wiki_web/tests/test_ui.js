@@ -848,3 +848,48 @@ test('page outline extracts headings, navigates editor lines and updates on live
   assert.equal(get('outline-panel').hidden, true);
   assert.equal(get('page').classList.contains('outline-visible'), false);
 });
+
+test('random Bible verse dialog fetches verse, handles errors, and inserts formatted Markdown blockquote', async () => {
+  const { context, state, get } = harness();
+  let requestedUrl = '';
+  context.fetch = async url => {
+    requestedUrl = url;
+    return {
+      ok: true,
+      json: async () => ({
+        translation: { identifier: 'web', name: 'World English Bible' },
+        random_verse: { book: 'John', chapter: 3, verse: 16, text: 'For God so loved the world...' }
+      })
+    };
+  };
+
+  state.page = { id: 'Home', title: 'Home', content: 'Pre-existing text.', revision: 'r1' };
+  get('editor').value = 'Pre-existing text.';
+  get('editor').selectionStart = get('editor').value.length;
+  get('editor').selectionEnd = get('editor').value.length;
+
+  // Open Verse dialog
+  get('verse-open').handlers.click();
+  assert.equal(get('verse-dialog').open, true);
+  await context.fetchVerse();
+  assert.equal(requestedUrl, 'https://bible-api.com/data/web/random');
+  assert.match(get('verse-text').textContent, /For God so loved the world/);
+  assert.match(get('verse-ref').textContent, /John 3:16 \(WEB\)/);
+
+  // Insert verse into note
+  get('verse-insert').handlers.click();
+  assert.equal(get('verse-dialog').open, false);
+  assert.equal(state.dirty, true);
+  assert.match(get('editor').value, /> For God so loved the world\.\.\./);
+  assert.match(get('editor').value, /> — \*\*John 3:16 \(WEB\)\*\*/);
+
+  // Error handling test
+  context.fetch = async () => { throw new Error('Network unreachable'); };
+  get('verse-open').handlers.click();
+  await context.fetchVerse();
+  assert.match(get('verse-text').textContent, /Could not load verse/);
+  assert.match(get('verse-status').textContent, /Network unreachable/);
+  assert.equal(get('verse-insert').disabled, true);
+  get('verse-close').handlers.click();
+  assert.equal(get('verse-dialog').open, false);
+});

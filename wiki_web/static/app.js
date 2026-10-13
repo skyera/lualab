@@ -8,7 +8,7 @@ let saveTimer, searchTimer;
 let selectedTag = '', treePages = null;
 const exportState = { controller: null };
 const captureState = { date: '', busy: false };
-const MODAL_DIALOGS = ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks', 'capture'];
+const MODAL_DIALOGS = ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks', 'capture', 'verse'];
 function anyDialogOpen() { return MODAL_DIALOGS.some(id => $(id + '-dialog').open); }
 
 function openCapture() {
@@ -550,6 +550,86 @@ function renderOutline() {
   $('outline-list').replaceChildren(...items);
 }
 
+const verseState = { current: null, controller: null, loading: false };
+
+function closeVerse() {
+  if (verseState.controller) { verseState.controller.abort(); verseState.controller = null; }
+  $('verse-dialog').close();
+  $('verse-open').focus();
+}
+
+async function fetchVerse() {
+  if (verseState.controller) verseState.controller.abort();
+  const controller = new AbortController();
+  verseState.controller = controller;
+  verseState.loading = true;
+  verseState.current = null;
+  $('verse-refresh').disabled = true;
+  $('verse-translation').disabled = true;
+  $('verse-insert').disabled = true;
+  $('verse-text').textContent = 'Fetching verse…';
+  $('verse-ref').textContent = '';
+  $('verse-status').textContent = 'Contacting bible-api.com…';
+  const trans = $('verse-translation').value || 'web';
+  try {
+    const url = 'https://bible-api.com/data/' + encodeURIComponent(trans) + '/random';
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) throw new Error('Bible API returned HTTP ' + response.status);
+    const data = await response.json();
+    if (controller.signal.aborted) return;
+    const item = data.random_verse;
+    if (!item || !item.text) throw new Error('Malformed verse response received.');
+    const ref = (item.book || '') + ' ' + (item.chapter || '') + ':' + (item.verse || '') + ' (' + (data.translation?.identifier || trans).toUpperCase() + ')';
+    const text = item.text.trim();
+    verseState.current = { text, ref, translation: data.translation?.identifier || trans };
+    $('verse-text').textContent = '“' + text + '”';
+    $('verse-ref').textContent = '— ' + ref;
+    $('verse-status').textContent = data.translation?.name ? data.translation.name + ' · Public Domain' : 'Public Domain';
+    $('verse-insert').disabled = false;
+  } catch (error) {
+    if (controller.signal.aborted) return;
+    $('verse-text').textContent = 'Could not load verse.';
+    $('verse-ref').textContent = '';
+    $('verse-status').textContent = error.message || 'Network error fetching verse.';
+  } finally {
+    if (verseState.controller === controller) {
+      verseState.controller = null;
+      verseState.loading = false;
+      $('verse-refresh').disabled = false;
+      $('verse-translation').disabled = false;
+    }
+  }
+}
+
+function openVerse() {
+  if (state.loading || state.uploading || anyDialogOpen()) return;
+  if (!state.page) return;
+  $('verse-status').textContent = '';
+  $('verse-dialog').showModal();
+  $('verse-refresh').focus();
+  fetchVerse();
+}
+
+function insertVerse() {
+  if (!verseState.current || !state.page) return;
+  const quote = verseState.current.text;
+  const ref = verseState.current.ref;
+  const quoteLines = quote.split('\n').map(l => '> ' + l).join('\n');
+  const markdown = '\n' + quoteLines + '\n> — **' + ref + '**\n\n';
+  const editor = $('editor');
+  const start = editor.selectionStart, end = editor.selectionEnd;
+  editor.setRangeText(markdown, start, end, 'end');
+  state.dirty = true;
+  rememberDraft();
+  preview();
+  renderOutline();
+  status('Unsaved edits');
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(save, 650);
+  closeVerse();
+  editor.focus();
+}
+
 function openDictionary() {
   if (!state.page) return;
   $('dictionary-panel').hidden = false;
@@ -990,6 +1070,13 @@ $('menu').addEventListener('click', () => {
 document.querySelectorAll('[data-mode]').forEach(node => node.addEventListener('click', () => setMode(node.dataset.mode)));
 $('outline-toggle').addEventListener('click', toggleOutline);
 $('outline-close').addEventListener('click', closeOutline);
+$('verse-open').addEventListener('click', openVerse);
+$('verse-close').addEventListener('click', closeVerse);
+$('verse-cancel').addEventListener('click', closeVerse);
+$('verse-refresh').addEventListener('click', fetchVerse);
+$('verse-translation').addEventListener('change', fetchVerse);
+$('verse-insert').addEventListener('click', insertVerse);
+$('verse-dialog').addEventListener('cancel', event => { event.preventDefault(); closeVerse(); });
 document.addEventListener('selectionchange', captureDictionarySelection);
 $('editor').addEventListener('select', captureDictionarySelection);
 $('dictionary-open').addEventListener('pointerdown', captureDictionarySelection);

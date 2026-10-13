@@ -170,6 +170,9 @@ or replaced as part of recovery advice.
 - **Outline** opens the document heading outline to navigate long notes.
   Clicking an outline item jumps directly to that section in the editor and preview.
   The outline updates live as headings are typed.
+- **Verse** opens a dialog to fetch a random Bible verse from public-domain translations
+  (World English Bible, King James Version, Bible in Basic English, Open English Bible)
+  and insert it directly into the editor as a formatted blockquote quotation.
 - Search matches page paths, titles, and content. Search supports filters such
   as `tag:work` (or `#work`) and `path:Projects` (or `path:"My Projects"`),
   alongside free-text terms. Search results display contextual snippets centered
