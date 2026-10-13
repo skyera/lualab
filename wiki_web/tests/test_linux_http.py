@@ -16,6 +16,28 @@ from pathlib import Path
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "Linux signal regression")
 class LinuxHttpTests(unittest.TestCase):
+    def test_ipv6_unavailable_reports_failure(self):
+        root = Path(__file__).resolve().parents[2]
+        script = """
+            package.path = '../?.lua;' .. package.path
+            local ffi = require('ffi')
+            local transport = setmetatable({}, { __index = ffi.C })
+            transport.socket = function(family, kind, protocol)
+                if family == 10 then return -1 end
+                return ffi.C.socket(family, kind, protocol)
+            end
+            package.loaded.ffi = setmetatable({ C = transport }, { __index = ffi })
+            require('http').serve(0, function() end, function()
+                error('Unexpected startup success')
+            end, '0.0.0.0', nil, { dual_stack = true })
+        """
+        result = subprocess.run(["luajit", "-e", script], cwd=root / "dictionary_web",
+                                capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Cannot create IPv4 + IPv6 server socket", result.stderr)
+        self.assertIn("--host 127.0.0.1", result.stderr)
+        self.assertNotIn("Unexpected startup success", result.stderr)
+
     def test_requests_concurrency_restart_and_signals(self):
         root = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory(prefix="leaf-linux-") as directory:
@@ -47,11 +69,20 @@ class LinuxHttpTests(unittest.TestCase):
                     self.assertIsNotNone(match, line)
                     self.assertIn("Loading modules", "".join(lines))
                     self.assertIn("listening on " + host, line)
-                    address = ("0100007F" if host == "127.0.0.1" else "00000000") + ":" + format(int(match.group(1)), "04X")
-                    sockets = Path("/proc/{}/net/tcp".format(child.pid)).read_text().splitlines()
+                    address = ("0100007F" if host == "127.0.0.1" else "0" * 32) + ":" + format(int(match.group(1)), "04X")
+                    table = "tcp" if host == "127.0.0.1" else "tcp6"
+                    sockets = Path("/proc/{}/net/{}".format(child.pid, table)).read_text().splitlines()
                     self.assertTrue(any(row.split()[1] == address and row.split()[3] == "0A"
                                         for row in sockets[1:]), "Actual socket binding differs from " + host)
                     url = match.group(0)
+                    if host == "0.0.0.0":
+                        self.assertIn("IPv4 + IPv6", line)
+                        for destination in ("127.0.0.1", "::1"):
+                            with socket.create_connection((destination, int(match.group(1))), timeout=5) as peer:
+                                peer.sendall(("GET /api/state HTTP/1.1\r\nHost: nano.local:{}\r\n"
+                                              "Connection: close\r\n\r\n".format(match.group(1))).encode())
+                                response = peer.recv(4096)
+                                self.assertTrue(response.startswith(b"HTTP/1.1 200"), response)
 
                     def request(route, body=None):
                         data = json.dumps(body).encode() if body is not None else None

@@ -69,13 +69,15 @@ luajit dictionary_web/app.lua --port 8080 --db /path/to/words.db
 luajit dictionary_web/app.lua --help
 ```
 
-To allow other computers to access the app, listen on all IPv4 interfaces:
+To allow other computers to access the app, listen on all IPv4 and IPv6 interfaces:
 
 ```sh
 luajit dictionary_web/app.lua --host 0.0.0.0 --port 8030
 ```
 
-Open `http://<server-IP>:8030` from another computer. Allow TCP port 8030 in
+Open `http://<server-IP>:8030` or `http://<server-name>:8030` from another computer.
+LAN mode requires operating system IPv6 support; startup reports a visible error
+if a dual-stack listener cannot be created. Allow TCP port 8030 in
 the server firewall. All visitors share the same journal and can edit notes
 and review progress; the app has no login. Internet access also depends on
 your router's port forwarding and network configuration. This option does

@@ -4,6 +4,8 @@ local json = require('json')
 local bit = require('bit')
 ffi.cdef[[
 struct wb_sockaddr_in { uint16_t family; uint16_t port; uint32_t address; unsigned char zero[8]; };
+struct wb_sockaddr_in6 { uint16_t family; uint16_t port; uint32_t flow;
+    unsigned char address[16]; uint32_t scope; };
 struct wb_timespec { long seconds; long nanoseconds; };
 typedef struct { unsigned long bits[16]; } wb_sigset;
 ]]
@@ -209,13 +211,27 @@ function M.serve(port, handler, ready, host, workers, options)
         blocked = true
         signals = C.signalfd(-1, mask, SFD_NONBLOCK)
         assert(signals >= 0, 'Cannot create signal descriptor')
-        listener = C.socket(AF_INET, SOCK_STREAM + SOCK_NONBLOCK, 0)
-        if listener < 0 then socket_failure('Cannot create server socket') end
+        local dual_stack = host == '0.0.0.0' and options and options.dual_stack
+        local family = dual_stack and (windows and 23 or 10) or AF_INET
+        listener = C.socket(family, SOCK_STREAM + SOCK_NONBLOCK, 0)
+        if listener < 0 then
+            socket_failure(dual_stack
+                and 'Cannot create IPv4 + IPv6 server socket; enable operating system IPv6 support or use --host 127.0.0.1'
+                or 'Cannot create server socket')
+        end
         local enabled = ffi.new('int[1]', 1)
         if C.setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, enabled, 4) ~= 0 then
             socket_failure('Cannot configure server socket')
         end
-        local address = ffi.new('struct wb_sockaddr_in', {
+        if dual_stack then
+            local disabled = ffi.new('int[1]', 0)
+            if C.setsockopt(listener, 41, windows and 27 or 26, disabled, 4) ~= 0 then
+                socket_failure('Cannot enable IPv4 + IPv6; check operating system IPv6 support')
+            end
+        end
+        local address = dual_stack and ffi.new('struct wb_sockaddr_in6', {
+            family, C.htons(port), 0, { 0 }, 0,
+        }) or ffi.new('struct wb_sockaddr_in', {
             AF_INET,
             C.htons(port),
             C.htonl(host == '0.0.0.0' and 0 or INADDR_LOOPBACK),

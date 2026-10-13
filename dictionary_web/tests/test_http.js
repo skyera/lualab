@@ -43,9 +43,9 @@ async function post(url, route, body, headers = {}) {
   const response = await fetch(url + route, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
   return { status: response.status, data: await response.json() };
 }
-async function raw(url, text, fragments = false) {
+async function raw(url, text, fragments = false, address) {
   const parsed = new URL(url);
-  const client = net.connect(Number(parsed.port), parsed.hostname);
+  const client = net.connect(Number(parsed.port), address || parsed.hostname);
   const completed = new Promise((resolve, reject) => {
     let output = '';
     client.on('data', data => { output += data; });
@@ -214,6 +214,11 @@ test('all-interface mode accepts remote Host headers and same-origin browser wri
   try {
     server = await start(path.join(directory, 'words.db'), '0.0.0.0');
     const port = new URL(server.url).port;
+    assert.match(server.logs(), /IPv4 \+ IPv6/);
+    for (const address of ['127.0.0.1', '::1']) {
+      assert.match(await raw(server.url,
+        `GET / HTTP/1.1\r\nHost: nano.local:${port}\r\n\r\n`, false, address), /^HTTP\/1.1 200/);
+    }
     for (const hostname of ['192.168.1.102', '100.101.69.0', 'wordbook.example']) {
       const host = `${hostname}:${port}`;
       assert.match(await raw(server.url, `GET /api/daily HTTP/1.1\r\nHost: ${host}\r\n\r\n`), /^HTTP\/1.1 200/);

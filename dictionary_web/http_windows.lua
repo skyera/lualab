@@ -72,9 +72,10 @@ function C.close(fd)
     if fd == SIGNAL_FD then return 0 end
     return W.closesocket(fd)
 end
-function C.setsockopt(fd, _, option, value, size)
+function C.setsockopt(fd, level, option, value, size)
     -- Exclusive bind prevents another Windows process from stealing this address.
-    return W.setsockopt(fd, 0xffff, option == 2 and -5 or option, ffi.cast('const char *', value), size)
+    return W.setsockopt(fd, level == 1 and 0xffff or level,
+        level == 1 and option == 2 and -5 or option, ffi.cast('const char *', value), size)
 end
 function C.bind(fd, address, size) return W.bind(fd, address, size) end
 function C.listen(fd, count) return W.listen(fd, count) end

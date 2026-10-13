@@ -218,7 +218,7 @@ test('default binding is loopback; LAN access requires an explicit host each lau
     if (windows) {
       const result = spawnSync('netstat', ['-ano', '-p', 'tcp'], { encoding: 'utf8' });
       assert.equal(result.status, 0, result.stderr);
-      const address = host + ':' + new URL(server.url).port;
+      const address = (host === '0.0.0.0' ? '[::]' : host) + ':' + new URL(server.url).port;
       assert.ok(result.stdout.split(/\r?\n/).some(line => {
         const columns = line.trim().split(/\s+/);
         return columns[1] === address && columns.at(-1) === String(server.child.pid);
@@ -231,6 +231,16 @@ test('default binding is loopback; LAN access requires an explicit host each lau
     await stop(server); server = undefined;
     server = await start(directory, ['--host', '0.0.0.0', '--save-config']);
     checkBinding('0.0.0.0');
+    for (const hostname of ['127.0.0.1', '::1']) {
+      const status = await new Promise((resolve, reject) => {
+        const req = http.get({ hostname, port: new URL(server.url).port, path: '/api/state',
+          headers: { Host: `nano.local:${new URL(server.url).port}` } }, response => {
+          response.resume(); response.on('end', () => resolve(response.statusCode));
+        });
+        req.on('error', reject);
+      });
+      assert.equal(status, 200);
+    }
     await stop(server); server = undefined;
     server = await start(directory); checkBinding('127.0.0.1');
     await stop(server); server = undefined;

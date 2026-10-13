@@ -282,9 +282,12 @@ function M.run(root)
     local ok, err = pcall(http.serve, port, handler, function(actual_port)
         startup.report('Server running')
         print('Leaf Wiki: http://127.0.0.1:' .. actual_port
-            .. ' (listening on ' .. options.host .. ') | Notebook: ' .. notebook.fs.root)
+            .. ' (listening on ' .. options.host
+            .. (options.host == '0.0.0.0' and '; IPv4 + IPv6' or '')
+            .. ') | Notebook: ' .. notebook.fs.root)
         io.stdout:flush()
-    end, options.host, nil, { body_limits = { ['/api/page'] = 7 * 1024 * 1024, ['/api/image'] = 5 * 1024 * 1024 } })
+    end, options.host, nil, { dual_stack = true,
+        body_limits = { ['/api/page'] = 7 * 1024 * 1024, ['/api/image'] = 5 * 1024 * 1024 } })
     notebook:close()
     if not ok then error(err) end
 end

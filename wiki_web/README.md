@@ -54,7 +54,10 @@ luajit .\wiki_web.lua --host 0.0.0.0
 ```
 
 Then open `http://<host-LAN-IP>:8020` or `http://<host-name>:8020` from another
-device and allow inbound TCP port `8020` through the host firewall. Leaf Wiki has
+device. LAN mode listens on both IPv4 and IPv6, so names such as `nano.local`
+work when resolved to either address family. IPv6 support must be enabled on the
+server; startup reports an error if a dual-stack listener cannot be created.
+Allow inbound TCP port `8020` through the host firewall. Leaf Wiki has
 no login, so only enable LAN access on a trusted network. `--host` applies to the
 current launch and is not saved by `--save-config`. Ctrl-C closes the server and
 index on both platforms; SIGTERM also does so on Linux. Windows process termination

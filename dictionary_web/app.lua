@@ -171,9 +171,11 @@ local function main()
     end
 
     local ok, err = pcall(http.serve, port, handler, function(actual_port)
-        print('Wordbook: http://127.0.0.1:' .. actual_port .. ' | Listening: ' .. bind_host .. ':' .. actual_port .. ' | SQLite: ' .. database)
+        print('Wordbook: http://127.0.0.1:' .. actual_port
+            .. ' | Listening: ' .. bind_host .. ':' .. actual_port
+            .. (bind_host == '0.0.0.0' and ' (IPv4 + IPv6)' or '') .. ' | SQLite: ' .. database)
         io.stdout:flush()
-    end, bind_host, workers)
+    end, bind_host, workers, { dual_stack = true })
     db:close()
     if not ok then
         io.stderr:write(tostring(err) .. '\n')
