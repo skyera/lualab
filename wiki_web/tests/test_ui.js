@@ -758,3 +758,29 @@ test('an external-change poll cannot flag a save that completed while the poll w
   assert.equal(state.blocked, false); assert.equal(get('conflict').hidden, true);
   assert.equal(get('save-status').textContent, '✓ Saved');
 });
+
+test('search renders matching snippets and highlights query terms', async () => {
+  const { context, get, timers } = harness();
+  let requestedRoute;
+  context.api = async route => {
+    requestedRoute = route;
+    return {
+      pages: [{ id: 'Projects/Roadmap', title: 'Roadmap', snippet: '… quarterly budget allocations …' }],
+      terms: ['budget']
+    };
+  };
+  get('search').value = 'tag:work path:Projects budget';
+  get('search').handlers.input();
+  const searchPromise = [...timers.values()].at(-1)();
+  await searchPromise;
+  assert.equal(requestedRoute, '/api/state?q=' + encodeURIComponent('tag:work path:Projects budget'));
+  const results = get('tree').children;
+  assert.equal(results.length, 1);
+  assert.equal(results[0].className.includes('tree-search-item'), true);
+  assert.match(texts(results[0]), /Roadmap/);
+  assert.match(texts(results[0]), /Projects \/ Roadmap/);
+  assert.match(texts(results[0]), /quarterly budget allocations/);
+  const marks = results[0].querySelectorAll('mark');
+  assert.equal(marks.length >= 1, true);
+  assert.equal(marks[0].textContent, 'budget');
+});

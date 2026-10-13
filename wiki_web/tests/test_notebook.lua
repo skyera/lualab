@@ -343,4 +343,36 @@ test('capture write and history failures preserve source pages and report the fa
         assert(n:page(large.id).content == large.content)
     end)
 end)
+test('rich search filters by tag and path and extracts contextual snippets with term preservation', function()
+    fixture(function(n)
+        assert(n:save('Projects/Roadmap', '# 2026 Roadmap #work #planning\n\nOverview of goals.\nMany sections later we detail the quarterly budget and capital allocations.\nEnd.', ''))
+        assert(n:save('Projects/Ideas', '# Ideas #work\n\nSome early notes without cost details.', ''))
+        assert(n:save('Personal/Journal', '# Diary #personal\n\nDaily thoughts and family budget.', ''))
+        assert(n:save('Personal/Empty', '', ''))
+
+        local res = n:state('tag:work')
+        assert(#res.pages == 2 and res.pages[1].id == 'Projects/Ideas' and res.pages[2].id == 'Projects/Roadmap')
+        local hash_res = n:state('#planning')
+        assert(#hash_res.pages == 1 and hash_res.pages[1].id == 'Projects/Roadmap')
+
+        local path_res = n:state('path:Personal')
+        assert(#path_res.pages == 2)
+        local empty_res = n:state('path:Personal/Empty')
+        assert(#empty_res.pages == 1 and empty_res.pages[1].snippet == '')
+
+        local combined = n:state('tag:work path:Projects budget')
+        assert(#combined.pages == 1 and combined.pages[1].id == 'Projects/Roadmap')
+        assert(combined.pages[1].snippet:find('quarterly budget and capital', 1, true))
+        assert(#combined.terms == 1 and combined.terms[1] == 'budget')
+
+        local case_res = n:state('TAG:WORK path:projects')
+        assert(#case_res.pages == 2)
+
+        local quote_res = n:state('path:Projects "quarterly budget"')
+        assert(#quote_res.pages == 1 and quote_res.pages[1].id == 'Projects/Roadmap')
+
+        local title_match = n:state('Roadmap')
+        assert(#title_match.pages == 1 and title_match.pages[1].snippet:find('Roadmap', 1, true))
+    end)
+end)
 print('Passed ' .. count .. ' notebook tests.')

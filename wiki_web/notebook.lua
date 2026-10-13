@@ -7,6 +7,7 @@ local History = require('history')
 local tags = require('tags')
 local tasks = require('tasks')
 local capture = require('capture')
+local search = require('search')
 local json = require('json')
 local Notebook = {}
 Notebook.__index = Notebook
@@ -106,15 +107,45 @@ end
 
 function Notebook:state(query)
     self:sync()
+    local parsed = search.parse(query or '')
     local rows
-    if query and query ~= '' then
-        local escaped = query:gsub('\\', '\\\\'):gsub('%%', '\\%%'):gsub('_', '\\_')
-        rows = self.db:query([[SELECT id,title,revision,substr(content,1,160) AS snippet FROM pages
-            WHERE id LIKE ? ESCAPE '\' OR content LIKE ? ESCAPE '\' ORDER BY id]],
-            { '%' .. escaped .. '%', '%' .. escaped .. '%' })
-    else rows = self.db:query('SELECT id,title,revision FROM pages ORDER BY id') end
-    for _, row in ipairs(rows) do row.tags = self.page_tags[row.id] or {} end
-    return { pages = rows, data_dir = self.fs.root, index_path = self.index_path, trash = self:trash_list() }
+    if #parsed.terms == 0 and #parsed.paths == 0 and #parsed.tags == 0 then
+        rows = self.db:query('SELECT id,title,revision,substr(content,1,160) AS snippet FROM pages ORDER BY id')
+    else
+        local sql = 'SELECT id,title,revision,content FROM pages WHERE 1=1'
+        local params = {}
+        for _, term in ipairs(parsed.terms) do
+            local escaped = term:gsub('\\', '\\\\'):gsub('%%', '\\%%'):gsub('_', '\\_')
+            sql = sql .. [[ AND (id LIKE ? ESCAPE '\' OR content LIKE ? ESCAPE '\')]]
+            params[#params + 1] = '%' .. escaped .. '%'
+            params[#params + 1] = '%' .. escaped .. '%'
+        end
+        for _, p in ipairs(parsed.paths) do
+            local escaped = p:gsub('\\', '\\\\'):gsub('%%', '\\%%'):gsub('_', '\\_')
+            sql = sql .. [[ AND (id LIKE ? ESCAPE '\' OR id LIKE ? ESCAPE '\')]]
+            params[#params + 1] = escaped
+            params[#params + 1] = escaped .. '/%'
+        end
+        sql = sql .. ' ORDER BY id'
+        local candidates = self.db:query(sql, params)
+        rows = {}
+        for _, row in ipairs(candidates) do
+            row.tags = self.page_tags[row.id] or {}
+            if search.matches_tags(row.tags, parsed.tags) then
+                row.snippet = search.snippet(row.content, parsed.terms)
+                row.content = nil
+                rows[#rows + 1] = row
+            end
+        end
+    end
+    for _, row in ipairs(rows) do row.tags = row.tags or self.page_tags[row.id] or {} end
+    return {
+        pages = rows,
+        data_dir = self.fs.root,
+        index_path = self.index_path,
+        trash = self:trash_list(),
+        terms = parsed.terms,
+    }
 end
 
 function Notebook:backlinks(id)

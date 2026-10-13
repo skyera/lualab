@@ -167,8 +167,11 @@ or replaced as part of recovery advice.
   the notebook root. `[[./Tasks]]` and `[[../Other]]` resolve relative to the
   current page's containing folder. Missing targets offer page creation.
 - **Linked from** lists backlinks. Links inside code are excluded.
-- Search matches page paths and content. **Ctrl K** (or Cmd K) focuses search;
-  **Ctrl S** (or Cmd S) saves immediately.
+- Search matches page paths, titles, and content. Search supports filters such
+  as `tag:work` (or `#work`) and `path:Projects` (or `path:"My Projects"`),
+  alongside free-text terms. Search results display contextual snippets centered
+  around matching terms with highlighted search keywords in titles, paths, and snippets.
+  **Ctrl K** (or Cmd K) focuses search; **Ctrl S** (or Cmd S) saves immediately.
 
 ## Tags
 

@@ -366,6 +366,10 @@ test('configured folder, autosave conflicts, images, links, maintenance and clea
     fs.writeFileSync(path.join(notebook, 'Projects', 'Plan.md'), 'External change');
     assert.equal((await post(server, '/api/page', { id: page.id, content: 'Overwrite', revision: page.revision })).status, 409);
     assert.equal((await (await fetch(server.url + '/api/state?q=External')).json()).pages.length, 1);
+    const searchRes = await (await fetch(server.url + '/api/state?q=' + encodeURIComponent('path:Projects External'))).json();
+    assert.equal(searchRes.pages.length, 1);
+    assert.match(searchRes.pages[0].snippet, /External change/);
+    assert.deepEqual(searchRes.terms, ['External']);
     await stop(server); server = await start(directory);
     assert.equal((await (await fetch(server.url + '/api/page?id=Projects%2FPlan')).json()).content, 'External change');
     assert.equal((await (await fetch(server.url + '/api/state')).json()).data_dir, normalized(notebook));

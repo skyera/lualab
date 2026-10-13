@@ -524,28 +524,90 @@ function button(text, action, className) {
   if (className) node.className = className;
   node.addEventListener('click', action); return node;
 }
-function renderTree(pages = state.pages) {
+function highlightTerms(text, terms) {
+  const span = document.createElement('span');
+  if (!text) return span;
+  if (!terms || !terms.length) { span.textContent = text; return span; }
+  const escaped = terms.filter(Boolean)
+    .map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .sort((a, b) => b.length - a.length);
+  if (!escaped.length) { span.textContent = text; return span; }
+  const regex = new RegExp('(' + escaped.join('|') + ')', 'gi');
+  let last = 0, match;
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > last) {
+      span.append(document.createTextNode(text.slice(last, match.index)));
+    }
+    const mark = document.createElement('mark');
+    mark.className = 'search-highlight';
+    mark.textContent = match[0];
+    span.append(mark);
+    last = regex.lastIndex;
+  }
+  if (last < text.length) {
+    span.append(document.createTextNode(text.slice(last)));
+  }
+  return span;
+}
+
+function renderTree(pages = state.pages, terms = []) {
   treePages = pages;
   if (selectedTag) pages = pages.filter(page => (page.tags || []).includes(selectedTag));
+  const isSearch = Boolean($('search').value.trim());
   const nodes = [], groups = new Set();
-  for (const page of pages) {
-    const parts = page.id.split('/');
-    for (let index = 1; index < parts.length; index++) {
-      const group = parts.slice(0, index).join('/');
-      if (!groups.has(group) && !pages.some(p => p.id === group)) {
-        groups.add(group); const node = document.createElement('div'); node.className = 'tree-group';
-        node.textContent = '\u00a0\u00a0'.repeat(index - 1) + parts[index - 1]; nodes.push(node);
+  if (isSearch) {
+    for (const page of pages) {
+      const node = document.createElement('button');
+      node.type = 'button';
+      node.className = 'tree-search-item' + (state.page?.id === page.id ? ' active' : '');
+      node.title = page.id + (page.snippet ? '\n' + page.snippet : '');
+      if (state.page?.id === page.id) node.setAttribute('aria-current', 'page');
+      node.addEventListener('click', () => openPage(page.id));
+
+      const titleNode = document.createElement('span');
+      titleNode.className = 'tree-search-title';
+      titleNode.append(highlightTerms(page.title, terms));
+
+      const pathNode = document.createElement('span');
+      pathNode.className = 'tree-search-path';
+      pathNode.append(highlightTerms(page.id.replaceAll('/', ' / '), terms));
+
+      node.append(titleNode);
+      node.append(pathNode);
+
+      if (page.snippet) {
+        const snippetNode = document.createElement('span');
+        snippetNode.className = 'tree-search-snippet';
+        snippetNode.append(highlightTerms(page.snippet, terms));
+        node.append(snippetNode);
       }
+      nodes.push(node);
     }
-    const node = button('\u00a0\u00a0'.repeat(parts.length - 1) + page.title, () => openPage(page.id), 'tree-page');
-    node.title = page.id; node.classList.toggle('active', state.page?.id === page.id);
-    if (state.page?.id === page.id) node.setAttribute('aria-current', 'page');
-    if (page.snippet) node.title += '\n' + page.snippet;
+  } else {
+    for (const page of pages) {
+      const parts = page.id.split('/');
+      for (let index = 1; index < parts.length; index++) {
+        const group = parts.slice(0, index).join('/');
+        if (!groups.has(group) && !pages.some(p => p.id === group)) {
+          groups.add(group); const node = document.createElement('div'); node.className = 'tree-group';
+          node.textContent = '\u00a0\u00a0'.repeat(index - 1) + parts[index - 1]; nodes.push(node);
+        }
+      }
+      const node = button('\u00a0\u00a0'.repeat(parts.length - 1) + page.title, () => openPage(page.id), 'tree-page');
+      node.title = page.id; node.classList.toggle('active', state.page?.id === page.id);
+      if (state.page?.id === page.id) node.setAttribute('aria-current', 'page');
+      if (page.snippet) node.title += '\n' + page.snippet;
+      nodes.push(node);
+    }
+  }
+  if (!nodes.length) {
+    const node = document.createElement('p');
+    node.textContent = selectedTag
+      ? 'No matching pages tagged #' + selectedTag + '.' : $('search').value ? 'No matching pages.' : 'No pages yet.';
     nodes.push(node);
   }
-  if (!nodes.length) { const node = document.createElement('p'); node.textContent = selectedTag
-    ? 'No matching pages tagged #' + selectedTag + '.' : $('search').value ? 'No matching pages.' : 'No pages yet.'; nodes.push(node); }
-  $('tree').replaceChildren(...nodes); $('page-count').textContent = state.pages.length;
+  $('tree').replaceChildren(...nodes);
+  $('page-count').textContent = pages.length;
 }
 function backlinks(rows) {
   $('backlink-count').textContent = rows.length;
@@ -853,7 +915,7 @@ $('search').addEventListener('input', () => {
   searchTimer = setTimeout(async () => {
     try {
       const result = await api('/api/state?q=' + encodeURIComponent(query));
-      if (request === state.searchRequest && query === $('search').value) renderTree(result.pages);
+      if (request === state.searchRequest && query === $('search').value) renderTree(result.pages, result.terms || []);
     } catch (error) { if (request === state.searchRequest) message(error.message); }
   }, 120);
 });
