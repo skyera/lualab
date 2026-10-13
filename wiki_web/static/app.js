@@ -485,6 +485,71 @@ async function lookupDictionary() {
   }
 }
 
+const outlineState = { activeId: '' };
+
+function closeOutline() {
+  $('outline-panel').hidden = true;
+  $('page').classList.remove('outline-visible');
+  $('outline-toggle').setAttribute('aria-expanded', 'false');
+  $('outline-toggle').focus();
+}
+
+function openOutline() {
+  if (!state.page) return;
+  if (!$('dictionary-panel').hidden) closeDictionary();
+  $('outline-panel').hidden = false;
+  $('page').classList.add('outline-visible');
+  $('outline-toggle').setAttribute('aria-expanded', 'true');
+  renderOutline();
+}
+
+function toggleOutline() {
+  if ($('outline-panel').hidden) openOutline();
+  else closeOutline();
+}
+
+function jumpToHeading(item) {
+  outlineState.activeId = item.id;
+  renderOutline();
+  if (state.mode === 'preview') {
+    const target = document.getElementById(item.id);
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return;
+  }
+  const lines = $('editor').value.split('\n');
+  const targetLine = Math.min(lines.length, Math.max(1, item.line));
+  const start = lines.slice(0, targetLine - 1).reduce((sum, line) => sum + line.length + 1, 0);
+  const end = start + (lines[targetLine - 1] || '').length;
+  $('editor').focus();
+  $('editor').setSelectionRange(start, end);
+  $('editor').scrollTop = Math.max(0, (targetLine - 3) * 25);
+  if (state.mode === 'split') {
+    const target = document.getElementById(item.id);
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+}
+
+function renderOutline() {
+  if ($('outline-panel').hidden || !state.page) return;
+  const headings = WikiMarkdown.headings($('editor').value);
+  if (!headings.length) {
+    $('outline-status').textContent = 'No headings in this note. Use # Heading to structure your note.';
+    $('outline-list').replaceChildren();
+    return;
+  }
+  $('outline-status').textContent = headings.length + (headings.length === 1 ? ' heading' : ' headings');
+  const items = headings.map(item => {
+    const node = document.createElement('button');
+    node.type = 'button';
+    node.className = 'outline-item outline-level-' + item.level + (outlineState.activeId === item.id ? ' active' : '');
+    node.textContent = item.text;
+    node.title = item.text + ' (H' + item.level + ', line ' + item.line + ')';
+    node.addEventListener('click', () => jumpToHeading(item));
+    return node;
+  });
+  $('outline-list').replaceChildren(...items);
+}
+
 function openDictionary() {
   if (!state.page) return;
   $('dictionary-panel').hidden = false;
@@ -752,7 +817,7 @@ async function openPage(id, anchor) {
     $('title').textContent = page.title; $('breadcrumb').textContent = page.id.replaceAll('/', ' › ');
     $('welcome').hidden = true; $('page').hidden = false; $('conflict').hidden = !state.blocked;
     status(state.blocked ? 'Conflict · Draft kept' : state.dirty ? 'Recovered draft' : '✓ Saved', state.blocked);
-    renderTree(); preview(); backlinks(page.backlinks || []);
+    renderTree(); preview(); renderOutline(); backlinks(page.backlinks || []);
     history.replaceState(null, '', '#page=' + encodeURIComponent(page.id));
     document.querySelector('.workspace').classList.remove('menu-open'); $('menu').setAttribute('aria-expanded', 'false');
     if (anchor) { setMode('preview'); document.getElementById(anchor)?.scrollIntoView(); }
@@ -783,7 +848,7 @@ async function uploadImages(files) {
 }
 $('editor').addEventListener('input', () => {
   if (!state.page) return;
-  state.dirty = true; rememberDraft(); preview();
+  state.dirty = true; rememberDraft(); preview(); renderOutline();
   if (!state.blocked) { status('Unsaved edits'); clearTimeout(saveTimer); saveTimer = setTimeout(save, 650); }
 });
 $('editor').addEventListener('paste', event => {
@@ -923,6 +988,8 @@ $('menu').addEventListener('click', () => {
   const open = document.querySelector('.workspace').classList.toggle('menu-open'); $('menu').setAttribute('aria-expanded', String(open));
 });
 document.querySelectorAll('[data-mode]').forEach(node => node.addEventListener('click', () => setMode(node.dataset.mode)));
+$('outline-toggle').addEventListener('click', toggleOutline);
+$('outline-close').addEventListener('click', closeOutline);
 document.addEventListener('selectionchange', captureDictionarySelection);
 $('editor').addEventListener('select', captureDictionarySelection);
 $('dictionary-open').addEventListener('pointerdown', captureDictionarySelection);

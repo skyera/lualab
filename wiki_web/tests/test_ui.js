@@ -9,7 +9,7 @@ class Node {
     this.tagName = tag.toUpperCase(); this.textContent = text; this.children = []; this.handlers = {};
     this.value = ''; this.hidden = false; this.dataset = {}; this.className = ''; this.open = false;
     const classes = new Set();
-    this.classList = { toggle(name, value) { const enabled = value ?? !classes.has(name); if (enabled) classes.add(name); else classes.delete(name); return enabled; }, remove: name => classes.delete(name), contains: name => classes.has(name) };
+    this.classList = { toggle(name, value) { const enabled = value ?? !classes.has(name); if (enabled) classes.add(name); else classes.delete(name); return enabled; }, add: name => classes.add(name), remove: name => classes.delete(name), contains: name => classes.has(name) };
   }
   append(...nodes) { this.children.push(...nodes); }
   contains(node) { return this === node || this.children.some(child => child.contains?.(node)); }
@@ -582,6 +582,7 @@ function harness() {
   const state = vm.runInContext('state', context), markdown = vm.runInContext('WikiMarkdown', context);
   state.root = '/notebook'; state.page = { id: 'Home', title: 'Home', content: 'Initial', revision: 'r1' };
   state.pages = [state.page, { id: 'Other', title: 'Other', revision: 'r2' }]; get('editor').value = 'Initial';
+  get('outline-panel').hidden = true; get('dictionary-panel').hidden = true;
   context.refresh = async () => {};
   return { context, state, get, events, stored, markdown, timers };
 }
@@ -783,4 +784,67 @@ test('search renders matching snippets and highlights query terms', async () => 
   const marks = results[0].querySelectorAll('mark');
   assert.equal(marks.length >= 1, true);
   assert.equal(marks[0].textContent, 'budget');
+});
+
+test('page outline extracts headings, navigates editor lines and updates on live input', async () => {
+  const { context, state, get, markdown } = harness();
+  const sample = '# Project Title\n\nIntro text\n\n```js\n# Not a heading\n```\n\n## Architecture\n\nDesign notes\n\n### Data Flow\n\nFlow details\n\n## Deployment';
+  const headings = markdown.headings(sample);
+  assert.equal(headings.length, 4);
+  assert.equal(headings[0].text, 'Project Title');
+  assert.equal(headings[0].level, 1);
+  assert.equal(headings[0].line, 1);
+  assert.equal(headings[0].id, 'project-title');
+  assert.equal(headings[1].text, 'Architecture');
+  assert.equal(headings[1].level, 2);
+  assert.equal(headings[1].line, 9);
+  assert.equal(headings[2].text, 'Data Flow');
+  assert.equal(headings[2].level, 3);
+  assert.equal(headings[2].line, 13);
+  assert.equal(headings[3].text, 'Deployment');
+  assert.equal(headings[3].level, 2);
+  assert.equal(headings[3].line, 17);
+
+  // Test UI interactions
+  state.page = { id: 'Doc', title: 'Doc', content: sample, revision: 'r1' };
+  get('editor').value = sample;
+  assert.equal(get('outline-panel').hidden, true);
+
+  // Toggle outline open
+  get('outline-toggle').handlers.click();
+  assert.equal(get('outline-panel').hidden, false);
+  assert.equal(get('page').classList.contains('outline-visible'), true);
+  assert.match(get('outline-status').textContent, /4 headings/);
+  const items = get('outline-list').children;
+  assert.equal(items.length, 4);
+  assert.equal(items[1].textContent, 'Architecture');
+  assert.equal(items[1].className.includes('outline-level-2'), true);
+
+  // Jump to heading "Architecture" (line 9)
+  items[1].handlers.click();
+  const updatedItems = get('outline-list').children;
+  assert.equal(updatedItems[1].className.includes('active'), true);
+  assert.equal(get('editor').focused, true);
+  const lines = sample.split('\n');
+  const expectedStart = lines.slice(0, 8).reduce((sum, line) => sum + line.length + 1, 0);
+  assert.equal(get('editor').selectionStart, expectedStart);
+  assert.equal(get('editor').selectionEnd, expectedStart + '## Architecture'.length);
+
+  // Live input updates outline
+  get('editor').value = '# Solitary Heading\n\nBody only';
+  get('editor').handlers.input();
+  assert.match(get('outline-status').textContent, /1 heading/);
+  assert.equal(get('outline-list').children.length, 1);
+  assert.equal(get('outline-list').children[0].textContent, 'Solitary Heading');
+
+  // Empty headings fallback
+  get('editor').value = 'Just plain paragraphs without headings';
+  get('editor').handlers.input();
+  assert.match(get('outline-status').textContent, /No headings/);
+  assert.equal(get('outline-list').children.length, 0);
+
+  // Toggle outline close
+  get('outline-close').handlers.click();
+  assert.equal(get('outline-panel').hidden, true);
+  assert.equal(get('page').classList.contains('outline-visible'), false);
 });

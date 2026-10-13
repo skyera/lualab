@@ -77,3 +77,23 @@ dialog{border:1px solid var(--line);border-radius:12px;background:var(--surface)
 .tree-search-path{font-size:11px;color:var(--muted);overflow-wrap:anywhere}
 .tree-search-snippet{font-size:11px;line-height:1.4;color:#4f5852;overflow-wrap:anywhere;margin-top:2px;background:var(--paper);padding:4px 6px;border-radius:4px;border:1px solid #ebece5}
 mark.search-highlight{background:#ffec99;color:inherit;padding:0 2px;border-radius:2px;font-weight:600}
+.outline-panel{border:1px solid var(--line);border-radius:10px;padding:16px;margin-top:20px;min-width:0;align-self:start;overflow-wrap:anywhere}
+.outline-heading{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px}
+.outline-heading h2{font-size:18px;margin:0}
+#outline-status{font-size:13px;color:var(--muted);margin:0 0 10px}
+#outline-list{display:flex;flex-direction:column;gap:3px;max-height:65vh;overflow:auto}
+.outline-item{border:0;text-align:left;width:100%;font-size:13px;line-height:1.4;padding:4px 8px;border-radius:5px;overflow-wrap:anywhere;display:flex;align-items:center}
+.outline-item:hover{background:var(--soft);color:var(--green)}
+.outline-item.active{background:#dde8da;color:var(--green);font-weight:600}
+.outline-level-1{font-weight:600;padding-left:6px}
+.outline-level-2{padding-left:16px}
+.outline-level-3{padding-left:26px}
+.outline-level-4{padding-left:36px;font-size:12px}
+.outline-level-5{padding-left:44px;font-size:12px}
+.outline-level-6{padding-left:52px;font-size:12px}
+#page.outline-visible{display:grid;grid-template-columns:minmax(0,1fr) 280px;column-gap:18px}
+#page.outline-visible>p,#page.outline-visible>.page-heading,#page.outline-visible>.toolbar,#page.outline-visible>#conflict{grid-column:1/-1}
+#page.outline-visible>#panes{grid-column:1;grid-row:5}
+#page.outline-visible>.backlinks{grid-column:1;grid-row:6}
+#page.outline-visible>.outline-panel{grid-column:2;grid-row:5/7;max-height:75vh;overflow:auto}
+@media(max-width:1100px){#page.outline-visible{grid-template-columns:minmax(0,1fr)}#page.outline-visible>.outline-panel{grid-column:1;grid-row:4;max-height:45vh}#page.outline-visible>#conflict{grid-row:5}#page.outline-visible>#panes{grid-row:6}#page.outline-visible>.backlinks{grid-row:7}}

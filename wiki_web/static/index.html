@@ -47,9 +47,15 @@
         <div class="page-heading"><h1 id="title"></h1><span id="save-status" role="status">Saved</span></div>
         <div class="toolbar">
           <div class="modes" aria-label="Editor layout"><button data-mode="edit">Edit</button><button data-mode="split" class="selected">Split</button><button data-mode="preview">Preview</button></div>
+          <button id="outline-toggle" aria-controls="outline-panel" aria-expanded="false">Outline</button>
           <button id="dictionary-open" aria-controls="dictionary-panel" aria-expanded="false">Look up</button>
           <button id="page-history">History</button><button id="save">Save</button><button id="rename">Rename</button><button id="delete">Trash page</button>
         </div>
+        <section id="outline-panel" class="outline-panel" aria-label="Page outline" hidden>
+          <div class="outline-heading"><h2>Outline</h2><button id="outline-close" type="button">Close</button></div>
+          <p id="outline-status" role="status" aria-live="polite">Navigate headings in this page.</p>
+          <nav id="outline-list" aria-label="Headings"></nav>
+        </section>
         <section id="dictionary-panel" class="dictionary-panel" aria-label="Dictionary lookup" hidden>
           <div class="dictionary-heading"><h2>Dictionary</h2><button id="dictionary-close" type="button">Close</button></div>
           <form id="dictionary-form"><label for="dictionary-word" class="sr-only">Word to look up</label><input id="dictionary-word" maxlength="240" placeholder="Word or short phrase" autocomplete="off"><button type="submit">Find</button></form>

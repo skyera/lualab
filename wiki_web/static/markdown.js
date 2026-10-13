@@ -110,5 +110,32 @@ const WikiMarkdown = (() => {
     }
     flush(); return root;
   }
-  return { render, resolve };
+  function headings(text) {
+    const list = [];
+    if (typeof text !== 'string') return list;
+    const lines = text.split(/\r?\n/);
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index];
+      const fence = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+      if (fence) {
+        while (++index < lines.length) {
+          const ending = lines[index].match(/^ {0,3}(`{3,}|~{3,})\s*$/);
+          if (ending && ending[1][0] === fence[1][0] && ending[1].length >= fence[1].length) break;
+        }
+        continue;
+      }
+      if (/^( {4}|\t)/.test(line)) {
+        while (index + 1 < lines.length && /^( {4}|\t)/.test(lines[index + 1])) index++;
+        continue;
+      }
+      const heading = line.match(/^(#{1,6})\s+(.+)$/);
+      if (heading) {
+        const title = heading[2].trim();
+        const id = title.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '');
+        list.push({ level: heading[1].length, text: title, line: index + 1, id });
+      }
+    }
+    return list;
+  }
+  return { render, resolve, headings };
 })();

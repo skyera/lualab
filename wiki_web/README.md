@@ -167,6 +167,9 @@ or replaced as part of recovery advice.
   the notebook root. `[[./Tasks]]` and `[[../Other]]` resolve relative to the
   current page's containing folder. Missing targets offer page creation.
 - **Linked from** lists backlinks. Links inside code are excluded.
+- **Outline** opens the document heading outline to navigate long notes.
+  Clicking an outline item jumps directly to that section in the editor and preview.
+  The outline updates live as headings are typed.
 - Search matches page paths, titles, and content. Search supports filters such
   as `tag:work` (or `#work`) and `path:Projects` (or `path:"My Projects"`),
   alongside free-text terms. Search results display contextual snippets centered
