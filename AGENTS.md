@@ -14,6 +14,16 @@ For any issue, feature request, review, or modification task, the agent MUST fol
 
 Verification is the only path to finality. Do not assume success. Always double check and verify every fix or solution for correctness.
 
+## Error Handling & Diagnostics
+
+* **Never Fail Silently**: Handle errors explicitly. Do not swallow exceptions, ignore failed return values, or exit without explaining what failed.
+* **Visible, Actionable Errors**: Report the failed operation, relevant file path or resource, underlying error, and a practical recovery step when known. CLI tools must write errors to stderr and return a nonzero exit code for fatal failures. GUIs and TUIs must show failures in the active view without losing user input.
+* **Startup & Progress Visibility**: Print and flush startup phases before loading native libraries, opening files or databases, scanning data, or starting servers. Long-running operations must show progress so a stall or native crash leaves a useful last-known phase.
+* **Explicit Fallbacks**: When a missing optional config or resource causes defaults, degraded functionality, or automatic creation, say so and print its path. Distinguish expected first-run creation from an invalid, unreadable, or corrupt resource. Never silently create an empty replacement for a required existing database.
+* **Protected Cleanup**: Protect application entry points and external operations where practical. Preserve error details and close handles, release locks, and restore terminal state on failure. Native crashes may bypass language-level handlers; do not claim they were caught.
+* **Verify Writes Before Reporting Success**: After saving configuration or other critical files, verify the file exists and read back its expected contents. Print the resolved path only after successful verification; write or verification failures must never produce a success message.
+* **Test Failure Paths**: Verify missing files and dependencies, permission and write failures, malformed data, busy resources, and failed subprocesses. Assert visible diagnostics, correct exit status, cleanup, and preservation of user data. Test intentional fallbacks and automatic creation as well as fatal errors.
+
 ## Verification & Validation Guidelines
 
 For every change, consider how to prove correctness before concluding:
