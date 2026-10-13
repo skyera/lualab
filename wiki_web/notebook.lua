@@ -5,6 +5,7 @@ local links = require('links')
 local hash = require('hash')
 local History = require('history')
 local tags = require('tags')
+local tasks = require('tasks')
 local json = require('json')
 local Notebook = {}
 Notebook.__index = Notebook
@@ -118,6 +119,40 @@ end
 function Notebook:backlinks(id)
     require_id(id); self:sync()
     return self.db:query('SELECT source AS id FROM links WHERE target=? ORDER BY source', { id })
+end
+
+function Notebook:tasks()
+    self:sync()
+    local result = {}
+    for _, page in ipairs(self.db:query('SELECT id,content,revision FROM pages ORDER BY id')) do
+        for _, task in ipairs(tasks.parse(page.content)) do
+            task.position = nil
+            task.id, task.revision = page.id, page.revision
+            task.tags = self.page_tags[page.id] or {}
+            result[#result + 1] = task
+        end
+    end
+    return { tasks = result }
+end
+
+function Notebook:update_task(id, line, done, revision)
+    require_id(id)
+    assert(type(line) == 'number' and line >= 1 and line == math.floor(line), 'Invalid task line')
+    assert(type(done) == 'boolean', 'Task completion must be a boolean')
+    assert(type(revision) == 'string', 'Revision is required')
+    local page = self:page(id)
+    if not page then return nil, 'Task page not found. Refresh the task list.', 404 end
+    if page.revision ~= revision then
+        return nil, 'Task page changed. Refresh the task list before trying again.', 409
+    end
+    for _, task in ipairs(tasks.parse(page.content)) do
+        if task.line == line then
+            local content = page.content:sub(1, task.position - 1) .. (done and 'x' or ' ')
+                .. page.content:sub(task.position + 1)
+            return self:save(id, content, revision)
+        end
+    end
+    return nil, 'Task no longer exists at this line. Refresh the task list.', 404
 end
 
 function Notebook:save(id, content, revision)

@@ -17,6 +17,7 @@
     <button id="new-page" class="primary">+ Page</button>
     <button id="switcher-open" title="Open page (Ctrl P / Cmd P)">Open page</button>
     <button id="export-open">Export</button>
+    <button id="tasks-open">Tasks</button>
   </header>
   <div class="workspace">
     <aside id="sidebar">
@@ -97,6 +98,21 @@
     <p id="history-status" role="status" aria-live="polite"></p>
     <div class="history-layout"><nav id="history-list" aria-label="Earlier page versions"></nav><pre id="history-preview" tabindex="0" aria-label="Version Markdown"></pre></div>
     <div class="dialog-actions"><button id="history-restore" class="primary" disabled>Restore this version</button></div>
+  </dialog>
+  <dialog id="tasks-dialog" aria-labelledby="tasks-title">
+    <div class="tasks-heading"><h2 id="tasks-title">Tasks</h2><button id="tasks-refresh">Refresh</button><button id="tasks-close">Close</button></div>
+    <label for="tasks-query">Search tasks</label><input id="tasks-query" type="search" placeholder="Task text or page…">
+    <div class="tasks-filters">
+      <label>Status<select id="tasks-state"><option value="open">Open</option><option value="done">Completed</option><option value="all">All tasks</option></select></label>
+      <label>Folder<select id="tasks-folder"><option value="">All folders</option></select></label>
+      <label>Tag<select id="tasks-tag"><option value="">All tags</option></select></label>
+      <label>Due date<select id="tasks-due"><option value="">Any due date</option><option value="overdue">Overdue</option><option value="today">Today</option><option value="upcoming">Upcoming</option><option value="none">No due date</option></select></label>
+    </div>
+    <p class="tasks-help">Use due:YYYY-MM-DD in a task to set its due date. Tags come from its page.</p>
+    <p id="tasks-status" role="status" aria-live="polite"></p>
+    <p id="tasks-error" role="alert"></p>
+    <div id="tasks-results"></div>
+    <button id="tasks-more" hidden>Show more</button>
   </dialog>
 </body>
 </html>

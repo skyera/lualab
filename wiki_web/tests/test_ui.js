@@ -18,6 +18,7 @@ class Node {
   setAttribute() {}
   focus() { this.focused = true; }
   select() {}
+  setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
   scrollIntoView() {}
   showModal() { this.open = true; }
   close() { this.open = false; }
@@ -27,6 +28,106 @@ class Node {
 }
 const texts = node => [node.textContent, ...node.children.map(texts)].join('');
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+test('task dashboard filters, safely renders long text and paginates without losing filters', async () => {
+  const { context, get } = harness();
+  const today = vm.runInContext('dateKey(new Date())', context);
+  const rows = [
+    { id: 'Work/学习', line: 2, text: '<img onerror=bad> ' + '长'.repeat(500), due: today, done: false, tags: ['work'] },
+    { id: 'Home', line: 3, text: 'Later', due: '9999-01-01', done: true, tags: [] },
+    { id: 'Work/Old', line: 1, text: 'Overdue', due: '2000-01-01', done: false, tags: ['work'] },
+    ...Array.from({ length: 105 }, (_, i) => ({ id: 'Notes/' + i, line: 1, text: 'No date', due: '', done: false, tags: [] }))
+  ];
+  context.api = async () => ({ tasks: rows }); get('tasks-state').value = 'open';
+  await get('tasks-open').handlers.click();
+  assert.equal(get('tasks-dialog').open, true);
+  assert.equal(get('tasks-results').children.length, 100);
+  await get('tasks-more').handlers.click(); assert.equal(get('tasks-results').children.length, 107);
+  get('tasks-folder').value = 'Work'; get('tasks-tag').value = 'work'; get('tasks-due').value = 'today';
+  get('tasks-due').handlers.change();
+  assert.equal(get('tasks-results').children.length, 1);
+  assert.match(texts(get('tasks-results')), /<img onerror=bad>/);
+  assert.equal(get('tasks-results').querySelectorAll('img').length, 0);
+  get('tasks-query').value = 'missing'; get('tasks-query').handlers.input();
+  assert.match(get('tasks-status').textContent, /No matching/);
+  get('tasks-query').value = ''; get('tasks-due').value = 'overdue'; get('tasks-due').handlers.change();
+  assert.match(texts(get('tasks-results')), /Overdue/);
+  get('tasks-folder').value = ''; get('tasks-tag').value = ''; get('tasks-state').value = 'done';
+  get('tasks-due').value = 'upcoming'; get('tasks-state').handlers.change();
+  assert.match(texts(get('tasks-results')), /Later/);
+  get('tasks-state').value = 'open'; get('tasks-due').value = 'none'; get('tasks-due').handlers.change();
+  assert.equal(get('tasks-results').children.length, 100);
+});
+test('task loading errors and stale responses preserve filters and allow retry', async () => {
+  const { context, get } = harness(); const pending = deferred();
+  context.api = () => pending.promise;
+  const loading = get('tasks-open').handlers.click(); await Promise.resolve(); await Promise.resolve();
+  get('tasks-query').value = 'keep';
+  get('tasks-dialog').handlers.cancel({ preventDefault() {} });
+  pending.resolve({ tasks: [{ id: 'Stale', line: 1, text: 'Old', done: false }] }); await loading;
+  assert.equal(get('tasks-dialog').open, false);
+  assert.equal(vm.runInContext('taskState.items.length', context), 0);
+  context.api = async () => { throw new Error('disk unreadable'); };
+  await get('tasks-open').handlers.click();
+  assert.match(get('tasks-error').textContent, /disk unreadable/);
+  assert.equal(get('tasks-query').value, 'keep');
+  context.api = async () => ({ tasks: [] }); await get('tasks-refresh').handlers.click();
+  assert.equal(get('tasks-error').textContent, '');
+  assert.match(get('tasks-status').textContent, /No matching/);
+});
+test('task checkboxes preserve failed edits and synchronize successful saves with the editor', async () => {
+  const { context, state, get } = harness();
+  const row = { id: 'Home', line: 1, text: 'Same', done: false, revision: 'r1', tags: [], due: '' };
+  context.api = async () => ({ tasks: [row] }); get('tasks-state').value = 'all';
+  await get('tasks-open').handlers.click();
+  context.api = async () => { throw new Error('Task page changed. Refresh the task list.'); };
+  let check = get('tasks-results').querySelectorAll('input')[0]; check.checked = true;
+  await check.handlers.change(); assert.equal(row.done, false);
+  assert.equal(get('editor').value, 'Initial'); assert.match(get('tasks-error').textContent, /changed/);
+  let payload;
+  context.api = async (route, body) => { payload = body; return { id: 'Home', revision: 'r3', content: '- [x] Same' }; };
+  check = get('tasks-results').querySelectorAll('input')[0]; check.checked = true; await check.handlers.change();
+  assert.equal(payload.revision, 'r1'); assert.equal(payload.line, 1); assert.equal(payload.done, true);
+  assert.equal(state.page.revision, 'r3'); assert.equal(get('editor').value, '- [x] Same');
+  assert.equal(row.done, true); assert.equal(state.loading, false);
+  state.blocked = true; get('editor').value = 'Unsaved draft';
+  check = get('tasks-results').querySelectorAll('input')[0]; check.checked = false; await check.handlers.change();
+  assert.equal(get('editor').value, 'Unsaved draft'); assert.equal(row.done, true);
+  assert.match(get('tasks-error').textContent, /draft/);
+});
+test('task source navigation selects the correct Unicode line and keeps failures visible', async () => {
+  const { context, get } = harness();
+  const row = { id: 'Home', line: 2, text: '学习', done: false, revision: 'r1', tags: [], due: '' };
+  context.api = async route => route === '/api/tasks' ? { tasks: [row] }
+    : { id: 'Home', title: 'Home', revision: 'r1', content: '# 中文\n- [ ] 学习\n' };
+  await get('tasks-open').handlers.click();
+  await get('tasks-results').querySelectorAll('button')[0].handlers.click();
+  assert.equal(get('tasks-dialog').open, false);
+  assert.equal(get('editor').selectionStart, '# 中文\n'.length);
+  assert.equal(get('editor').selectionEnd, '# 中文\n- [ ] 学习'.length);
+  await get('tasks-open').handlers.click();
+  context.api = async () => { throw new Error('Page unreadable'); };
+  await get('tasks-results').querySelectorAll('button')[0].handlers.click();
+  assert.equal(get('tasks-dialog').open, true);
+  assert.match(get('tasks-error').textContent, /Could not open/);
+});
+test('pending task saves block repeated changes, close and global shortcuts', async () => {
+  const { context, get, events } = harness();
+  const row = { id: 'Other', line: 1, text: 'Task', revision: 'r2', done: false };
+  context.api = async () => ({ tasks: [row] });
+  await get('tasks-open').handlers.click();
+  const pending = deferred(); let calls = 0;
+  context.api = () => { calls++; return pending.promise; };
+  const check = get('tasks-results').querySelectorAll('input')[0]; check.checked = true;
+  const saving = check.handlers.change(); await Promise.resolve(); await Promise.resolve();
+  get('tasks-dialog').handlers.cancel({ preventDefault() {} });
+  assert.equal(get('tasks-dialog').open, true); assert.equal(get('tasks-close').disabled, true);
+  await check.handlers.change(); assert.equal(calls, 1);
+  await events.keydown({ ctrlKey: true, key: 'p', preventDefault() {} });
+  assert.equal(get('switcher-dialog').open, false);
+  pending.resolve({ id: 'Other', revision: 'r3', content: '- [x] Task' }); await saving;
+  assert.equal(get('tasks-close').disabled, false);
+  get('tasks-close').handlers.click(); assert.equal(get('tasks-dialog').open, false);
+});
 test('export generator rejects empty scopes, changed revisions, missing files and oversized content', async () => {
   const { context } = harness();
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../static/export.js'), 'utf8'), context);

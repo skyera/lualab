@@ -229,6 +229,7 @@ function M.run(root)
                 return assert(read(root .. '/wiki_web/static/' .. STATIC[path][1])), 200, STATIC[path][2]
             end
             if path == '/api/state' then return reply(notebook:state(params.q)) end
+            if path == '/api/tasks' then return reply(notebook:tasks()) end
             if path == '/api/dictionary' then
                 local value, status = dictionary.lookup(dictionary_path, params.word)
                 return reply(value, status)
@@ -261,6 +262,8 @@ function M.run(root)
             assert(type(payload) == 'table', 'Expected a JSON object')
             local value, err, status
             if path == '/api/page' then value, err, status = notebook:save(payload.id, payload.content, payload.revision)
+            elseif path == '/api/task' then
+                value, err, status = notebook:update_task(payload.id, payload.line, payload.done, payload.revision)
             elseif path == '/api/history/restore' then
                 value, err, status = notebook:restore_version(payload.id, payload.selected, payload.revision)
             elseif path == '/api/rename' then

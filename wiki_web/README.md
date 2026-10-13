@@ -238,6 +238,36 @@ saves your current draft first; a save failure or revision conflict keeps the
 draft and switcher open. A removed or unreadable page reports an error. The
 switcher is unavailable while another modal dialog is open.
 
+## Task dashboard
+
+Click **Tasks** to collect Markdown checklist items from all active pages. Search
+task text or page paths, and filter by completion, folder (including subfolders),
+page tag, or due date. The default view shows open tasks. Results sort by due date,
+then page and line; **Show more** adds another 100 results. Filters remain selected
+when you refresh or reopen the dashboard.
+
+```markdown
+# Home Lab #work
+- [ ] Review network setup due:2026-10-15
+- [x] Enable IPv6
+```
+
+Use `due:YYYY-MM-DD` as a separate word in a task. Invalid dates are treated as
+having no due date. Today and overdue use the browser's local date. Tag filtering
+uses all tags on the source page, matching the notebook's existing tag filter.
+Tasks support `-`, `+`, `*`, and numbered list markers, with zero to three leading
+spaces. Fenced code and lines indented by four spaces or a tab are excluded;
+deeply indented task lists are therefore excluded too. Tasks remain plain Markdown.
+
+Check or uncheck a task to update only its checkbox in the source page. The edit
+uses revision checks and saves page history. Duplicate labels are distinguished
+by their source lines. If a page changed, the dashboard reports a conflict and
+asks you to refresh; it never retries with a newer revision automatically.
+Opening Tasks first saves the current draft, and an unresolved editor conflict
+blocks task changes. Click the source page and line to select the task in the
+editor. A changed page or recovered draft must be inspected before jumping to
+an old line number. Use **Refresh** to discover external edits while Tasks is open.
+
 ## Dictionary lookup
 
 Select a word in the Markdown editor or rendered preview, then click **Look up**.
@@ -360,8 +390,8 @@ filename characters, and names ending in a dot are rejected; the spelling and
 case of existing filenames must match exactly to prevent duplicate index entries.
 
 The app does not read Zim's wiki-text format. Existing `.md` files can be placed
-in the notebook and indexed automatically. Zim import, weekly/monthly journal
-views and task aggregation remain future work.
+in the notebook and indexed automatically. Zim import and weekly/monthly journal
+views remain future work.
 
 ## HTML export
 

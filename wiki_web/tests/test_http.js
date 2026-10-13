@@ -50,6 +50,32 @@ function getWithHeaders(url, headers) {
     request.on('error', reject); request.end();
   });
 }
+test('task API lists source lines and rejects stale, missing and malformed updates', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-tasks-'));
+  let server;
+  try {
+    server = await start(directory, ['--data-dir', path.join(directory, 'notebook'), '--dict-db', 'none']);
+    const content = '# 学习 #work\r\n- [ ] Same due:2026-10-15\r\n- [ ] Same\r\n```\r\n- [ ] Hidden\r\n```';
+    const created = await post(server, '/api/page', { id: 'Projects/学习', content, revision: '' });
+    assert.equal(created.status, 200);
+    let tasks = (await (await fetch(server.url + '/api/tasks')).json()).tasks;
+    assert.equal(tasks.length, 2); assert.equal(tasks[0].line, 2); assert.equal(tasks[0].due, '2026-10-15');
+    const changed = await post(server, '/api/task', { id: tasks[1].id, line: 3, done: true, revision: tasks[1].revision });
+    assert.equal(changed.status, 200);
+    assert.equal(changed.data.content, content.replace('- [ ] Same\r\n', '- [x] Same\r\n'));
+    assert.equal((await post(server, '/api/task', { id: tasks[0].id, line: 2, done: true, revision: tasks[0].revision })).status, 409);
+    assert.equal((await post(server, '/api/task', { id: tasks[0].id, line: 5, done: true, revision: changed.data.revision })).status, 404);
+    assert.equal((await post(server, '/api/task', { id: tasks[0].id, line: '3', done: true, revision: changed.data.revision })).status, 400);
+    assert.equal((await post(server, '/api/task', { id: 'Missing', line: 1, done: true, revision: '' })).status, 404);
+    tasks = (await (await fetch(server.url + '/api/tasks')).json()).tasks;
+    assert.equal(tasks[0].done, false); assert.equal(tasks[1].done, true);
+    const history = await (await fetch(server.url + '/api/history?id=' + encodeURIComponent(tasks[0].id))).json();
+    assert.equal(history.versions.length, 1);
+  } finally {
+    if (server) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 test('app.lua can launch directly from the wiki_web directory', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-direct-'));
   let server;

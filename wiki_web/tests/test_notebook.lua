@@ -268,4 +268,33 @@ test('path normalization is absolute and does not create missing folders', funct
         assert(not pcall(fs.resolve, '%LEAF_WIKI_UNDEFINED_PATH_VARIABLE%/file'))
     end
 end)
+test('tasks exclude code, validate dates and preserve Unicode, CRLF, history and duplicate lines', function()
+    local tasks = require('tasks')
+    local content = '# 学习 #work\r\n- [ ] Same due:2028-02-29\r\n- [X] Same due:2027-02-29\r\n'
+        .. '```md\r\n- [ ] Hidden\r\n```\r\n    - [ ] Code\r\n\t- [ ] Code\r\n'
+        .. '`- [ ] Inline`\r\n~~~\r\n- [ ] Hidden too\r\n~~~\r\n  * [ ] 中文\r\n1. [ ] Ordered'
+    local parsed = tasks.parse(content)
+    assert(#parsed == 4 and parsed[1].due == '2028-02-29' and parsed[2].due == '')
+    assert(parsed[2].done and parsed[3].text == '中文' and parsed[4].line == 14)
+    assert(#tasks.parse('```\n- [ ] Unclosed fence') == 0)
+    assert(#tasks.parse('') == 0)
+    fixture(function(n)
+        local page = assert(n:save('Projects/学习', content, ''))
+        local all = n:tasks().tasks
+        assert(#all == 4 and all[1].tags[1] == 'work' and all[1].revision == page.revision)
+        local changed = assert(n:update_task(page.id, 2, true, page.revision))
+        assert(changed.content == content:gsub('%[ %]', '[x]', 1))
+        assert(#n:versions(page.id).versions >= 1)
+        local value, _, status = n:update_task(page.id, 3, false, page.revision)
+        assert(not value and status == 409 and n:page(page.id).content == changed.content)
+        value, _, status = n:update_task(page.id, 5, true, changed.revision)
+        assert(not value and status == 404)
+        assert(not pcall(n.update_task, n, page.id, 2.5, true, changed.revision))
+        assert(not pcall(n.update_task, n, page.id, 2, 'yes', changed.revision))
+        n.fs:write(page.id .. '.md', '- [ ] External')
+        assert(n:tasks().tasks[1].text == 'External')
+        value, _, status = n:update_task('Missing', 1, true, '')
+        assert(not value and status == 404 and not n:page('Missing'))
+    end)
+end)
 print('Passed ' .. count .. ' notebook tests.')

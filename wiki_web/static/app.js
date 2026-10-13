@@ -7,6 +7,117 @@ const state = { pages: [], trash: [], root: '', page: null, dirty: false, saving
 let saveTimer, searchTimer;
 let selectedTag = '', treePages = null;
 const exportState = { controller: null };
+const taskState = { items: [], request: 0, busy: false, action: false, limit: 100 };
+
+function taskOptions(id, values, label) {
+  const selected = $(id).value;
+  if (selected) values.add(selected);
+  const option = value => {
+    const node = document.createElement('option'); node.value = value; node.textContent = value || label; return node;
+  };
+  $(id).replaceChildren(option(''), ...Array.from(values).sort().map(option)); $(id).value = selected;
+}
+function renderTasks() {
+  const today = dateKey(new Date()), query = $('tasks-query').value.trim().toLowerCase();
+  const folder = $('tasks-folder').value, tag = $('tasks-tag').value, due = $('tasks-due').value;
+  const items = taskState.items.filter(task => {
+    if ($('tasks-state').value === 'open' && task.done) return false;
+    if ($('tasks-state').value === 'done' && !task.done) return false;
+    if (folder && !task.id.startsWith(folder + '/')) return false;
+    if (tag && !(task.tags || []).includes(tag)) return false;
+    if (query && !(task.text + ' ' + task.id).toLowerCase().includes(query)) return false;
+    if (due === 'none') return !task.due;
+    if (due === 'today') return task.due === today;
+    if (due === 'overdue') return task.due && task.due < today;
+    if (due === 'upcoming') return task.due && task.due > today;
+    return true;
+  }).sort((a, b) => (a.due || '9999-99-99').localeCompare(b.due || '9999-99-99')
+    || a.id.localeCompare(b.id) || a.line - b.line);
+  $('tasks-results').replaceChildren(...items.slice(0, taskState.limit).map(task => {
+    const row = document.createElement('div'); row.className = 'dashboard-task';
+    const label = document.createElement('label'), check = document.createElement('input');
+    check.type = 'checkbox'; check.checked = task.done; check.disabled = taskState.busy;
+    check.addEventListener('change', () => changeTask(task, check.checked));
+    const text = document.createElement('span'); text.textContent = task.text || '(Empty task)';
+    label.append(check, text);
+    const source = button(task.id + ' · line ' + task.line, () => openTask(task)); source.disabled = taskState.busy;
+    row.append(label, source); return row;
+  }));
+  $('tasks-status').textContent = taskState.busy ? 'Working…'
+    : items.length ? Math.min(items.length, taskState.limit) + ' of ' + items.length + ' tasks' : 'No matching tasks.';
+  $('tasks-more').hidden = items.length <= taskState.limit;
+  $('tasks-more').disabled = taskState.busy; $('tasks-refresh').disabled = taskState.busy;
+  $('tasks-close').disabled = taskState.action;
+}
+async function loadTasks() {
+  const request = ++taskState.request;
+  taskState.busy = true; $('tasks-error').textContent = ''; renderTasks();
+  try {
+    const result = await api('/api/tasks');
+    if (request !== taskState.request || !$('tasks-dialog').open) return;
+    taskState.items = result.tasks || []; taskState.limit = 100;
+    const folders = new Set(), tags = new Set();
+    for (const task of taskState.items) {
+      const parts = task.id.split('/'); parts.pop();
+      for (let i = 1; i <= parts.length; i++) folders.add(parts.slice(0, i).join('/'));
+      for (const tag of task.tags || []) tags.add(tag);
+    }
+    taskOptions('tasks-folder', folders, 'All folders'); taskOptions('tasks-tag', tags, 'All tags');
+  } catch (error) {
+    if (request === taskState.request) $('tasks-error').textContent = 'Could not load tasks: ' + error.message;
+  } finally {
+    if (request === taskState.request) { taskState.busy = false; renderTasks(); }
+  }
+}
+async function openTasks() {
+  if (state.loading || state.uploading || ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks'].some(id => $(id + '-dialog').open)) return;
+  if (!(await ensureSaved())) return;
+  $('tasks-dialog').showModal(); $('tasks-query').focus(); await loadTasks();
+}
+function closeTasks() {
+  if (taskState.action) return;
+  ++taskState.request; taskState.busy = false;
+  $('tasks-dialog').close(); $('tasks-open').focus();
+}
+async function changeTask(task, done) {
+  if (taskState.busy) return;
+  taskState.busy = true; taskState.action = true; renderTasks(); $('tasks-error').textContent = '';
+  let locked = false;
+  try {
+    if (!(await ensureSaved())) throw new Error('Save or resolve your current draft before changing a task.');
+    state.loading = true; locked = true; $('editor').readOnly = true;
+    const page = await api('/api/task', { id: task.id, line: task.line, done, revision: task.revision });
+    task.done = done;
+    for (const item of taskState.items) if (item.id === page.id) item.revision = page.revision;
+    if (state.page?.id === page.id) {
+      state.page = { ...state.page, ...page }; $('editor').value = page.content;
+      clearDraft(page.id); preview(); status('✓ Saved');
+    }
+    await refresh();
+  } catch (error) { $('tasks-error').textContent = error.message; }
+  finally {
+    if (locked) { state.loading = false; $('editor').readOnly = false; }
+    taskState.busy = false; taskState.action = false; renderTasks();
+  }
+}
+async function openTask(task) {
+  if (taskState.busy) return;
+  taskState.busy = true; taskState.action = true; renderTasks();
+  try {
+    await refresh();
+    if (!(await openPage(task.id))) throw new Error('Could not open the task page. Check the editor message.');
+    if (state.page.revision !== task.revision || state.dirty) {
+      throw new Error('The page or recovered draft changed. Close Tasks to inspect it, or refresh the task list.');
+    }
+    const lines = $('editor').value.split('\n');
+    const start = lines.slice(0, task.line - 1).reduce((sum, line) => sum + line.length + 1, 0);
+    taskState.action = false; setMode('edit'); closeTasks(); $('editor').focus();
+    $('editor').setSelectionRange(start, start + (lines[task.line - 1] || '').length);
+    $('editor').scrollTop = Math.max(0, (task.line - 3) * 25);
+  } catch (error) { $('tasks-error').textContent = error.message; }
+  finally { taskState.busy = false; taskState.action = false; renderTasks(); }
+}
+
 function openExport() {
   if ($('prompt-dialog').open || $('history-dialog').open || $('switcher-dialog').open || $('trash-dialog').open) return;
   $('export-page-option').disabled = !state.page;
@@ -559,6 +670,15 @@ $('editor').addEventListener('drop', event => {
 });
 $('save').addEventListener('click', save);
 $('export-open').addEventListener('click', openExport);
+$('tasks-open').addEventListener('click', openTasks);
+$('tasks-close').addEventListener('click', closeTasks);
+$('tasks-dialog').addEventListener('cancel', event => { event.preventDefault(); closeTasks(); });
+$('tasks-refresh').addEventListener('click', () => { if (!taskState.busy) return loadTasks(); });
+$('tasks-query').addEventListener('input', () => { taskState.limit = 100; renderTasks(); });
+for (const id of ['tasks-state', 'tasks-folder', 'tasks-tag', 'tasks-due']) {
+  $(id).addEventListener('change', () => { taskState.limit = 100; renderTasks(); });
+}
+$('tasks-more').addEventListener('click', () => { taskState.limit += 100; renderTasks(); });
 $('export-start').addEventListener('click', runExport);
 $('export-cancel').addEventListener('click', closeExport);
 $('export-dialog').addEventListener('cancel', event => { event.preventDefault(); closeExport(); });
@@ -680,6 +800,7 @@ $('dictionary-word').addEventListener('input', () => {
 });
 $('dictionary-word').addEventListener('keydown', event => { if (event.key === 'Escape') closeDictionary(); });
 window.addEventListener('keydown', event => {
+  if ($('tasks-dialog').open) return;
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'p') {
     if (!$('prompt-dialog').open && !$('trash-dialog').open && !$('history-dialog').open && !$('export-dialog').open) {
       event.preventDefault(); openSwitcher();
@@ -694,7 +815,7 @@ window.addEventListener('beforeunload', event => {
 window.addEventListener('resize', () => { if (innerWidth <= 950 && state.mode === 'split') setMode('edit'); });
 async function checkExternal() {
   if (state.loading || state.uploading || state.saving || $('search').value || $('prompt-dialog').open
-      || $('history-dialog').open || $('export-dialog').open) return;
+      || $('history-dialog').open || $('export-dialog').open || $('tasks-dialog').open) return;
   const page = state.page, revision = page?.revision;
   try {
     await refresh();
