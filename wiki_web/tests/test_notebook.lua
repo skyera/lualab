@@ -5,6 +5,8 @@ package.path = root .. '/wiki_web/?.lua;' .. root .. '/dictionary_web/?.lua;' ..
 local Notebook = require('notebook')
 local links = require('links')
 local json = require('json')
+local backup = require('backup')
+local Fs = require('fs')
 local ffi = require('ffi')
 if ffi.os ~= 'Windows' then ffi.cdef[[int symlink(const char *, const char *);]] end
 local managed = arg[1] and arg[1]:gsub('\\', '/')
@@ -28,6 +30,137 @@ local function test(name, run)
     count = count + 1; print('ok ' .. count .. ' - ' .. name)
 end
 
+test('notebook backup round trips binary images, history, trash and Unicode without changing the source', function()
+    fixture(function(n, _, cache)
+        local first = assert(n:save('Notes/学习', '# Before', ''))
+        local image = n:image(first.id, '\137PNG\r\n\26\n\0\255bytes')
+        local second = assert(n:save(first.id, '# After\n' .. image.markdown, first.revision))
+        local deleted = assert(n:save('Trash me', '# Gone', ''))
+        n:image(deleted.id, 'GIF89a\0data')
+        assert(n:trash(deleted.id, deleted.revision))
+        local encoded = backup.export(n)
+        local bundle = json.decode(encoded)
+        local files, bytes = backup.validate(bundle)
+        assert(#files > 4 and bytes > 0)
+        local name = 'restored 学习-' .. serial
+        local result = backup.restore(n, bundle, name)
+        assert(result.files == #files and n:page(first.id).revision == second.revision)
+        local restored = Notebook.open(result.path, cache .. '-restored')
+        local ok, err = pcall(function()
+            assert(restored:page(first.id).content == second.content)
+            assert(restored:attachment(first.id, image.file) == '\137PNG\r\n\26\n\0\255bytes')
+            assert(#restored:versions(first.id).versions == #n:versions(first.id).versions)
+            assert(#restored:trash_list() == 1)
+            assert(backup.export(restored) == encoded)
+            assert(not pcall(backup.restore, n, bundle, name), 'Existing folders must never be overwritten')
+        end)
+        restored:close()
+        assert(ok, err)
+    end)
+end)
+
+test('backup rejects corruption, traversal, aliases and file-directory collisions before creating a destination', function()
+    fixture(function(n)
+        n:save('Home', 'Keep me', '')
+        local encoded = backup.export(n)
+        for _, path in ipairs({ '../outside', '/absolute', 'C:/outside', 'Home/../bad', 'NUL.md', '.leaf/lock' }) do
+            local bundle = json.decode(encoded)
+            bundle.files[1].path = path
+            assert(not pcall(backup.restore, n, bundle, 'invalid-' .. serial))
+        end
+        local bundle = json.decode(encoded)
+        bundle.files[1].data = 'corrupt'
+        assert(not pcall(backup.validate, bundle))
+        bundle = json.decode(encoded)
+        bundle.files[2] = bundle.files[1]
+        assert(not pcall(backup.validate, bundle))
+        bundle = json.decode(encoded)
+        local copy = json.decode(json.encode(bundle.files[1]))
+        copy.path = bundle.files[1].path .. '/nested'
+        bundle.files[2] = copy
+        assert(not pcall(backup.validate, bundle))
+        assert(n:page('Home').content == 'Keep me')
+    end)
+end)
+
+test('failed restore retains an incomplete marker, closes handles and cannot open as a notebook', function()
+    fixture(function(n, _, cache)
+        n:save('Home', 'Keep me', '')
+        local bundle = json.decode(backup.export(n))
+        local original_open = Fs.open
+        local destination
+        Fs.open = function(path)
+            local fs = original_open(path)
+            if path:match('/failed%-restore%-') then
+                destination = path
+                local original_write = fs.write
+                fs.write = function(self, name, data)
+                    if name == 'Home.md' then error('Injected write permission failure: Home.md') end
+                    return original_write(self, name, data)
+                end
+            end
+            return fs
+        end
+        local ok, err = pcall(backup.restore, n, bundle, 'failed-restore-' .. serial)
+        Fs.open = original_open
+        assert(not ok and tostring(err):find('Home.md', 1, true))
+        local partial = Fs.open(destination)
+        assert(partial:read('.leaf/restore-incomplete.json'))
+        local unlock = partial:lock()
+        unlock(); partial:close()
+        local opened, failure = pcall(Notebook.open, destination, cache .. '-failed')
+        assert(not opened and tostring(failure):find('Incomplete notebook restore', 1, true))
+        assert(n:page('Home').content == 'Keep me')
+    end)
+end)
+
+test('empty backups restore and visible source changes abort backup with the file path', function()
+    fixture(function(n)
+        local empty = json.decode(backup.export(n))
+        assert(#empty.files == 0)
+        assert(backup.restore(n, empty, 'empty-restore-' .. serial).files == 0)
+        n:save('Home', 'Original', '')
+        local original_read, reads = n.fs.read, 0
+        n.fs.read = function(self, path, maximum)
+            if path == 'Home.md' then
+                reads = reads + 1
+                if reads > 1 then return 'Changed externally' end
+            end
+            return original_read(self, path, maximum)
+        end
+        local ok, err = pcall(backup.export, n)
+        n.fs.read = original_read
+        assert(not ok and tostring(err):find('File changed during backup: Home.md', 1, true))
+        assert(n:page('Home').content == 'Original')
+    end)
+end)
+
+test('restore read-back mismatch is fatal and preserves the incomplete marker', function()
+    fixture(function(n)
+        n:save('Home', 'Original', '')
+        local bundle = json.decode(backup.export(n))
+        local original_open, destination = Fs.open
+        Fs.open = function(path)
+            local fs = original_open(path)
+            if path:match('/mismatch%-restore%-') then
+                destination = path
+                local original_read = fs.read
+                fs.read = function(self, name, maximum)
+                    if name == 'Home.md' then return 'Wrong contents' end
+                    return original_read(self, name, maximum)
+                end
+            end
+            return fs
+        end
+        local ok, err = pcall(backup.restore, n, bundle, 'mismatch-restore-' .. serial)
+        Fs.open = original_open
+        assert(not ok and tostring(err):find('verification failed: Home.md', 1, true))
+        local partial = Fs.open(destination)
+        assert(partial:read('.leaf/restore-incomplete.json'))
+        partial:close()
+    end)
+end)
+
 test('attachment listing excludes unsafe files and code-only references', function()
     fixture(function(n, directory)
         local page = assert(n:save('Notes/学习', '# Images', ''))
@@ -49,6 +182,8 @@ test('attachment listing excludes unsafe files and code-only references', functi
             assert(ffi.C.symlink('/etc/passwd', target) == 0)
             rows = n:attachments().attachments
             assert(#rows == 3, 'Symlink attachments must not be listed')
+            local backed_up, failure = pcall(backup.export, n)
+            assert(not backed_up and tostring(failure):find('unsafe.png', 1, true))
         end
     end)
 end)

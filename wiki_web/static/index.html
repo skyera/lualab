@@ -20,6 +20,7 @@
     <button id="export-open">Export</button>
     <button id="tasks-open">Tasks</button>
     <button id="attachments-open" type="button">Attachments</button>
+    <button id="backup-open" type="button">Backup</button>
     <button id="capture-open" title="Quick capture (Ctrl / Cmd + Shift + J)">Capture</button>
   </header>
   <div class="workspace">
@@ -134,6 +135,16 @@
     <p id="tasks-error" role="alert"></p>
     <div id="tasks-results"></div>
     <button id="tasks-more" hidden>Show more</button>
+  </dialog>
+  <dialog id="backup-dialog" aria-labelledby="backup-title">
+    <h2 id="backup-title">Backup &amp; restore</h2>
+    <button id="backup-download" type="button">Download notebook backup</button>
+    <p>Includes notebook files, images, history, and trash. Maximum 32 MiB of file contents; 63 MiB JSON backup. Browser preferences and search cache are excluded.</p>
+    <label for="backup-file">Leaf Wiki JSON backup</label><input id="backup-file" type="file" accept=".json,application/json">
+    <label for="backup-name">New folder beside the current notebook</label><input id="backup-name" maxlength="120" placeholder="LeafWiki-restored">
+    <p>The destination must not exist. Restoring keeps the current notebook open.</p>
+    <p id="backup-status" role="status" aria-live="polite"></p><p id="backup-error" role="alert"></p>
+    <div class="dialog-actions"><button id="backup-close" type="button">Close</button><button id="backup-validate" type="button">Validate backup</button><button id="backup-restore" type="button" disabled>Restore</button></div>
   </dialog>
   <dialog id="attachments-dialog" aria-labelledby="attachments-title">
     <div class="attachments-heading"><h2 id="attachments-title">Attachments</h2><button id="attachments-refresh" type="button">Refresh</button><button id="attachments-close" type="button">Close</button></div>

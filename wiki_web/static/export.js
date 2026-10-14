@@ -77,8 +77,8 @@ const WikiExport = (() => {
     if (new TextEncoder().encode(html).length > MAX_BYTES) throw new Error('Export exceeds 64 MiB. Export individual pages instead.');
     return html;
   }
-  function download(html, filename) {
-    const url = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
+  function download(html, filename, type = 'text/html;charset=utf-8') {
+    const url = URL.createObjectURL(new Blob([html], { type }));
     const link = document.createElement('a'); link.href = url; link.download = filename;
     document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   }

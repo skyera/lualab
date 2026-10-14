@@ -304,9 +304,11 @@ function Fs:directory_exists(path)
 end
 
 function Fs:list(prefix, depth, attachments)
+    local backup = attachments == 'backup'
+    attachments = attachments == true
     prefix, depth = prefix or '', depth or 0
     assert(self.handle, 'Notebook is closed')
-    assert(depth <= 16, 'Notebook nesting is limited to 16 levels')
+    assert(depth <= (backup and 32 or 16), 'Notebook nesting exceeds the listing limit')
     local full, release = self.root, function() end
     local directory
     if prefix ~= '' then
@@ -329,7 +331,14 @@ function Fs:list(prefix, depth, attachments)
     end
     repeat
         local name, attributes = utf8(data[0].name), tonumber(data[0].attributes)
-        if name:sub(1, 1) ~= '.' and bit.band(attributes, REPARSE) == 0 then
+        if backup and name ~= '.' and name ~= '..' and bit.band(attributes, REPARSE) ~= 0 then
+            C.FindClose(search)
+            if directory then C.CloseHandle(directory) end
+            release()
+            error('Unsafe reparse point in backup: ' .. full .. '/' .. name)
+        end
+        if name ~= '.' and name ~= '..' and (backup or name:sub(1, 1) ~= '.')
+            and bit.band(attributes, REPARSE) == 0 then
             entries[#entries + 1] = { name = name, directory = bit.band(attributes, DIRECTORY) ~= 0,
                 bytes = tonumber(data[0].size_high) * 4294967296 + tonumber(data[0].size_low) }
         end
@@ -342,17 +351,31 @@ function Fs:list(prefix, depth, attachments)
     local pages = {}
     for _, entry in ipairs(entries) do
         local path = prefix == '' and entry.name or prefix .. '/' .. entry.name
-        if attachments and not entry.directory and entry.name:match('^[%w_-]+%.%a+$')
+        if backup then
+            if entry.directory then
+                for _, child in ipairs(self:list(path, depth + 1, 'backup')) do pages[#pages + 1] = child end
+            else pages[#pages + 1] = path end
+        elseif attachments and not entry.directory and entry.name:match('^[%w_-]+%.%a+$')
             and ({ png = true, jpg = true, gif = true, webp = true })[entry.name:match('%.(.*)$')] then
             pages[#pages + 1] = { file = entry.name, bytes = entry.bytes }
         elseif not attachments and entry.directory and not entry.name:match('%.attachments$') then
             for _, child in ipairs(self:list(path, depth + 1)) do pages[#pages + 1] = child end
         elseif not attachments and not entry.directory and entry.name:match('%.md$') then pages[#pages + 1] = path end
-        assert(#pages <= 2000, attachments and 'Attachment directory is limited to 2,000 images: ' .. prefix
+        assert(#pages <= (backup and 10000 or 2000), attachments and 'Attachment directory is limited to 2,000 images: ' .. prefix
+            or backup and 'Backup is limited to 10,000 files'
             or 'Notebook is limited to 2,000 pages')
     end
     table.sort(pages, attachments and function(a, b) return a.file < b.file end or nil)
     return pages
+end
+
+function Fs:create_directory(path)
+    local full, release = self:parent(path)
+    local created = C.CreateDirectoryW(native(full), nil) ~= 0
+    local err = tonumber(C.GetLastError())
+    release()
+    assert(created, 'Cannot create new restore folder (existing or unwritable): ' .. full
+        .. ' (Windows error ' .. err .. ')')
 end
 
 function Fs:lock()

@@ -31,6 +31,10 @@
 .attachment-name{font:12px/1.5 monospace;overflow-wrap:anywhere;margin:0 0 6px}
 .attachment-info button{text-align:left;overflow-wrap:anywhere;max-width:100%}
 #attachments-error,.attachment-error{color:var(--error);overflow-wrap:anywhere;font-size:12px}
+#backup-dialog{max-width:min(600px,calc(100vw - 32px));max-height:85vh;overflow:auto}
+#backup-dialog p{font-size:13px;overflow-wrap:anywhere}
+#backup-dialog label{margin-top:14px}
+#backup-error{color:var(--error)}
 #journal-overview-dialog{max-width:min(850px,calc(100vw - 32px));max-height:85vh;overflow:auto}
 .journal-overview-heading,.journal-overview-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .journal-overview-heading{justify-content:space-between}

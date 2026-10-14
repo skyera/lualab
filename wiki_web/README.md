@@ -483,6 +483,45 @@ Removing an image link does not delete its file; unused attachments remain in
 the notebook. Images already linked before an interrupted upload remain stored
 even if the Markdown save fails, so you can recover them from the folder.
 
+## Notebook backup and restore
+
+Open **Backup** in the header and choose **Download notebook backup**. This
+downloads `LeafWiki-backup.json`, a versioned Leaf Wiki bundle containing regular
+notebook files, images, revision history, and trash. Each file includes its size
+and SHA-256 checksum. UTF-8 files are stored as text; binary files use hexadecimal
+encoding. This is a restorable JSON bundle, not a ZIP file or HTML export.
+Runtime lock files and temporary writes are excluded. Search caches and browser
+preferences are not notebook files and are not included. Empty directories are
+not preserved; required directories are recreated from file paths.
+
+Choose a downloaded JSON file, click **Validate backup**, and enter a **new folder
+name beside the current notebook**. Click **Restore** and confirm. The destination
+must not exist, even as an empty folder. Folder names use one portable component
+of at most 120 UTF-8 bytes. The server validates paths, checksums, duplicate names,
+file/directory collisions, and size limits before creating the destination.
+Every restored file is read back and checked before success is reported.
+
+Restoring keeps the current notebook open and never overwrites it. After success,
+the dialog shows the verified destination path. Stop Leaf Wiki and restart with
+`--data-dir "<restored path>"` to open it; add `--save-config` if desired. The usual
+startup rebuilds its search index. Server-console progress identifies files being
+backed up or restored; the dialog remains busy until the operation finishes.
+
+A failed or interrupted restore may leave a new partial folder. Preserve it for
+inspection and retry using a different new folder name. A partial restore keeps
+`.leaf/restore-incomplete.json`; startup refuses to open that folder. Do not remove
+the marker to bypass the check. Write and verification errors retain the selected
+backup and destination name in the dialog and never report successful restoration.
+
+Bundles are limited to 10,000 files, 32 MiB of decoded file contents, and 63 MiB
+of JSON. For larger notebooks, copy the entire notebook folder with your normal
+backup tooling. Symlinks, reparse points, and non-portable names stop backup with
+a diagnostic rather than silently omitting data. Pending maintenance recovery and
+incomplete restores also block backup. Visible external file changes during
+backup abort it; pause external editors and sync writes for a consistent snapshot.
+The checks cannot coordinate cloud synchronization or eliminate every possible
+external-write race. Keep the downloaded bundle as a separate copy.
+
 ## Attachment manager
 
 Click **Attachments** in the header to browse PNG, JPEG (`.jpg`), GIF, and WebP

@@ -244,6 +244,24 @@ test('real browser selects words in editor/preview and keeps dictionary within d
       const singleView = await browser.newPage(); await singleView.goto(require('node:url').pathToFileURL(singleFile).href);
       assert.equal(await singleView.locator('article').count(), 1); await singleView.close();
       await page.locator('#export-cancel').click();
+      await page.locator('#backup-open').click();
+      const backupDownload = page.waitForEvent('download'); await page.locator('#backup-download').click();
+      const downloadedBackup = await backupDownload;
+      assert.equal(downloadedBackup.suggestedFilename(), 'LeafWiki-backup.json');
+      const backupFile = path.join(directory, 'backup.json'); await downloadedBackup.saveAs(backupFile);
+      const backupBundle = JSON.parse(fs.readFileSync(backupFile, 'utf8'));
+      assert.equal(backupBundle.format, 'leaf-wiki-backup');
+      assert.ok(backupBundle.files.some(file => file.path.startsWith('.leaf/history/')));
+      await page.locator('#backup-file').setInputFiles(backupFile);
+      await page.locator('#backup-validate').click();
+      await page.waitForFunction(() => !document.getElementById('backup-restore').disabled);
+      await page.locator('#backup-name').fill('Restored 学习');
+      page.once('dialog', dialog => dialog.accept()); await page.locator('#backup-restore').click();
+      await page.waitForFunction(() => document.getElementById('backup-status').textContent.includes('restored and verified'));
+      assert.ok(fs.existsSync(path.join(directory, 'Restored 学习', 'Notes/新课.md')));
+      const backupBounds = await page.locator('#backup-dialog').boundingBox();
+      assert.ok(backupBounds.x >= 0 && backupBounds.x + backupBounds.width <= 375);
+      await page.locator('#backup-close').click();
       assert.deepEqual(errors, []);
     } finally {
       if (browser) await browser.close();

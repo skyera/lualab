@@ -857,6 +857,54 @@ test('attachment manager keeps editor drafts on save failures, navigates safely,
   assert.equal(state.page.id, 'Other'); assert.equal(get('attachments-dialog').open, false);
 });
 
+test('backup dialog downloads JSON, validates a file, restores a sibling and retains the current editor', async () => {
+  const { context, state, get } = harness(); let downloaded, restored;
+  context.WikiExport = { download: (...args) => { downloaded = args; } };
+  context.fetch = async () => ({ ok: true, text: async () => '{"format":"leaf-wiki-backup"}' });
+  await get('backup-open').handlers.click(); assert.equal(get('backup-dialog').open, true);
+  await get('backup-download').handlers.click();
+  assert.equal(downloaded[1], 'LeafWiki-backup.json'); assert.equal(downloaded[2], 'application/json;charset=utf-8');
+  const bundle = { format: 'leaf-wiki-backup', version: 1, files: [] };
+  get('backup-file').files = [{ size: 100, text: async () => JSON.stringify(bundle) }];
+  context.api = async (route, payload) => {
+    if (route === '/api/backup/validate') return { files: 2, bytes: 4096 };
+    restored = payload; return { files: 2, path: '/Restored 学习' };
+  };
+  await get('backup-validate').handlers.click(); assert.equal(get('backup-restore').disabled, false);
+  get('backup-name').value = 'Restored 学习'; await get('backup-restore').handlers.click();
+  assert.equal(restored.name, 'Restored 学习');
+  assert.match(get('backup-status').textContent, /restored and verified at \/Restored 学习/);
+  assert.equal(state.page.id, 'Home'); assert.equal(get('editor').value, 'Initial');
+  get('backup-dialog').handlers.cancel({ preventDefault() {} }); assert.equal(get('backup-dialog').open, false);
+});
+
+test('backup failures retain selected files and folder names, block dismissal while busy, and invalidate changed files', async () => {
+  const { context, state, get } = harness();
+  state.dirty = true; context.api = async () => { throw new Error('Save denied'); };
+  await get('backup-open').handlers.click(); assert.equal(get('backup-dialog').open, false); state.dirty = false;
+  await get('backup-open').handlers.click();
+  await get('backup-validate').handlers.click(); assert.match(get('backup-error').textContent, /Choose a Leaf Wiki/);
+  get('backup-file').files = [{ size: 64 * 1024 * 1024 }];
+  await get('backup-validate').handlers.click(); assert.match(get('backup-error').textContent, /63 MiB/);
+  get('backup-file').files = [{ size: 10, text: async () => '{broken' }];
+  await get('backup-validate').handlers.click(); assert.equal(get('backup-restore').disabled, true);
+  const selected = { size: 10, text: async () => '{}' }; get('backup-file').files = [selected];
+  const pending = deferred(); context.api = () => pending.promise;
+  const validating = get('backup-validate').handlers.click(); await Promise.resolve(); await Promise.resolve();
+  get('backup-dialog').handlers.cancel({ preventDefault() {} }); assert.equal(get('backup-dialog').open, true);
+  pending.resolve({ files: 1, bytes: 10 }); await validating;
+  get('backup-name').value = 'Keep this name'; context.api = async () => { throw new Error('Destination exists'); };
+  await get('backup-restore').handlers.click();
+  assert.match(get('backup-error').textContent, /Destination exists/);
+  assert.equal(get('backup-file').files[0], selected); assert.equal(get('backup-name').value, 'Keep this name');
+  get('backup-file').files = [{ size: 10 }]; await get('backup-restore').handlers.click();
+  assert.match(get('backup-error').textContent, /Validate it again/);
+  assert.equal(get('backup-restore').disabled, true);
+  context.fetch = async () => ({ ok: false, json: async () => ({ error: 'Read denied: image.png' }) });
+  await get('backup-download').handlers.click(); assert.match(get('backup-error').textContent, /Read denied: image.png/);
+  assert.equal(get('backup-status').textContent, 'Backup failed.');
+});
+
 test('safe preview renders empty, Unicode, code, tasks, links, images and hostile markup', () => {
   const { markdown } = harness();
   const pages = new Set(['Home', 'Other']); const navigation = [];

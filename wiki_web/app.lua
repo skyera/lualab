@@ -22,6 +22,7 @@ local Notebook = require('notebook')
 local http = require('http')
 local dictionary = require('dictionary')
 local sqlite_loader = require('sqlite')
+local backup = require('backup')
 local is_windows = package.config:sub(1, 1) == '\\'
 local function quote(value)
     return "'" .. value:gsub("'", is_windows and "''" or "'\\''") .. "'"
@@ -231,6 +232,9 @@ function M.run(root)
             if path == '/api/state' then return reply(notebook:state(params.q)) end
             if path == '/api/tasks' then return reply(notebook:tasks()) end
             if path == '/api/attachments' then return reply(notebook:attachments()) end
+            if path == '/api/backup' then
+                return backup.export(notebook, startup.report), 200, 'application/json; charset=utf-8'
+            end
             if path == '/api/dictionary' then
                 local value, status = dictionary.lookup(dictionary_path, params.word)
                 return reply(value, status)
@@ -262,7 +266,12 @@ function M.run(root)
             local payload = json.decode(request.body)
             assert(type(payload) == 'table', 'Expected a JSON object')
             local value, err, status
-            if path == '/api/page' then value, err, status = notebook:save(payload.id, payload.content, payload.revision)
+            if path == '/api/backup/validate' then
+                local files, bytes = backup.validate(payload.backup)
+                value = { files = #files, bytes = bytes }
+            elseif path == '/api/backup/restore' then
+                value = backup.restore(notebook, payload.backup, payload.name, startup.report)
+            elseif path == '/api/page' then value, err, status = notebook:save(payload.id, payload.content, payload.revision)
             elseif path == '/api/capture' then
                 value, err, status = notebook:capture(payload.date, payload.text, payload.kind, payload.revision)
             elseif path == '/api/task' then
@@ -294,7 +303,8 @@ function M.run(root)
         io.stdout:flush()
     end, options.host, nil, { dual_stack = true,
         body_limits = { ['/api/page'] = 7 * 1024 * 1024, ['/api/image'] = 5 * 1024 * 1024,
-            ['/api/capture'] = 128 * 1024 } })
+            ['/api/capture'] = 128 * 1024, ['/api/backup/validate'] = 64 * 1024 * 1024,
+            ['/api/backup/restore'] = 64 * 1024 * 1024 } })
     notebook:close()
     if not ok then error(err) end
 end

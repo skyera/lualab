@@ -50,6 +50,42 @@ function getWithHeaders(url, headers) {
     request.on('error', reject); request.end();
   });
 }
+test('backup API validates and restores files into a new Unicode sibling without overwriting existing folders', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-backup-')); let server;
+  try {
+    server = await start(directory, ['--data-dir', path.join(directory, 'notebook'), '--dict-db', 'none']);
+    const page = await post(server, '/api/page', { id: '学习/Home', content: '# Before', revision: '' });
+    await post(server, '/api/page', { id: page.data.id, content: '# After', revision: page.data.revision });
+    const image = await fetch(server.url + '/api/image?page=' + encodeURIComponent(page.data.id), { method: 'POST', body: png });
+    assert.equal(image.status, 200);
+    const response = await fetch(server.url + '/api/backup'); assert.equal(response.status, 200);
+    const bundle = await response.json();
+    assert.equal(bundle.format, 'leaf-wiki-backup');
+    assert.ok(bundle.files.some(file => file.path.startsWith('.leaf/history/')));
+    assert.ok(bundle.files.some(file => file.path.endsWith('.png')));
+    assert.ok(bundle.files.every(file => file.path !== '.leaf/lock'));
+    const valid = await post(server, '/api/backup/validate', { backup: bundle }); assert.equal(valid.status, 200);
+    const name = 'Restored 学习';
+    const restored = await post(server, '/api/backup/restore', { backup: bundle, name });
+    assert.equal(restored.status, 200); assert.equal(restored.data.files, bundle.files.length);
+    assert.equal(fs.readFileSync(path.join(directory, name, '学习/Home.md'), 'utf8'), '# After');
+    assert.equal(fs.existsSync(path.join(directory, name, '.leaf/restore-incomplete.json')), false);
+    assert.match(server.logs(), /Restoring.*学习\/Home.md/);
+    assert.match(server.logs(), /Restore saved and verified/);
+    const collision = await post(server, '/api/backup/restore', { backup: bundle, name });
+    assert.equal(collision.status, 400); assert.match(collision.data.error, /existing or unwritable/);
+    assert.equal((await post(server, '/api/backup/restore', { backup: bundle, name: '../escape' })).status, 400);
+    const corrupt = structuredClone(bundle); corrupt.files[0].data += 'corrupt';
+    const failed = await post(server, '/api/backup/restore', { backup: corrupt, name: 'invalid' });
+    assert.equal(failed.status, 400); assert.equal(fs.existsSync(path.join(directory, 'invalid')), false);
+    assert.equal((await post(server, '/api/backup/validate', { backup: {} })).status, 400);
+    assert.equal((await (await fetch(server.url + '/api/page?id=' + encodeURIComponent(page.data.id))).json()).content, '# After');
+  } finally {
+    if (server) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('attachment manager lists active images, missing references, metadata, history-only use, and maintenance changes', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-attachments-'));
   const notebook = path.join(directory, 'notebook'); let server;

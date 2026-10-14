@@ -74,8 +74,72 @@ $('pin-page').addEventListener('click', () => {
     ? navigationState.pinned.filter(value => value !== id) : [...navigationState.pinned, id];
   saveNavigation(); renderNavigation();
 });
-const MODAL_DIALOGS = ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks', 'capture', 'verse', 'journal-overview', 'saved-search', 'attachments'];
+const MODAL_DIALOGS = ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks', 'capture', 'verse', 'journal-overview', 'saved-search', 'attachments', 'backup'];
 function anyDialogOpen() { return MODAL_DIALOGS.some(id => $(id + '-dialog').open); }
+
+const backupState = { busy: false, bundle: null, file: null };
+function backupControls() {
+  for (const id of ['backup-download', 'backup-validate', 'backup-close', 'backup-file', 'backup-name']) $(id).disabled = backupState.busy;
+  $('backup-restore').disabled = backupState.busy || !backupState.bundle;
+}
+function closeBackup() { if (!backupState.busy) $('backup-dialog').close(); }
+$('backup-open').addEventListener('click', async () => {
+  if (anyDialogOpen() || !(await ensureSaved()) || anyDialogOpen()) return;
+  backupControls(); $('backup-dialog').showModal();
+});
+$('backup-close').addEventListener('click', closeBackup);
+$('backup-dialog').addEventListener('cancel', event => { event.preventDefault(); closeBackup(); });
+$('backup-file').addEventListener('change', () => {
+  backupState.bundle = null; backupState.file = null;
+  $('backup-status').textContent = ''; $('backup-error').textContent = ''; backupControls();
+});
+$('backup-download').addEventListener('click', async () => {
+  if (backupState.busy) return;
+  backupState.busy = true; backupControls(); $('backup-error').textContent = '';
+  $('backup-status').textContent = 'Saving draft and building a verified notebook backup…';
+  try {
+    if (!(await ensureSaved())) throw new Error($('message').textContent || 'Save the current draft first.');
+    const response = await fetch('/api/backup');
+    if (!response.ok) throw new Error((await response.json()).error || 'Backup failed');
+    const text = await response.text();
+    // Reuse the existing Blob download lifecycle; the bundle is JSON, not executable HTML.
+    WikiExport.download(text, 'LeafWiki-backup.json', 'application/json;charset=utf-8');
+    $('backup-status').textContent = 'Verified notebook backup download started.';
+  } catch (error) { $('backup-status').textContent = 'Backup failed.'; $('backup-error').textContent = error.message; }
+  finally { backupState.busy = false; backupControls(); }
+});
+$('backup-validate').addEventListener('click', async () => {
+  if (backupState.busy) return;
+  backupState.busy = true; backupState.bundle = null; backupState.file = null; backupControls();
+  $('backup-error').textContent = ''; $('backup-status').textContent = 'Reading and validating backup…';
+  try {
+    const file = $('backup-file').files?.[0];
+    if (!file) throw new Error('Choose a Leaf Wiki JSON backup file.');
+    if (file.size > 63 * 1024 * 1024) throw new Error('Backup file exceeds 63 MiB. Copy the notebook folder directly.');
+    const bundle = JSON.parse(await file.text());
+    const summary = await api('/api/backup/validate', { backup: bundle });
+    backupState.bundle = bundle; backupState.file = file;
+    $('backup-status').textContent = summary.files + ' files validated · ' + (summary.bytes / 1024 / 1024).toFixed(2) + ' MiB';
+  } catch (error) { $('backup-status').textContent = 'Validation failed.'; $('backup-error').textContent = error.message; }
+  finally { backupState.busy = false; backupControls(); }
+});
+$('backup-restore').addEventListener('click', async () => {
+  if (backupState.busy || !backupState.bundle) return;
+  if ($('backup-file').files?.[0] !== backupState.file) {
+    backupState.bundle = null; backupControls(); $('backup-error').textContent = 'The selected backup changed. Validate it again.'; return;
+  }
+  const name = $('backup-name').value.trim();
+  if (!name) { $('backup-error').textContent = 'Enter a new sibling folder name.'; return; }
+  if (!confirm('Restore into the new sibling folder “' + name + '”? Existing folders are never overwritten.')) return;
+  backupState.busy = true; backupControls(); $('backup-error').textContent = '';
+  $('backup-status').textContent = 'Restoring and verifying files… See the server console for progress.';
+  try {
+    const result = await api('/api/backup/restore', { backup: backupState.bundle, name });
+    $('backup-status').textContent = result.files + ' files restored and verified at ' + result.path
+      + '. To open it, restart Leaf Wiki with --data-dir pointing to this folder.';
+  } catch (error) { $('backup-status').textContent = 'Restore failed.'; $('backup-error').textContent = error.message; }
+  finally { backupState.busy = false; backupControls(); }
+});
 
 const attachmentState = { rows: [], limit: 40, request: 0, opening: false };
 function renderAttachments() {
@@ -1458,7 +1522,7 @@ window.addEventListener('keydown', event => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); $('search').focus(); $('search').select(); }
 });
 window.addEventListener('beforeunload', event => {
-  if (state.dirty || state.uploading || captureState.busy || $('capture-text').value.trim()) {
+  if (state.dirty || state.uploading || captureState.busy || backupState.busy || $('capture-text').value.trim()) {
     rememberDraft(); event.preventDefault(); event.returnValue = '';
   }
 });

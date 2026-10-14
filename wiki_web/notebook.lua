@@ -28,6 +28,8 @@ function Notebook.open(data_dir, cache_dir, progress)
     local self = setmetatable({ fs = fs, lock = lock }, Notebook)
     self.history = History.open(fs)
     local ok, err = pcall(function()
+        assert(not fs:read('.leaf/restore-incomplete.json'),
+            'Incomplete notebook restore: ' .. fs.root .. '. Preserve it for inspection and restore to a new folder.')
         progress('Preparing search cache: ' .. tostring(cache_dir))
         local cache = Fs.absolute(cache_dir)
         local cache_key, root_key = cache, fs.root

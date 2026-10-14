@@ -188,8 +188,10 @@ function Fs:directory_exists(path)
 end
 
 function Fs:list(prefix, depth, attachments)
+    local backup = attachments == 'backup'
+    attachments = attachments == true
     prefix, depth = prefix or '', depth or 0
-    assert(depth <= 16, 'Notebook nesting is limited to 16 levels')
+    assert(depth <= (backup and 32 or 16), 'Notebook nesting exceeds the listing limit')
     local fd
     if prefix == '' then fd = C.openat(self.fd, '.', DIRECTORY)
     else
@@ -197,7 +199,7 @@ function Fs:list(prefix, depth, attachments)
         fd = C.openat(parent, name, DIRECTORY); C.close(parent)
     end
     if fd < 0 then
-        assert(not attachments or ffi.errno() == 2, 'Cannot list attachment directory: ' .. prefix)
+        assert(not backup and (not attachments or ffi.errno() == 2), 'Cannot list directory: ' .. prefix)
         return {}
     end
     local stream = fd_open_dir(fd)
@@ -207,7 +209,9 @@ function Fs:list(prefix, depth, attachments)
         local item = read_dir(stream)
         if item == nil then break end
         local name = ffi.string(item.name)
-        if name:sub(1, 1) ~= '.' then entries[#entries + 1] = { name = name, kind = tonumber(item.kind) } end
+        if name ~= '.' and name ~= '..' and (backup or name:sub(1, 1) ~= '.') then
+            entries[#entries + 1] = { name = name, kind = tonumber(item.kind) }
+        end
     end
     close_dir(stream)
     local pages = {}
@@ -225,7 +229,12 @@ function Fs:list(prefix, depth, attachments)
                 C.close(probe)
             end
         end
-        if attachments and entry.kind == 8 and entry.name:match('^[%w_-]+%.%a+$')
+        if backup then
+            assert(entry.kind == 4 or entry.kind == 8, 'Unsafe or unsupported backup entry: ' .. path)
+            if entry.kind == 4 then
+                for _, child in ipairs(self:list(path, depth + 1, 'backup')) do pages[#pages + 1] = child end
+            else pages[#pages + 1] = path end
+        elseif attachments and entry.kind == 8 and entry.name:match('^[%w_-]+%.%a+$')
             and ({ png = true, jpg = true, gif = true, webp = true })[entry.name:match('%.(.*)$')] then
             -- Image metadata is read through a confined, no-follow file handle.
             local parent, name = self:parent(path)
@@ -241,11 +250,20 @@ function Fs:list(prefix, depth, attachments)
         elseif not attachments and entry.kind == 4 and not entry.name:match('%.attachments$') then
             for _, child in ipairs(self:list(path, depth + 1)) do pages[#pages + 1] = child end
         elseif not attachments and entry.kind == 8 and entry.name:match('%.md$') then pages[#pages + 1] = path end
-        assert(#pages <= 2000, attachments and 'Attachment directory is limited to 2,000 images: ' .. prefix
+        assert(#pages <= (backup and 10000 or 2000), attachments and 'Attachment directory is limited to 2,000 images: ' .. prefix
+            or backup and 'Backup is limited to 10,000 files'
             or 'Notebook is limited to 2,000 pages')
     end
     table.sort(pages, attachments and function(a, b) return a.file < b.file end or nil)
     return pages
+end
+
+function Fs:create_directory(path)
+    local parent, name = self:parent(path)
+    local created = C.mkdirat(parent, name, 448) == 0
+    local err = ffi.errno()
+    C.close(parent)
+    assert(created, 'Cannot create new restore folder (existing or unwritable): ' .. path .. ' (errno ' .. err .. ')')
 end
 
 function Fs:close()
