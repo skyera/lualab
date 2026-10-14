@@ -74,8 +74,130 @@ $('pin-page').addEventListener('click', () => {
     ? navigationState.pinned.filter(value => value !== id) : [...navigationState.pinned, id];
   saveNavigation(); renderNavigation();
 });
-const MODAL_DIALOGS = ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks', 'capture', 'verse', 'journal-overview', 'saved-search', 'attachments', 'backup', 'folder', 'image-options'];
+const MODAL_DIALOGS = ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks', 'capture', 'verse', 'journal-overview', 'saved-search', 'attachments', 'backup', 'folder', 'image-options', 'dashboard'];
 function anyDialogOpen() { return MODAL_DIALOGS.some(id => $(id + '-dialog').open); }
+
+const dashboardState = { request: 0, busy: false, pages: null, tasks: null, images: null, errors: [] };
+function closeDashboard() {
+  if (dashboardState.busy) return;
+  ++dashboardState.request; $('dashboard-dialog').close(); $('dashboard-open').focus();
+}
+function dashboardControls() {
+  for (const id of ['dashboard-refresh', 'dashboard-close', 'dashboard-today', 'dashboard-capture', 'dashboard-new', 'dashboard-all-tasks']) $(id).disabled = dashboardState.busy;
+}
+function dashboardPlaceholder(target, text) {
+  const node = document.createElement('p'); node.className = 'dashboard-help'; node.textContent = text;
+  $(target).replaceChildren(node);
+}
+async function dashboardNavigate(id, task) {
+  if (dashboardState.busy) return;
+  dashboardState.busy = true; ++dashboardState.request; dashboardControls(); $('dashboard-error').textContent = '';
+  try {
+    await refresh();
+    if (!(await openPage(id))) throw new Error($('message').textContent || 'Could not open ' + id);
+    if (task && (state.page.revision !== task.revision || state.dirty)) {
+      throw new Error('The task page or recovered draft changed. Go back to the editor to inspect it, or Refresh before jumping to its line.');
+    }
+    dashboardState.busy = false; closeDashboard();
+    if (task) selectTaskLine(task);
+  } catch (error) { $('dashboard-error').textContent = error.message; }
+  finally { dashboardState.busy = false; dashboardControls(); }
+}
+function renderDashboard() {
+  const pages = dashboardState.pages, tasks = dashboardState.tasks;
+  $('dashboard-pages-count').textContent = pages ? pages.length.toLocaleString() : '—';
+  $('dashboard-images-count').textContent = dashboardState.images
+    ? dashboardState.images.filter(row => !row.missing).length.toLocaleString() : '—';
+  $('dashboard-tasks-count').textContent = tasks ? tasks.filter(task => !task.done).length.toLocaleString() : '—';
+  for (const [key, target] of [['pinned', 'dashboard-pinned'], ['recent', 'dashboard-recent']]) {
+    const existing = new Set((pages || []).map(page => page.id));
+    const ids = navigationState[key].filter(id => existing.has(id)).slice(0, 10);
+    if (!pages) dashboardPlaceholder(target, 'Page list unavailable. Refresh to retry.');
+    else if (!ids.length) dashboardPlaceholder(target, key === 'pinned' ? 'No pinned pages yet.' : 'No recent pages yet.');
+    else $(target).replaceChildren(...ids.map(id => button(id, () => dashboardNavigate(id))));
+  }
+  if (!tasks) dashboardPlaceholder('dashboard-upcoming', 'Tasks unavailable. Refresh to retry.');
+  else {
+    const today = dateKey(new Date());
+    const upcoming = tasks.filter(task => !task.done && task.due).sort((a, b) => a.due.localeCompare(b.due)
+      || a.id.localeCompare(b.id) || a.line - b.line).slice(0, 10);
+    if (!upcoming.length) dashboardPlaceholder('dashboard-upcoming', 'No open tasks with a due date.');
+    else $('dashboard-upcoming').replaceChildren(...upcoming.map(task => {
+      const label = (task.due < today ? 'Overdue · ' : task.due === today ? 'Today · ' : '')
+        + task.due + ' · ' + task.text + ' · ' + task.id + ':' + task.line;
+      return button(label, () => dashboardNavigate(task.id, task), 'dashboard-due-task');
+    }));
+  }
+  if (!pages) dashboardPlaceholder('dashboard-tags', 'Tags unavailable. Refresh to retry.');
+  else {
+    const counts = new Map();
+    for (const page of pages) for (const tag of new Set(page.tags || [])) counts.set(tag, (counts.get(tag) || 0) + 1);
+    const tags = [...counts].sort(([a, countA], [b, countB]) => countB - countA || a.localeCompare(b)).slice(0, 10);
+    if (!tags.length) dashboardPlaceholder('dashboard-tags', 'No tags yet.');
+    else $('dashboard-tags').replaceChildren(...tags.map(([tag, count]) => button('#' + tag + ' (' + count + ')', () => {
+      if (dashboardState.busy) return;
+      clearTimeout(searchTimer); ++state.searchRequest; $('search').value = ''; selectedTag = tag;
+      renderTagFilter(); renderTree(state.pages); renderSavedSearches(); closeDashboard();
+    })));
+  }
+  $('dashboard-error').textContent = dashboardState.errors.join('\n');
+}
+async function loadDashboard() {
+  if (dashboardState.busy || !$('dashboard-dialog').open) return;
+  const request = ++dashboardState.request;
+  Object.assign(dashboardState, { pages: null, tasks: null, images: null, errors: [] }); renderDashboard();
+  $('dashboard-status').textContent = 'Loading notebook pages, images, and tasks…';
+  const results = await Promise.allSettled([api('/api/state'), api('/api/attachments'), api('/api/tasks')]);
+  if (request !== dashboardState.request || !$('dashboard-dialog').open) return;
+  for (const [index, key] of ['pages', 'images', 'tasks'].entries()) {
+    const result = results[index];
+    try {
+      if (result.status === 'rejected') throw result.reason;
+      const rows = key === 'images' ? result.value.attachments : result.value[key];
+      if (!Array.isArray(rows)) throw new Error('Invalid ' + key + ' response');
+      if (key === 'pages' && rows.some(row => !row || typeof row.id !== 'string'
+          || (row.tags !== undefined && (!Array.isArray(row.tags) || row.tags.some(tag => typeof tag !== 'string'))))) {
+        throw new Error('Invalid page data');
+      }
+      if (key === 'tasks' && rows.some(row => !row || typeof row.id !== 'string' || typeof row.text !== 'string'
+          || typeof row.done !== 'boolean' || typeof row.due !== 'string' || typeof row.revision !== 'string'
+          || !Number.isInteger(row.line) || row.line < 1)) throw new Error('Invalid task data');
+      if (key === 'images' && rows.some(row => !row || typeof row.page !== 'string'
+          || typeof row.file !== 'string' || typeof row.missing !== 'boolean')) throw new Error('Invalid image data');
+      dashboardState[key] = rows;
+      if (key === 'pages') {
+        if (typeof result.value.data_dir !== 'string') throw new Error('Notebook path is missing');
+        state.pages = rows; state.root = result.value.data_dir; state.trash = result.value.trash || [];
+        loadNavigation(); renderNavigation(); loadSavedSearches(); renderSavedSearches();
+        renderTagFilter();
+        if (!$('search').value.trim()) renderTree();
+        renderJournal();
+      }
+    } catch (error) { dashboardState[key] = null; dashboardState.errors.push('Could not load ' + key + ': ' + error.message + '. Use Refresh to retry.'); }
+  }
+  if (navigationState.error) dashboardState.errors.push(navigationState.error);
+  renderDashboard();
+  $('dashboard-status').textContent = dashboardState.errors.length ? 'Overview loaded with errors.' : 'Notebook overview ready.';
+}
+$('dashboard-open').addEventListener('click', async () => {
+  if (anyDialogOpen() || !(await ensureSaved()) || anyDialogOpen()) return;
+  $('dashboard-dialog').showModal(); await loadDashboard();
+});
+$('dashboard-close').addEventListener('click', closeDashboard);
+$('dashboard-dialog').addEventListener('cancel', event => { event.preventDefault(); closeDashboard(); });
+$('dashboard-refresh').addEventListener('click', loadDashboard);
+$('dashboard-today').addEventListener('click', async () => {
+  if (dashboardState.busy) return;
+  dashboardState.busy = true; ++dashboardState.request; dashboardControls(); $('dashboard-error').textContent = '';
+  try {
+    if (!(await openJournalDate(dateKey(new Date())))) throw new Error($('message').textContent || 'Could not open today’s journal.');
+    dashboardState.busy = false; closeDashboard();
+  } catch (error) { $('dashboard-error').textContent = error.message; }
+  finally { dashboardState.busy = false; dashboardControls(); }
+});
+for (const [id, action] of [['dashboard-capture', openCapture], ['dashboard-all-tasks', openTasks], ['dashboard-new', () => ask('create')]]) {
+  $(id).addEventListener('click', () => { if (!dashboardState.busy) { closeDashboard(); return action(); } });
+}
 
 const imageOptionsState = { page: null, before: '', items: [] };
 function populateImageOptions() {
@@ -589,13 +711,17 @@ async function openTask(task) {
     if (state.page.revision !== task.revision || state.dirty) {
       throw new Error('The page or recovered draft changed. Close Tasks to inspect it, or refresh the task list.');
     }
-    const lines = $('editor').value.split('\n');
-    const start = lines.slice(0, task.line - 1).reduce((sum, line) => sum + line.length + 1, 0);
-    taskState.action = false; setMode('edit'); closeTasks(); $('editor').focus();
-    $('editor').setSelectionRange(start, start + (lines[task.line - 1] || '').length);
-    $('editor').scrollTop = Math.max(0, (task.line - 3) * 25);
+    taskState.action = false; closeTasks(); selectTaskLine(task);
   } catch (error) { $('tasks-error').textContent = error.message; }
   finally { taskState.busy = false; taskState.action = false; renderTasks(); }
+}
+
+function selectTaskLine(task) {
+  const lines = $('editor').value.split('\n');
+  const start = lines.slice(0, task.line - 1).reduce((sum, line) => sum + line.length + 1, 0);
+  setMode('edit'); $('editor').focus();
+  $('editor').setSelectionRange(start, start + (lines[task.line - 1] || '').length);
+  $('editor').scrollTop = Math.max(0, (task.line - 3) * 25);
 }
 
 function openExport() {

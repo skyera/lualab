@@ -179,6 +179,35 @@ or replaced as part of recovery advice.
   around matching terms with highlighted search keywords in titles, paths, and snippets.
   **Ctrl K** (or Cmd K) focuses search; **Ctrl S** (or Cmd S) saves immediately.
 
+## Notebook dashboard
+
+Click **Dashboard** in the header for a notebook-wide overview. Opening it first
+saves the current draft; a failed save or conflict keeps the draft in the editor.
+**Back to editor** or **Esc** closes the dashboard without changing the current
+page, cursor, or scroll position.
+
+The summary counts active pages, physical supported image files belonging to
+active pages, and all open tasks. Missing referenced images are excluded from the
+image count. Pinned and recent pages use the same notebook-specific preferences
+as the sidebar. Lists show up to 10 entries. **Upcoming tasks** shows dated open
+tasks in due-date order, including overdue tasks first; completed and undated
+tasks are omitted from that list. Popular tags are ranked by the number of pages
+using each tag, with alphabetical ties.
+
+Click a saved page shortcut to open it. Clicking a task opens its page and selects
+the source line only when its saved revision still matches and no recovered draft
+changes the text. If it changed, the dashboard reports the conflict; return to
+the editor to inspect it or refresh the task list. Clicking a popular tag clears
+the search and filters the sidebar while keeping the current editor page.
+
+Quick actions open **Today’s journal**, **Quick capture**, **+ Page**, or **All
+tasks** using their existing safeguards. **Refresh** reloads the overview. Page,
+image, and task requests fail independently: an unavailable count is shown as
+`—` with a visible error and retry guidance, while successfully loaded sections
+remain usable. Closing or refreshing ignores late responses from previous loads.
+The dashboard itself is read-only; quick actions can create or edit pages through
+the normal flows. Header controls wrap to remain accessible on smaller screens.
+
 ## Markdown editing toolbar
 
 Use the buttons above the Markdown editor to format selected text or insert a

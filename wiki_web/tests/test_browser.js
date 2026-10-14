@@ -39,6 +39,20 @@ test('real browser selects words in editor/preview and keeps dictionary within d
       const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
       const errors = []; page.on('pageerror', error => errors.push(error.message));
       await page.goto(url); await page.locator('#editor').waitFor({ state: 'visible' });
+      const dashboardEditor = await page.locator('#editor').inputValue();
+      await page.locator('#dashboard-open').click();
+      await page.waitForFunction(() => document.getElementById('dashboard-status').textContent.includes('ready'));
+      assert.equal(await page.locator('#dashboard-pages-count').innerText(), '1');
+      assert.equal(await page.locator('#dashboard-images-count').innerText(), '0');
+      for (const width of [1440, 950, 650, 375, 320]) {
+        await page.setViewportSize({ width, height: 850 });
+        const dashboardBounds = await page.locator('#dashboard-dialog').boundingBox();
+        assert.ok(dashboardBounds.x >= 0 && dashboardBounds.x + dashboardBounds.width <= width);
+        assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      }
+      await page.locator('#dashboard-close').click();
+      assert.equal(await page.locator('#editor').inputValue(), dashboardEditor);
+      await page.setViewportSize({ width: 1440, height: 1000 });
       const originalEditor = await page.locator('#editor').inputValue();
       await page.locator('#editor').evaluate(editor => {
         editor.focus(); const index = editor.value.indexOf('ephemeral'); editor.setSelectionRange(index, index + 9);

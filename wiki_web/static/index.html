@@ -23,6 +23,7 @@
     <button id="backup-open" type="button">Backup</button>
     <button id="folder-open" type="button">Move folder</button>
     <button id="capture-open" title="Quick capture (Ctrl / Cmd + Shift + J)">Capture</button>
+    <button id="dashboard-open" type="button">Dashboard</button>
   </header>
   <div class="workspace">
     <aside id="sidebar">
@@ -166,6 +167,18 @@
     <p id="tasks-error" role="alert"></p>
     <div id="tasks-results"></div>
     <button id="tasks-more" hidden>Show more</button>
+  </dialog>
+  <dialog id="dashboard-dialog" aria-labelledby="dashboard-title">
+    <div class="notebook-dashboard-heading"><h2 id="dashboard-title">Your notebook</h2><button id="dashboard-refresh" type="button">Refresh</button><button id="dashboard-close" type="button">Back to editor</button></div>
+    <div class="notebook-dashboard-summary"><p><strong id="dashboard-pages-count">—</strong> pages</p><p><strong id="dashboard-images-count">—</strong> images</p><p><strong id="dashboard-tasks-count">—</strong> open tasks</p></div>
+    <div class="notebook-dashboard-actions"><button id="dashboard-today" type="button">Today’s journal</button><button id="dashboard-capture" type="button">Quick capture</button><button id="dashboard-new" type="button">+ Page</button><button id="dashboard-all-tasks" type="button">All tasks</button></div>
+    <p id="dashboard-status" role="status" aria-live="polite"></p><p id="dashboard-error" role="alert"></p>
+    <div class="notebook-dashboard-grid">
+      <section><h3>Pinned pages</h3><nav id="dashboard-pinned" aria-label="Dashboard pinned pages"></nav></section>
+      <section><h3>Upcoming tasks</h3><p class="dashboard-help">Overdue first · showing up to 10 dated open tasks.</p><div id="dashboard-upcoming"></div></section>
+      <section><h3>Recent pages</h3><nav id="dashboard-recent" aria-label="Dashboard recent pages"></nav></section>
+      <section><h3>Popular tags</h3><nav id="dashboard-tags" aria-label="Dashboard popular tags"></nav></section>
+    </div>
   </dialog>
   <dialog id="image-options-dialog" aria-labelledby="image-options-title">
     <form id="image-options-form">

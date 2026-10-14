@@ -1192,6 +1192,103 @@ test('HTML export embeds images and retains caption text and width styles throug
   assert.match(html, /\.image-small\{width:240px\}/);
 });
 
+test('notebook dashboard renders counts, saved shortcuts, due tasks and popular tags without changing editor', async () => {
+  const { context, state, get, stored } = harness();
+  stored.set('leaf-navigation:/notebook', JSON.stringify({ pinned: ['Other'], recent: ['Home', 'Other'] }));
+  const pages = [{ id: 'Home', tags: ['work', '学习'] }, { id: 'Other', tags: ['work'] }];
+  const tasks = [
+    { id: 'Other', text: '<img>Review 学习', line: 2, revision: 'r2', done: false, due: '2000-01-01' },
+    { id: 'Home', text: 'Done', line: 1, revision: 'r1', done: true, due: '2000-01-01' },
+    { id: 'Home', text: 'Undated', line: 3, revision: 'r1', done: false, due: '' },
+  ];
+  context.api = async route => route === '/api/state' ? { pages, data_dir: '/notebook', trash: [] }
+    : route === '/api/tasks' ? { tasks } : { attachments: [
+      { page: 'Home', file: 'one.png', missing: false }, { page: 'Other', file: 'missing.png', missing: true }] };
+  await get('dashboard-open').handlers.click();
+  assert.equal(get('dashboard-dialog').open, true); assert.equal(get('dashboard-pages-count').textContent, '2');
+  assert.equal(get('dashboard-images-count').textContent, '1'); assert.equal(get('dashboard-tasks-count').textContent, '2');
+  assert.equal(texts(get('dashboard-pinned')), 'Other');
+  assert.equal(get('dashboard-tags').children[0].textContent, '#work (2)');
+  assert.match(texts(get('dashboard-upcoming')), /Overdue.*Review 学习/);
+  assert.equal(get('dashboard-upcoming').querySelectorAll('img').length, 0);
+  assert.equal(get('editor').value, 'Initial'); assert.equal(state.page.id, 'Home');
+  get('dashboard-dialog').handlers.cancel({ preventDefault() {} }); assert.equal(get('dashboard-dialog').open, false);
+});
+
+test('notebook dashboard handles empty and partial failures and ignores responses after closing', async () => {
+  const { context, get } = harness();
+  context.api = async route => {
+    if (route === '/api/attachments') throw new Error('Unreadable image folder');
+    return route === '/api/state' ? { pages: [], data_dir: '/notebook', trash: [] } : { tasks: [] };
+  };
+  await get('dashboard-open').handlers.click();
+  assert.equal(get('dashboard-pages-count').textContent, '0'); assert.equal(get('dashboard-tasks-count').textContent, '0');
+  assert.equal(get('dashboard-images-count').textContent, '—');
+  assert.match(get('dashboard-error').textContent, /Unreadable image folder.*Refresh/);
+  assert.match(texts(get('dashboard-pinned')), /No pinned/); assert.match(texts(get('dashboard-upcoming')), /No open tasks/);
+  context.api = async route => route === '/api/state' ? { pages: [{ id: 1 }], data_dir: '/notebook' }
+    : route === '/api/tasks' ? { tasks: [{}] } : { attachments: [] };
+  await get('dashboard-refresh').handlers.click();
+  assert.match(get('dashboard-error').textContent, /Invalid page data/);
+  assert.match(get('dashboard-error').textContent, /Invalid task data/);
+  const pending = deferred(); context.api = () => pending.promise;
+  const loading = get('dashboard-refresh').handlers.click();
+  get('dashboard-close').handlers.click(); pending.resolve({ pages: [], tasks: [], attachments: [], data_dir: '/notebook' });
+  await loading; assert.equal(get('dashboard-dialog').open, false);
+  assert.equal(get('dashboard-pages-count').textContent, '—');
+});
+
+test('notebook dashboard saves before opening, preserves failed drafts and navigates task sources with revision guards', async () => {
+  const { context, state, get } = harness();
+  state.dirty = true; get('editor').value = 'Unsaved'; context.api = async () => { throw new Error('Save failed'); };
+  await get('dashboard-open').handlers.click(); assert.equal(get('dashboard-dialog').open, false);
+  assert.equal(get('editor').value, 'Unsaved'); state.dirty = false;
+  get('dashboard-dialog').showModal();
+  context.api = async () => ({ id: 'Other', title: 'Other', revision: 'changed', content: 'First\n- [ ] task' });
+  const task = { id: 'Other', text: 'task', line: 2, revision: 'r2', due: '2026-10-15', done: false };
+  await context.dashboardNavigate('Other', task);
+  assert.equal(get('dashboard-dialog').open, true); assert.match(get('dashboard-error').textContent, /task page.*changed/);
+  context.api = async () => ({ id: 'Other', title: 'Other', revision: 'r2', content: 'First\n- [ ] task' });
+  await context.dashboardNavigate('Other', task); assert.equal(get('dashboard-dialog').open, false);
+  assert.equal(get('editor').selectionStart, 6); assert.equal(get('editor').selectionEnd, 16);
+  assert.equal(get('editor').focused, true);
+});
+
+test('dashboard actions open capture, creation and tasks while tags filter sidebar and bounded lists stay safe', async () => {
+  const { context, state, get, stored } = harness();
+  const rows = Array.from({ length: 15 }, (_, index) => ({ id: 'Page' + index, tags: ['学习'], title: 'Page' + index }));
+  stored.set('leaf-navigation:/notebook', JSON.stringify({ pinned: rows.map(row => row.id), recent: rows.map(row => row.id) }));
+  const tasks = rows.map((row, index) => ({ id: row.id, text: 'Task' + index, line: index + 1, revision: 'r1', done: false, due: '2026-10-15' }));
+  context.api = async route => route === '/api/state' ? { pages: rows, data_dir: '/notebook' }
+    : route === '/api/tasks' ? { tasks } : { attachments: [] };
+  await get('dashboard-open').handlers.click();
+  assert.equal(get('dashboard-pinned').children.length, 10);
+  assert.equal(get('dashboard-recent').children.length, 10);
+  assert.equal(get('dashboard-upcoming').children.length, 10);
+  get('search').value = 'old query'; get('dashboard-tags').children[0].handlers.click();
+  assert.equal(get('search').value, ''); assert.equal(get('tag-filter').value, '学习');
+  assert.equal(state.page.id, 'Home'); assert.equal(get('dashboard-dialog').open, false);
+  await get('dashboard-open').handlers.click(); get('dashboard-capture').handlers.click();
+  assert.equal(get('capture-dialog').open, true); get('capture-dialog').close();
+  await get('dashboard-open').handlers.click(); get('dashboard-new').handlers.click();
+  assert.equal(get('prompt-dialog').open, true); get('prompt-dialog').close();
+  await get('dashboard-open').handlers.click(); await get('dashboard-all-tasks').handlers.click();
+  assert.equal(get('tasks-dialog').open, true);
+});
+
+test('dashboard Today opens a journal and pending navigation prevents accidental dismissal', async () => {
+  const { context, get } = harness(); let opened;
+  get('dashboard-dialog').showModal(); const pending = deferred();
+  context.openJournalDate = async key => { opened = key; return pending.promise; };
+  const opening = get('dashboard-today').handlers.click();
+  get('dashboard-dialog').handlers.cancel({ preventDefault() {} });
+  assert.equal(get('dashboard-dialog').open, true); assert.equal(get('dashboard-close').disabled, true);
+  pending.resolve(true); await opening;
+  assert.equal(opened, context.dateKey(new Date())); assert.equal(get('dashboard-dialog').open, false);
+  get('dashboard-dialog').showModal(); context.openJournalDate = async () => false;
+  await get('dashboard-today').handlers.click(); assert.match(get('dashboard-error').textContent, /Could not open today/);
+});
+
 test('safe preview renders empty, Unicode, code, tasks, links, images and hostile markup', () => {
   const { markdown } = harness();
   const pages = new Set(['Home', 'Other']); const navigation = [];
