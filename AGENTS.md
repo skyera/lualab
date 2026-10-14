@@ -124,6 +124,12 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
    * **Functions & Variables**: Use `snake_case` for functions and variables (`load_config`, `parse_args`).
    * **Classes / Metatables**: Use `PascalCase` for OOP-like metatables or types (`Database`, `Indexer`).
 
+5. **Readability-First & Statement Separation**:
+   * **One statement per line**: Never pack multiple statements on a single line separated by semicolons (e.g. avoid `stmt1; stmt2`, `if not ok then release(); error(err) end`, `count = count + 1; print(...)`). Semicolons in Lua code are reserved strictly for `package.path` lists, C struct declarations in `ffi.cdef`, or string literals.
+   * **Structured Control Flow**: Avoid single-line `if ... then ... end` or compressed loops when statements involve side effects, error reporting, returns, or resource cleanup. Expand them into structured multi-line blocks with standard 4-space indentation.
+   * **Clarity Over Compaction**: Never micro-compact or minify Lua code to reduce line counts. Code must be formatted for clarity, rapid comprehension, effortless debugging, and clean git diffs.
+   * **Multi-line Tables & Arguments**: When table constructors or function calls contain multiple fields or exceed comfortable reading width, format them across multiple lines with clean indentation rather than sprawling horizontally.
+
 ## Commit Workflow
 
 *   **One commit per issue**: Each fix should be its own atomic commit with a descriptive message.
