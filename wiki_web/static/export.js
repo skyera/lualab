@@ -70,6 +70,9 @@ const WikiExport = (() => {
       + 'article{margin-top:32px;padding-top:20px;border-top:1px solid #ddd;overflow-wrap:anywhere}'
       + 'img{max-width:100%;height:auto}pre{padding:16px;background:#eee;overflow:auto}'
       + 'a{color:#32634c}a:not([href]){color:#777}blockquote{border-left:3px solid #aaa;padding-left:16px}'
+      + '.markdown-table{max-width:100%;overflow-x:auto;margin:16px 0}table{border-collapse:collapse;min-width:100%}'
+      + 'th,td{border:1px solid #ddd;padding:8px 12px;vertical-align:top}th{background:#eee}'
+      + '.align-left{text-align:left}.align-center{text-align:center}.align-right{text-align:right}'
       + '@media print{article{break-before:page}nav{display:none}}</style></head><body>' + root.outerHTML + '</body></html>';
     if (new TextEncoder().encode(html).length > MAX_BYTES) throw new Error('Export exceeds 64 MiB. Export individual pages instead.');
     return html;

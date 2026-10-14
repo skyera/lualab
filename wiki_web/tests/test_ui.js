@@ -604,6 +604,75 @@ test('safe preview renders empty, Unicode, code, tasks, links, images and hostil
   assert.equal(markdown.resolve('Projects/Design', './Tasks').id, 'Projects/Tasks');
   assert.equal(markdown.resolve('Home', '../escape'), null);
 });
+test('Markdown tables render alignment, inline formatting, links, and safe Unicode cells', () => {
+  const { markdown } = harness(); const navigation = [];
+  const source = '| Name | Center | Count |\r\n| :--- | :---: | ---: |\r\n'
+    + '| **学习** | [[Other|Go]] | 123 |\r\n'
+    + '| <script>bad</script> | [bad](javascript:alert) | *fine* |\r\n\r\nAfter';
+  const frame = markdown.render(source, 'Home', new Set(['Other']), (...args) => navigation.push(args));
+  assert.equal(frame.querySelectorAll('table').length, 1);
+  assert.equal(frame.querySelectorAll('thead').length, 1);
+  assert.equal(frame.querySelectorAll('tbody').length, 1);
+  const headers = frame.querySelectorAll('th');
+  assert.deepEqual(headers.map(node => node.className), ['align-left', 'align-center', 'align-right']);
+  assert.ok(headers.every(node => node.scope === 'col'));
+  assert.equal(frame.querySelectorAll('td').length, 6);
+  assert.equal(frame.querySelectorAll('strong')[0].textContent, '学习');
+  frame.querySelectorAll('a')[0].handlers.click({ preventDefault() {} });
+  assert.equal(navigation[0][0], 'Other');
+  assert.equal(frame.querySelectorAll('script').length, 0);
+  assert.match(texts(frame), /<script>bad<\/script>/);
+  assert.equal(frame.querySelectorAll('a').length, 1);
+  assert.equal(frame.querySelectorAll('p').at(-1).children.at(-1).textContent, 'After');
+});
+
+test('Markdown table rows handle optional borders, escaped pipes, code spans, and uneven widths', () => {
+  const { markdown } = harness();
+  const source = 'A | B | C\n--- | --- | ---\n'
+    + 'a\\|b | `x|y` | ``x`|y``\n'
+    + '| short | |\n| one | two | three | ignored |\n\n| Only |\n| --- |';
+  const frame = markdown.render(source, 'Home', new Set(), () => {});
+  assert.equal(frame.querySelectorAll('table').length, 2);
+  const cells = frame.querySelectorAll('td');
+  assert.equal(texts(cells[0]), 'a|b');
+  assert.equal(frame.querySelectorAll('code')[0].textContent, 'x|y');
+  assert.equal(frame.querySelectorAll('code')[1].textContent, 'x`|y');
+  assert.equal(cells.length, 9);
+  assert.equal(texts(cells[4]), ''); assert.equal(texts(cells[5]), '');
+  assert.doesNotMatch(texts(frame), /ignored/);
+});
+
+test('HTML export renders tables through the shared renderer and includes alignment and overflow styles', async () => {
+  const { context } = harness(); let root;
+  const create = context.document.createElement;
+  context.document.createElement = tag => {
+    const node = create(tag); if (tag === 'main') root = node; return node;
+  };
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../static/export.js'), 'utf8'), context);
+  const exporter = vm.runInContext('WikiExport', context);
+  const page = { id: 'Home', revision: 'r1', content: '| Name | Count |\n| :--- | ---: |\n| 学习 | 123 |' };
+  context.fetch = async route => ({ ok: true, json: async () => route === '/api/state' ? { pages: [page] } : page });
+  const html = await exporter.generate('page', 'Home', new AbortController().signal);
+  assert.equal(root.querySelectorAll('table').length, 1);
+  assert.deepEqual(root.querySelectorAll('td').map(texts), ['学习', '123']);
+  assert.match(html, /\.align-right\{text-align:right\}/);
+  assert.match(html, /\.markdown-table\{[^}]*overflow-x:auto/);
+});
+
+test('Markdown table recognition rejects malformed dividers and preserves code and block boundaries', () => {
+  const { markdown } = harness();
+  for (const source of ['A | B\n-- | ---', 'A | B\n--- | --- | ---', 'A | B\n--- | nope', '', 'plain']) {
+    assert.equal(markdown.render(source, 'Home', new Set(), () => {}).querySelectorAll('table').length, 0);
+  }
+  const frame = markdown.render('```\nA | B\n--- | ---\n```\n\n    A | B\n    --- | ---\n\n'
+    + 'A | B\n--- | ---\n# Heading | text\n- List | item\n> Quote | text', 'Home', new Set(), () => {});
+  assert.equal(frame.querySelectorAll('table').length, 1);
+  assert.equal(frame.querySelectorAll('pre').length, 2);
+  assert.equal(frame.querySelectorAll('h1').length, 1);
+  assert.equal(frame.querySelectorAll('li').length, 1);
+  assert.equal(frame.querySelectorAll('blockquote').length, 1);
+});
+
 test('journal calendar marks existing dates and navigates across month boundaries', () => {
   const { context, state, get } = harness();
   state.journalMonth = new Date(2026, 9, 1);

@@ -169,10 +169,14 @@ test('real browser selects words in editor/preview and keeps dictionary within d
       const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ioAAAAASUVORK5CYII=', 'base64');
       const image = await (await fetch(url + '/api/image?page=' + encodeURIComponent(exportPage.id), { method: 'POST', body: png })).json();
       const changed = await fetch(url + '/api/page', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: exportPage.id, content: exportPage.content + '\n[[Projects/Design]]\n<script>unsafe</script>\n' + image.markdown,
+        body: JSON.stringify({ id: exportPage.id, content: exportPage.content + '\n[[Projects/Design]]\n<script>unsafe</script>\n' + image.markdown
+          + '\n\n| Name | Count |\n| :--- | ---: |\n| **学习** | 123 |\n',
           revision: exportPage.revision }) }); assert.equal(changed.status, 200);
       await page.reload(); await page.locator('#editor').waitFor({ state: 'visible' });
       await page.locator('#export-open').click(); await page.locator('#export-scope').selectOption('notebook');
+      assert.equal(await page.locator('#preview table').count(), 1);
+      assert.equal(await page.locator('#preview td.align-right').evaluate(cell => getComputedStyle(cell).textAlign), 'right');
+      assert.equal(await page.locator('#preview .markdown-table').evaluate(node => getComputedStyle(node).overflowX), 'auto');
       if (screenshots) await page.screenshot({ path: path.join(screenshots, 'export-mobile.png') });
       const downloadEvent = page.waitForEvent('download'); await page.locator('#export-start').click();
       const download = await downloadEvent; assert.equal(download.suggestedFilename(), 'LeafWiki.html');
@@ -185,6 +189,8 @@ test('real browser selects words in editor/preview and keeps dictionary within d
       assert.ok(await offline.locator('article').count() > 1);
       assert.equal(await offline.locator('img').first().evaluate(image => image.complete && image.naturalWidth > 0), true);
       assert.equal(await offline.locator('script').count(), 0);
+      assert.equal(await offline.locator('table').count(), 1);
+      assert.equal(await offline.locator('td.align-right').evaluate(cell => getComputedStyle(cell).textAlign), 'right');
       const link = offline.locator('article a[href^="#page-"]').first();
       const target = await link.getAttribute('href'); assert.ok(await offline.locator(target).count() > 0);
       await offline.close();

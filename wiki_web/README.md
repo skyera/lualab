@@ -159,7 +159,7 @@ or replaced as part of recovery advice.
 - Choose **Edit**, **Split**, or **Preview**. Narrow screens default to Edit;
   the notebook tree opens with the menu button.
 - Supported Markdown includes headings, paragraphs, lists, task checkboxes,
-  emphasis, inline/fenced code, blockquotes, links, and local images. Task
+  emphasis, inline/fenced code, blockquotes, tables, links, and local images. Task
   checkboxes are display-only; change `[ ]` to `[x]` in the editor. Raw HTML is
   shown as text. This is a deliberately limited renderer, not full CommonMark.
 - Use `[[Home]]`, `[[Projects:Wiki:Tasks|Tasks]]`, or
@@ -178,6 +178,26 @@ or replaced as part of recovery advice.
   alongside free-text terms. Search results display contextual snippets centered
   around matching terms with highlighted search keywords in titles, paths, and snippets.
   **Ctrl K** (or Cmd K) focuses search; **Ctrl S** (or Cmd S) saves immediately.
+
+## Markdown tables
+
+Use a header row followed by a separator row with at least three hyphens per
+column. Outer pipes are optional. Colons select left, center, or right alignment:
+
+```markdown
+| Feature | Status | Effort |
+| :--- | :---: | ---: |
+| **Tables** | Ready | Medium |
+| [[Home]] | Reference | Small |
+```
+
+Tables appear in preview and standalone HTML exports. Wide tables scroll
+horizontally. Cells support the existing inline Markdown, including wiki links,
+code, emphasis, and images. Write `\|` for a literal pipe; pipes inside code spans
+and wiki-link labels also stay inside their cell. Body rows must contain a pipe;
+missing cells are filled with empty cells and extra cells are ignored. A blank
+line or another block ends the table. Malformed separators remain ordinary text,
+and table syntax inside code blocks is displayed literally. Raw HTML stays text.
 
 ## Tags
 

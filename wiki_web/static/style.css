@@ -1,4 +1,11 @@
 :root{--paper:#f8f7f3;--surface:#fff;--ink:#25382e;--muted:#6a766e;--line:#dedfd6;--green:#32634c;--soft:#e8eee6;--error:#a23832}
+#preview .markdown-table{max-width:100%;overflow-x:auto;margin:16px 0}
+#preview table{border-collapse:collapse;min-width:100%}
+#preview th,#preview td{border:1px solid var(--line);padding:8px 12px;vertical-align:top}
+#preview th{background:var(--paper)}
+#preview .align-left{text-align:left}
+#preview .align-center{text-align:center}
+#preview .align-right{text-align:right}
 *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.6 system-ui,sans-serif}
 button,input,textarea{font:inherit;color:inherit}button{cursor:pointer;background:transparent;border:1px solid var(--line);border-radius:7px;padding:7px 12px}button:hover{background:var(--soft)}button:disabled{opacity:.5;cursor:wait}button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--green);outline-offset:3px}
 .primary{background:var(--green);color:white;border-color:var(--green)}.primary:hover{background:#244d39}a{color:var(--green);text-decoration:none}a:hover{text-decoration:underline}[hidden]{display:none!important}

@@ -58,6 +58,36 @@ const WikiMarkdown = (() => {
     }
     target.append(document.createTextNode(text.slice(start)));
   }
+  // Keep pipes in escapes, code spans, and wiki-link labels inside their cell.
+  function table_row(line) {
+    if (!line.includes('|')) return null;
+    const cells = []; let cell = '', separators = 0;
+    const text = line.trim();
+    for (let index = 0; index < text.length; index++) {
+      if (text[index] === '\\' && index + 1 < text.length) {
+        const next = text[++index]; cell += next === '|' ? next : '\\' + next;
+      } else if (text[index] === '`') {
+        const run = text.slice(index).match(/^`+/)[0];
+        let end = index + run.length;
+        while ((end = text.indexOf(run, end)) !== -1) {
+          if (text[end - 1] !== '`' && text[end + run.length] !== '`') break;
+          end += run.length;
+        }
+        if (end !== -1) { cell += text.slice(index, end + run.length); index = end + run.length - 1; }
+        else { cell += run; index += run.length - 1; }
+      } else if (text.startsWith('[[', index) && text.indexOf(']]', index + 2) !== -1) {
+        const end = text.indexOf(']]', index + 2);
+        cell += text.slice(index, end + 2); index = end + 1;
+      } else if (text[index] === '|') {
+        cells.push(cell.trim()); cell = ''; separators++;
+      } else cell += text[index];
+    }
+    cells.push(cell.trim());
+    if (!separators) return null;
+    if (text.startsWith('|')) cells.shift();
+    if (text.endsWith('|') && cells.at(-1) === '') cells.pop();
+    return cells;
+  }
   function render(text, page, pages, navigate) {
     const root = document.createDocumentFragment();
     const lines = text.split(/\r?\n/);
@@ -84,6 +114,33 @@ const WikiMarkdown = (() => {
         flush(); const body = [line.replace(/^( {4}|\t)/, '')];
         while (index + 1 < lines.length && /^( {4}|\t)/.test(lines[index + 1])) body.push(lines[++index].replace(/^( {4}|\t)/, ''));
         const pre = element('pre'); pre.append(element('code', body.join('\n'))); root.append(pre); continue;
+      }
+      const headers = table_row(line);
+      const divider = index + 1 < lines.length ? table_row(lines[index + 1]) : null;
+      if (headers?.length && divider?.length === headers.length
+          && divider.every(cell => /^:?-{3,}:?$/.test(cell))) {
+        flush();
+        const wrapper = element('div'); wrapper.className = 'markdown-table';
+        const table = element('table'), head = element('thead'), body = element('tbody');
+        const alignments = divider.map(cell => cell.startsWith(':')
+          ? (cell.endsWith(':') ? 'center' : 'left') : (cell.endsWith(':') ? 'right' : 'left'));
+        function add_row(cells, target, tag) {
+          const row = element('tr');
+          headers.forEach((_, column) => {
+            const node = element(tag); node.className = 'align-' + alignments[column];
+            if (tag === 'th') node.scope = 'col';
+            inline(cells[column] || '', node, page, pages, navigate); row.append(node);
+          });
+          target.append(row);
+        }
+        add_row(headers, head, 'th'); index++;
+        while (index + 1 < lines.length) {
+          const next = lines[index + 1];
+          if (/^(\s*$| {4}|\t| {0,3}(?:#{1,6}\s|>|`{3,}|~{3,}|[-*+]\s|\d+\.\s))/.test(next)) break;
+          const cells = table_row(next); if (!cells) break;
+          add_row(cells, body, 'td'); index++;
+        }
+        table.append(head, body); wrapper.append(table); root.append(wrapper); continue;
       }
       const heading = line.match(/^(#{1,6})\s+(.+)$/);
       const item = line.match(/^\s*([-*]|\d+\.)\s+(.+)$/);
