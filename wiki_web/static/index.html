@@ -28,6 +28,11 @@
         <div class="journal-weekdays" aria-hidden="true"><span>Su</span><span>Mo</span><span>Tu</span><span>We</span><span>Th</span><span>Fr</span><span>Sa</span></div>
         <div id="journal-days" class="journal-days" role="group" aria-label="Days in month"></div>
       </section>
+      <section class="page-shortcuts" aria-label="Page shortcuts">
+        <h2>PINNED</h2><nav id="pinned-pages" aria-label="Pinned pages"></nav>
+        <h2>RECENT</h2><nav id="recent-pages" aria-label="Recent pages"></nav>
+        <p id="shortcuts-status" role="status" aria-live="polite"></p>
+      </section>
       <div class="sidebar-heading">YOUR NOTEBOOK <span id="page-count">0</span></div>
       <label for="tag-filter" class="tag-label">Filter by tag</label><select id="tag-filter"><option value="">All tags</option></select>
       <nav id="tree" aria-label="Notebook pages"></nav>
@@ -50,6 +55,7 @@
           <button id="outline-toggle" aria-controls="outline-panel" aria-expanded="false">Outline</button>
           <button id="verse-open" title="Insert random Bible verse">Verse</button>
           <button id="dictionary-open" aria-controls="dictionary-panel" aria-expanded="false">Look up</button>
+          <button id="pin-page" aria-pressed="false">☆ Pin page</button>
           <button id="page-history">History</button><button id="save">Save</button><button id="rename">Rename</button><button id="delete">Trash page</button>
         </div>
         <section id="outline-panel" class="outline-panel" aria-label="Page outline" hidden>

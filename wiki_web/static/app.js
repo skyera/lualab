@@ -8,6 +8,72 @@ let saveTimer, searchTimer;
 let selectedTag = '', treePages = null;
 const exportState = { controller: null };
 const captureState = { date: '', busy: false };
+const navigationState = { root: null, pinned: [], recent: [], writable: true, error: '' };
+function navigationKey() { return 'leaf-navigation:' + state.root; }
+function loadNavigation() {
+  if (navigationState.root === state.root) return;
+  Object.assign(navigationState, { root: state.root, pinned: [], recent: [], writable: true, error: '' });
+  try {
+    const raw = localStorage.getItem(navigationKey());
+    if (raw === null || raw === undefined) return;
+    const data = JSON.parse(raw);
+    if (!data || !Array.isArray(data.pinned) || !Array.isArray(data.recent)
+        || [...data.pinned, ...data.recent].some(id => typeof id !== 'string' || WikiMarkdown.resolve('', id)?.id !== id)) {
+      throw new Error('Invalid pinned/recent page data');
+    }
+    navigationState.pinned = [...new Set(data.pinned)];
+    navigationState.recent = [...new Set(data.recent)].slice(0, 10);
+  } catch (error) {
+    navigationState.writable = false;
+    navigationState.error = 'Could not load page shortcuts from browser storage (' + navigationKey() + '): '
+      + error.message + '. Shortcuts work for this session only. Repair or remove this storage entry and reload to retry.';
+  }
+}
+function saveNavigation() {
+  if (!navigationState.writable) return;
+  try {
+    const text = JSON.stringify({ pinned: navigationState.pinned, recent: navigationState.recent });
+    localStorage.setItem(navigationKey(), text);
+    if (localStorage.getItem(navigationKey()) !== text) throw new Error('Saved shortcuts failed read-back verification');
+    navigationState.error = '';
+  } catch (error) {
+    navigationState.error = 'Could not save page shortcuts to browser storage (' + navigationKey() + '): '
+      + error.message + '. Changes remain in this session; enable browser storage or free space, then pin or open a page to retry.';
+  }
+}
+function renderNavigation() {
+  const pages = new Map(state.pages.map(page => [page.id, page]));
+  for (const [key, target, empty] of [['pinned', 'pinned-pages', 'No pinned pages.'], ['recent', 'recent-pages', 'No recent pages.']]) {
+    const nodes = navigationState[key].filter(id => pages.has(id)).map(id => {
+      const node = document.createElement('button'); node.type = 'button';
+      node.className = 'tree-page' + (state.page?.id === id ? ' active' : '');
+      node.textContent = (key === 'pinned' ? '★ ' : '') + id; node.title = pages.get(id).title || id;
+      if (state.page?.id === id) node.setAttribute('aria-current', 'page');
+      node.addEventListener('click', () => openPage(id)); return node;
+    });
+    if (!nodes.length) {
+      const node = document.createElement('p'); node.className = 'empty-shortcuts'; node.textContent = empty; nodes.push(node);
+    }
+    $(target).replaceChildren(...nodes);
+  }
+  const pinned = Boolean(state.page && navigationState.pinned.includes(state.page.id));
+  $('pin-page').textContent = pinned ? '★ Unpin page' : '☆ Pin page';
+  $('pin-page').setAttribute('aria-pressed', String(pinned));
+  $('pin-page').disabled = !state.page || state.loading;
+  $('shortcuts-status').textContent = navigationState.error;
+}
+function renameNavigation(old, id) {
+  for (const key of ['pinned', 'recent']) navigationState[key] = [...new Set(navigationState[key].map(value => value === old ? id : value))];
+  saveNavigation();
+}
+$('pin-page').addEventListener('click', () => {
+  if (!state.page || state.loading) return;
+  loadNavigation();
+  const id = state.page.id;
+  navigationState.pinned = navigationState.pinned.includes(id)
+    ? navigationState.pinned.filter(value => value !== id) : [...navigationState.pinned, id];
+  saveNavigation(); renderNavigation();
+});
 const MODAL_DIALOGS = ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks', 'capture', 'verse'];
 function anyDialogOpen() { return MODAL_DIALOGS.some(id => $(id + '-dialog').open); }
 
@@ -824,6 +890,7 @@ async function openJournalDate(key) {
 }
 async function refresh() {
   const data = await api('/api/state'); state.pages = data.pages; state.trash = data.trash; state.root = data.data_dir;
+  loadNavigation(); renderNavigation();
   $('data-path').textContent = state.root; renderTagFilter(); renderTree(); renderJournal(); preview();
   if ($('switcher-dialog').open && !switcherState.busy) renderSwitcher(true);
   return data;
@@ -902,9 +969,12 @@ async function openPage(id, anchor) {
     document.querySelector('.workspace').classList.remove('menu-open'); $('menu').setAttribute('aria-expanded', 'false');
     if (anchor) { setMode('preview'); document.getElementById(anchor)?.scrollIntoView(); }
     if (state.dirty && !state.blocked) saveTimer = setTimeout(save, 500);
+    loadNavigation();
+    navigationState.recent = [id, ...navigationState.recent.filter(value => value !== id)].slice(0, 10);
+    saveNavigation(); renderNavigation();
     return true;
   } catch (error) { message(error.message); return false; }
-  finally { if (request === state.request) { state.loading = false; $('editor').readOnly = false; } }
+  finally { if (request === state.request) { state.loading = false; $('editor').readOnly = false; renderNavigation(); } }
 }
 async function uploadImages(files) {
   if (!state.page || state.blocked || state.uploading || !(await ensureSaved())) return;
@@ -1013,6 +1083,7 @@ $('prompt-form').addEventListener('submit', async event => {
     if (state.prompt === 'rename') {
       const old = state.page.id;
       await api('/api/rename', { id: old, destination: id, revision: state.page.revision }); clearDraft(old);
+      renameNavigation(old, id);
     } else await api('/api/page', { id, content, revision: '' });
     $('prompt-dialog').close(); await refresh(); await openPage(id);
   } catch (error) { $('prompt-error').textContent = error.message; }

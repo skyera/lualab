@@ -6,6 +6,12 @@
 #preview .align-left{text-align:left}
 #preview .align-center{text-align:center}
 #preview .align-right{text-align:right}
+.page-shortcuts{margin:0 0 22px;min-width:0}
+.page-shortcuts h2{font:11px system-ui;letter-spacing:1.4px;color:var(--muted);margin:14px 10px 6px}
+.page-shortcuts nav{display:flex;flex-direction:column;gap:3px}
+.page-shortcuts .empty-shortcuts{font-size:12px;color:var(--muted);margin:4px 10px}
+#shortcuts-status{font-size:12px;color:var(--error);overflow-wrap:anywhere;margin:8px 10px 0}
+#shortcuts-status:empty{display:none}
 *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.6 system-ui,sans-serif}
 button,input,textarea{font:inherit;color:inherit}button{cursor:pointer;background:transparent;border:1px solid var(--line);border-radius:7px;padding:7px 12px}button:hover{background:var(--soft)}button:disabled{opacity:.5;cursor:wait}button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--green);outline-offset:3px}
 .primary{background:var(--green);color:white;border-color:var(--green)}.primary:hover{background:#244d39}a{color:var(--green);text-decoration:none}a:hover{text-decoration:underline}[hidden]{display:none!important}

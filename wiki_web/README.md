@@ -179,6 +179,28 @@ or replaced as part of recovery advice.
   around matching terms with highlighted search keywords in titles, paths, and snippets.
   **Ctrl K** (or Cmd K) focuses search; **Ctrl S** (or Cmd S) saves immediately.
 
+## Pinned and recent pages
+
+Click **☆ Pin page** in the page toolbar to add the current page to **PINNED**
+in the sidebar. Click **★ Unpin page** to remove it. **RECENT** lists the last
+10 successfully opened pages, newest first, without duplicates. Both lists stay
+available while searching or filtering by tag, and opening a shortcut follows
+the same draft-saving and conflict checks as normal page navigation.
+
+Preferences are saved in browser storage separately for each notebook path.
+They survive reloads in the same browser and origin, but are not synced between
+devices or included in notebook backups. A notebook folder move uses a new key.
+Renaming a page through Leaf Wiki updates its shortcuts. Missing or trashed pages
+are hidden without deleting their preferences, so restoring the same path makes
+them visible again. Renames performed outside Leaf Wiki are not tracked.
+
+Storage failures appear beside the shortcuts; editing remains available and
+shortcut changes remain in memory for the session. Each successful write is
+read back and verified. Invalid saved shortcut data is preserved for repair,
+and is never silently replaced. Follow the diagnostic to repair or remove that
+browser storage entry, then reload. Failed writes can be retried by pinning or
+opening a page after enabling storage or freeing space.
+
 ## Markdown tables
 
 Use a header row followed by a separator row with at least three hyphens per

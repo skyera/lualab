@@ -586,6 +586,117 @@ function harness() {
   context.refresh = async () => {};
   return { context, state, get, events, stored, markdown, timers };
 }
+test('pinned pages persist, unpin, reload, and remain isolated by notebook', () => {
+  const { context, state, get, stored } = harness();
+  context.loadNavigation(); context.renderNavigation();
+  assert.match(texts(get('pinned-pages')), /No pinned pages/);
+  assert.match(texts(get('recent-pages')), /No recent pages/);
+  get('pin-page').handlers.click();
+  assert.equal(get('pin-page').textContent, '★ Unpin page');
+  assert.equal(texts(get('pinned-pages')), '★ Home');
+  assert.deepEqual(JSON.parse(stored.get('leaf-navigation:/notebook')).pinned, ['Home']);
+  const reload = harness();
+  reload.stored.set('leaf-navigation:/notebook', stored.get('leaf-navigation:/notebook'));
+  reload.context.loadNavigation(); reload.context.renderNavigation();
+  assert.equal(texts(reload.get('pinned-pages')), '★ Home');
+  state.root = '/另一个 notebook'; context.loadNavigation(); context.renderNavigation();
+  assert.match(texts(get('pinned-pages')), /No pinned pages/);
+  get('pin-page').handlers.click();
+  assert.ok(stored.has('leaf-navigation:/另一个 notebook'));
+  state.root = '/notebook'; context.loadNavigation(); get('pin-page').handlers.click();
+  assert.deepEqual(JSON.parse(stored.get('leaf-navigation:/notebook')).pinned, []);
+  assert.equal(get('pin-page').textContent, '☆ Pin page');
+});
+
+test('recent pages record successful opens only, deduplicate, cap at ten, and navigate through save guards', async () => {
+  const { context, state, get, stored } = harness();
+  state.pages = Array.from({ length: 12 }, (_, index) => ({ id: 'Page' + index, title: 'Page' + index, revision: 'r1' }));
+  context.api = async route => ({ id: decodeURIComponent(route.split('=')[1]), title: 'Page', content: 'Text', revision: 'r1' });
+  for (const page of state.pages) assert.equal(await context.openPage(page.id), true);
+  let recent = JSON.parse(stored.get('leaf-navigation:/notebook')).recent;
+  assert.equal(recent.length, 10); assert.equal(recent[0], 'Page11'); assert.equal(recent[9], 'Page2');
+  await context.openPage('Page5');
+  recent = JSON.parse(stored.get('leaf-navigation:/notebook')).recent;
+  assert.equal(recent[0], 'Page5'); assert.equal(new Set(recent).size, 10);
+  const reload = harness();
+  reload.state.pages = state.pages;
+  reload.stored.set('leaf-navigation:/notebook', stored.get('leaf-navigation:/notebook'));
+  reload.context.loadNavigation(); reload.context.renderNavigation();
+  assert.equal(reload.get('recent-pages').querySelectorAll('button').length, 10);
+  assert.equal(reload.get('recent-pages').children[0].textContent, 'Page5');
+  state.dirty = true; get('editor').value = 'Keep this draft';
+  context.api = async () => { throw new Error('Save failed'); };
+  await get('recent-pages').children[1].handlers.click();
+  assert.equal(state.page.id, 'Page5'); assert.equal(get('editor').value, 'Keep this draft');
+  assert.deepEqual(JSON.parse(stored.get('leaf-navigation:/notebook')).recent, recent);
+  state.dirty = false;
+  assert.equal(await context.openPage('Page3'), false);
+  assert.deepEqual(JSON.parse(stored.get('leaf-navigation:/notebook')).recent, recent);
+});
+
+test('page shortcuts preserve renames, hide trashed pages, restore them, and safely render long Unicode names', async () => {
+  const { context, state, get, stored } = harness();
+  get('pin-page').handlers.click();
+  context.ask('rename', 'Home'); get('prompt-value').value = 'Notes/学习';
+  context.api = async (route, body) => {
+    if (route === '/api/rename') {
+      assert.equal(body.id, 'Home'); state.pages[0] = { ...state.pages[0], id: body.destination }; return {};
+    }
+    return { id: 'Notes/学习', title: '学习', content: 'Initial', revision: 'r2' };
+  };
+  await get('prompt-form').handlers.submit({ preventDefault() {} });
+  assert.deepEqual(JSON.parse(stored.get('leaf-navigation:/notebook')).pinned, ['Notes/学习']);
+  assert.equal(texts(get('pinned-pages')), '★ Notes/学习');
+  const page = state.pages.shift(); context.renderNavigation();
+  assert.match(texts(get('pinned-pages')), /No pinned pages/);
+  state.pages.unshift(page); context.renderNavigation();
+  assert.equal(texts(get('pinned-pages')), '★ Notes/学习');
+  state.page = { id: '学习'.repeat(60) + '<img>', title: '<script>bad</script>' };
+  state.pages.push(state.page); get('pin-page').handlers.click();
+  assert.match(texts(get('pinned-pages')), /<img>/);
+  assert.equal(get('pinned-pages').querySelectorAll('img').length, 0);
+  get('search').value = 'unrelated'; context.renderTree([]); context.renderNavigation();
+  assert.equal(get('pinned-pages').querySelectorAll('button').length, 2);
+  state.page = null; context.renderNavigation(); assert.equal(get('pin-page').disabled, true);
+});
+
+test('pinned shortcuts open through the actual navigation handler and saved duplicate lists normalize', async () => {
+  const { context, state, get, stored } = harness();
+  stored.set('leaf-navigation:/notebook', JSON.stringify({ pinned: ['Other', 'Other'], recent: ['Home', 'Home'] }));
+  context.loadNavigation(); context.renderNavigation();
+  assert.equal(get('pinned-pages').querySelectorAll('button').length, 1);
+  assert.equal(get('recent-pages').querySelectorAll('button').length, 1);
+  context.api = async () => ({ id: 'Other', title: 'Other', content: 'Opened', revision: 'r2' });
+  await get('pinned-pages').children[0].handlers.click();
+  assert.equal(state.page.id, 'Other'); assert.equal(get('editor').value, 'Opened');
+  assert.equal(get('pin-page').textContent, '★ Unpin page');
+  assert.deepEqual(JSON.parse(stored.get('leaf-navigation:/notebook')).recent, ['Other', 'Home']);
+});
+
+test('shortcut storage failures are visible, preserve malformed data, and verify writes before success', () => {
+  for (const raw of ['{broken', '{"pinned":null,"recent":[]}', '{"pinned":[12],"recent":[]}', '{"pinned":["../bad"],"recent":[]}']) {
+    const { context, get, stored } = harness();
+    stored.set('leaf-navigation:/notebook', raw);
+    context.loadNavigation(); get('pin-page').handlers.click();
+    assert.match(get('shortcuts-status').textContent, /Could not load.*leaf-navigation:\/notebook/);
+    assert.equal(stored.get('leaf-navigation:/notebook'), raw);
+    assert.equal(texts(get('pinned-pages')), '★ Home');
+  }
+  const { context, get, stored } = harness(); context.loadNavigation();
+  context.localStorage.setItem = () => { throw new Error('Quota exceeded'); };
+  get('pin-page').handlers.click();
+  assert.match(get('shortcuts-status').textContent, /Could not save.*Quota exceeded/);
+  context.localStorage.setItem = () => {};
+  get('pin-page').handlers.click();
+  assert.match(get('shortcuts-status').textContent, /read-back verification/);
+  context.localStorage.setItem = (key, value) => stored.set(key, value);
+  get('pin-page').handlers.click(); assert.equal(get('shortcuts-status').textContent, '');
+  const unavailable = harness();
+  unavailable.context.localStorage.getItem = () => { throw new Error('Storage disabled'); };
+  unavailable.context.loadNavigation(); unavailable.context.renderNavigation();
+  assert.match(unavailable.get('shortcuts-status').textContent, /Storage disabled/);
+});
+
 test('safe preview renders empty, Unicode, code, tasks, links, images and hostile markup', () => {
   const { markdown } = harness();
   const pages = new Set(['Home', 'Other']); const navigation = [];

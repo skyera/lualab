@@ -39,6 +39,16 @@ test('real browser selects words in editor/preview and keeps dictionary within d
       const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
       const errors = []; page.on('pageerror', error => errors.push(error.message));
       await page.goto(url); await page.locator('#editor').waitFor({ state: 'visible' });
+      await page.locator('#pin-page').click();
+      assert.equal(await page.locator('#pin-page').getAttribute('aria-pressed'), 'true');
+      assert.equal(await page.locator('#pinned-pages button').innerText(), '★ Study');
+      assert.equal(await page.locator('#recent-pages button').first().innerText(), 'Study');
+      await page.reload(); await page.locator('#editor').waitFor({ state: 'visible' });
+      assert.equal(await page.locator('#pin-page').getAttribute('aria-pressed'), 'true');
+      assert.equal(await page.locator('#pinned-pages button').count(), 1);
+      await page.locator('#pin-page').click();
+      assert.equal(await page.locator('#pin-page').getAttribute('aria-pressed'), 'false');
+      assert.match(await page.locator('#pinned-pages').innerText(), /No pinned pages/);
       await page.locator('#editor').evaluate(editor => {
         editor.focus(); const index = editor.value.indexOf('ephemeral'); editor.setSelectionRange(index, index + 9);
       });
