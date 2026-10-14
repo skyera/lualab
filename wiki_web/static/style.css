@@ -39,6 +39,13 @@
 #folder-dialog p{font-size:13px;overflow-wrap:anywhere}
 #folder-dialog label{margin-top:12px}
 #folder-error{color:var(--error)}
+.statistics-panel{margin-top:16px;padding:16px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+.statistics-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.statistics-heading h2{font:normal 22px Georgia;margin:0}
+.statistics-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(140px,100%),1fr));gap:12px;margin:16px 0}
+.statistics-grid dt{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.statistics-grid dd{font-size:20px;margin:3px 0 0;overflow-wrap:anywhere}
+.statistics-panel p{font-size:12px;color:var(--muted);margin:0;overflow-wrap:anywhere}
 #journal-overview-dialog{max-width:min(850px,calc(100vw - 32px));max-height:85vh;overflow:auto}
 .journal-overview-heading,.journal-overview-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .journal-overview-heading{justify-content:space-between}

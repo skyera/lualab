@@ -583,6 +583,7 @@ function harness() {
   state.root = '/notebook'; state.page = { id: 'Home', title: 'Home', content: 'Initial', revision: 'r1' };
   state.pages = [state.page, { id: 'Other', title: 'Other', revision: 'r2' }]; get('editor').value = 'Initial';
   get('outline-panel').hidden = true; get('dictionary-panel').hidden = true;
+  get('statistics-panel').hidden = true;
   context.refresh = async () => {};
   return { context, state, get, events, stored, markdown, timers };
 }
@@ -948,6 +949,67 @@ test('folder move preserves drafts and names on failure, invalidates previews, a
   await get('folder-move').handlers.click(); assert.match(get('folder-error').textContent, /Notebook changed/);
   assert.equal(get('folder-move').disabled, true); assert.equal(state.page.id, 'Home');
   get('folder-close').handlers.click(); assert.equal(get('folder-dialog').open, false);
+});
+
+test('page statistics count Unicode source words and code points with defined reading-time boundaries', () => {
+  const { markdown } = harness();
+  const count = text => markdown.statistics(text, 'Home', markdown.render(text, 'Home', new Set(), () => {}));
+  assert.equal(count('').words, 0); assert.equal(count('').characters, 0); assert.equal(count('').readingMinutes, 0);
+  const text = "Hello can't café cafe\u0301 学习123 🙂\n";
+  const result = count(text);
+  assert.equal(result.words, 5); assert.equal(result.characters, Array.from(text).length);
+  assert.equal(result.readingMinutes, 1);
+  assert.equal(count('word '.repeat(200)).readingMinutes, 1);
+  assert.equal(count('word '.repeat(201)).readingMinutes, 2);
+  assert.equal(count('--- | :---: | 🙂').words, 0);
+});
+
+test('page statistics use rendered headings, distinct wiki targets, and image occurrences while excluding code', () => {
+  const { markdown } = harness();
+  const text = '# Title\n## Section\n\n[[Other]] [[Other#next|Again]] [[Missing]] [[Home]] [[#section]]\n'
+    + '[external](https://example.com)\n![x](Home.attachments/a.png) ![x](Home.attachments/a.png)\n'
+    + '`[[Code]]`\n\n```\n# Hidden\n[[Fenced]]\n![code](Home.attachments/code.png)\n```\n\n'
+    + '    # Indented\n    [[Indented]]';
+  const frame = markdown.render(text, 'Home', new Set(['Home', 'Other']), () => {});
+  const result = markdown.statistics(text, 'Home', frame);
+  assert.equal(result.headings, 2); assert.equal(result.outgoing, 2); assert.equal(result.images, 2);
+  assert.ok(result.words > 0); assert.equal(frame.querySelectorAll('script').length, 0);
+});
+
+test('statistics panel updates through actual typing, agrees with footer, and resets on page transitions', async () => {
+  const { context, state, get } = harness();
+  context.preview(); get('statistics-toggle').handlers.click();
+  assert.equal(get('statistics-panel').hidden, false); assert.equal(get('statistics-words').textContent, '1');
+  get('editor').setSelectionRange(0, get('editor').value.length);
+  get('editor').setRangeText('# Hello\nWorld', 0, get('editor').value.length);
+  get('editor').handlers.input();
+  assert.equal(get('statistics-words').textContent, '2'); assert.equal(get('word-count').textContent, '2 words');
+  assert.equal(get('statistics-headings').textContent, '1');
+  assert.equal(get('statistics-characters').textContent, String(Array.from('# Hello\nWorld').length));
+  context.backlinks([{ id: 'One' }, { id: 'One' }, { id: 'Two' }]);
+  assert.equal(get('statistics-backlinks').textContent, '2');
+  state.dirty = false;
+  context.api = async () => ({ id: 'Other', title: 'Other', revision: 'r2', content: '', backlinks: [] });
+  await context.openPage('Other');
+  assert.equal(get('statistics-words').textContent, '0'); assert.equal(get('statistics-headings').textContent, '0');
+  assert.equal(get('statistics-backlinks').textContent, '0'); assert.equal(get('statistics-reading').textContent, '0 minutes');
+  get('statistics-close').handlers.click(); assert.equal(get('statistics-panel').hidden, true);
+  assert.equal(get('statistics-toggle').focused, true);
+  state.page = null; context.preview(); context.renderStatistics();
+  assert.equal(get('statistics-images').textContent, '0');
+});
+
+test('page statistics survive successful saves and revision conflicts without changing the draft', async () => {
+  const { context, state, get } = harness();
+  get('editor').value = 'Two words'; get('editor').handlers.input();
+  context.api = async () => ({ revision: 'saved', tags: [] });
+  assert.equal(await context.save(), true);
+  assert.equal(get('statistics-words').textContent, '2'); assert.equal(get('word-count').textContent, '2 words');
+  get('editor').setRangeText(' another', get('editor').value.length, get('editor').value.length);
+  get('editor').handlers.input();
+  context.api = async () => { const error = new Error('File changed'); error.status = 409; throw error; };
+  assert.equal(await context.save(), false); assert.equal(state.blocked, true);
+  assert.equal(get('statistics-words').textContent, '3'); assert.equal(get('editor').value, 'Two words another');
 });
 
 test('safe preview renders empty, Unicode, code, tasks, links, images and hostile markup', () => {

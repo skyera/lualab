@@ -194,5 +194,18 @@ const WikiMarkdown = (() => {
     }
     return list;
   }
-  return { render, resolve, headings };
+  function statistics(text, page, frame) {
+    let words = 0, characters = 0;
+    for (const match of text.matchAll(/[\p{L}\p{N}][\p{L}\p{M}\p{N}]*(?:['’][\p{L}\p{M}\p{N}]+)*/gu)) words++;
+    for (const character of text) characters++;
+    const targets = new Set();
+    for (const link of frame.querySelectorAll('a')) {
+      if (link.dataset.wikiPage && link.dataset.wikiPage !== page) targets.add(link.dataset.wikiPage);
+    }
+    let headingCount = 0;
+    for (let level = 1; level <= 6; level++) headingCount += frame.querySelectorAll('h' + level).length;
+    return { words, characters, readingMinutes: words ? Math.ceil(words / 200) : 0,
+      headings: headingCount, outgoing: targets.size, images: frame.querySelectorAll('img').length };
+  }
+  return { render, resolve, headings, statistics };
 })();

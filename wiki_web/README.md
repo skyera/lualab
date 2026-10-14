@@ -179,6 +179,33 @@ or replaced as part of recovery advice.
   around matching terms with highlighted search keywords in titles, paths, and snippets.
   **Ctrl K** (or Cmd K) focuses search; **Ctrl S** (or Cmd S) saves immediately.
 
+## Page statistics
+
+Click **Statistics** in a page's toolbar to open a panel that updates as you type.
+**Close** hides it and returns focus to its toolbar button. Counts use the current
+editor text, including recovered and unsaved drafts; saving does not change them.
+The footer uses the same word count.
+
+- **Words** counts Unicode letter/number groups, including combining marks and
+  internal apostrophes. Punctuation alone is not a word. Code and Markdown source
+  labels, paths, and URLs contribute to this source count. Unspaced Chinese text
+  counts as one group rather than receiving linguistic word segmentation.
+- **Characters** counts Unicode code points, including spaces, newlines, and
+  Markdown syntax. An emoji outside the basic multilingual plane counts once;
+  combining marks and multi-code-point emoji sequences count individually.
+- **Reading time** estimates 200 source words per minute, rounded up. Empty text
+  has a zero-minute estimate.
+- **Headings** counts rendered heading elements, excluding code examples.
+- **Outgoing wiki pages** counts distinct valid wiki targets, including missing
+  pages, excluding the current page. Repeated links and different heading anchors
+  on the same target count once. External web links are excluded.
+- **Backlinks** counts distinct source pages in the current page's last-loaded
+  saved backlink data. Reopen the page to refresh external backlink changes.
+- **Images** counts rendered image occurrences, including repeated uses of the
+  same attachment. Code examples and unsupported image paths are excluded.
+
+Statistics are computed locally and do not write files or make extra requests.
+
 ## Saved searches
 
 Enter a query, click **Save search** beside the search field, and give it a name.

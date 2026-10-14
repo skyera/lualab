@@ -39,6 +39,11 @@ test('real browser selects words in editor/preview and keeps dictionary within d
       const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
       const errors = []; page.on('pageerror', error => errors.push(error.message));
       await page.goto(url); await page.locator('#editor').waitFor({ state: 'visible' });
+      await page.locator('#statistics-toggle').click();
+      assert.equal(await page.locator('#statistics-words').innerText(), '4');
+      assert.equal(await page.locator('#statistics-headings').innerText(), '1');
+      assert.equal(await page.locator('#statistics-outgoing').innerText(), '0');
+      await page.locator('#statistics-close').click();
       await page.locator('#pin-page').click();
       assert.equal(await page.locator('#pin-page').getAttribute('aria-pressed'), 'true');
       assert.equal(await page.locator('#pinned-pages button').innerText(), '★ Study');
@@ -96,6 +101,10 @@ test('real browser selects words in editor/preview and keeps dictionary within d
       assert.equal(await page.locator('#dictionary-word').inputValue(), 'ephemeral');
       for (const width of [950, 650, 375, 320]) {
         await page.setViewportSize({ width, height: 850 });
+        await page.locator('#statistics-toggle').click();
+        const statisticsBounds = await page.locator('#statistics-panel').boundingBox();
+        assert.ok(statisticsBounds.x >= 0 && statisticsBounds.x + statisticsBounds.width <= width);
+        await page.locator('#statistics-close').click();
         const bounds = await page.locator('#dictionary-panel').boundingBox();
         assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width, 'Panel outside viewport: ' + width);
         const find = await page.locator('#dictionary-form button').boundingBox();

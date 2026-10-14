@@ -1011,12 +1011,31 @@ function rememberDraft() {
   catch (_) { /* Save state remains visible even when browser storage is unavailable. */ }
 }
 function clearDraft(id) { try { localStorage.removeItem(draftKey(id)); } catch (_) {} }
-function preview() {
+let pageStatistics = null;
+function renderStatistics() {
+  const counts = state.page && pageStatistics || { words: 0, characters: 0, readingMinutes: 0, headings: 0, outgoing: 0, images: 0 };
+  for (const key of ['words', 'characters', 'headings', 'outgoing', 'images']) $('statistics-' + key).textContent = counts[key].toLocaleString();
+  $('statistics-reading').textContent = counts.readingMinutes
+    ? '~' + counts.readingMinutes + (counts.readingMinutes === 1 ? ' minute' : ' minutes') : '0 minutes';
+  $('statistics-backlinks').textContent = new Set((state.page?.backlinks || []).map(row => row.id)).size.toLocaleString();
+}
+function closeStatistics() {
+  $('statistics-panel').hidden = true; $('statistics-toggle').setAttribute('aria-expanded', 'false'); $('statistics-toggle').focus();
+}
+$('statistics-toggle').addEventListener('click', () => {
   if (!state.page) return;
+  if (!$('statistics-panel').hidden) { closeStatistics(); return; }
+  $('statistics-panel').hidden = false; $('statistics-toggle').setAttribute('aria-expanded', 'true'); renderStatistics();
+});
+$('statistics-close').addEventListener('click', closeStatistics);
+function preview() {
+  if (!state.page) { pageStatistics = null; renderStatistics(); return; }
   $('preview').replaceChildren(WikiMarkdown.render($('editor').value, state.page.id,
     new Set(state.pages.map(page => page.id)), openPage));
-  const words = $('editor').value.trim().split(/\s+/).filter(Boolean).length;
+  pageStatistics = WikiMarkdown.statistics($('editor').value, state.page.id, $('preview'));
+  const words = pageStatistics.words;
   $('word-count').textContent = words + (words === 1 ? ' word' : ' words');
+  renderStatistics();
 }
 function button(text, action, className) {
   const node = document.createElement('button'); node.textContent = text;
@@ -1109,6 +1128,8 @@ function renderTree(pages = state.pages, terms = []) {
   $('page-count').textContent = pages.length;
 }
 function backlinks(rows) {
+  if (state.page) state.page.backlinks = rows;
+  renderStatistics();
   $('backlink-count').textContent = rows.length;
   $('backlinks').replaceChildren(...rows.map(row => button(row.id.replaceAll('/', ' › '), () => openPage(row.id))));
   if (!rows.length) $('backlinks').textContent = 'No incoming links yet.';

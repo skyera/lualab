@@ -62,11 +62,25 @@
         <div class="toolbar">
           <div class="modes" aria-label="Editor layout"><button data-mode="edit">Edit</button><button data-mode="split" class="selected">Split</button><button data-mode="preview">Preview</button></div>
           <button id="outline-toggle" aria-controls="outline-panel" aria-expanded="false">Outline</button>
+          <button id="statistics-toggle" aria-controls="statistics-panel" aria-expanded="false">Statistics</button>
           <button id="verse-open" title="Insert random Bible verse">Verse</button>
           <button id="dictionary-open" aria-controls="dictionary-panel" aria-expanded="false">Look up</button>
           <button id="pin-page" aria-pressed="false">☆ Pin page</button>
           <button id="page-history">History</button><button id="save">Save</button><button id="rename">Rename</button><button id="delete">Trash page</button>
         </div>
+        <section id="statistics-panel" class="statistics-panel" aria-labelledby="statistics-title" hidden>
+          <div class="statistics-heading"><h2 id="statistics-title">Page statistics</h2><button id="statistics-close" type="button">Close</button></div>
+          <dl class="statistics-grid">
+            <div><dt>Words</dt><dd id="statistics-words">0</dd></div>
+            <div><dt>Characters</dt><dd id="statistics-characters">0</dd></div>
+            <div><dt>Reading time</dt><dd id="statistics-reading">0 minutes</dd></div>
+            <div><dt>Headings</dt><dd id="statistics-headings">0</dd></div>
+            <div><dt>Outgoing wiki pages</dt><dd id="statistics-outgoing">0</dd></div>
+            <div><dt>Backlinks</dt><dd id="statistics-backlinks">0</dd></div>
+            <div><dt>Images</dt><dd id="statistics-images">0</dd></div>
+          </dl>
+          <p>Words and characters count Markdown source. Reading time estimates 200 words/minute. Backlinks reflect the last loaded saved page.</p>
+        </section>
         <section id="outline-panel" class="outline-panel" aria-label="Page outline" hidden>
           <div class="outline-heading"><h2>Outline</h2><button id="outline-close" type="button">Close</button></div>
           <p id="outline-status" role="status" aria-live="polite">Navigate headings in this page.</p>
