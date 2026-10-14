@@ -74,8 +74,76 @@ $('pin-page').addEventListener('click', () => {
     ? navigationState.pinned.filter(value => value !== id) : [...navigationState.pinned, id];
   saveNavigation(); renderNavigation();
 });
-const MODAL_DIALOGS = ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks', 'capture', 'verse', 'journal-overview', 'saved-search'];
+const MODAL_DIALOGS = ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks', 'capture', 'verse', 'journal-overview', 'saved-search', 'attachments'];
 function anyDialogOpen() { return MODAL_DIALOGS.some(id => $(id + '-dialog').open); }
+
+const attachmentState = { rows: [], limit: 40, request: 0, opening: false };
+function renderAttachments() {
+  const nodes = attachmentState.rows.slice(0, attachmentState.limit).map(row => {
+    const node = document.createElement('section'); node.className = 'attachment-row';
+    const info = document.createElement('div'); info.className = 'attachment-info';
+    const name = document.createElement('p'); name.className = 'attachment-name'; name.textContent = row.file;
+    const owner = button(row.page, async () => {
+      if (attachmentState.opening) return;
+      attachmentState.opening = true; ++attachmentState.request;
+      try {
+        if (await openPage(row.page)) $('attachments-dialog').close();
+        else $('attachments-error').textContent = $('message').textContent || 'Could not open ' + row.page + '. Refresh and retry.';
+      } finally { attachmentState.opening = false; }
+    });
+    const details = document.createElement('p'); details.className = 'attachment-details';
+    details.textContent = (row.referenced ? 'Referenced in current page' : 'No current reference · history not checked')
+      + ' · ' + (row.missing ? 'Size unavailable' : row.bytes < 1024 ? row.bytes + ' B' : (row.bytes / 1024).toFixed(1) + ' KiB');
+    const diagnostic = document.createElement('p'); diagnostic.className = 'attachment-error';
+    const path = row.page + '.attachments/' + row.file;
+    if (row.missing) diagnostic.textContent = 'Missing or excluded image: ' + path + '. Inspect the notebook folder or restore the image, then Refresh.';
+    else if (row.error) diagnostic.textContent = path + ': ' + row.error;
+    else {
+      const image = document.createElement('img'); image.alt = row.file; image.loading = 'lazy';
+      image.src = '/api/attachment?' + new URLSearchParams({ page: row.page, file: row.file });
+      image.addEventListener('error', () => {
+        image.hidden = true;
+        diagnostic.textContent = 'Could not preview ' + path + '. The image may be missing, unreadable, or invalid. Inspect the file and Refresh.';
+      });
+      node.append(image);
+    }
+    info.append(name, owner, details, diagnostic); node.append(info); return node;
+  });
+  if (!nodes.length) { const node = document.createElement('p'); node.textContent = 'No attachments in active pages.'; nodes.push(node); }
+  $('attachments-results').replaceChildren(...nodes);
+  $('attachments-more').hidden = attachmentState.limit >= attachmentState.rows.length;
+  $('attachments-status').textContent = Math.min(attachmentState.limit, attachmentState.rows.length)
+    + ' of ' + attachmentState.rows.length + ' images · read-only';
+}
+async function loadAttachments() {
+  if (attachmentState.opening || !$('attachments-dialog').open) return;
+  const request = ++attachmentState.request;
+  $('attachments-status').textContent = 'Scanning active page attachment folders…'; $('attachments-error').textContent = '';
+  try {
+    await refresh();
+    if (request !== attachmentState.request || !$('attachments-dialog').open) return;
+    const result = await api('/api/attachments');
+    if (request !== attachmentState.request || !$('attachments-dialog').open) return;
+    if (!Array.isArray(result.attachments)) throw new Error('Invalid attachment listing');
+    attachmentState.rows = result.attachments; attachmentState.limit = 40; renderAttachments();
+  } catch (error) {
+    if (request !== attachmentState.request || !$('attachments-dialog').open) return;
+    $('attachments-status').textContent = 'Attachment scan failed; any previous results may be outdated.';
+    $('attachments-error').textContent = 'Could not list attachments: ' + error.message + '. Inspect the reported path and use Refresh to retry.';
+  }
+}
+function closeAttachments() {
+  if (attachmentState.opening) return;
+  ++attachmentState.request; $('attachments-dialog').close();
+}
+$('attachments-open').addEventListener('click', async () => {
+  if (anyDialogOpen() || !(await ensureSaved()) || anyDialogOpen()) return;
+  $('attachments-dialog').showModal(); await loadAttachments();
+});
+$('attachments-refresh').addEventListener('click', loadAttachments);
+$('attachments-close').addEventListener('click', closeAttachments);
+$('attachments-dialog').addEventListener('cancel', event => { event.preventDefault(); closeAttachments(); });
+$('attachments-more').addEventListener('click', () => { attachmentState.limit += 40; renderAttachments(); });
 
 const savedSearchState = { root: null, rows: [], writable: true, error: '', query: '' };
 function savedSearchKey() { return 'leaf-searches:' + state.root; }

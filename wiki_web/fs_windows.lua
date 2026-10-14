@@ -303,7 +303,7 @@ function Fs:directory_exists(path)
     return false
 end
 
-function Fs:list(prefix, depth)
+function Fs:list(prefix, depth, attachments)
     prefix, depth = prefix or '', depth or 0
     assert(self.handle, 'Notebook is closed')
     assert(depth <= 16, 'Notebook nesting is limited to 16 levels')
@@ -311,7 +311,13 @@ function Fs:list(prefix, depth)
     local directory
     if prefix ~= '' then
         full, release = self:parent(prefix)
-        directory = assert(open_directory(full), 'Cannot list page directory')
+        directory = open_directory(full)
+        if not directory then
+            local err = tonumber(C.GetLastError())
+            release()
+            if attachments and (err == 2 or err == 3) then return {} end
+            error('Cannot list directory: ' .. full .. ' (Windows error ' .. err .. ')')
+        end
     end
     local data, entries = ffi.new('leaf_find_data[1]'), {}
     local search = C.FindFirstFileW(native(full .. '/*'), data)
@@ -324,7 +330,8 @@ function Fs:list(prefix, depth)
     repeat
         local name, attributes = utf8(data[0].name), tonumber(data[0].attributes)
         if name:sub(1, 1) ~= '.' and bit.band(attributes, REPARSE) == 0 then
-            entries[#entries + 1] = { name = name, directory = bit.band(attributes, DIRECTORY) ~= 0 }
+            entries[#entries + 1] = { name = name, directory = bit.band(attributes, DIRECTORY) ~= 0,
+                bytes = tonumber(data[0].size_high) * 4294967296 + tonumber(data[0].size_low) }
         end
     until C.FindNextFileW(search, data) == 0
     local err = tonumber(C.GetLastError())
@@ -335,12 +342,16 @@ function Fs:list(prefix, depth)
     local pages = {}
     for _, entry in ipairs(entries) do
         local path = prefix == '' and entry.name or prefix .. '/' .. entry.name
-        if entry.directory and not entry.name:match('%.attachments$') then
+        if attachments and not entry.directory and entry.name:match('^[%w_-]+%.%a+$')
+            and ({ png = true, jpg = true, gif = true, webp = true })[entry.name:match('%.(.*)$')] then
+            pages[#pages + 1] = { file = entry.name, bytes = entry.bytes }
+        elseif not attachments and entry.directory and not entry.name:match('%.attachments$') then
             for _, child in ipairs(self:list(path, depth + 1)) do pages[#pages + 1] = child end
-        elseif not entry.directory and entry.name:match('%.md$') then pages[#pages + 1] = path end
-        assert(#pages <= 2000, 'Notebook is limited to 2,000 pages')
+        elseif not attachments and not entry.directory and entry.name:match('%.md$') then pages[#pages + 1] = path end
+        assert(#pages <= 2000, attachments and 'Attachment directory is limited to 2,000 images: ' .. prefix
+            or 'Notebook is limited to 2,000 pages')
     end
-    table.sort(pages)
+    table.sort(pages, attachments and function(a, b) return a.file < b.file end or nil)
     return pages
 end
 

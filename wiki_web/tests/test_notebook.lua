@@ -28,6 +28,31 @@ local function test(name, run)
     count = count + 1; print('ok ' .. count .. ' - ' .. name)
 end
 
+test('attachment listing excludes unsafe files and code-only references', function()
+    fixture(function(n, directory)
+        local page = assert(n:save('Notes/学习', '# Images', ''))
+        local image = n:image(page.id, '\137PNG\r\n\26\nbytes')
+        n.fs:write(page.id .. '.attachments/manual.jpg', '\255\216\255')
+        n.fs:write(page.id .. '.attachments/ignored.svg', '<svg/>')
+        local content = image.markdown .. '\n![missing](学习.attachments/missing.webp)\n'
+            .. '`![code](学习.attachments/code.gif)`'
+        assert(n:save(page.id, content, page.revision))
+        local rows = n:attachments().attachments
+        assert(#rows == 3)
+        local found = {}
+        for _, row in ipairs(rows) do found[row.file] = row end
+        assert(found[image.file].referenced and found[image.file].bytes == 13)
+        assert(not found['manual.jpg'].referenced and found['manual.jpg'].bytes == 3)
+        assert(found['missing.webp'].missing)
+        if ffi.os ~= 'Windows' then
+            local target = directory .. '/' .. page.id .. '.attachments/unsafe.png'
+            assert(ffi.C.symlink('/etc/passwd', target) == 0)
+            rows = n:attachments().attachments
+            assert(#rows == 3, 'Symlink attachments must not be listed')
+        end
+    end)
+end)
+
 test('nested Unicode pages, revision conflicts, external edits and rebuildable search', function()
     fixture(function(n)
         local page = assert(n:save('Projects/学习', '# Study\nSee [[Home]]. 100%_done', ''))

@@ -207,6 +207,15 @@ test('real browser selects words in editor/preview and keeps dictionary within d
           + '\n\n| Name | Count |\n| :--- | ---: |\n| **学习** | 123 |\n',
           revision: exportPage.revision }) }); assert.equal(changed.status, 200);
       await page.reload(); await page.locator('#editor').waitFor({ state: 'visible' });
+      await page.locator('#attachments-open').click();
+      await page.waitForFunction(() => document.querySelectorAll('.attachment-row').length > 0);
+      assert.match(await page.locator('#attachments-results').innerText(), /Referenced in current page/);
+      await page.waitForFunction(() => {
+        const image = document.querySelector('.attachment-row img'); return image?.complete && image.naturalWidth > 0;
+      });
+      const attachmentBounds = await page.locator('#attachments-dialog').boundingBox();
+      assert.ok(attachmentBounds.x >= 0 && attachmentBounds.x + attachmentBounds.width <= 375);
+      await page.locator('#attachments-close').click();
       await page.locator('#export-open').click(); await page.locator('#export-scope').selectOption('notebook');
       assert.equal(await page.locator('#preview table').count(), 1);
       assert.equal(await page.locator('#preview td.align-right').evaluate(cell => getComputedStyle(cell).textAlign), 'right');

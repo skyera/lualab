@@ -483,6 +483,30 @@ Removing an image link does not delete its file; unused attachments remain in
 the notebook. Images already linked before an interrupted upload remain stored
 even if the Markdown save fails, so you can recover them from the folder.
 
+## Attachment manager
+
+Click **Attachments** in the header to browse PNG, JPEG (`.jpg`), GIF, and WebP
+files belonging to active pages. Opening the manager first saves the editor's
+draft; save failures or conflicts keep the editor intact and prevent opening.
+Each row shows an image preview, its owning page, its byte size, and whether the
+current saved Markdown references it. Click the owner to open that page. Close
+or Esc returns to the current editor without navigating.
+
+**No current reference** does not mean an image is safe to delete: revision
+history is not scanned. This manager is read-only and provides no cleanup action.
+Trash attachments and directories without active owner pages are excluded.
+References inside code are excluded. Missing referenced images appear with a
+diagnostic instead of a preview. Oversized, unreadable, or invalid image previews
+also show errors. Use **Refresh** after inspecting or repairing a reported file.
+
+Files are discovered only inside each active page's own attachment directory;
+symlinks and Windows reparse points are excluded. Supported names match the
+existing image-serving rules; unsupported filenames and formats are omitted.
+Results display 40 rows at a time; **Show more** reveals the next group. Scans are
+limited to 2,000 images per page and 10,000 images overall, with an explicit error
+rather than a silently truncated listing. Sizes are gathered as file metadata
+without loading every image into memory. Image previews retain the 5 MiB limit.
+
 ## Rename and trash
 
 **Rename** moves a single page, updates incoming wiki links, and preserves its

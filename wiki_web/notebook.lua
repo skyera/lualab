@@ -273,6 +273,45 @@ function Notebook:image(id, bytes)
     return { file = name, markdown = '![' .. 'Image' .. '](' .. id:match('[^/]+$') .. '.attachments/' .. name .. ')' }
 end
 
+function Notebook:attachments()
+    self:sync()
+    local rows = {}
+    for _, page in ipairs(self.db:query('SELECT id, content FROM pages ORDER BY id')) do
+        local referenced = {}
+        local folder = page.id:match('[^/]+$') .. '.attachments/'
+        links.prose(page.content, function(piece)
+            for target in piece:gmatch('!%[[^%]]*%]%(([^%s%)]+)%)') do
+                if target:sub(1, #folder) == folder then
+                    local name = target:sub(#folder + 1)
+                    if name:match('^[%w_-]+%.%a+$')
+                        and ({ png = true, jpg = true, gif = true, webp = true })[name:match('%.(.*)$')] then
+                        referenced[name] = true
+                    end
+                end
+            end
+            return piece
+        end)
+        local found = {}
+        for _, image in ipairs(self.fs:list(page.id .. '.attachments', 0, true)) do
+            found[image.file] = true
+            rows[#rows + 1] = { page = page.id, file = image.file, bytes = image.bytes,
+                referenced = referenced[image.file] == true, missing = false,
+                error = image.bytes > 5 * 1024 * 1024 and 'Image exceeds the 5 MiB serving limit.' or nil }
+        end
+        for name in pairs(referenced) do
+            if not found[name] then
+                rows[#rows + 1] = { page = page.id, file = name, referenced = true, missing = true }
+            end
+        end
+        assert(#rows <= 10000, 'Attachment manager is limited to 10,000 images; inspect notebook folders directly.')
+    end
+    table.sort(rows, function(a, b)
+        if a.page == b.page then return a.file < b.file end
+        return a.page < b.page
+    end)
+    return { attachments = rows }
+end
+
 function Notebook:attachment(id, name)
     require_id(id)
     assert(type(name) == 'string' and name:match('^[%w_-]+%.[%a]+$'), 'Invalid attachment name')

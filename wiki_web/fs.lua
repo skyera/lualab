@@ -187,7 +187,7 @@ function Fs:directory_exists(path)
     return false
 end
 
-function Fs:list(prefix, depth)
+function Fs:list(prefix, depth, attachments)
     prefix, depth = prefix or '', depth or 0
     assert(depth <= 16, 'Notebook nesting is limited to 16 levels')
     local fd
@@ -196,7 +196,10 @@ function Fs:list(prefix, depth)
         local parent, name = self:parent(prefix)
         fd = C.openat(parent, name, DIRECTORY); C.close(parent)
     end
-    if fd < 0 then return {} end
+    if fd < 0 then
+        assert(not attachments or ffi.errno() == 2, 'Cannot list attachment directory: ' .. prefix)
+        return {}
+    end
     local stream = fd_open_dir(fd)
     if stream == nil then C.close(fd); error('Cannot list notebook') end
     local entries = {}
@@ -222,12 +225,26 @@ function Fs:list(prefix, depth)
                 C.close(probe)
             end
         end
-        if entry.kind == 4 and not entry.name:match('%.attachments$') then
+        if attachments and entry.kind == 8 and entry.name:match('^[%w_-]+%.%a+$')
+            and ({ png = true, jpg = true, gif = true, webp = true })[entry.name:match('%.(.*)$')] then
+            -- Image metadata is read through a confined, no-follow file handle.
+            local parent, name = self:parent(path)
+            local probe = C.openat(parent, name, NOFOLLOW)
+            C.close(parent)
+            assert(probe >= 0, 'Cannot inspect attachment: ' .. path)
+            local stamp = ffi.new('struct leaf_stat[1]')
+            local ok = stat_fd(probe, stamp) == 0 and bit.band(stamp[0].mode, 61440) == 32768
+            local bytes = tonumber(stamp[0].size)
+            C.close(probe)
+            assert(ok, 'Cannot inspect regular attachment: ' .. path)
+            pages[#pages + 1] = { file = entry.name, bytes = bytes }
+        elseif not attachments and entry.kind == 4 and not entry.name:match('%.attachments$') then
             for _, child in ipairs(self:list(path, depth + 1)) do pages[#pages + 1] = child end
-        elseif entry.kind == 8 and entry.name:match('%.md$') then pages[#pages + 1] = path end
-        assert(#pages <= 2000, 'Notebook is limited to 2,000 pages')
+        elseif not attachments and entry.kind == 8 and entry.name:match('%.md$') then pages[#pages + 1] = path end
+        assert(#pages <= 2000, attachments and 'Attachment directory is limited to 2,000 images: ' .. prefix
+            or 'Notebook is limited to 2,000 pages')
     end
-    table.sort(pages)
+    table.sort(pages, attachments and function(a, b) return a.file < b.file end or nil)
     return pages
 end
 

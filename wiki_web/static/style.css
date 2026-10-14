@@ -21,6 +21,16 @@
 #saved-search-status,#saved-search-error{font-size:12px;color:var(--error);overflow-wrap:anywhere}
 #saved-search-status:empty{display:none}
 #saved-search-query{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--paper);padding:10px}
+#attachments-dialog{max-width:min(850px,calc(100vw - 32px));max-height:85vh;overflow:auto}
+.attachments-heading{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.attachments-heading h2{margin:0 auto 10px 0}
+.attachments-help,.attachment-details{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.attachment-row{display:flex;align-items:flex-start;gap:14px;padding:14px 0;border-top:1px solid var(--line);min-width:0}
+.attachment-row img{width:80px;height:80px;object-fit:contain;flex-shrink:0;background:var(--paper)}
+.attachment-info{min-width:0;flex:1}
+.attachment-name{font:12px/1.5 monospace;overflow-wrap:anywhere;margin:0 0 6px}
+.attachment-info button{text-align:left;overflow-wrap:anywhere;max-width:100%}
+#attachments-error,.attachment-error{color:var(--error);overflow-wrap:anywhere;font-size:12px}
 #journal-overview-dialog{max-width:min(850px,calc(100vw - 32px));max-height:85vh;overflow:auto}
 .journal-overview-heading,.journal-overview-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .journal-overview-heading{justify-content:space-between}

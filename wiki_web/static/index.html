@@ -19,6 +19,7 @@
     <button id="switcher-open" title="Open page (Ctrl P / Cmd P)">Open page</button>
     <button id="export-open">Export</button>
     <button id="tasks-open">Tasks</button>
+    <button id="attachments-open" type="button">Attachments</button>
     <button id="capture-open" title="Quick capture (Ctrl / Cmd + Shift + J)">Capture</button>
   </header>
   <div class="workspace">
@@ -133,6 +134,14 @@
     <p id="tasks-error" role="alert"></p>
     <div id="tasks-results"></div>
     <button id="tasks-more" hidden>Show more</button>
+  </dialog>
+  <dialog id="attachments-dialog" aria-labelledby="attachments-title">
+    <div class="attachments-heading"><h2 id="attachments-title">Attachments</h2><button id="attachments-refresh" type="button">Refresh</button><button id="attachments-close" type="button">Close</button></div>
+    <p class="attachments-help">Images belonging to active pages. References are checked in current saved Markdown only; revision history is not checked. No files are deleted.</p>
+    <p id="attachments-status" role="status" aria-live="polite"></p>
+    <p id="attachments-error" role="alert"></p>
+    <div id="attachments-results"></div>
+    <button id="attachments-more" type="button" hidden>Show more</button>
   </dialog>
   <dialog id="saved-search-dialog" aria-labelledby="saved-search-title">
     <form id="saved-search-form">

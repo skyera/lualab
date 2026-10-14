@@ -50,6 +50,59 @@ function getWithHeaders(url, headers) {
     request.on('error', reject); request.end();
   });
 }
+test('attachment manager lists active images, missing references, metadata, history-only use, and maintenance changes', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-attachments-'));
+  const notebook = path.join(directory, 'notebook'); let server;
+  try {
+    server = await start(directory, ['--data-dir', notebook, '--dict-db', 'none']);
+    const id = 'Notes/学习';
+    const created = await post(server, '/api/page', { id, content: '# Images', revision: '' });
+    const upload = async page => (await (await fetch(server.url + '/api/image?page=' + encodeURIComponent(page), { method: 'POST', body: png })).json());
+    const image = await upload(id); assert.equal((await upload(id)).file, image.file);
+    let saved = await post(server, '/api/page', { id, content: image.markdown + '\n![missing](学习.attachments/missing.jpg)\n'
+      + '`![code](学习.attachments/code.png)`\n\n```\n![code](学习.attachments/fence.png)\n```', revision: created.data.revision });
+    const list = async () => {
+      const response = await fetch(server.url + '/api/attachments'); assert.equal(response.status, 200);
+      return (await response.json()).attachments;
+    };
+    let rows = await list(); assert.equal(rows.length, 2);
+    const found = rows.find(row => row.file === image.file);
+    assert.equal(found.page, id); assert.equal(found.bytes, png.length); assert.equal(found.referenced, true);
+    assert.equal(rows.find(row => row.file === 'missing.jpg').missing, true);
+    saved = await post(server, '/api/page', { id, content: '# No current image', revision: saved.data.revision });
+    rows = await list(); assert.equal(rows.length, 1); assert.equal(rows[0].referenced, false);
+    assert.ok((await (await fetch(server.url + '/api/history?id=' + encodeURIComponent(id))).json()).versions.length > 0);
+    await post(server, '/api/page', { id: 'Other', content: '# Other', revision: '' }); await upload('Other');
+    rows = await list(); assert.equal(rows.length, 2); assert.ok(rows.every(row => row.file === image.file));
+    const renamed = await post(server, '/api/rename', { id, destination: 'New Folder/图片', revision: saved.data.revision });
+    assert.equal(renamed.status, 200);
+    rows = await list(); assert.ok(rows.some(row => row.page === 'New Folder/图片'));
+    const trashed = await post(server, '/api/trash', { id: 'New Folder/图片', revision: renamed.data.revision });
+    assert.equal(trashed.status, 200); assert.equal((await list()).length, 1);
+    const trash = (await (await fetch(server.url + '/api/state')).json()).trash;
+    assert.equal((await post(server, '/api/restore', { token: trash[0].token })).status, 200);
+    assert.equal((await list()).length, 2);
+    const folder = path.join(notebook, 'Other.attachments');
+    fs.writeFileSync(path.join(folder, 'large.webp'), Buffer.alloc(5 * 1024 * 1024 + 1));
+    fs.writeFileSync(path.join(folder, 'manual.gif'), 'GIF89a');
+    fs.writeFileSync(path.join(folder, 'ignored.svg'), '<svg/>');
+    rows = await list(); assert.equal(rows.length, 4);
+    assert.match(rows.find(row => row.file === 'large.webp').error, /5 MiB/);
+    assert.equal(rows.find(row => row.file === 'manual.gif').bytes, 6);
+    const bad = await fetch(server.url + '/api/attachment?page=Other&file=..%2Foutside.png');
+    assert.equal(bad.status, 400);
+    const held = folder + '-held'; fs.renameSync(folder, held); fs.writeFileSync(folder, 'not a directory');
+    try {
+      const failed = await fetch(server.url + '/api/attachments'); assert.equal(failed.status, 400);
+      assert.match((await failed.json()).error, /Other.attachments/);
+    } finally { fs.unlinkSync(folder); fs.renameSync(held, folder); }
+    assert.equal((await list()).length, 4);
+  } finally {
+    if (server) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('capture API creates a journal, appends safely and validates request bodies', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-capture-'));
   let server;

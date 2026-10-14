@@ -230,6 +230,7 @@ function M.run(root)
             end
             if path == '/api/state' then return reply(notebook:state(params.q)) end
             if path == '/api/tasks' then return reply(notebook:tasks()) end
+            if path == '/api/attachments' then return reply(notebook:attachments()) end
             if path == '/api/dictionary' then
                 local value, status = dictionary.lookup(dictionary_path, params.word)
                 return reply(value, status)

@@ -816,6 +816,47 @@ test('saved search limits and unavailable storage produce actionable diagnostics
   assert.match(unavailable.get('saved-search-status').textContent, /Storage disabled/);
 });
 
+test('attachment manager renders empty, Unicode, missing, unreferenced and failed-preview images with pagination', async () => {
+  const { context, get } = harness();
+  context.api = async () => ({ attachments: [] });
+  await get('attachments-open').handlers.click();
+  assert.match(texts(get('attachments-results')), /No attachments/);
+  const rows = Array.from({ length: 45 }, (_, index) => ({ page: 'Notes/学习', file: 'image' + index + '.png', bytes: 2048, referenced: false }));
+  rows[0] = { page: 'Notes/学习', file: '<img>.png', bytes: 64, referenced: true };
+  rows[1].missing = true; rows[2].error = 'Image exceeds the 5 MiB serving limit.';
+  context.api = async () => ({ attachments: rows }); await get('attachments-refresh').handlers.click();
+  assert.equal(get('attachments-results').children.length, 40);
+  assert.match(texts(get('attachments-results')), /No current reference · history not checked/);
+  assert.match(texts(get('attachments-results')), /Missing or excluded image/);
+  assert.match(texts(get('attachments-results')), /5 MiB/);
+  const images = get('attachments-results').querySelectorAll('img');
+  assert.equal(images[0].alt, '<img>.png');
+  assert.equal(images[0].src, '/api/attachment?' + new URLSearchParams({ page: 'Notes/学习', file: '<img>.png' }));
+  images[0].handlers.error(); assert.equal(images[0].hidden, true);
+  assert.match(texts(get('attachments-results')), /Could not preview Notes\/学习.attachments/);
+  get('attachments-more').handlers.click(); assert.equal(get('attachments-results').children.length, 45);
+  assert.equal(get('attachments-more').hidden, true);
+  get('attachments-dialog').handlers.cancel({ preventDefault() {} }); assert.equal(get('attachments-dialog').open, false);
+});
+
+test('attachment manager keeps editor drafts on save failures, navigates safely, and ignores stale responses', async () => {
+  const { context, state, get } = harness();
+  state.dirty = true; get('editor').value = 'Draft'; context.api = async () => { throw new Error('Save denied'); };
+  await get('attachments-open').handlers.click(); assert.equal(get('attachments-dialog').open, false);
+  assert.equal(get('editor').value, 'Draft'); state.dirty = false;
+  const first = deferred(); context.api = () => first.promise;
+  const opening = get('attachments-open').handlers.click(); await Promise.resolve(); await Promise.resolve();
+  get('attachments-close').handlers.click(); first.resolve({ attachments: [{ page: 'Other', file: 'stale.png' }] }); await opening;
+  assert.doesNotMatch(texts(get('attachments-results')), /stale/);
+  context.api = async () => ({ attachments: [{ page: 'Other', file: 'image.png', bytes: 10, referenced: true }] });
+  await get('attachments-open').handlers.click();
+  context.api = async () => { throw new Error('Unreadable folder'); };
+  await get('attachments-refresh').handlers.click(); assert.match(get('attachments-error').textContent, /Unreadable folder.*Refresh/);
+  context.api = async () => ({ id: 'Other', title: 'Other', content: 'Opened', revision: 'r2' });
+  await get('attachments-results').querySelectorAll('button')[0].handlers.click();
+  assert.equal(state.page.id, 'Other'); assert.equal(get('attachments-dialog').open, false);
+});
+
 test('safe preview renders empty, Unicode, code, tasks, links, images and hostile markup', () => {
   const { markdown } = harness();
   const pages = new Set(['Home', 'Other']); const navigation = [];
