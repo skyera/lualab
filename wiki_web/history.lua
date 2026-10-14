@@ -33,6 +33,12 @@ function History:list(id)
             and type(entry.bytes) == 'number' and entry.bytes >= 0 and entry.bytes <= 1024 * 1024,
             'Invalid page history')
         assert(not seen[entry.revision], 'Duplicate history revision')
+        if entry.moves then
+            assert(type(entry.moves) == 'table', 'Invalid history relocation map')
+            for source, target in pairs(entry.moves) do
+                assert(links.page_id(source) and links.page_id(target), 'Invalid history relocation map')
+            end
+        end
         seen[entry.revision] = true
     end
     return entries
@@ -55,14 +61,29 @@ function History:remember(page)
     self:write_manifest(page.id, entries)
 end
 
-function History:inherit(source, destination)
+function History:inheritance(source, destination, mapping)
     local entries, seen = self:list(source), {}
     for _, entry in ipairs(entries) do seen[entry.revision] = true end
     for _, entry in ipairs(self:list(destination)) do
         if not seen[entry.revision] then entries[#entries + 1] = entry; seen[entry.revision] = true end
     end
+    if mapping then
+        for _, entry in ipairs(entries) do
+            local moves = {}
+            for old, target in pairs(entry.moves or {}) do moves[old] = mapping[target] or target end
+            for old, target in pairs(mapping) do moves[old] = target end
+            entry.moves = moves
+        end
+    end
+    return entries
+end
+
+function History:inherit(source, destination)
+    local entries = self:inheritance(source, destination)
     if #entries > 0 then self:write_manifest(destination, entries) end
 end
+
+function History:manifest_path(id) return manifest_path(id) end
 
 function History:version(id, revision)
     assert(valid_revision(revision), 'Invalid history revision')
@@ -71,7 +92,8 @@ function History:version(id, revision)
             local text = assert(self.fs:read('.leaf/history/blobs/' .. revision .. '.md'), 'History snapshot is missing')
             assert(hash.sha256(text) == revision and links.valid_utf8(text) and not text:find('%z'),
                 'History snapshot is damaged; preserve it for recovery')
-            return { content = text, revision = revision, source = entry.source, saved_at = entry.saved_at }
+            return { content = text, revision = revision, source = entry.source, saved_at = entry.saved_at,
+                moves = entry.moves }
         end
     end
     return nil

@@ -21,6 +21,7 @@
     <button id="tasks-open">Tasks</button>
     <button id="attachments-open" type="button">Attachments</button>
     <button id="backup-open" type="button">Backup</button>
+    <button id="folder-open" type="button">Move folder</button>
     <button id="capture-open" title="Quick capture (Ctrl / Cmd + Shift + J)">Capture</button>
   </header>
   <div class="workspace">
@@ -135,6 +136,14 @@
     <p id="tasks-error" role="alert"></p>
     <div id="tasks-results"></div>
     <button id="tasks-more" hidden>Show more</button>
+  </dialog>
+  <dialog id="folder-dialog" aria-labelledby="folder-title">
+    <h2 id="folder-title">Move folder</h2>
+    <label for="folder-source">From</label><input id="folder-source" maxlength="240" placeholder="Projects/Wiki">
+    <label for="folder-destination">To</label><input id="folder-destination" maxlength="240" placeholder="Archive/Wiki">
+    <p>Moves the folder's own page and descendants, their attachments, and history. Updates incoming wiki links. Empty source directories may remain.</p>
+    <p id="folder-status" role="status" aria-live="polite"></p><p id="folder-error" role="alert"></p>
+    <div class="dialog-actions"><button id="folder-close" type="button">Cancel</button><button id="folder-preview" type="button">Preview move</button><button id="folder-move" type="button" disabled>Move folder</button></div>
   </dialog>
   <dialog id="backup-dialog" aria-labelledby="backup-title">
     <h2 id="backup-title">Backup &amp; restore</h2>

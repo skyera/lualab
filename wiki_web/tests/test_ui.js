@@ -905,6 +905,51 @@ test('backup failures retain selected files and folder names, block dismissal wh
   assert.equal(get('backup-status').textContent, 'Backup failed.');
 });
 
+test('folder move dialog previews, confirms, relocates shortcuts and opens the moved current page', async () => {
+  const { context, state, get, stored } = harness();
+  state.page = { id: 'Old/学习', title: '学习', content: 'Text', revision: 'r1' }; state.pages = [state.page];
+  context.loadNavigation(); get('pin-page').handlers.click();
+  get('folder-open').handlers.click(); assert.equal(get('folder-source').value, 'Old');
+  get('folder-destination').value = 'Archive/新'; const calls = [];
+  context.api = async (route, payload) => {
+    calls.push([route, payload]);
+    if (route === '/api/folder/preview') return { revision: 'token', pages: 2, images: 1, linked_pages: 3 };
+    if (route === '/api/folder/move') {
+      state.pages = [{ id: 'Archive/新/学习', title: '学习', revision: 'r2' }];
+      return { moved: 2, mapping: { 'Old/学习': 'Archive/新/学习' } };
+    }
+    return { id: 'Archive/新/学习', title: '学习', content: 'Moved', revision: 'r2' };
+  };
+  await get('folder-preview').handlers.click();
+  assert.match(get('folder-status').textContent, /2 pages · 1 images · 3 linked pages/);
+  assert.equal(get('folder-move').disabled, false);
+  await get('folder-move').handlers.click();
+  assert.equal(calls[1][1].revision, 'token'); assert.equal(state.page.id, 'Archive/新/学习');
+  assert.deepEqual(JSON.parse(stored.get('leaf-navigation:/notebook')).pinned, ['Archive/新/学习']);
+  assert.match(get('folder-status').textContent, /moved and verified/);
+  get('folder-close').handlers.click(); assert.equal(get('folder-dialog').open, false);
+});
+
+test('folder move preserves drafts and names on failure, invalidates previews, and prevents dismissal while busy', async () => {
+  const { context, state, get } = harness();
+  get('folder-open').handlers.click(); get('folder-source').value = 'Old'; get('folder-destination').value = 'New';
+  state.dirty = true; get('editor').value = 'Unsaved'; context.api = async () => { throw new Error('Save denied'); };
+  await get('folder-preview').handlers.click(); assert.match(get('folder-error').textContent, /Save denied/);
+  assert.equal(get('editor').value, 'Unsaved'); assert.equal(get('folder-destination').value, 'New'); state.dirty = false;
+  const pending = deferred(); context.api = () => pending.promise;
+  const previewing = get('folder-preview').handlers.click(); await Promise.resolve(); await Promise.resolve();
+  get('folder-dialog').handlers.cancel({ preventDefault() {} }); assert.equal(get('folder-dialog').open, true);
+  pending.resolve({ revision: 'token', pages: 1, images: 0, linked_pages: 0 }); await previewing;
+  get('folder-destination').value = 'Elsewhere'; get('folder-destination').handlers.input();
+  assert.equal(get('folder-move').disabled, true);
+  context.api = async () => ({ revision: 'token', pages: 1, images: 0, linked_pages: 0 });
+  await get('folder-preview').handlers.click();
+  context.api = async () => { throw new Error('Notebook changed. Preview again.'); };
+  await get('folder-move').handlers.click(); assert.match(get('folder-error').textContent, /Notebook changed/);
+  assert.equal(get('folder-move').disabled, true); assert.equal(state.page.id, 'Home');
+  get('folder-close').handlers.click(); assert.equal(get('folder-dialog').open, false);
+});
+
 test('safe preview renders empty, Unicode, code, tasks, links, images and hostile markup', () => {
   const { markdown } = harness();
   const pages = new Set(['Home', 'Other']); const navigation = [];

@@ -35,6 +35,10 @@
 #backup-dialog p{font-size:13px;overflow-wrap:anywhere}
 #backup-dialog label{margin-top:14px}
 #backup-error{color:var(--error)}
+#folder-dialog{max-height:85vh;overflow:auto}
+#folder-dialog p{font-size:13px;overflow-wrap:anywhere}
+#folder-dialog label{margin-top:12px}
+#folder-error{color:var(--error)}
 #journal-overview-dialog{max-width:min(850px,calc(100vw - 32px));max-height:85vh;overflow:auto}
 .journal-overview-heading,.journal-overview-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .journal-overview-heading{justify-content:space-between}

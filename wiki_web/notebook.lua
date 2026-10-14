@@ -245,8 +245,11 @@ function Notebook:restore_version(id, selected, revision)
     local version, err, status = self:version(id, selected)
     if not version then return nil, err, status end
     local content = version.content
-    if version.source ~= id then
-        content = links.rename(content, version.source, version.source, id)
+    if version.source ~= id or version.moves then
+        local mapping = {}
+        for source, target in pairs(version.moves or {}) do mapping[source] = target end
+        mapping[version.source] = id
+        content = links.relocate(content, version.source, mapping)
         local old_name, new_name = version.source:match('[^/]+$'), id:match('[^/]+$')
         content = links.prose(content, function(piece)
             return (piece:gsub('(!%[[^%]]*%]%()([^%)]+)(%))', function(first, target, last)
@@ -334,6 +337,18 @@ function Notebook:recover()
         assert(current == operation.before or current == operation.after,
             'Recovery stopped: a transaction page was edited externally. Preserve the files and recovery journal.')
     end
+    for _, entry in ipairs(transaction.histories or {}) do
+        require_id(entry.id)
+        local current = self.fs:read(self.history:manifest_path(entry.id), 32 * 1024 * 1024) or false
+        assert(current == entry.before or current == entry.after,
+            'Recovery stopped: history was edited externally. Preserve the files and recovery journal.')
+    end
+    for _, moved in ipairs(transaction.moves or {}) do
+        require_id(moved.from:match('^(.*)%.attachments$'))
+        require_id(moved.to:match('^(.*)%.attachments$'))
+        assert(self.fs:directory_exists(moved.from) ~= self.fs:directory_exists(moved.to),
+            'Attachment recovery collision or missing directory; preserve the journal.')
+    end
     for _, operation in ipairs(transaction.files) do
         assert(links.page_id(operation.id), 'Invalid recovery journal')
         if operation.before ~= false then self.fs:write(operation.id .. '.md', operation.before)
@@ -345,6 +360,15 @@ function Notebook:recover()
             assert(not self.fs:directory_exists(moved.from), 'Attachment recovery destination is occupied')
             self.fs:move(moved.to, moved.from)
         end
+    end
+    for index = #(transaction.moves or {}), 1, -1 do
+        local moved = transaction.moves[index]
+        if self.fs:directory_exists(moved.to) then self.fs:move(moved.to, moved.from) end
+    end
+    for _, entry in ipairs(transaction.histories or {}) do
+        local path = self.history:manifest_path(entry.id)
+        if entry.before ~= false then self.fs:write(path, entry.before)
+        elseif self.fs:read(path, 32 * 1024 * 1024) then self.fs:remove(path) end
     end
     if transaction.trash_before then
         self.fs:write('.leaf/trash.json', transaction.trash_before)
@@ -410,6 +434,140 @@ function Notebook:rename(id, destination, revision)
     if not ok then self:recover(); error(err) end
     self:sync()
     return self:page(destination)
+end
+
+function Notebook:folder_plan(source, destination)
+    require_id(source); require_id(destination)
+    assert(source ~= destination and source:sub(1, #destination + 1) ~= destination .. '/'
+        and destination:sub(1, #source + 1) ~= source .. '/', 'Source and destination folders must not overlap')
+    self:sync()
+    local pages = self.db:query('SELECT id, content, revision FROM pages ORDER BY id')
+    local mapping, moved_pages, images, linked_pages = {}, 0, 0, 0
+    local snapshots = {}
+    for _, page in ipairs(pages) do
+        snapshots[#snapshots + 1] = { id = page.id, revision = page.revision }
+        if page.id == source or page.id:sub(1, #source + 1) == source .. '/' then
+            local target = destination .. page.id:sub(#source + 1)
+            require_id(target)
+            mapping[page.id] = target
+            moved_pages = moved_pages + 1
+        end
+        assert(page.id ~= destination and page.id:sub(1, #destination + 1) ~= destination .. '/',
+            'Destination namespace already contains pages: ' .. page.id)
+    end
+    assert(moved_pages > 0, 'Source folder has no pages: ' .. source)
+    mapping[source] = destination
+    for _, page in ipairs(pages) do
+        for target in pairs(links.targets(page.id, page.content)) do
+            if target:sub(1, #source + 1) == source .. '/' then
+                local relocated = destination .. target:sub(#source + 1)
+                require_id(relocated)
+                mapping[target] = relocated
+            end
+        end
+    end
+    local files, moves, histories = {}, {}, {}
+    for _, page in ipairs(pages) do
+        local after = links.relocate(page.content, page.id, mapping)
+        if mapping[page.id] then
+            local target = mapping[page.id]
+            assert(not self.fs:read(target .. '.md'), 'Destination page is occupied: ' .. target)
+            assert(not self.fs:directory_exists(target .. '.attachments'), 'Destination images are occupied: ' .. target)
+            local old_name, new_name = page.id:match('[^/]+$'), target:match('[^/]+$')
+            after = links.prose(after, function(piece)
+                return (piece:gsub('(!%[[^%]]*%]%()([^%)]+)(%))', function(first, image, last)
+                    local folder = old_name .. '.attachments/'
+                    if image:sub(1, #folder) == folder then image = new_name .. '.attachments/' .. image:sub(#folder + 1) end
+                    return first .. image .. last
+                end))
+            end)
+            files[#files + 1] = { id = target, before = false, after = after }
+            files[#files + 1] = { id = page.id, before = page.content, after = false }
+            local source_manifest = self.fs:read(self.history:manifest_path(page.id), 32 * 1024 * 1024) or false
+            local target_manifest = self.fs:read(self.history:manifest_path(target), 32 * 1024 * 1024) or false
+            histories[#histories + 1] = { source = page.id, id = target,
+                source_before = source_manifest, before = target_manifest }
+            if self.fs:directory_exists(page.id .. '.attachments') then
+                local entries = self.fs:list(page.id .. '.attachments', 0, true)
+                images = images + #entries
+                moves[#moves + 1] = { from = page.id .. '.attachments', to = target .. '.attachments', images = entries }
+            end
+        elseif after ~= page.content then
+            linked_pages = linked_pages + 1
+            files[#files + 1] = { id = page.id, before = page.content, after = after }
+            local manifest = self.fs:read(self.history:manifest_path(page.id), 32 * 1024 * 1024) or false
+            histories[#histories + 1] = { source = page.id, id = page.id, source_before = manifest, before = manifest }
+        end
+    end
+    local encoded = json.encode({ source = source, destination = destination, snapshots = snapshots,
+        files = files, moves = moves, histories = histories })
+    assert(#encoded <= 32 * 1024 * 1024, 'Folder move exceeds the 32 MiB planning limit; move smaller folders')
+    return { revision = hash.sha256(encoded), pages = moved_pages, images = images, linked_pages = linked_pages,
+        mapping = mapping, files = files, moves = moves, histories = histories }
+end
+
+function Notebook:move_folder(source, destination, revision, progress)
+    progress = progress or function() end
+    progress('Checking folder move: ' .. tostring(source) .. ' -> ' .. tostring(destination))
+    local plan = self:folder_plan(source, destination)
+    if plan.revision ~= revision then return nil, 'Notebook changed. Preview the folder move again.', 409 end
+    for _, operation in ipairs(plan.files) do
+        assert((self.fs:read(operation.id .. '.md') or false) == operation.before,
+            'Page changed before folder move: ' .. operation.id)
+    end
+    for _, operation in ipairs(plan.files) do
+        if operation.before ~= false then
+            progress('Archiving before folder move: ' .. operation.id)
+            self.history:remember({ id = operation.id, content = operation.before,
+                revision = hash.sha256(operation.before) })
+        end
+    end
+    for _, entry in ipairs(plan.histories) do
+        if entry.source == entry.id then
+            entry.before = self.fs:read(self.history:manifest_path(entry.id), 32 * 1024 * 1024) or false
+        end
+        entry.after = json.encode(self.history:inheritance(entry.source, entry.id, plan.mapping))
+        entry.source_before = nil
+    end
+    local transaction = { files = plan.files, moves = plan.moves, histories = plan.histories }
+    for _, move in ipairs(transaction.moves) do move.images = nil end
+    local encoded = json.encode(transaction)
+    assert(#encoded <= 32 * 1024 * 1024, 'Folder move recovery journal exceeds 32 MiB; move smaller folders')
+    self.fs:write('.leaf/transaction.json', encoded)
+    assert(self.fs:read('.leaf/transaction.json', 32 * 1024 * 1024) == encoded,
+        'Cannot verify folder move recovery journal; preserve the notebook and journal for inspection')
+    local ok, err = pcall(function()
+        for _, entry in ipairs(transaction.histories) do
+            progress('Relocating history: ' .. entry.id)
+            self.fs:write(self.history:manifest_path(entry.id), entry.after)
+        end
+        for _, operation in ipairs(transaction.files) do
+            progress('Updating folder move page: ' .. operation.id)
+            if operation.after == false then self.fs:remove(operation.id .. '.md')
+            else self.fs:write(operation.id .. '.md', operation.after) end
+        end
+        for _, move in ipairs(transaction.moves) do
+            progress('Moving attachments: ' .. move.from .. ' -> ' .. move.to)
+            self.fs:move(move.from, move.to)
+        end
+        progress('Verifying folder move files, history, and attachments')
+        for _, operation in ipairs(transaction.files) do
+            assert((self.fs:read(operation.id .. '.md') or false) == operation.after,
+                'Folder move verification failed: ' .. operation.id)
+        end
+        for _, entry in ipairs(transaction.histories) do
+            assert(self.fs:read(self.history:manifest_path(entry.id), 32 * 1024 * 1024) == entry.after,
+                'Moved history verification failed: ' .. entry.id)
+        end
+        for _, move in ipairs(transaction.moves) do
+            assert(self.fs:directory_exists(move.to) and not self.fs:directory_exists(move.from),
+                'Moved attachment verification failed: ' .. move.to)
+        end
+        self.fs:remove('.leaf/transaction.json')
+    end)
+    if not ok then self:recover(); error(err) end
+    self:sync()
+    return { moved = plan.pages, mapping = plan.mapping }
 end
 
 function Notebook:trash_list()

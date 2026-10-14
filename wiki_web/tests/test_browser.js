@@ -244,6 +244,19 @@ test('real browser selects words in editor/preview and keeps dictionary within d
       const singleView = await browser.newPage(); await singleView.goto(require('node:url').pathToFileURL(singleFile).href);
       assert.equal(await singleView.locator('article').count(), 1); await singleView.close();
       await page.locator('#export-cancel').click();
+      await page.locator('#pin-page').click();
+      await page.locator('#folder-open').click();
+      await page.locator('#folder-source').fill('Notes');
+      await page.locator('#folder-destination').fill('Archive/Notes');
+      await page.locator('#folder-preview').click();
+      await page.waitForFunction(() => !document.getElementById('folder-move').disabled);
+      const folderBounds = await page.locator('#folder-dialog').boundingBox();
+      assert.ok(folderBounds.x >= 0 && folderBounds.x + folderBounds.width <= 375);
+      page.once('dialog', dialog => dialog.accept()); await page.locator('#folder-move').click();
+      await page.waitForFunction(() => document.getElementById('folder-status').textContent.includes('moved and verified'));
+      assert.ok(fs.existsSync(path.join(directory, 'notebook/Archive/Notes/新课.md')));
+      assert.match(await page.locator('#pinned-pages').innerText(), /Archive\/Notes\/新课/);
+      await page.locator('#folder-close').click();
       await page.locator('#backup-open').click();
       const backupDownload = page.waitForEvent('download'); await page.locator('#backup-download').click();
       const downloadedBackup = await backupDownload;
@@ -258,7 +271,7 @@ test('real browser selects words in editor/preview and keeps dictionary within d
       await page.locator('#backup-name').fill('Restored 学习');
       page.once('dialog', dialog => dialog.accept()); await page.locator('#backup-restore').click();
       await page.waitForFunction(() => document.getElementById('backup-status').textContent.includes('restored and verified'));
-      assert.ok(fs.existsSync(path.join(directory, 'Restored 学习', 'Notes/新课.md')));
+      assert.ok(fs.existsSync(path.join(directory, 'Restored 学习', 'Archive/Notes/新课.md')));
       const backupBounds = await page.locator('#backup-dialog').boundingBox();
       assert.ok(backupBounds.x >= 0 && backupBounds.x + backupBounds.width <= 375);
       await page.locator('#backup-close').click();

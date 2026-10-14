@@ -50,6 +50,38 @@ function getWithHeaders(url, headers) {
     request.on('error', reject); request.end();
   });
 }
+test('folder move API previews counts, rejects stale state, and preserves nested pages, links, images and history', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-folder-')); let server;
+  try {
+    server = await start(directory, ['--data-dir', path.join(directory, 'notebook'), '--dict-db', 'none']);
+    const first = await post(server, '/api/page', { id: 'Old/学习', content: '[[./Tasks]]', revision: '' });
+    const image = await (await fetch(server.url + '/api/image?page=' + encodeURIComponent(first.data.id), { method: 'POST', body: png })).json();
+    await post(server, '/api/page', { id: first.data.id, content: first.data.content + '\n' + image.markdown, revision: first.data.revision });
+    await post(server, '/api/page', { id: 'Old/Tasks', content: 'Tasks', revision: '' });
+    const home = await post(server, '/api/page', { id: 'Home', content: '[[Old/学习]]', revision: '' });
+    const names = { source: 'Old', destination: 'Archive/新' };
+    const plan = await post(server, '/api/folder/preview', names); assert.equal(plan.status, 200);
+    assert.equal(plan.data.pages, 2); assert.equal(plan.data.images, 1); assert.equal(plan.data.linked_pages, 1);
+    await post(server, '/api/page', { id: 'Home', content: 'Changed [[Old/学习]]', revision: home.data.revision });
+    const stale = await post(server, '/api/folder/move', { ...names, revision: plan.data.revision });
+    assert.equal(stale.status, 409); assert.match(stale.data.error, /Preview/);
+    const fresh = await post(server, '/api/folder/preview', names);
+    const moved = await post(server, '/api/folder/move', { ...names, revision: fresh.data.revision });
+    assert.equal(moved.status, 200); assert.equal(moved.data.mapping['Old/学习'], 'Archive/新/学习');
+    const page = await (await fetch(server.url + '/api/page?id=' + encodeURIComponent('Archive/新/学习'))).json();
+    assert.match(page.content, /\[\[Archive:新:Tasks\]\]/);
+    assert.equal((await fetch(server.url + '/api/page?id=' + encodeURIComponent(first.data.id))).status, 404);
+    assert.equal((await fetch(server.url + '/api/attachment?' + new URLSearchParams({ page: page.id, file: image.file }))).status, 200);
+    const restored = await post(server, '/api/history/restore', { id: page.id, selected: first.data.revision, revision: page.revision });
+    assert.equal(restored.status, 200); assert.match(restored.data.content, /\[\[Archive:新:Tasks\]\]/);
+    assert.equal((await post(server, '/api/folder/preview', { source: 'Archive', destination: 'Archive/Sub' })).status, 400);
+    assert.equal(fs.existsSync(path.join(directory, 'notebook/.leaf/transaction.json')), false);
+  } finally {
+    if (server) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('backup API validates and restores files into a new Unicode sibling without overwriting existing folders', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-backup-')); let server;
   try {

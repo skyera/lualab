@@ -550,7 +550,7 @@ without loading every image into memory. Image previews retain the 5 MiB limit.
 
 **Rename** moves a single page, updates incoming wiki links, and preserves its
 outgoing relative links and images. Child pages remain at their existing paths;
-subtree moves are a later feature. A destination page or attachment-directory
+  use **Move folder** for a subtree move. A destination page or attachment-directory
 collision is rejected.
 
 **Trash page** removes one page and its images from the active notebook. Child
@@ -562,6 +562,41 @@ An interrupted operation is rolled back when the notebook next starts. Recovery
 stops if a participating Markdown file has been edited externally; preserve the
 files and journal for manual reconciliation. The notebook uses a local advisory
 lock to prevent two Leaf Wiki servers from opening the same folder on one device.
+
+## Move folder
+
+Click **Move folder** in the header, enter **From** and **To** namespaces, and
+choose **Preview move**. The preview counts affected pages, supported images,
+and outside pages whose incoming wiki links will be updated. **Move folder** then
+asks for confirmation. Preview and confirmation first save the current draft;
+failures retain it and keep the entered folder names. The current page reopens
+at its new path after a successful move, and pinned/recent shortcuts follow it.
+
+The folder's own page, if present, and every descendant page move together.
+Paths match whole namespace components: moving `Projects/Wiki` does not affect
+`Projects/Wikipedia`. Wiki links are resolved against their original source and
+rewritten in one pass, preserving labels and heading anchors. Relative links to
+pages outside the subtree keep their original targets; missing targets inside
+the subtree follow its new namespace. Code blocks and inline code stay literal.
+Each owning page's attachment directory moves with it, and image references are
+updated when its name changes. Revision history follows the move; restoring an
+older version also relocates wiki targets that participated in the move.
+
+Source and destination must not overlap. Existing pages anywhere in the target
+namespace, occupied destination image directories, and invalid names are rejected.
+Existing empty directories can be reused, and unrelated non-page files are left
+in place. Empty source directories may remain. Orphan attachment folders without
+active owner pages do not participate. Saved search queries and browser drafts for
+inactive pages are not rewritten; inspect those separately after a folder move.
+
+The preview token covers notebook page revisions, affected history manifests,
+and image metadata. Changes before confirmation require a new preview. Planning
+and the recovery journal each have a 32 MiB limit; move smaller folders if needed.
+The transaction journal covers every changed page, attachment directory, and
+destination history manifest. Failures roll back; interrupted operations recover
+on startup. Recovery stops on conflicting external edits or attachment collisions
+and preserves the journal for inspection. Pause external writers during a move;
+revision checks cannot eliminate the final filesystem race with independent tools.
 
 ## Limits and compatibility
 

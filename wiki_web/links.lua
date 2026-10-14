@@ -103,4 +103,18 @@ function M.rename(text, source, old, new)
         end))
     end)
 end
+
+-- Resolve against the original source and apply every destination in one pass.
+function M.relocate(text, source, mapping)
+    return M.prose(text, function(piece)
+        return (piece:gsub('%[%[([^%[%]]+)%]%]', function(inner)
+            local address, label = inner:match('^([^|]+)(|.*)$')
+            address = address or inner
+            local target, anchor = M.resolve(source, address)
+            if not target or (not mapping[source] and not mapping[target]) then return '[[' .. inner .. ']]' end
+            target = mapping[target] or target
+            return '[[' .. target:gsub('/', ':') .. (anchor ~= '' and '#' .. anchor or '') .. (label or '') .. ']]'
+        end))
+    end)
+end
 return M

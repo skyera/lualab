@@ -271,6 +271,13 @@ function M.run(root)
                 value = { files = #files, bytes = bytes }
             elseif path == '/api/backup/restore' then
                 value = backup.restore(notebook, payload.backup, payload.name, startup.report)
+            elseif path == '/api/folder/preview' then
+                startup.report('Planning folder move: ' .. tostring(payload.source) .. ' -> ' .. tostring(payload.destination))
+                local plan = notebook:folder_plan(payload.source, payload.destination)
+                value = { revision = plan.revision, pages = plan.pages, images = plan.images,
+                    linked_pages = plan.linked_pages }
+            elseif path == '/api/folder/move' then
+                value, err, status = notebook:move_folder(payload.source, payload.destination, payload.revision, startup.report)
             elseif path == '/api/page' then value, err, status = notebook:save(payload.id, payload.content, payload.revision)
             elseif path == '/api/capture' then
                 value, err, status = notebook:capture(payload.date, payload.text, payload.kind, payload.revision)

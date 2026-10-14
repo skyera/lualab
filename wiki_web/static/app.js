@@ -74,8 +74,71 @@ $('pin-page').addEventListener('click', () => {
     ? navigationState.pinned.filter(value => value !== id) : [...navigationState.pinned, id];
   saveNavigation(); renderNavigation();
 });
-const MODAL_DIALOGS = ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks', 'capture', 'verse', 'journal-overview', 'saved-search', 'attachments', 'backup'];
+const MODAL_DIALOGS = ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks', 'capture', 'verse', 'journal-overview', 'saved-search', 'attachments', 'backup', 'folder'];
 function anyDialogOpen() { return MODAL_DIALOGS.some(id => $(id + '-dialog').open); }
+
+const folderState = { busy: false, plan: null };
+function folderControls() {
+  for (const id of ['folder-source', 'folder-destination', 'folder-preview', 'folder-close']) $(id).disabled = folderState.busy;
+  $('folder-move').disabled = folderState.busy || !folderState.plan;
+}
+function folderNames() {
+  const source = $('folder-source').value.trim().replaceAll(':', '/');
+  const destination = $('folder-destination').value.trim().replaceAll(':', '/');
+  if (WikiMarkdown.resolve('', source)?.id !== source || WikiMarkdown.resolve('', destination)?.id !== destination) {
+    throw new Error('Use valid folder names with / between components.');
+  }
+  return { source, destination };
+}
+function closeFolder() { if (!folderState.busy) $('folder-dialog').close(); }
+$('folder-open').addEventListener('click', () => {
+  if (anyDialogOpen() || state.loading || state.uploading) return;
+  folderState.plan = null;
+  $('folder-source').value = state.page?.id.split('/').slice(0, -1).join('/') || '';
+  $('folder-destination').value = ''; $('folder-status').textContent = ''; $('folder-error').textContent = '';
+  folderControls(); $('folder-dialog').showModal(); $('folder-source').focus();
+});
+$('folder-close').addEventListener('click', closeFolder);
+$('folder-dialog').addEventListener('cancel', event => { event.preventDefault(); closeFolder(); });
+for (const id of ['folder-source', 'folder-destination']) $(id).addEventListener('input', () => {
+  folderState.plan = null; $('folder-status').textContent = 'Preview the updated move.'; folderControls();
+});
+$('folder-preview').addEventListener('click', async () => {
+  if (folderState.busy) return;
+  folderState.busy = true; folderState.plan = null; folderControls(); $('folder-error').textContent = '';
+  $('folder-status').textContent = 'Saving draft and checking folder move…';
+  try {
+    if (!(await ensureSaved())) throw new Error($('message').textContent || 'Save or resolve the current draft first.');
+    const names = folderNames(), plan = await api('/api/folder/preview', names);
+    folderState.plan = { ...names, ...plan };
+    $('folder-status').textContent = plan.pages + ' pages · ' + plan.images + ' images · ' + plan.linked_pages + ' linked pages will update';
+  } catch (error) { $('folder-status').textContent = 'Move preview failed.'; $('folder-error').textContent = error.message; }
+  finally { folderState.busy = false; folderControls(); }
+});
+$('folder-move').addEventListener('click', async () => {
+  if (folderState.busy || !folderState.plan) return;
+  const plan = folderState.plan;
+  if (!confirm('Move ' + plan.pages + ' pages from “' + plan.source + '” to “' + plan.destination + '”?')) return;
+  folderState.busy = true; folderControls(); $('folder-error').textContent = '';
+  $('folder-status').textContent = 'Moving pages, attachments, and history…';
+  let completed = false;
+  try {
+    if (!(await ensureSaved())) throw new Error($('message').textContent || 'Save or resolve the current draft first.');
+    const current = state.page?.id;
+    const result = await api('/api/folder/move', { source: plan.source, destination: plan.destination, revision: plan.revision });
+    completed = true; folderState.plan = null;
+    for (const key of ['pinned', 'recent']) navigationState[key] = [...new Set(navigationState[key].map(id => result.mapping[id] || id))];
+    saveNavigation();
+    if (current && result.mapping[current]) clearDraft(current);
+    await refresh();
+    if (current && !(await openPage(result.mapping[current] || current))) throw new Error($('message').textContent || 'Could not reopen the current page.');
+    $('folder-status').textContent = result.moved + ' pages moved and verified.';
+  } catch (error) {
+    folderState.plan = null;
+    $('folder-status').textContent = completed ? 'Folder move completed; the editor could not refresh.' : 'Folder move failed.';
+    $('folder-error').textContent = error.message + (completed ? ' Reload the browser to open the moved pages.' : ' Preview again before retrying.');
+  } finally { folderState.busy = false; folderControls(); }
+});
 
 const backupState = { busy: false, bundle: null, file: null };
 function backupControls() {
@@ -1522,7 +1585,7 @@ window.addEventListener('keydown', event => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); $('search').focus(); $('search').select(); }
 });
 window.addEventListener('beforeunload', event => {
-  if (state.dirty || state.uploading || captureState.busy || backupState.busy || $('capture-text').value.trim()) {
+  if (state.dirty || state.uploading || captureState.busy || backupState.busy || folderState.busy || $('capture-text').value.trim()) {
     rememberDraft(); event.preventDefault(); event.returnValue = '';
   }
 });
