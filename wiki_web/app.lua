@@ -1,4 +1,8 @@
+--------------------------------------------------------------------------------
+-- app.lua
 -- Leaf Wiki launcher, persistent folder configuration and same-origin HTTP API.
+--------------------------------------------------------------------------------
+
 local direct_script = arg[0]:gsub('\\', '/'):match('([^/]+)$') == 'app.lua'
 local direct_root
 if direct_script then
@@ -10,7 +14,12 @@ if direct_script then
 end
 local startup = require('startup')
 if direct_script and not startup.running then
-    if not startup.launch(function() require('app').run(direct_root) end) then os.exit(1) end
+    local ok = startup.launch(function()
+        require('app').run(direct_root)
+    end)
+    if not ok then
+        os.exit(1)
+    end
     return
 end
 local windows_args = require('windows_args')
@@ -27,7 +36,12 @@ local is_windows = package.config:sub(1, 1) == '\\'
 local function quote(value)
     return "'" .. value:gsub("'", is_windows and "''" or "'\\''") .. "'"
 end
+
 local M = {}
+
+--------------------------------------------------------------------------------
+-- Static Assets & Filesystem Helpers
+--------------------------------------------------------------------------------
 local STATIC = {
     ['/'] = { 'index.html', 'text/html; charset=utf-8' },
     ['/app.js'] = { 'app.js', 'text/javascript; charset=utf-8' },
@@ -40,7 +54,9 @@ local function read(path)
     if is_windows then return Fs.read_file(path) end
     local file = io.open(path, 'rb')
     if not file then return nil end
-    local value = file:read('*a'); file:close(); return value
+    local value = file:read('*a')
+    file:close()
+    return value
 end
 
 local function save_config(config_path, expected)
@@ -85,6 +101,9 @@ local function is_allowed_host(host, port)
     return not name:find('%.%.')
 end
 
+--------------------------------------------------------------------------------
+-- Main Server Lifecycle & CLI Dispatcher
+--------------------------------------------------------------------------------
 function M.run(root)
     root = Fs.resolve(root)
     local home = (is_windows and getenv('USERPROFILE')) or getenv('HOME') or '.'
@@ -101,9 +120,13 @@ function M.run(root)
                 .. '[--config FILE] [--save-config] [--dict-db PATH|none] '
                 .. '[--sqlite-dll PATH] [--sqlite-list] [--sqlite-select] [--host 127.0.0.1|0.0.0.0] [--port 8020]')
             return
-        elseif flag == '--save-config' then options.save_config = true
-        elseif flag == '--sqlite-list' then options.sqlite_list = true
-        elseif flag == '--sqlite-select' then options.sqlite_select = true; options.save_config = true
+        elseif flag == '--save-config' then
+            options.save_config = true
+        elseif flag == '--sqlite-list' then
+            options.sqlite_list = true
+        elseif flag == '--sqlite-select' then
+            options.sqlite_select = true
+            options.save_config = true
         elseif flag == '--data-dir' or flag == '--cache-dir' or flag == '--config'
             or flag == '--dict-db' or flag == '--sqlite-dll' or flag == '--host' or flag == '--port' then
             index = index + 1
@@ -137,8 +160,11 @@ function M.run(root)
             print(index .. '. ' .. candidate.path .. ' [' .. candidate.source .. ']'
                 .. (candidate.reason and ' — ' .. candidate.reason or ''))
         end
-        if #candidates == 0 then print('No SQLite DLL found. Use --sqlite-dll PATH or LEAF_WIKI_SQLITE3.') end
-        io.stdout:flush(); return
+        if #candidates == 0 then
+            print('No SQLite DLL found. Use --sqlite-dll PATH or LEAF_WIKI_SQLITE3.')
+        end
+        io.stdout:flush()
+        return
     end
     local data_dir = Fs.resolve(options.data_dir or getenv('LEAF_WIKI_DATA_DIR') or config.data_dir or home .. '/LeafWiki')
     cache = Fs.resolve(cache)
@@ -213,7 +239,14 @@ function M.run(root)
         save_config(config_path, { data_dir = notebook.fs.root, dict_db = dictionary_path,
             sqlite_dll = sqlite_info.pin })
     end
-    local function reply(value, status) return json.encode(value), status or 200, 'application/json; charset=utf-8' end
+
+    ----------------------------------------------------------------------------
+    -- HTTP API Routing & Request Handlers
+    ----------------------------------------------------------------------------
+    local function reply(value, status)
+        return json.encode(value), status or 200, 'application/json; charset=utf-8'
+    end
+
     local function route(request, actual_port)
         local host = request.headers.host
         if not is_allowed_host(host, actual_port) then
@@ -299,6 +332,10 @@ function M.run(root)
         if not result[1] then return reply({ error = tostring(result[2]):gsub('^.-:%d+: ', '') }, 400) end
         return result[2], result[3], result[4], result[5]
     end
+
+    ----------------------------------------------------------------------------
+    -- HTTP Server Listener Startup
+    ----------------------------------------------------------------------------
     startup.set_recovery('Close the process using this port, or choose a free port:\n  ' .. launcher .. ' --port 0')
     startup.report('Starting HTTP server on ' .. options.host .. ':' .. port)
     local ok, err = pcall(http.serve, port, handler, function(actual_port)

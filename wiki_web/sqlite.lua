@@ -1,9 +1,14 @@
+--------------------------------------------------------------------------------
+-- sqlite.lua
 -- Concrete SQLite library selection, adapted from CodeFind's explicit pin,
 -- Windows candidate discovery and validation. Never load a DLL just to list it.
+--------------------------------------------------------------------------------
+
 local ffi = require('ffi')
 local Fs = require('fs')
 local windows_args = require('windows_args')
 local DB = require('db') -- declares every probed symbol, without loading a library
+
 local M = {}
 local WINDOWS = ffi.os == 'Windows'
 local FILE_NAMES = { 'sqlite3.dll', 'sqlite3-3.dll', 'libsqlite3.dll' }
@@ -15,6 +20,9 @@ local REQUIRED = {
     'sqlite3_column_bytes', 'sqlite3_exec', 'sqlite3_free',
 }
 
+--------------------------------------------------------------------------------
+-- PE Header Inspection & Architecture Validation
+--------------------------------------------------------------------------------
 local function word(text, offset)
     local a, b = text:byte(offset, offset + 1)
     return a and b and a + b * 256 or nil
@@ -33,11 +41,21 @@ function M.inspect(path)
     return true
 end
 
+--------------------------------------------------------------------------------
+-- Candidate Discovery
+--------------------------------------------------------------------------------
 function M.discover(root, script_dir, file_names)
-    if not WINDOWS then return { { path = 'sqlite3', source = 'loader' }, { path = 'libsqlite3.so.0', source = 'loader' } } end
-    ffi.cdef[[unsigned long __stdcall GetModuleFileNameW(void *, uint16_t *, unsigned long);
+    if not WINDOWS then
+        return {
+            { path = 'sqlite3', source = 'loader' },
+            { path = 'libsqlite3.so.0', source = 'loader' }
+        }
+    end
+    ffi.cdef[[
+    unsigned long __stdcall GetModuleFileNameW(void *, uint16_t *, unsigned long);
     int __stdcall WideCharToMultiByte(unsigned int, unsigned long, const uint16_t *, int,
-        char *, int, const char *, int *);]]
+        char *, int, const char *, int *);
+    ]]
     local kernel = ffi.load('kernel32')
     local buffer = ffi.new('uint16_t[32768]')
     local length = kernel.GetModuleFileNameW(nil, buffer, 32768)
@@ -46,10 +64,16 @@ function M.discover(root, script_dir, file_names)
     local bytes = ffi.new('char[?]', size)
     kernel.WideCharToMultiByte(65001, 0, buffer, length, bytes, size, nil, nil)
     local executable = ffi.string(bytes, size):gsub('\\', '/')
-    local dirs = { { path = root, source = 'repository' }, { path = script_dir or root .. '/wiki_web', source = 'script' },
-        { path = executable:match('^(.*)/'), source = 'LuaJIT directory' }, { path = '.', source = 'current directory' } }
+    local dirs = {
+        { path = root, source = 'repository' },
+        { path = script_dir or root .. '/wiki_web', source = 'script' },
+        { path = executable:match('^(.*)/'), source = 'LuaJIT directory' },
+        { path = '.', source = 'current directory' }
+    }
     local system_root = windows_args.getenv('SystemRoot')
-    if system_root then dirs[#dirs + 1] = { path = system_root .. '/System32', source = 'Windows system directory' } end
+    if system_root then
+        dirs[#dirs + 1] = { path = system_root .. '/System32', source = 'Windows system directory' }
+    end
     for dir in (windows_args.getenv('PATH') or ''):gmatch('[^;]+') do
         dir = dir:gsub('^%s+', ''):gsub('%s+$', ''):gsub('^"(.*)"$', '%1')
         if dir ~= '' then dirs[#dirs + 1] = { path = dir, source = 'PATH' } end
@@ -66,8 +90,12 @@ function M.discover(root, script_dir, file_names)
                     local readable, text = pcall(Fs.read_file, path)
                     if readable and text then
                         local compatible, reason = M.inspect(path)
-                        candidates[#candidates + 1] = { path = path, source = dir.source,
-                            compatible = not not compatible, reason = reason }
+                        candidates[#candidates + 1] = {
+                            path = path,
+                            source = dir.source,
+                            compatible = not not compatible,
+                            reason = reason
+                        }
                     end
                 end
             end
@@ -76,6 +104,9 @@ function M.discover(root, script_dir, file_names)
     return candidates
 end
 
+--------------------------------------------------------------------------------
+-- Library Loading & Validation
+--------------------------------------------------------------------------------
 function M.open_library(path)
     local load_path = path
     if WINDOWS and path:find('[\128-\255]') then
@@ -106,7 +137,8 @@ function M.validate(path, report, require_fts5)
     if report then report('Validating SQLite library: ' .. path) end
     local library = M.open_library(path)
     for _, symbol in ipairs(REQUIRED) do
-        assert(pcall(function() return library[symbol] end), 'SQLite library is missing ' .. symbol .. ': ' .. path)
+        assert(pcall(function() return library[symbol] end),
+            'SQLite library is missing ' .. symbol .. ': ' .. path)
     end
     local version = ffi.string(library.sqlite3_libversion())
     local db = ffi.new('sqlite3 *[1]')
@@ -132,13 +164,17 @@ function M.validate(path, report, require_fts5)
             SELECT value FROM search_probe WHERE search_probe MATCH 'test';]]
     end
     status = library.sqlite3_exec(db[0], probe_sql, nil, nil, err)
-    local message = err[0] ~= nil and ffi.string(err[0]) or (require_fts5 and 'SQLite FTS5/UPSERT validation failed' or 'SQLite UPSERT validation failed')
+    local message = err[0] ~= nil and ffi.string(err[0])
+        or (require_fts5 and 'SQLite FTS5/UPSERT validation failed' or 'SQLite UPSERT validation failed')
     if err[0] ~= nil then library.sqlite3_free(err[0]) end
     library.sqlite3_close(db[0])
     assert(status == 0, path .. ': ' .. message)
     return library, { path = path, version = version, library = library }
 end
 
+--------------------------------------------------------------------------------
+-- Library Selection & Environment Resolution
+--------------------------------------------------------------------------------
 function M.load(root, options, config, report, warn)
     local environment = windows_args.getenv(options.sqlite_env or 'LEAF_WIKI_SQLITE3')
     if environment == '' then environment = nil end
@@ -146,15 +182,18 @@ function M.load(root, options, config, report, warn)
     if override then
         local path = not WINDOWS and not override:find('/', 1, true) and override or Fs.resolve(override)
         local library, info = M.validate(path, report, options.require_fts5)
-        DB.set_library(library); info.pin = path
+        DB.set_library(library)
+        info.pin = path
         return info
     end
     local candidates = M.discover(root, options.script_dir)
     if options.sqlite_select or (WINDOWS and #candidates > 1) then
         local interactive = options.sqlite_select
         if WINDOWS then
-            ffi.cdef[[void * __stdcall GetStdHandle(unsigned long);
-        int __stdcall GetConsoleMode(void *, unsigned long *);]]
+            ffi.cdef[[
+            void * __stdcall GetStdHandle(unsigned long);
+            int __stdcall GetConsoleMode(void *, unsigned long *);
+            ]]
             local kernel, mode = ffi.load('kernel32'), ffi.new('unsigned long[1]')
             interactive = interactive or kernel.GetConsoleMode(kernel.GetStdHandle(0xfffffff6), mode) ~= 0
         end
@@ -163,20 +202,27 @@ function M.load(root, options, config, report, warn)
                 print(index .. '. ' .. candidate.path .. ' [' .. candidate.source .. ']'
                     .. (candidate.reason and ' - ' .. candidate.reason or ''))
             end
-            io.write('Select SQLite library [1-' .. #candidates .. '] (default 1): '); io.stdout:flush()
+            io.write('Select SQLite library [1-' .. #candidates .. '] (default 1): ')
+            io.stdout:flush()
             local choice = io.read('*l')
             local selected = choice == '' and 1 or tonumber(choice)
             assert(selected and selected % 1 == 0 and candidates[selected], 'Invalid SQLite selection')
             local library, info = M.validate(candidates[selected].path, report, options.require_fts5)
-            DB.set_library(library); info.pin = info.path
+            DB.set_library(library)
+            info.pin = info.path
             return info
         end
     end
     for _, candidate in ipairs(candidates) do
         local ok, library, info = pcall(M.validate, candidate.path, report, options.require_fts5)
-        if ok then DB.set_library(library); info.pin = WINDOWS and info.path or nil; return info end
+        if ok then
+            DB.set_library(library)
+            info.pin = WINDOWS and info.path or nil
+            return info
+        end
         if warn and WINDOWS then warn(tostring(library)) end
     end
     error('No usable SQLite library found. Use --sqlite-list, --sqlite-select, or --sqlite-dll PATH.')
 end
+
 return M

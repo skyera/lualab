@@ -1,29 +1,41 @@
+--------------------------------------------------------------------------------
+-- backup.lua
 -- Portable, checksummed notebook bundles and verified restore into a fresh sibling.
+--------------------------------------------------------------------------------
+
 local Fs = require('fs')
 local json = require('json')
 local hash = require('hash')
 local links = require('links')
+
 local M = {}
 local MAX_BYTES = 32 * 1024 * 1024
 local MAX_BUNDLE = 63 * 1024 * 1024
 local MARKER = '.leaf/restore-incomplete.json'
-local EXCLUDED = { ['.leaf/lock'] = true, ['.leaf/transaction.json'] = true, [MARKER] = true }
+local EXCLUDED = {
+    ['.leaf/lock'] = true,
+    ['.leaf/transaction.json'] = true,
+    [MARKER] = true,
+}
 
--- ============================================================================
--- Portable paths and archive validation
--- ============================================================================
-
+--------------------------------------------------------------------------------
+-- Portable Paths and Archive Validation
+--------------------------------------------------------------------------------
 local function valid_path(path)
     if type(path) ~= 'string' or #path > 1024 or path == '' or path:sub(1, 1) == '/'
         or path:sub(-1) == '/' or path:find('//', 1, true) or not links.valid_utf8(path)
-        or path:find('[%z\1-\31\127\\:<>"|?*]') then return false end
+        or path:find('[%z\1-\31\127\\:<>"|?*]') then
+        return false
+    end
     local depth = 0
     for part in path:gmatch('[^/]+') do
         depth = depth + 1
         local stem = part:match('^([^.]*)'):upper()
         if part == '.' or part == '..' or part:match('[ .]$') or part:match('^%s')
             or stem == 'CON' or stem == 'PRN' or stem == 'AUX' or stem == 'NUL'
-            or stem:match('^COM[1-9]$') or stem:match('^LPT[1-9]$') then return false end
+            or stem:match('^COM[1-9]$') or stem:match('^LPT[1-9]$') then
+            return false
+        end
     end
     return depth <= 32 and not EXCLUDED[path] and not path:find('%.leaf%-write%-')
 end
@@ -52,7 +64,8 @@ function M.validate(bundle)
         else
             assert(entry.encoding == 'hex' and #entry.data % 2 == 0 and not entry.data:find('[^a-f0-9]')
                 and #entry.data <= MAX_BYTES * 2, 'Invalid binary encoding: ' .. entry.path)
-            data = entry.data:gsub('..', function(pair) return string.char(tonumber(pair, 16)) end)
+            data = entry.data:gsub('..', function(pair)
+                return string.char(tonumber(pair, 16)) end)
         end
         size = size + #data
         assert(size <= MAX_BYTES, 'Backup contents exceed 32 MiB')
@@ -70,10 +83,9 @@ function M.validate(bundle)
     return files, size
 end
 
--- ============================================================================
--- Snapshot construction and verified fresh-folder restore
--- ============================================================================
-
+--------------------------------------------------------------------------------
+-- Snapshot Construction and Verified Fresh-Folder Restore
+--------------------------------------------------------------------------------
 function M.export(notebook, progress)
     progress = progress or function() end
     assert(not notebook.fs:read('.leaf/transaction.json'), 'Finish notebook recovery before backing up')
@@ -89,10 +101,15 @@ function M.export(notebook, progress)
             size = size + #data
             assert(size <= MAX_BYTES, 'Notebook backup exceeds 32 MiB; copy the notebook folder directly')
             local text = links.valid_utf8(data) and not data:find('%z')
-            files[#files + 1] = { path = path, bytes = #data, sha256 = hash.sha256(data),
-                encoding = text and 'utf8' or 'hex', data = text and data or data:gsub('.', function(char)
+            files[#files + 1] = {
+                path = path,
+                bytes = #data,
+                sha256 = hash.sha256(data),
+                encoding = text and 'utf8' or 'hex',
+                data = text and data or data:gsub('.', function(char)
                     return string.format('%02x', char:byte())
-                end) }
+                end)
+            }
         end
     end
     -- Detect visible external edits across the snapshot window instead of shipping partial data.

@@ -1,8 +1,16 @@
+--------------------------------------------------------------------------------
+-- dictionary.lua
 -- Read-only access to ffi_dict's imported SQLite dictionary, without TUI/network modules.
+--------------------------------------------------------------------------------
+
 local DB = require('db')
 local links = require('links')
+
 local M = {}
 
+--------------------------------------------------------------------------------
+-- Dictionary Verification
+--------------------------------------------------------------------------------
 function M.check(path)
     local opened, db = pcall(DB.open, path, nil, true)
     if not opened then return nil, tostring(db):gsub('^.-:%d+: ', '') end
@@ -12,6 +20,9 @@ function M.check(path)
     return true
 end
 
+--------------------------------------------------------------------------------
+-- Dictionary Word Lookup
+--------------------------------------------------------------------------------
 function M.lookup(path, value)
     if type(value) ~= 'string' or not links.valid_utf8(value) or #value > 240
         or value:find('[%z\1-\31\127]') then
@@ -24,7 +35,9 @@ function M.lookup(path, value)
     end
     local opened, db = pcall(DB.open, path, nil, true)
     if not opened then
-        return { error = 'Local dictionary is unavailable. Configure --dict-db with an existing imported dictionary.' }, 503
+        return {
+            error = 'Local dictionary is unavailable. Configure --dict-db with an existing imported dictionary.'
+        }, 503
     end
     local ok, rows = pcall(db.query, db, [[
         SELECT word, pos, definition, example, syn, ant FROM dict
@@ -32,13 +45,22 @@ function M.lookup(path, value)
     ]], { word })
     db:close()
     if not ok then
-        return { error = 'Cannot read this dictionary. Use a database imported with ffi_dict or download_dict.' }, 503
+        return {
+            error = 'Cannot read this dictionary. Use a database imported with ffi_dict or download_dict.'
+        }, 503
     end
     local senses = {}
     for _, row in ipairs(rows) do
-        if row.definition and row.definition:find('%S') then senses[#senses + 1] = row end
+        if row.definition and row.definition:find('%S') then
+            senses[#senses + 1] = row
+        end
     end
-    return { word = word, source = 'local', senses = senses,
-        message = #senses == 0 and 'No definition found in the local dictionary.' or nil }, 200
+    return {
+        word = word,
+        source = 'local',
+        senses = senses,
+        message = #senses == 0 and 'No definition found in the local dictionary.' or nil
+    }, 200
 end
+
 return M

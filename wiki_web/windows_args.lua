@@ -1,8 +1,16 @@
+--------------------------------------------------------------------------------
+-- windows_args.lua
 -- LuaJIT's Windows CRT argv is ANSI. Recover UTF-8 notebook/config arguments from
 -- the original Unicode command line before parsing options.
+--------------------------------------------------------------------------------
+
 local ffi = require('ffi')
+
 local M = {}
 
+--------------------------------------------------------------------------------
+-- Unicode Environment Variable Retrieval
+--------------------------------------------------------------------------------
 function M.getenv(name)
     if ffi.os ~= 'Windows' then return os.getenv(name) end
     ffi.cdef[[
@@ -13,7 +21,9 @@ function M.getenv(name)
     assert(name:match('^[%w_]+$'), 'Invalid environment variable name')
     local kernel = ffi.load('kernel32')
     local key = ffi.new('uint16_t[?]', #name + 1)
-    for index = 1, #name do key[index - 1] = name:byte(index) end
+    for index = 1, #name do
+        key[index - 1] = name:byte(index)
+    end
     local count = kernel.GetEnvironmentVariableW(key, nil, 0)
     if count == 0 then return nil end
     local value = ffi.new('uint16_t[?]', count)
@@ -24,6 +34,9 @@ function M.getenv(name)
     return ffi.string(buffer)
 end
 
+--------------------------------------------------------------------------------
+-- Unicode Command Line Argument Normalization
+--------------------------------------------------------------------------------
 function M.normalize()
     if ffi.os ~= 'Windows' then return end
     ffi.cdef[[
@@ -49,10 +62,15 @@ function M.normalize()
     for index = 1, count[0] - 1 do
         if arguments[index]:gsub('\\', '/'):match('([^/]+)$') == name then
             arg[0] = arguments[index]
-            for offset = 1, #arg do arg[offset] = nil end
-            for offset = index + 1, count[0] - 1 do arg[offset - index] = arguments[offset] end
+            for offset = 1, #arg do
+                arg[offset] = nil
+            end
+            for offset = index + 1, count[0] - 1 do
+                arg[offset - index] = arguments[offset]
+            end
             return
         end
     end
 end
+
 return M

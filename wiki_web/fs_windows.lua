@@ -1,5 +1,9 @@
+--------------------------------------------------------------------------------
+-- fs_windows.lua
 -- Windows notebook filesystem: UTF-8 paths, pinned directories, no reparse traversal,
 -- flushed temporary writes and atomic replacement. Handles prohibit directory swaps.
+--------------------------------------------------------------------------------
+
 local ffi = require('ffi')
 local bit = require('bit')
 ffi.cdef[[
@@ -39,9 +43,9 @@ local Fs = {}
 Fs.__index = Fs
 local serial = 0
 
--- ============================================================================
--- UTF conversion and canonical folder paths
--- ============================================================================
+--------------------------------------------------------------------------------
+-- UTF Conversion and Canonical Folder Paths
+--------------------------------------------------------------------------------
 local function wide(text)
     assert(type(text) == 'string' and not text:find('%z'), 'Invalid path')
     local count = C.MultiByteToWideChar(65001, 8, text, #text, nil, 0)
@@ -136,9 +140,9 @@ function Fs.open(path)
     return setmetatable({ root = root, handle = assert(open_directory(root)) }, Fs)
 end
 
--- ============================================================================
--- Pin each ancestor without delete sharing, and reject Windows path aliases.
--- ============================================================================
+--------------------------------------------------------------------------------
+-- Pin Ancestors without Delete Sharing, and Reject Windows Path Aliases
+--------------------------------------------------------------------------------
 local function valid_component(part)
     local stem = part:match('^([^.]*)'):upper()
     return part ~= '' and part ~= '.' and part ~= '..' and not part:find('[%z\1-\31<>:"|?*\\]')
@@ -169,7 +173,9 @@ function Fs:parent(path, create)
         parts[#parts + 1] = part
     end
     local function release()
-        for _, handle in ipairs(handles) do C.CloseHandle(handle) end
+        for _, handle in ipairs(handles) do
+            C.CloseHandle(handle)
+        end
     end
     local current = self.root:gsub('/$', '')
     local ok, err = pcall(function()
@@ -183,7 +189,10 @@ function Fs:parent(path, create)
         end
         check_name(current .. '/' .. parts[#parts], parts[#parts])
     end)
-    if not ok then release(); error(err) end
+    if not ok then
+        release()
+        error(err)
+    end
     return current .. '/' .. parts[#parts], release
 end
 
@@ -240,7 +249,8 @@ function Fs:file_exists(path)
     local inspected, stamp = pcall(info, handle)
     local regular = inspected and C.GetFileType(handle) == 1
         and bit.band(stamp.attributes, DIRECTORY + REPARSE) == 0
-    C.CloseHandle(handle); release()
+    C.CloseHandle(handle)
+    release()
     assert(regular, 'Not a regular file: ' .. path)
     return true
 end
@@ -255,7 +265,10 @@ function Fs:write(path, text)
     serial = serial + 1
     local temporary = full:match('^(.*)/') .. '/.leaf-write-' .. tonumber(C.GetCurrentProcessId()) .. '-' .. serial
     local handle = C.CreateFileW(native(temporary), 0x40000000, 0, nil, 1, OPEN_FLAGS, nil)
-    if handle == INVALID then release(); error('Cannot create temporary file') end
+    if handle == INVALID then
+        release()
+        error('Cannot create temporary file')
+    end
     local ok, err = pcall(function()
         local pointer, offset, bytes = ffi.cast('const char *', text), 0, ffi.new('unsigned long[1]')
         while offset < #text do
@@ -264,7 +277,8 @@ function Fs:write(path, text)
             offset = offset + tonumber(bytes[0])
         end
         assert(C.FlushFileBuffers(handle) ~= 0, 'Cannot flush file')
-        C.CloseHandle(handle); handle = nil
+        C.CloseHandle(handle)
+        handle = nil
         assert(C.MoveFileExW(native(temporary), native(full), 1 + 8) ~= 0, 'Cannot replace file')
     end)
     if handle then C.CloseHandle(handle) end
@@ -283,9 +297,13 @@ end
 function Fs:move(source, target)
     local full, release = self:parent(source)
     local ok, destination, release_target = pcall(self.parent, self, target, true)
-    if not ok then release(); error(destination) end
+    if not ok then
+        release()
+        error(destination)
+    end
     local moved = C.MoveFileExW(native(full), native(destination), 8) ~= 0
-    release_target(); release()
+    release_target()
+    release()
     assert(moved, 'Cannot move file or attachment directory')
 end
 
@@ -298,7 +316,10 @@ function Fs:directory_exists(path)
     local success, handle, err = pcall(open_directory, full)
     release()
     assert(success, handle)
-    if handle then C.CloseHandle(handle); return true end
+    if handle then
+        C.CloseHandle(handle)
+        return true
+    end
     assert(err == 2 or err == 3, 'Unsafe or unreadable directory')
     return false
 end
@@ -387,6 +408,9 @@ function Fs:lock()
 end
 
 function Fs:close()
-    if self.handle then C.CloseHandle(self.handle); self.handle = nil end
+    if self.handle then
+        C.CloseHandle(self.handle)
+        self.handle = nil
+    end
 end
 return Fs

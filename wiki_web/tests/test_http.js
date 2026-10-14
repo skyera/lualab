@@ -388,7 +388,8 @@ test('default binding is loopback; LAN access requires an explicit host each lau
   const checkBinding = host => {
     assert.match(server.logs(), new RegExp('listening on ' + host.replaceAll('.', '\\.')));
     if (windows) {
-      const result = spawnSync('netstat', ['-ano', '-p', 'tcp'], { encoding: 'utf8' });
+      const proto = host === '0.0.0.0' ? 'tcpv6' : 'tcp';
+      const result = spawnSync('netstat', ['-ano', '-p', proto], { encoding: 'utf8' });
       assert.equal(result.status, 0, result.stderr);
       const address = (host === '0.0.0.0' ? '[::]' : host) + ':' + new URL(server.url).port;
       assert.ok(result.stdout.split(/\r?\n/).some(line => {

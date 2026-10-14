@@ -1,33 +1,51 @@
 #!/usr/bin/env luajit
+--------------------------------------------------------------------------------
+-- test_notebook.lua
 -- Temporary-notebook verification of files, links, conflicts and maintenance recovery.
+--------------------------------------------------------------------------------
+
 local root = (arg[0]:gsub('\\', '/'):match('^(.*)/') or '.') .. '/../..'
 package.path = root .. '/wiki_web/?.lua;' .. root .. '/dictionary_web/?.lua;' .. root .. '/?.lua;' .. package.path
+
 local Notebook = require('notebook')
 local links = require('links')
 local json = require('json')
 local backup = require('backup')
 local Fs = require('fs')
 local ffi = require('ffi')
-if ffi.os ~= 'Windows' then ffi.cdef[[int symlink(const char *, const char *);]] end
+
+if ffi.os ~= 'Windows' then
+    ffi.cdef[[int symlink(const char *, const char *);]]
+end
+
 local managed = arg[1] and arg[1]:gsub('\\', '/')
 assert(ffi.os ~= 'Windows' or managed, 'On Windows run node --test wiki_web/tests/test_http.js')
+
 local serial = 0
 local count = 0
+
 local function fixture(run)
     serial = serial + 1
     local directory = managed and managed .. '/notebook-' .. serial or os.tmpname()
     local cache = managed and managed .. '/cache-' .. serial or os.tmpname()
-    if not managed then os.remove(directory); os.remove(cache) end
+    if not managed then
+        os.remove(directory)
+        os.remove(cache)
+    end
     local notebook = Notebook.open(directory, cache)
     local ok, err = pcall(run, notebook, directory, cache)
     notebook:close()
-    if not managed then os.execute("rm -rf -- '" .. directory .. "' '" .. cache .. "'") end
+    if not managed then
+        os.execute("rm -rf -- '" .. directory .. "' '" .. cache .. "'")
+    end
     assert(ok, err)
 end
+
 local function test(name, run)
     local ok, err = pcall(run)
     assert(ok, name .. ': ' .. tostring(err))
-    count = count + 1; print('ok ' .. count .. ' - ' .. name)
+    count = count + 1
+    print('ok ' .. count .. ' - ' .. name)
 end
 
 test('notebook backup round trips binary images, history, trash and Unicode without changing the source', function()
@@ -107,7 +125,8 @@ test('failed restore retains an incomplete marker, closes handles and cannot ope
         local partial = Fs.open(destination)
         assert(partial:read('.leaf/restore-incomplete.json'))
         local unlock = partial:lock()
-        unlock(); partial:close()
+        unlock()
+        partial:close()
         local opened, failure = pcall(Notebook.open, destination, cache .. '-failed')
         assert(not opened and tostring(failure):find('Incomplete notebook restore', 1, true))
         assert(n:page('Home').content == 'Keep me')
@@ -325,7 +344,8 @@ test('nested Unicode pages, revision conflicts, external edits and rebuildable s
         local result, _, status = n:save(page.id, 'Stale text', page.revision)
         assert(not result and status == 409 and n:page(page.id).content == '# External edit')
         assert(#n:state('External').pages == 1 and #n:backlinks('Home') == 0)
-        n.db:query('DELETE FROM pages'); n.db:query('DELETE FROM links')
+        n.db:query('DELETE FROM pages')
+        n.db:query('DELETE FROM links')
         assert(#n:state().pages == 1)
         for _, id in ipairs({ '../escape', '/absolute', 'A//B', '.hidden', 'A/.leaf', 'A\\B', 'A#x', ' bad', 'bad ', '\255' }) do
             assert(not pcall(n.save, n, id, 'text', ''))
@@ -354,11 +374,15 @@ test('notebook lock and symlink confinement protect external files', function()
         assert(not pcall(Notebook.open, directory .. '/Other', directory .. '/Other/cache'))
         if ffi.os == 'Windows' then return end -- junction confinement is exercised by the Node integration test
         local outside = os.tmpname()
-        local file = assert(io.open(outside, 'w')); file:write('outside'); file:close()
+        local file = assert(io.open(outside, 'w'))
+        file:write('outside')
+        file:close()
         assert(ffi.C.symlink(outside, directory .. '/Escape.md') == 0)
         assert(not pcall(n.page, n, 'Escape'))
         assert(not pcall(n.save, n, 'Escape', 'overwrite', ''))
-        file = assert(io.open(outside)); assert(file:read('*a') == 'outside'); file:close()
+        file = assert(io.open(outside))
+        assert(file:read('*a') == 'outside')
+        file:close()
         os.remove(outside)
         assert(ffi.C.symlink('/tmp', directory .. '/Linked') == 0)
         assert(not pcall(n.save, n, 'Linked/escape', 'overwrite', ''))
@@ -372,7 +396,8 @@ test('image attachments survive renames, trash and restore with linked pages', f
         local png = '\137PNG\r\n\26\nfixture'
         local image = n:image(page.id, png)
         page = assert(n:save(page.id, page.content .. image.markdown, page.revision))
-        local again = n:image(page.id, png); assert(again.file == image.file)
+        local again = n:image(page.id, png)
+        assert(again.file == image.file)
         assert(n:attachment(page.id, image.file) == png)
         local renamed = assert(n:rename(page.id, 'New/Plan', page.revision))
         assert(renamed.content:find('[[Projects:Tasks]]', 1, true))
@@ -381,7 +406,8 @@ test('image attachments survive renames, trash and restore with linked pages', f
         assert(n:page('Refer').content == '[[New:Plan|Design]] `[[Projects:Design]]`')
         assert(n:trash(renamed.id, renamed.revision).deleted)
         assert(not n:page(renamed.id) and not n:attachment(renamed.id, image.file))
-        local entries = n:trash_list(); assert(#entries == 1 and entries[1].attachments)
+        local entries = n:trash_list()
+        assert(#entries == 1 and entries[1].attachments)
         local restored = assert(n:restore(entries[1].token))
         assert(restored.content == renamed.content and n:attachment(restored.id, image.file) == png)
         assert(#n:trash_list() == 0)
@@ -397,7 +423,10 @@ test('failed multi-file rename rolls back and interrupted transactions recover o
         n:save('Ref', '[[Old]]', '')
         local original, failed = n.fs.write, false
         n.fs.write = function(fs, path, text)
-            if path == 'Ref.md' and not failed then failed = true; error('Injected disk failure') end
+            if path == 'Ref.md' and not failed then
+                failed = true
+                error('Injected disk failure')
+            end
             return original(fs, path, text)
         end
         assert(not pcall(n.rename, n, 'Old', 'New', page.revision))
@@ -425,7 +454,10 @@ test('trash collision never overwrites a newly created page and restore failures
         n.fs:remove('Page.md')
         local original, failed = n.fs.write, false
         n.fs.write = function(fs, path, text)
-            if path == 'Page.md' and not failed then failed = true; error('Injected write failure') end
+            if path == 'Page.md' and not failed then
+                failed = true
+                error('Injected write failure')
+            end
             return original(fs, path, text)
         end
         assert(not pcall(n.restore, n, token))

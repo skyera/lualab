@@ -1,7 +1,16 @@
+--------------------------------------------------------------------------------
+-- hash.lua
 -- SHA-256 revisions: native Windows CNG, OpenSSL on Linux; no network dependency.
+--------------------------------------------------------------------------------
+
 local ffi = require('ffi')
+
 local M = {}
 local digest_bytes
+
+--------------------------------------------------------------------------------
+-- Cryptographic Provider Setup (Win32 BCrypt / POSIX OpenSSL)
+--------------------------------------------------------------------------------
 if ffi.os == 'Windows' then
     ffi.cdef[[
     long __stdcall BCryptOpenAlgorithmProvider(void **, const uint16_t *, const uint16_t *, unsigned long);
@@ -30,10 +39,16 @@ else
     end
 end
 
+--------------------------------------------------------------------------------
+-- Public API
+--------------------------------------------------------------------------------
 function M.sha256(text)
     local digest, hex = ffi.new('unsigned char[32]'), {}
     digest_bytes(text, digest)
-    for index = 0, 31 do hex[#hex + 1] = string.format('%02x', digest[index]) end
+    for index = 0, 31 do
+        hex[#hex + 1] = string.format('%02x', digest[index])
+    end
     return table.concat(hex)
 end
+
 return M

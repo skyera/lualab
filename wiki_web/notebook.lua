@@ -1,4 +1,8 @@
+--------------------------------------------------------------------------------
+-- notebook.lua
 -- Markdown source files, recoverable maintenance operations and local SQLite index.
+--------------------------------------------------------------------------------
+
 local Fs = require('fs')
 local DB = require('db')
 local links = require('links')
@@ -9,8 +13,10 @@ local tasks = require('tasks')
 local capture = require('capture')
 local search = require('search')
 local json = require('json')
+
 local Notebook = {}
 Notebook.__index = Notebook
+
 local SCHEMA = [[
 CREATE TABLE IF NOT EXISTS pages(id TEXT PRIMARY KEY, title TEXT NOT NULL,
     content TEXT NOT NULL, revision TEXT NOT NULL);
@@ -18,13 +24,19 @@ CREATE TABLE IF NOT EXISTS links(source TEXT NOT NULL, target TEXT NOT NULL, PRI
 CREATE INDEX IF NOT EXISTS links_target ON links(target);
 ]]
 
+--------------------------------------------------------------------------------
+-- Notebook Lifecycle & Database Initialization
+--------------------------------------------------------------------------------
 function Notebook.open(data_dir, cache_dir, progress)
     progress = progress or function() end
     progress('Opening notebook: ' .. tostring(data_dir))
     local fs = Fs.open(data_dir)
     progress('Acquiring notebook lock')
     local locked, lock = pcall(fs.lock, fs)
-    if not locked then fs:close(); error(lock) end
+    if not locked then
+        fs:close()
+        error(lock)
+    end
     local self = setmetatable({ fs = fs, lock = lock }, Notebook)
     self.history = History.open(fs)
     local ok, err = pcall(function()
@@ -51,7 +63,10 @@ function Notebook.open(data_dir, cache_dir, progress)
         progress('Scanning notebook files')
         self:sync(progress)
     end)
-    if not ok then self:close(); error(err) end
+    if not ok then
+        self:close()
+        error(err)
+    end
     return self
 end
 
@@ -103,7 +118,10 @@ function Notebook:sync(progress)
         end
         self.db:query('COMMIT;')
     end)
-    if not ok then self.db:query('ROLLBACK;'); error(err) end
+    if not ok then
+        self.db:query('ROLLBACK;')
+        error(err)
+    end
     self.page_tags = page_tags
 end
 
@@ -151,7 +169,8 @@ function Notebook:state(query)
 end
 
 function Notebook:backlinks(id)
-    require_id(id); self:sync()
+    require_id(id)
+    self:sync()
     return self.db:query('SELECT source AS id FROM links WHERE target=? ORDER BY source', { id })
 end
 
@@ -380,7 +399,8 @@ function Notebook:recover()
 end
 
 function Notebook:rename(id, destination, revision)
-    require_id(id); require_id(destination)
+    require_id(id)
+    require_id(destination)
     local page = self:page(id)
     assert(page, 'Page not found')
     if page.revision ~= revision then return nil, 'Page changed. Reload before renaming.', 409 end
@@ -431,13 +451,17 @@ function Notebook:rename(id, destination, revision)
         end
         self.fs:remove('.leaf/transaction.json')
     end)
-    if not ok then self:recover(); error(err) end
+    if not ok then
+        self:recover()
+        error(err)
+    end
     self:sync()
     return self:page(destination)
 end
 
 function Notebook:folder_plan(source, destination)
-    require_id(source); require_id(destination)
+    require_id(source)
+    require_id(destination)
     assert(source ~= destination and source:sub(1, #destination + 1) ~= destination .. '/'
         and destination:sub(1, #source + 1) ~= source .. '/', 'Source and destination folders must not overlap')
     self:sync()
@@ -565,11 +589,17 @@ function Notebook:move_folder(source, destination, revision, progress)
         end
         self.fs:remove('.leaf/transaction.json')
     end)
-    if not ok then self:recover(); error(err) end
+    if not ok then
+        self:recover()
+        error(err)
+    end
     self:sync()
     return { moved = plan.pages, mapping = plan.mapping }
 end
 
+--------------------------------------------------------------------------------
+-- Trash & Restore Operations
+--------------------------------------------------------------------------------
 function Notebook:trash_list()
     local raw = self.fs:read('.leaf/trash.json', 1024 * 1024)
     return raw and json.decode(raw) or {}
@@ -597,7 +627,10 @@ function Notebook:trash(id, revision)
         self.fs:remove(id .. '.md')
         self.fs:remove('.leaf/transaction.json')
     end)
-    if not ok then self:recover(); error(err) end
+    if not ok then
+        self:recover()
+        error(err)
+    end
     self:sync()
     return { deleted = true }
 end
@@ -627,7 +660,10 @@ function Notebook:restore(token)
                 self.fs:write('.leaf/trash.json', json.encode(entries))
                 self.fs:remove('.leaf/transaction.json')
             end)
-            if not ok then self:recover(); error(err) end
+            if not ok then
+                self:recover()
+                error(err)
+            end
             self.fs:remove('.leaf/trash/' .. token .. '.md')
             self:sync()
             return self:page(entry.id)
@@ -636,9 +672,20 @@ function Notebook:restore(token)
     return nil, 'Trashed page not found.', 404
 end
 
+--------------------------------------------------------------------------------
+-- Notebook Closure
+--------------------------------------------------------------------------------
 function Notebook:close()
-    if self.db then self.db:close(); self.db = nil end
-    if self.lock then self.lock(); self.lock = nil end
-    if self.fs then self.fs:close() end
+    if self.db then
+        self.db:close()
+        self.db = nil
+    end
+    if self.lock then
+        self.lock()
+        self.lock = nil
+    end
+    if self.fs then
+        self.fs:close()
+    end
 end
 return Notebook
