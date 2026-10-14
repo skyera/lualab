@@ -1,4 +1,8 @@
+--------------------------------------------------------------------------------
+-- store.lua
 -- Adapter over the web lookup journal and ffi_dict's shared vocabulary deck.
+--------------------------------------------------------------------------------
+
 local DB = require('db')
 local dictionary = require('ffi_dict')
 local content = require('content')
@@ -6,8 +10,13 @@ local net = require('net')
 local learning = require('learning')
 local backup = require('backup')
 local statistics = require('statistics')
+
 local Store = {}
 Store.__index = Store
+
+--------------------------------------------------------------------------------
+-- Database Initialization & Lifecycle
+--------------------------------------------------------------------------------
 
 local function checked(value, err)
     if value == nil or value == false then
@@ -17,7 +26,11 @@ local function checked(value, err)
 end
 
 function Store.open(path, schema, dictionary_path)
-    local self = setmetatable({ web = DB.open(path, schema), lookup_generation = 0, word_versions = {} }, Store)
+    local self = setmetatable({
+        web = DB.open(path, schema),
+        lookup_generation = 0,
+        word_versions = {},
+    }, Store)
     if dictionary_path and dictionary_path ~= 'none' then
         local file = io.open(dictionary_path, 'rb')
         if file then
@@ -42,8 +55,14 @@ function Store:close()
     self.web:close()
 end
 
+--------------------------------------------------------------------------------
+-- Deck & Record Adapters
+--------------------------------------------------------------------------------
+
 local function parse_synonyms(text)
-    if not text or text == '' then return nil end
+    if not text or text == '' then
+        return nil
+    end
     local list = {}
     local seen = {}
     for s in text:gmatch('[^,;]+') do
@@ -65,8 +84,8 @@ local function deck_entry(row)
         syn = row.syn,
         synonyms = parse_synonyms(row.syn),
         ant = row.ant,
-        definitions = row.definition and row.definition ~= '' and {row.definition} or {},
-        examples = row.example and row.example ~= '' and {row.example} or {},
+        definitions = row.definition and row.definition ~= '' and { row.definition } or {},
+        examples = row.example and row.example ~= '' and { row.example } or {},
     }
 end
 
@@ -91,6 +110,10 @@ function Store:get(word, source)
     return self.web:get(word, source)
 end
 
+--------------------------------------------------------------------------------
+-- Word & Proverb Lookups
+--------------------------------------------------------------------------------
+
 function Store:local_lookup(word)
     if not self.shared then
         return nil, 'Local dictionary is unavailable. Import a dictionary with ffi_dict or configure --dict-db.'
@@ -103,7 +126,8 @@ function Store:local_lookup(word)
     local definitions, examples, synonyms, antonyms = {}, {}, {}, {}
     for _, sense in ipairs(senses) do
         if sense.definition and sense.definition ~= '' and #definitions < 12 then
-            definitions[#definitions + 1] = (sense.pos and sense.pos ~= '' and sense.pos .. ' · ' or '') .. sense.definition
+            definitions[#definitions + 1] = (sense.pos and sense.pos ~= '' and sense.pos .. ' · ' or '')
+                .. sense.definition
         end
         if sense.example and sense.example ~= '' and #examples < 4 then
             examples[#examples + 1] = sense.example
@@ -137,7 +161,12 @@ function Store:daily(stamp, fetch_fn)
     if self.shared then
         local word = self.shared:wotd(stamp)
         if word then
-            daily.word = {word = word.word, meaning = word.definition or '', example = word.example or '', source = 'local'}
+            daily.word = {
+                word = word.word,
+                meaning = word.definition or '',
+                example = word.example or '',
+                source = 'local',
+            }
         end
     end
     -- Check local database for today's saved proverb first
@@ -163,11 +192,16 @@ end
 function Store:random_proverb(fetch_fn, source, quote_fn)
     -- Try fetching from online quote / proverb services first
     local online
-    if quote_fn then online = quote_fn()
-    else online = content.fetch_quote(fetch_fn or net.fetch, source) end
+    if quote_fn then
+        online = quote_fn()
+    else
+        online = content.fetch_quote(fetch_fn or net.fetch, source)
+    end
     if online and online.text and online.text ~= '' then
         local existing = self.web:find_proverb(online)
-        if existing then return existing end
+        if existing then
+            return existing
+        end
         local date, suffix = os.date('!%Y-%m-%d %H:%M:%S', os.time()), math.random(100, 999)
         online.date = date .. '-' .. suffix
         while self.web:get_proverb(online.date) do
@@ -175,12 +209,16 @@ function Store:random_proverb(fetch_fn, source, quote_fn)
             online.date = date .. '-' .. suffix
         end
         local saved = self.web:save_proverb(online)
-        if saved then return saved end
+        if saved then
+            return saved
+        end
         return online
     end
     -- Fallback: pick a random proverb from local database history
     local local_rand = self.web.random_proverb and self.web:random_proverb()
-    if local_rand then return local_rand end
+    if local_rand then
+        return local_rand
+    end
     -- Fallback: pick a historical or curated proverb
     local offset = math.random(1, 365) * 86400
     local target_date = os.date('!%Y-%m-%d', os.time() - offset)
@@ -208,6 +246,10 @@ function Store:random_word()
     end
     return content.random_word()
 end
+
+--------------------------------------------------------------------------------
+-- Vocabulary CRUD & Review Scheduling
+--------------------------------------------------------------------------------
 
 function Store:save(word, source, entry, stamp)
     local saved = self.web:save(word, source, entry, stamp)
@@ -255,7 +297,7 @@ function Store:words(query, due, stamp)
         local sql = [[SELECT w.*,s.due_at,s.interval_days,
             (SELECT count(*) FROM reviews r WHERE r.word_id=w.id) AS review_count
             FROM words w LEFT JOIN srs s ON s.word_id=w.id WHERE w.word LIKE ? ESCAPE '\']]
-        local params = {'%' .. escaped .. '%'}
+        local params = { '%' .. escaped .. '%' }
         if due then
             sql = sql .. ' AND s.due_at<=?'
             params[2] = stamp
@@ -281,21 +323,33 @@ function Store:words(query, due, stamp)
         end
     end
     table.sort(rows, function(a, b)
-        if a.last_seen ~= b.last_seen then return a.last_seen > b.last_seen end
+        if a.last_seen ~= b.last_seen then
+            return a.last_seen > b.last_seen
+        end
         return a.word < b.word
     end)
     local meanings = {}
-    for _, row in ipairs(self.web:query('SELECT * FROM study_meanings')) do meanings[row.word] = row.meaning end
-    for _, row in ipairs(rows) do row.study_meaning = meanings[row.word:lower()] or '' end
+    for _, row in ipairs(self.web:query('SELECT * FROM study_meanings')) do
+        meanings[row.word] = row.meaning
+    end
+    for _, row in ipairs(rows) do
+        row.study_meaning = meanings[row.word:lower()] or ''
+    end
     local examples = {}
-    for _, row in ipairs(self.web:query('SELECT * FROM study_examples')) do examples[row.word] = row.example end
-    for _, row in ipairs(rows) do row.study_example = examples[row.word:lower()] or '' end
+    for _, row in ipairs(self.web:query('SELECT * FROM study_examples')) do
+        examples[row.word] = row.example
+    end
+    for _, row in ipairs(rows) do
+        row.study_example = examples[row.word:lower()] or ''
+    end
     return learning.decorate(self, rows)
 end
 
 function Store:suggest(prefix, limit)
     limit = limit or 6
-    if not prefix or #prefix == 0 then return {} end
+    if not prefix or #prefix == 0 then
+        return {}
+    end
     local results = {}
     local seen = {}
     local escaped = (prefix or ''):gsub('\\', '\\\\'):gsub('%%', '\\%%'):gsub('_', '\\_')
@@ -345,7 +399,9 @@ function Store:review(id, remembered, stamp, collection, grade)
         return nil, 'Word not found.'
     end
     local next_state, err = dictionary.SM2.schedule(old, grade, stamp)
-    if not next_state then return nil, err end
+    if not next_state then
+        return nil, err
+    end
     -- Update scheduling and review history atomically in the shared database.
     checked(self.shared:exec('BEGIN IMMEDIATE;'))
     local ok, failure = pcall(function()
@@ -353,8 +409,8 @@ function Store:review(id, remembered, stamp, collection, grade)
         -- update the schedule between our state read and write.
         next_state = checked(dictionary.SM2.schedule(checked(self.shared:srs_state(id)), grade, stamp))
         checked(self.shared:run([[UPDATE srs SET ease=?,interval_days=?,due_at=?,reps=?,lapses=? WHERE word_id=?]],
-            {next_state.ease, next_state.interval_days, next_state.due_at, next_state.reps, next_state.lapses, id}))
-        checked(self.shared:run('INSERT INTO reviews(word_id,rated_at,grade) VALUES(?,?,?)', {id, stamp, grade}))
+            { next_state.ease, next_state.interval_days, next_state.due_at, next_state.reps, next_state.lapses, id }))
+        checked(self.shared:run('INSERT INTO reviews(word_id,rated_at,grade) VALUES(?,?,?)', { id, stamp, grade }))
         checked(self.shared:commit())
     end)
     if not ok then
@@ -371,11 +427,11 @@ function Store:note(id, note, collection)
     if not self.shared then
         return nil, 'Shared dictionary is unavailable.'
     end
-    if not checked(self.shared:query('SELECT id FROM words WHERE id=?', {id}))[1] then
+    if not checked(self.shared:query('SELECT id FROM words WHERE id=?', { id }))[1] then
         return nil, 'Word not found.'
     end
-    checked(self.shared:run('UPDATE words SET mnem=? WHERE id=?', {note, id}))
-    return {saved = true}
+    checked(self.shared:run('UPDATE words SET mnem=? WHERE id=?', { note, id }))
+    return { saved = true }
 end
 
 function Store:delete(id, collection)
@@ -383,7 +439,9 @@ function Store:delete(id, collection)
         local row = self.web:query('SELECT word FROM words WHERE id=?', { id })[1]
         local preserve = row and self.shared and self.shared:deck_get(row.word)
         local result, err = self.web:delete(id, not not preserve)
-        if result then self.word_versions[result.word:lower()] = (self.word_versions[result.word:lower()] or 0) + 1 end
+        if result then
+            self.word_versions[result.word:lower()] = (self.word_versions[result.word:lower()] or 0) + 1
+        end
         return result, err
     end
     if not self.shared then
@@ -391,31 +449,39 @@ function Store:delete(id, collection)
     end
     -- One SQLite connection coordinates rollback across the two databases.
     if not self.deletion_attached then
-        self.web:query('ATTACH DATABASE ? AS shared_deletion', {self.shared.path})
+        self.web:query('ATTACH DATABASE ? AS shared_deletion', { self.shared.path })
         self.deletion_attached = true
     end
     self.web:query('BEGIN IMMEDIATE;')
     local ok, result = pcall(function()
-        local row = self.web:query('SELECT word FROM shared_deletion.words WHERE id=?', {id})[1]
-        if not row then return nil end
-        for _, name in ipairs({'study_plan_words', 'reviews', 'srs'}) do
-            self.web:query('DELETE FROM shared_deletion.' .. name .. ' WHERE word_id=?', {id})
+        local row = self.web:query('SELECT word FROM shared_deletion.words WHERE id=?', { id })[1]
+        if not row then
+            return nil
         end
-        self.web:query('DELETE FROM shared_deletion.words WHERE id=?', {id})
-        self.web:query('DELETE FROM main.review_log WHERE word_id IN (SELECT id FROM main.words WHERE lower(word)=lower(?))', { row.word })
-        self.web:query('DELETE FROM main.words WHERE lower(word)=lower(?)', {row.word})
+        for _, name in ipairs({ 'study_plan_words', 'reviews', 'srs' }) do
+            self.web:query('DELETE FROM shared_deletion.' .. name .. ' WHERE word_id=?', { id })
+        end
+        self.web:query('DELETE FROM shared_deletion.words WHERE id=?', { id })
+        self.web:query('DELETE FROM main.review_log WHERE word_id IN '
+            .. '(SELECT id FROM main.words WHERE lower(word)=lower(?))', { row.word })
+        self.web:query('DELETE FROM main.words WHERE lower(word)=lower(?)', { row.word })
         self.web:query('DELETE FROM main.study_meanings WHERE word=lower(?)', { row.word })
         self.web:query('DELETE FROM main.study_examples WHERE word=lower(?)', { row.word })
         self.web:query('COMMIT;')
-        return {deleted = true, word = row.word, collection = 'tui'}
+        return { deleted = true, word = row.word, collection = 'tui' }
     end)
     if not ok or not result then
         self.web:query('ROLLBACK;')
     end
-    if not ok then error(result) end
-    if result then self.word_versions[result.word:lower()] = (self.word_versions[result.word:lower()] or 0) + 1 end
+    if not ok then
+        error(result)
+    end
+    if result then
+        self.word_versions[result.word:lower()] = (self.word_versions[result.word:lower()] or 0) + 1
+    end
     return result, not result and 'Word not found.' or nil
 end
+
 function Store:organize(id, collection, folder, tags)
     return learning.organize(self, id, collection, folder, tags)
 end
@@ -423,6 +489,10 @@ end
 function Store:session(params, stamp)
     return learning.session(self, params, stamp)
 end
+
+--------------------------------------------------------------------------------
+-- Backup & Supplementary Study Notes
+--------------------------------------------------------------------------------
 
 function Store:export_backup()
     return backup.export(self)
@@ -434,7 +504,9 @@ end
 
 function Store:restore(payload)
     local result, err = backup.restore(self, payload)
-    if result then self.lookup_generation = self.lookup_generation + 1 end
+    if result then
+        self.lookup_generation = self.lookup_generation + 1
+    end
     return result, err
 end
 
@@ -450,7 +522,9 @@ function Store:meaning(id, collection, meaning)
     elseif collection == 'web' then
         row = self.web:query('SELECT word FROM words WHERE id=?', { id })[1]
     end
-    if not row then return nil, 'Word not found.' end
+    if not row then
+        return nil, 'Word not found.'
+    end
     self.web:query([[INSERT INTO study_meanings(word,meaning) VALUES(lower(?),?)
         ON CONFLICT(word) DO UPDATE SET meaning=excluded.meaning]], { row.word, meaning })
     return { saved = true, study_meaning = meaning }
@@ -472,9 +546,12 @@ function Store:example(id, collection, example)
     elseif collection == 'web' then
         row = self.web:query('SELECT word FROM words WHERE id=?', { id })[1]
     end
-    if not row then return nil, 'Word not found.' end
+    if not row then
+        return nil, 'Word not found.'
+    end
     self.web:query([[INSERT INTO study_examples(word,example) VALUES(lower(?),?)
         ON CONFLICT(word) DO UPDATE SET example=excluded.example]], { row.word, example })
     return { saved = true, study_example = example }
 end
+
 return Store

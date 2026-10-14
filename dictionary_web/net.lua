@@ -1,6 +1,15 @@
--- HTTPS via libcurl FFI. No shells, temporary credentials, or command arguments.
+--------------------------------------------------------------------------------
+-- net.lua
+-- HTTPS networking via libcurl and native FFI bindings.
+--------------------------------------------------------------------------------
+
 local ffi = require('ffi')
 local jit = require('jit')
+
+--------------------------------------------------------------------------------
+-- FFI Declarations & Options
+--------------------------------------------------------------------------------
+
 ffi.cdef[[
 typedef void WB_CURL;
 int curl_global_init(long);
@@ -12,10 +21,12 @@ int curl_easy_getinfo(WB_CURL *, int, ...);
 const char *curl_easy_strerror(int);
 unsigned char *SHA256(const unsigned char *, size_t, unsigned char *);
 ]]
+
 local curl, curl_info
 local tls_revoke_best_effort = false
 local proxy_mode = 'auto'
 local http_client = ffi.os == 'Windows' and 'native' or 'curl'
+
 local CURLOPT = {
     TIMEOUT         = 13,
     FOLLOWLOCATION  = 52,
@@ -37,10 +48,15 @@ local CURLOPT = {
     USERAGENT       = 10018,
     WRITEFUNCTION   = 20011,
 }
+
 local CURLINFO_RESPONSE_CODE = 0x200002
 local CURLPROTO_HTTPS = 2
 
 local M = {}
+
+--------------------------------------------------------------------------------
+-- Client & Proxy Configuration
+--------------------------------------------------------------------------------
 
 function M.set_curl(library, info)
     assert(not curl or curl == library, 'Curl library is already in use')
@@ -56,7 +72,8 @@ end
 
 function M.set_tls_revoke_best_effort(enabled)
     assert(type(enabled) == 'boolean', 'TLS revocation setting must be true or false')
-    local schannel = http_client == 'curl' and curl_info and curl_info.tls and curl_info.tls:find('Schannel', 1, true)
+    local schannel = http_client == 'curl' and curl_info and curl_info.tls
+        and curl_info.tls:find('Schannel', 1, true)
     if enabled and schannel then
         assert(curl_info.version_num and curl_info.version_num >= 0x074600,
             'Best-effort revocation requires Schannel curl 7.70 or newer. Use --curl-select.')
@@ -74,30 +91,51 @@ function M.set_proxy(value)
 end
 
 local function request_proxy(url)
-    if proxy_mode == 'none' then return '', 'direct override' end
-    if proxy_mode ~= 'auto' then return proxy_mode, 'configured proxy' end
-    if ffi.os ~= 'Windows' then return nil, 'curl defaults' end
+    if proxy_mode == 'none' then
+        return '', 'direct override'
+    end
+    if proxy_mode ~= 'auto' then
+        return proxy_mode, 'configured proxy'
+    end
+    if ffi.os ~= 'Windows' then
+        return nil, 'curl defaults'
+    end
     local windows_args = require('windows_args')
     for _, name in ipairs({ 'https_proxy', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY' }) do
         local value = windows_args.getenv(name)
-        if value and value ~= '' then return nil, 'curl environment proxy' end
+        if value and value ~= '' then
+            return nil, 'curl environment proxy'
+        end
     end
     local proxy, source, warning = require('windows_proxy').resolve(url)
-    if warning then io.stderr:write('Wordbook warning: ' .. warning .. '\n'); io.stderr:flush() end
+    if warning then
+        io.stderr:write('Wordbook warning: ' .. warning .. '\n')
+        io.stderr:flush()
+    end
     return proxy, source
 end
 
 local function load_curl()
-    if curl_info then return end
+    if curl_info then
+        return
+    end
     local source = debug.getinfo(1, 'S').source:sub(2):gsub('\\', '/')
     local directory = source:match('^(.*)/') or '.'
     curl, curl_info = require('curl_loader').load(directory .. '/..', { script_dir = directory }, {})
 end
 
+--------------------------------------------------------------------------------
+-- HTTPS Request Execution
+--------------------------------------------------------------------------------
+
 function M.fetch(url, body)
-    if http_client == 'native' then return require('net_windows').fetch(url, body, proxy_mode) end
+    if http_client == 'native' then
+        return require('net_windows').fetch(url, body, proxy_mode)
+    end
     load_curl()
-    if curl_info and curl_info.error then return nil, curl_info.error end
+    if curl_info and curl_info.error then
+        return nil, curl_info.error
+    end
     if not curl then
         return nil, 'No HTTPS-capable curl library available. Use --curl-select.'
     end
@@ -111,7 +149,9 @@ function M.fetch(url, body)
     local callback = ffi.cast('size_t (*)(char *, size_t, size_t, void *)', function(data, unit, count)
         local bytes = tonumber(unit * count)
         size = size + bytes
-        if size > 2 * 1024 * 1024 then return 0 end
+        if size > 2 * 1024 * 1024 then
+            return 0
+        end
         chunks[#chunks + 1] = ffi.string(data, bytes)
         return bytes
     end)
@@ -126,7 +166,9 @@ function M.fetch(url, body)
         option(CURLOPT.ERRORBUFFER, error_buffer)
         local proxy
         proxy, route = request_proxy(url)
-        if proxy ~= nil then option(CURLOPT.PROXY, proxy) end
+        if proxy ~= nil then
+            option(CURLOPT.PROXY, proxy)
+        end
         local public_page = url:match('^https://www%.iciba%.com/') or url:match('^https://dict%.cn/')
             or url:match('^https://www%.youdao%.com/')
         local agent = public_page and 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
@@ -134,7 +176,9 @@ function M.fetch(url, body)
             or 'Wordbook/1.0 (personal dictionary)'
         option(CURLOPT.USERAGENT, agent)
         option(CURLOPT.ACCEPT_ENCODING, '')
-        if public_page then option(CURLOPT.HTTP_VERSION, ffi.new('long', 2)) end -- HTTP/1.1
+        if public_page then
+            option(CURLOPT.HTTP_VERSION, ffi.new('long', 2)) -- HTTP/1.1
+        end
         option(CURLOPT.WRITEFUNCTION, callback)
         option(CURLOPT.FOLLOWLOCATION, ffi.new('long', 1))
         option(CURLOPT.MAXREDIRS, ffi.new('long', 4))
@@ -155,7 +199,9 @@ function M.fetch(url, body)
         local rc = curl.curl_easy_perform(handle)
         if rc ~= 0 then
             local detail = ffi.string(error_buffer)
-            if detail == '' then detail = ffi.string(curl.curl_easy_strerror(rc)) end
+            if detail == '' then
+                detail = ffi.string(curl.curl_easy_strerror(rc))
+            end
             return nil, 'Dictionary connection failed: ' .. detail .. ' (curl ' .. curl_info.version
                 .. ', ' .. curl_info.path .. ', route: ' .. route .. ', URL: ' .. url .. ')'
         end
@@ -173,8 +219,13 @@ function M.fetch(url, body)
     end
     return result, message
 end
+
 -- curl_easy_perform invokes Lua callbacks; keep this FFI call off JIT traces.
 jit.off(M.fetch, true)
+
+--------------------------------------------------------------------------------
+-- Cryptography & URL Encoding Helpers
+--------------------------------------------------------------------------------
 
 local crypto_names = {
     'crypto',
@@ -185,8 +236,11 @@ local crypto_names = {
     'libcrypto.dylib',
 }
 local crypto
+
 local function get_crypto()
-    if crypto ~= nil then return crypto end
+    if crypto ~= nil then
+        return crypto
+    end
     for _, name in ipairs(crypto_names) do
         local ok, lib = pcall(ffi.load, name)
         if ok and lib then
@@ -199,7 +253,9 @@ end
 
 function M.sha256(text)
     local crypt = get_crypto()
-    if not crypt then error('OpenSSL crypto library not found') end
+    if not crypt then
+        error('OpenSSL crypto library not found')
+    end
     local digest = ffi.new('unsigned char[32]')
     assert(crypt.SHA256(text, #text, digest) ~= nil, 'SHA256 failed')
     local hex = {}
@@ -226,4 +282,5 @@ function M.form(values)
     end
     return table.concat(parts, '&')
 end
+
 return M

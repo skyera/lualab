@@ -1,29 +1,44 @@
+--------------------------------------------------------------------------------
+-- learning.lua
 -- Word organization and bounded review sessions across web and shared TUI decks.
+--------------------------------------------------------------------------------
+
 local json = require('json')
 local M = {}
 
 --------------------------------------------------------------------------------
--- Organization validation and persistence
+-- Organization Validation & Persistence
 --------------------------------------------------------------------------------
+
 local function label(value)
-    if type(value) ~= 'string' or value:find('[%z\1-\31\127]') then return nil end
+    if type(value) ~= 'string' or value:find('[%z\1-\31\127]') then
+        return nil
+    end
     value = value:gsub('^%s+', ''):gsub('%s+$', ''):gsub('%s+', ' ')
     local count, bytes = 0, 0
     for char in value:gmatch('[\1-\127\194-\244][\128-\191]*') do
         local first, second = char:byte(1, 2)
         local expected = first < 128 and 1 or first < 224 and 2 or first < 240 and 3 or 4
         if #char ~= expected or (first == 224 and second < 160) or (first == 237 and second >= 160)
-            or (first == 240 and second < 144) or (first == 244 and second >= 144) then return nil end
+            or (first == 240 and second < 144) or (first == 244 and second >= 144) then
+            return nil
+        end
         count, bytes = count + 1, bytes + #char
     end
-    if count > 64 or bytes ~= #value then return nil end
+    if count > 64 or bytes ~= #value then
+        return nil
+    end
     return value
 end
 
 function M.validate(folder, tags)
     folder = label(folder)
-    if not folder then return nil, 'Use a collection name of at most 64 characters.' end
-    if type(tags) ~= 'table' or #tags > 8 then return nil, 'Use at most eight tags.' end
+    if not folder then
+        return nil, 'Use a collection name of at most 64 characters.'
+    end
+    if type(tags) ~= 'table' or #tags > 8 then
+        return nil, 'Use at most eight tags.'
+    end
     local count = 0
     for key in pairs(tags) do
         if type(key) ~= 'number' or key < 1 or key % 1 ~= 0 or key > #tags then
@@ -31,7 +46,9 @@ function M.validate(folder, tags)
         end
         count = count + 1
     end
-    if count ~= #tags then return nil, 'Tags must be a list.' end
+    if count ~= #tags then
+        return nil, 'Tags must be a list.'
+    end
     local clean, seen = {}, {}
     for _, value in ipairs(tags) do
         local tag = label(value)
@@ -61,7 +78,9 @@ end
 
 function M.organize(store, id, collection, folder, tags)
     local data, err = M.validate(folder, tags)
-    if not data then return nil, err, 400 end
+    if not data then
+        return nil, err, 400
+    end
     local row
     if collection == 'tui' and store.shared then
         local rows, failure = store.shared:query('SELECT word FROM words WHERE id=?', { id })
@@ -70,7 +89,9 @@ function M.organize(store, id, collection, folder, tags)
     elseif collection == 'web' then
         row = store.web:query('SELECT word FROM words WHERE id=?', { id })[1]
     end
-    if not row then return nil, 'Word not found.', 404 end
+    if not row then
+        return nil, 'Word not found.', 404
+    end
     store.web:query([[INSERT INTO word_organization(word,folder,tags) VALUES(?,?,?)
         ON CONFLICT(word) DO UPDATE SET folder=excluded.folder,tags=excluded.tags]],
         { row.word:lower(), data.folder, json.encode(data.tags) })
@@ -78,8 +99,9 @@ function M.organize(store, id, collection, folder, tags)
 end
 
 --------------------------------------------------------------------------------
--- Review selection; existing schedulers still perform all grading
+-- Review Selection (Spaced Repetition Sessions)
 --------------------------------------------------------------------------------
+
 function M.session(store, params, stamp)
     params = params or {}
     stamp = stamp or os.time()
@@ -93,31 +115,55 @@ function M.session(store, params, stamp)
     end
     local folder, tag = params.folder or '', params.tag or ''
     folder, tag = label(folder), label(tag)
-    if not folder or not tag then return nil, 'Invalid collection or tag filter.' end
+    if not folder or not tag then
+        return nil, 'Invalid collection or tag filter.'
+    end
     local matches = {}
     for _, row in ipairs(store:words()) do
         local due = (row.due_at or 0) <= stamp
         local reviewed = (row.review_count or 0) > 0
         local keep = mode == 'all' or (mode == 'due' and due)
             or (mode == 'new' and not reviewed) or (mode == 'overdue' and due and reviewed)
-        if folder ~= '' and row.folder:lower() ~= folder:lower() then keep = false end
+        if folder ~= '' and row.folder:lower() ~= folder:lower() then
+            keep = false
+        end
         if tag ~= '' then
             local found = false
             for _, value in ipairs(row.tags) do
-                if value:lower() == tag:lower() then found = true end
+                if value:lower() == tag:lower() then
+                    found = true
+                end
             end
-            if not found then keep = false end
+            if not found then
+                keep = false
+            end
         end
-        if keep then matches[#matches + 1] = row end
+        if keep then
+            matches[#matches + 1] = row
+        end
     end
     table.sort(matches, function(a, b)
-        if a.due_at ~= b.due_at then return a.due_at < b.due_at end
-        if a.word ~= b.word then return a.word < b.word end
-        if a.collection ~= b.collection then return a.collection < b.collection end
+        if a.due_at ~= b.due_at then
+            return a.due_at < b.due_at
+        end
+        if a.word ~= b.word then
+            return a.word < b.word
+        end
+        if a.collection ~= b.collection then
+            return a.collection < b.collection
+        end
         return a.id < b.id
     end)
     local total = #matches
-    while #matches > limit do table.remove(matches) end
-    return { words = matches, total_matching = total, mode = mode, limit = limit }
+    while #matches > limit do
+        table.remove(matches)
+    end
+    return {
+        words = matches,
+        total_matching = total,
+        mode = mode,
+        limit = limit,
+    }
 end
+
 return M

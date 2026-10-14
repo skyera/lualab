@@ -1,7 +1,15 @@
--- Winsock transport for the shared coroutine HTTP server. Console Ctrl-C is read
--- on the Lua thread, avoiding unsafe Lua callbacks on Windows control threads.
+--------------------------------------------------------------------------------
+-- http_windows.lua
+-- Winsock transport and console Ctrl-C handler for HTTP server on Windows.
+--------------------------------------------------------------------------------
+
 local ffi = require('ffi')
 local bit = require('bit')
+
+--------------------------------------------------------------------------------
+-- FFI & Winsock Declarations
+--------------------------------------------------------------------------------
+
 ffi.cdef[[
 struct leaf_wsapollfd { uintptr_t fd; short events; short revents; };
 struct leaf_key_event { unsigned short kind, padding; int down;
@@ -30,6 +38,7 @@ int __stdcall SetConsoleMode(void *, unsigned long);
 int __stdcall PeekConsoleInputW(void *, struct leaf_key_event *, unsigned long, unsigned long *);
 int __stdcall ReadConsoleInputW(void *, struct leaf_key_event *, unsigned long, unsigned long *);
 ]]
+
 local W, K = ffi.load('ws2_32'), ffi.load('kernel32')
 local INVALID = ffi.cast('uintptr_t', -1)
 local SIGNAL_FD = 2147483647
@@ -37,26 +46,45 @@ local M = { C = {} }
 local C = M.C
 local started, console, console_mode
 
+--------------------------------------------------------------------------------
+-- Error Handling & Cleanup
+--------------------------------------------------------------------------------
+
 function M.errno()
     local err = W.WSAGetLastError()
     return err == 10035 and 11 or err == 10004 and 4 or err
 end
 
-function M.now() return tonumber(K.GetTickCount64()) / 1000 end
+function M.now()
+    return tonumber(K.GetTickCount64()) / 1000
+end
 
 function M.cleanup()
-    if console then K.SetConsoleMode(console, console_mode); console = nil end
-    if started then W.WSACleanup(); started = false end
+    if console then
+        K.SetConsoleMode(console, console_mode)
+        console = nil
+    end
+    if started then
+        W.WSACleanup()
+        started = false
+    end
 end
 
 local function nonblocking(fd)
-    if fd == INVALID then return -1 end
+    if fd == INVALID then
+        return -1
+    end
     local enabled = ffi.new('unsigned long[1]', 1)
     if W.ioctlsocket(fd, bit.tobit(0x8004667e), enabled) ~= 0 then
-        W.closesocket(fd); return -1
+        W.closesocket(fd)
+        return -1
     end
     return tonumber(fd)
 end
+
+--------------------------------------------------------------------------------
+-- Winsock Socket Wrappers
+--------------------------------------------------------------------------------
 
 function C.socket(family, kind, protocol)
     if not started then
@@ -67,28 +95,74 @@ function C.socket(family, kind, protocol)
     return nonblocking(W.socket(family, bit.band(kind, 15), protocol))
 end
 
-function C.accept(fd) return nonblocking(W.accept(fd, nil, nil)) end
+function C.accept(fd)
+    return nonblocking(W.accept(fd, nil, nil))
+end
+
 function C.close(fd)
-    if fd == SIGNAL_FD then return 0 end
+    if fd == SIGNAL_FD then
+        return 0
+    end
     return W.closesocket(fd)
 end
+
 function C.setsockopt(fd, level, option, value, size)
     -- Exclusive bind prevents another Windows process from stealing this address.
     return W.setsockopt(fd, level == 1 and 0xffff or level,
         level == 1 and option == 2 and -5 or option, ffi.cast('const char *', value), size)
 end
-function C.bind(fd, address, size) return W.bind(fd, address, size) end
-function C.listen(fd, count) return W.listen(fd, count) end
-function C.getsockname(fd, address, size) return W.getsockname(fd, address, ffi.cast('int *', size)) end
-function C.recv(fd, buffer, size) return W.recv(fd, buffer, size, 0) end
-function C.send(fd, buffer, size) return W.send(fd, buffer, size, 0) end
-function C.htons(value) return W.htons(value) end
-function C.ntohs(value) return W.ntohs(value) end
-function C.htonl(value) return W.htonl(value) end
-function C.sigemptyset() return 0 end
-function C.sigaddset() return 0 end
-function C.sigprocmask() return 0 end
-function C.read() return 0 end
+
+function C.bind(fd, address, size)
+    return W.bind(fd, address, size)
+end
+
+function C.listen(fd, count)
+    return W.listen(fd, count)
+end
+
+function C.getsockname(fd, address, size)
+    return W.getsockname(fd, address, ffi.cast('int *', size))
+end
+
+function C.recv(fd, buffer, size)
+    return W.recv(fd, buffer, size, 0)
+end
+
+function C.send(fd, buffer, size)
+    return W.send(fd, buffer, size, 0)
+end
+
+function C.htons(value)
+    return W.htons(value)
+end
+
+function C.ntohs(value)
+    return W.ntohs(value)
+end
+
+function C.htonl(value)
+    return W.htonl(value)
+end
+
+function C.sigemptyset()
+    return 0
+end
+
+function C.sigaddset()
+    return 0
+end
+
+function C.sigprocmask()
+    return 0
+end
+
+function C.read()
+    return 0
+end
+
+--------------------------------------------------------------------------------
+-- Console Ctrl-C Signal Handling & Polling
+--------------------------------------------------------------------------------
 
 function C.signalfd()
     local handle, mode = K.GetStdHandle(0xfffffff6), ffi.new('unsigned long[1]')
@@ -102,10 +176,14 @@ function C.signalfd()
 end
 
 local function interrupted()
-    if not console then return false end
+    if not console then
+        return false
+    end
     local event, count = ffi.new('struct leaf_key_event[1]'), ffi.new('unsigned long[1]')
     while K.PeekConsoleInputW(console, event, 1, count) ~= 0 and count[0] > 0 do
-        if K.ReadConsoleInputW(console, event, 1, count) == 0 then break end
+        if K.ReadConsoleInputW(console, event, 1, count) == 0 then
+            break
+        end
         if event[0].kind == 1 and event[0].down ~= 0
             and (event[0].character == 3 or (event[0].key == 67 and bit.band(event[0].control, 12) ~= 0)) then
             return true
@@ -133,4 +211,5 @@ function M.poll(fds, count, timeout)
     end
     return result
 end
+
 return M

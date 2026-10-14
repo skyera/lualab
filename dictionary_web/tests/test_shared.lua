@@ -1,35 +1,61 @@
 #!/usr/bin/env luajit
+--------------------------------------------------------------------------------
+-- test_shared.lua
 -- Wordbook and TUI shared vocabulary, note and scheduling regression tests.
+--------------------------------------------------------------------------------
+
 local directory = (arg[0]:match('^(.*)/') or '.') .. '/..'
 package.path = directory .. '/?.lua;' .. directory .. '/../?.lua;' .. package.path
+
 local Store = require('store')
 local dictionary = require('ffi_dict')
 local service = require('service')
 local json = require('json')
+
 local file = assert(io.open(directory .. '/schema.sql', 'rb'))
-local schema = file:read('*a'); file:close()
+local schema = file:read('*a')
+file:close()
+
+--------------------------------------------------------------------------------
+-- Test Harness & Fixture Setup
+--------------------------------------------------------------------------------
+
 local count = 0
+
 local function test(name, run)
     local ok, err = pcall(run)
     assert(ok, name .. ': ' .. tostring(err))
-    count = count + 1; print('ok ' .. count .. ' - ' .. name)
+    count = count + 1
+    print('ok ' .. count .. ' - ' .. name)
 end
+
 local function fixture(run)
     local shared_path, web_path = os.tmpname(), os.tmpname()
     local native = assert(dictionary.Database.open(shared_path))
-    assert(native:dict_replace_word('hello', {{pos = 'interjection', definition = 'A greeting.', example = 'Hello, friend.'}}) == 1)
-    assert(native:dict_replace_word('learn', {{pos = 'verb', definition = 'To gain knowledge.', example = 'We learn daily.', syn = 'study', ant = 'forget'},
-        {pos = 'verb', definition = 'To discover.'}}) == 2)
-    local deck_id = assert(native:deck_add({word = 'hello', mnem = 'Existing TUI note'}, 100))
+    assert(native:dict_replace_word('hello', {
+        { pos = 'interjection', definition = 'A greeting.', example = 'Hello, friend.' },
+    }) == 1)
+    assert(native:dict_replace_word('learn', {
+        { pos = 'verb', definition = 'To gain knowledge.', example = 'We learn daily.', syn = 'study', ant = 'forget' },
+        { pos = 'verb', definition = 'To discover.' },
+    }) == 2)
+    local deck_id = assert(native:deck_add({ word = 'hello', mnem = 'Existing TUI note' }, 100))
     assert(native:srs_apply(deck_id, 2, 200))
     local store = Store.open(web_path, schema, shared_path)
     local ok, err = pcall(run, store, native, deck_id, web_path, shared_path)
-    store:close(); native:close()
-    for _, path in ipairs({shared_path, web_path}) do
-        os.remove(path); os.remove(path .. '-wal'); os.remove(path .. '-shm')
+    store:close()
+    native:close()
+    for _, path in ipairs({ shared_path, web_path }) do
+        os.remove(path)
+        os.remove(path .. '-wal')
+        os.remove(path .. '-shm')
     end
     assert(ok, err)
 end
+
+--------------------------------------------------------------------------------
+-- Deck Availability & Lookup Synchronization
+--------------------------------------------------------------------------------
 
 test('existing deck and dictionary become available without resetting state', function()
     fixture(function(store, native, id)
@@ -47,17 +73,20 @@ end)
 
 test('offline search adds imported word to the shared TUI deck once', function()
     fixture(function(store, native)
-        local function no_network() error('Network must not be used for local lookup') end
-        local first = assert(service.search(store, {word = ' LEARN ', source = 'local'}, no_network, 1000))
+        local function no_network()
+            error('Network must not be used for local lookup')
+        end
+        local first = assert(service.search(store, { word = ' LEARN ', source = 'local' }, no_network, 1000))
         assert(first.collection == 'tui' and first.entry.definitions[1] == 'verb · To gain knowledge.')
         assert(not first.source_url and not first.error)
         assert(native:deck_get('learn').id == first.id and native:deck_get('learn').due_at == 1000)
-        assert(native:deck_get('learn').pos == 'verb' and native:deck_get('learn').syn == 'study' and native:deck_get('learn').ant == 'forget')
-        local second = assert(service.search(store, {word = 'learn', source = 'local'}, no_network, 2000))
+        assert(native:deck_get('learn').pos == 'verb' and native:deck_get('learn').syn == 'study'
+            and native:deck_get('learn').ant == 'forget')
+        local second = assert(service.search(store, { word = 'learn', source = 'local' }, no_network, 2000))
         assert(second.id == first.id and second.lookup_count == 2 and not second.cached)
         assert(store:words('learn')[1].last_seen == 2000 and store:words('learn')[1].lookup_count == 2)
         assert(native:scalar('SELECT count(*) FROM words') == 2 and #store:words() == 2)
-        local missing = assert(service.search(store, {word = 'not-in-dictionary', source = 'local'}, no_network))
+        local missing = assert(service.search(store, { word = 'not-in-dictionary', source = 'local' }, no_network))
         assert(missing.error and not missing.saved and not missing.id)
         assert(not store.web:get('not-in-dictionary', 'local'))
         assert(not native:deck_get('not-in-dictionary'))
@@ -66,8 +95,8 @@ end)
 
 test('notes and definitions update both ways with independent overlapping IDs', function()
     fixture(function(store, native, id)
-        local online = assert(service.search(store, {word = 'hello', source = 'dict.cn'}, function()
-            return {definitions = {'online meaning'}, examples = {}, phonetic = ''}
+        local online = assert(service.search(store, { word = 'hello', source = 'dict.cn' }, function()
+            return { definitions = { 'online meaning' }, examples = {}, phonetic = '' }
         end, 1000))
         assert(online.id == id and online.collection == 'tui' and online.note == 'Existing TUI note')
         assert(#store:words() == 1)
@@ -75,13 +104,18 @@ test('notes and definitions update both ways with independent overlapping IDs', 
         assert(unrelated.collection == 'web')
         assert(store:note(id, '<study>web note</study>', 'tui').saved)
         assert(native:deck_get('hello').mnem == '<study>web note</study>')
-        assert(native:run('UPDATE words SET mnem=?,definition=? WHERE id=?', {'TUI updated note', 'Updated TUI meaning', id}))
+        assert(native:run('UPDATE words SET mnem=?,definition=? WHERE id=?',
+            { 'TUI updated note', 'Updated TUI meaning', id }))
         assert(store:words('hello')[1].note == 'TUI updated note')
         assert(store:local_lookup('hello').definitions[1] == 'Updated TUI meaning')
         assert(store.web:get('other', 'dict.cn').note == '')
         assert(not store:note(99999, 'missing', 'tui'))
     end)
 end)
+
+--------------------------------------------------------------------------------
+-- Scheduling, Lifecycle & Cross-Database Transactions
+--------------------------------------------------------------------------------
 
 test('web SM-2 grades and TUI reviews share scheduling and history', function()
     fixture(function(store, native, id)
@@ -103,7 +137,7 @@ end)
 
 test('due filtering does not leak web duplicates of a scheduled TUI word', function()
     fixture(function(store, native, id)
-        store:save('hello', 'youdao', {definitions = {'never cached'}}, 100)
+        store:save('hello', 'youdao', { definitions = { 'never cached' } }, 100)
         assert(#store:words('', true, 300) == 0)
         assert(#store:words('', false, 300) == 1)
         assert(not store.web:get('hello', 'youdao').entry)
@@ -133,22 +167,26 @@ end)
 
 test('API rejects unknown collections and invalid shared grades', function()
     fixture(function(store, _, id)
-        local _, status = service.route(store, 'POST', '/api/review', {}, {id = id, collection = 'tui', remembered = true, grade = 4})
+        local _, status = service.route(store, 'POST', '/api/review', {},
+            { id = id, collection = 'tui', remembered = true, grade = 4 })
         assert(status == 400)
-        local _, invalid = service.route(store, 'POST', '/api/note', {}, {id = id, collection = 'unknown', note = 'bad'})
+        local _, invalid = service.route(store, 'POST', '/api/note', {},
+            { id = id, collection = 'unknown', note = 'bad' })
         assert(invalid == 400)
-        local result, code = service.route(store, 'POST', '/api/review', {}, {id = id, collection = 'tui', remembered = true, grade = 1})
+        local result, code = service.route(store, 'POST', '/api/review', {},
+            { id = id, collection = 'tui', remembered = true, grade = 1 })
         assert(code == 200 and result.interval_days >= 0.5)
         assert(json.encode(store:words()):find('"collection":"tui"', 1, true))
     end)
 end)
+
 test('daily word matches the TUI selection and falls back when integration is disabled', function()
     fixture(function(store, native)
         local selected = store:daily(1000)
         assert(selected.word.word == native:wotd(1000).word)
         assert(selected.word.meaning == native:wotd(1000).definition and selected.word.source == 'local')
         assert(selected.proverb.text and selected.date == '1970-01-01')
-        
+
         -- Custom online fetcher saves into SQLite and subsequent calls read from SQLite
         local mock_json = json.encode({
             content = 'Knowledge is power.',
@@ -167,7 +205,9 @@ test('daily word matches the TUI selection and falls back when integration is di
         assert(fetched_count == 1)
 
         -- Second call for same date should read from SQLite cache without invoking fetcher
-        local cached = store:daily(100000, function() error('Should not fetch') end)
+        local cached = store:daily(100000, function()
+            error('Should not fetch')
+        end)
         assert(cached.proverb.text == 'Knowledge is power.')
         assert(cached.proverb.chinese == '知识就是力量。')
         assert(fetched_count == 1)
@@ -176,10 +216,11 @@ test('daily word matches the TUI selection and falls back when integration is di
     assert(not store:daily(1000).word.source and store:daily(1000).word.meaning ~= '')
     store:close()
 end)
+
 test('all-source lookup preserves one shared word, notes and existing review progress', function()
     fixture(function(store, native, id)
-        local all = assert(service.search(store, {word = 'hello', source = 'all'}, function(source)
-            return {definitions = {'Meaning from ' .. source}, examples = {}, phonetic = ''}
+        local all = assert(service.search(store, { word = 'hello', source = 'all' }, function(source)
+            return { definitions = { 'Meaning from ' .. source }, examples = {}, phonetic = '' }
         end, 10000))
         assert(#all.results == 4 and all.results[2].entry.definitions[1]:find('A greeting.', 1, true))
         for _, result in ipairs(all.results) do
@@ -193,26 +234,28 @@ test('all-source lookup preserves one shared word, notes and existing review pro
         assert(store.web:get('hello', 'iciba').entry)
     end)
 end)
+
 test('shared deletion cleans related rows and all web copies but preserves imported definitions', function()
     fixture(function(store, native, id)
         native:exec('PRAGMA foreign_keys=ON;')
-        assert(native:run('INSERT INTO study_plan_words(word_id,source_track,plan_date) VALUES(?,?,?)', {id, 'mixed', '1970-01-01'}))
-        store:save('hello', 'local', {definitions = {'local'}, examples = {}}, 1000)
-        store:save('HELLO', 'dict.cn', {definitions = {'online'}, examples = {}}, 1000)
+        assert(native:run('INSERT INTO study_plan_words(word_id,source_track,plan_date) VALUES(?,?,?)',
+            { id, 'mixed', '1970-01-01' }))
+        store:save('hello', 'local', { definitions = { 'local' }, examples = {} }, 1000)
+        store:save('HELLO', 'dict.cn', { definitions = { 'online' }, examples = {} }, 1000)
         store:save('hello', 'youdao', nil, 1000)
         local other = store:save('other', 'dict.cn', nil, 1000)
         assert(other.collection == 'web')
         local result = assert(store:delete(id, 'tui'))
         assert(result.deleted and result.word == 'hello')
         assert(not native:deck_get('hello'))
-        for _, table_name in ipairs({'srs', 'reviews', 'study_plan_words'}) do
+        for _, table_name in ipairs({ 'srs', 'reviews', 'study_plan_words' }) do
             assert(native:scalar('SELECT count(*) FROM ' .. table_name .. ' WHERE word_id=' .. id) == 0)
         end
         assert(#native:dict_lookup('hello') == 1 and #native:dict_search('hello') > 0)
         assert(#store:words() == 1 and store:words()[1].word == 'other')
         assert(store.web:get('other', 'dict.cn').id == other.id)
         assert(not store:delete(id, 'tui'))
-        local again = assert(service.search(store, {word = 'hello', source = 'local'}, nil, 2000))
+        local again = assert(service.search(store, { word = 'hello', source = 'local' }, nil, 2000))
         assert(again.collection == 'tui' and again.entry and native:deck_get('hello'))
         assert(native:scalar('SELECT count(*) FROM reviews') == 0)
     end)
@@ -220,7 +263,7 @@ end)
 
 test('shared deletion rolls back both databases when cleanup fails', function()
     fixture(function(store, native, id)
-        store:save('hello', 'dict.cn', {definitions = {'online'}, examples = {}}, 1000)
+        store:save('hello', 'dict.cn', { definitions = { 'online' }, examples = {} }, 1000)
         store.web:query([[CREATE TRIGGER block_web_delete BEFORE DELETE ON words BEGIN
             SELECT RAISE(ABORT, 'simulated delete failure'); END;]])
         local ok = pcall(store.delete, store, id, 'tui')
@@ -242,18 +285,25 @@ test('online deletion with an overlapping ID leaves the shared TUI word untouche
     end)
 end)
 
+--------------------------------------------------------------------------------
+-- Suggestion & Data Integrity Tests
+--------------------------------------------------------------------------------
+
 test('shared dictionary provides prefix suggestions and merges with web words', function()
     fixture(function(store, native)
-        native:dict_replace_word('horizon', {{pos = 'noun', definition = 'The line where earth meets sky.'}})
-        native:dict_replace_word('horoscope', {{pos = 'noun', definition = 'An astrological forecast.'}})
-        store.web:save('horse', 'dict.cn', {definitions = {'An animal.'}}, 100)
-        local res = assert(service.route(store, 'GET', '/api/suggest', {q = 'hor'}))
+        native:dict_replace_word('horizon', { { pos = 'noun', definition = 'The line where earth meets sky.' } })
+        native:dict_replace_word('horoscope', { { pos = 'noun', definition = 'An astrological forecast.' } })
+        store.web:save('horse', 'dict.cn', { definitions = { 'An animal.' } }, 100)
+        local res = assert(service.route(store, 'GET', '/api/suggest', { q = 'hor' }))
         assert(#res.suggestions == 3)
         local words = {}
-        for _, s in ipairs(res.suggestions) do words[s.word] = true end
+        for _, s in ipairs(res.suggestions) do
+            words[s.word] = true
+        end
         assert(words['horizon'] and words['horoscope'] and words['horse'])
     end)
 end)
+
 test('Shared notes preserve embedded NULs across web and TUI reads', function()
     fixture(function(store, native, id)
         local note = 'web\0note · 学习'

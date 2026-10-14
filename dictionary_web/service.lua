@@ -1,46 +1,72 @@
+--------------------------------------------------------------------------------
+-- service.lua
+-- REST API router and lookup dispatcher for dictionaries, words and proverbs.
+--------------------------------------------------------------------------------
+
 local json = require('json')
 local providers = require('providers')
 local content = require('content')
 local ffi = require('ffi')
+
 local M = {}
 local SOURCE_ORDER = { iciba = 1, ['local'] = 2, ['dict.cn'] = 3, youdao = 4 }
 
+--------------------------------------------------------------------------------
+-- Input Normalization Helpers
+--------------------------------------------------------------------------------
+
 function M.normalize(word)
-    if type(word) ~= 'string' or word:find('[%z\1-\31\127]') then return nil end
+    if type(word) ~= 'string' or word:find('[%z\1-\31\127]') then
+        return nil
+    end
     word = word:gsub('^%s+', ''):gsub('%s+$', ''):gsub('%s+', ' '):lower()
     local count, bytes = 0, 0
     for char in word:gmatch('[%z\1-\127\194-\244][\128-\191]*') do
         local first, second = char:byte(1, 2)
         local expected = first < 128 and 1 or first < 224 and 2 or first < 240 and 3 or 4
         if #char ~= expected or (first == 224 and second < 160) or (first == 237 and second >= 160)
-            or (first == 240 and second < 144) or (first == 244 and second >= 144) then return nil end
+            or (first == 240 and second < 144) or (first == 244 and second >= 144) then
+            return nil
+        end
         count, bytes = count + 1, bytes + #char
     end
-    if count < 1 or count > 100 or bytes ~= #word then return nil end
+    if count < 1 or count > 100 or bytes ~= #word then
+        return nil
+    end
     return word
 end
 
+--------------------------------------------------------------------------------
+-- Dictionary Search & Caching
+--------------------------------------------------------------------------------
+
 function M.search(db, payload, provider, stamp, guard)
-    if type(payload) ~= 'table' then return nil, 'Expected a JSON object.' end
+    if type(payload) ~= 'table' then
+        return nil, 'Expected a JSON object.'
+    end
     local word = M.normalize(payload.word)
-    if not word then return nil, 'Enter a word or short phrase (1–100 characters).' end
+    if not word then
+        return nil, 'Enter a word or short phrase (1–100 characters).'
+    end
     local source = payload.source or 'dict.cn'
     if source == 'all' then
         local results = {}
-        for _, name in ipairs({'local', 'dict.cn', 'youdao', 'iciba'}) do
-            results[#results + 1] = assert(M.search(db, {word = word, source = name}, provider, stamp, guard))
+        for _, name in ipairs({ 'local', 'dict.cn', 'youdao', 'iciba' }) do
+            results[#results + 1] = assert(M.search(db, { word = word, source = name }, provider, stamp, guard))
         end
         table.sort(results, function(a, b)
             return SOURCE_ORDER[a.source] < SOURCE_ORDER[b.source]
         end)
-        return {word = word, source = 'all', results = results}
+        return { word = word, source = 'all', results = results }
     end
     if source ~= 'local' and source ~= 'dict.cn' and source ~= 'youdao' and source ~= 'iciba' then
         return nil, 'Select a valid dictionary source.'
     end
     stamp = stamp or os.time()
     local old, entry, message = db:get(word, source)
-    local cached = source ~= 'local' and source ~= 'youdao' and old and old.entry and old.fetched_at and stamp - old.fetched_at < 86400
+    local cached = source ~= 'local' and source ~= 'youdao' and old and old.entry
+        and old.fetched_at and stamp - old.fetched_at < 86400
+
     if source == 'local' then
         if db.local_lookup then
             entry, message = db:local_lookup(word)
@@ -57,6 +83,7 @@ function M.search(db, payload, provider, stamp, guard)
             message = 'Dictionary lookup failed. Please try again.'
         end
     end
+
     local usable = false
     if type(entry) == 'table' and type(entry.definitions) == 'table' then
         for _, definition in ipairs(entry.definitions) do
@@ -66,9 +93,16 @@ function M.search(db, payload, provider, stamp, guard)
             end
         end
     end
+
     if guard and not guard(word) then
-        return { word = word, source = source, saved = false, error = 'Lookup cancelled because the journal changed.' }
+        return {
+            word = word,
+            source = source,
+            saved = false,
+            error = 'Lookup cancelled because the journal changed.',
+        }
     end
+
     if not usable then
         return {
             word = word,
@@ -79,8 +113,11 @@ function M.search(db, payload, provider, stamp, guard)
             source_url = source ~= 'local' and providers.source_url(source, word) or nil,
         }
     end
+
     local fresh_entry = entry
-    if cached then fresh_entry = nil end -- Reads must not extend cache expiry.
+    if cached then
+        fresh_entry = nil -- Reads must not extend cache expiry.
+    end
     local saved = db:save(word, source, fresh_entry, stamp)
     return {
         word = word,
@@ -100,18 +137,26 @@ function M.search(db, payload, provider, stamp, guard)
     }
 end
 
+--------------------------------------------------------------------------------
+-- HTTP API Request Routing
+--------------------------------------------------------------------------------
+
 function M.route(db, method, path, params, payload, background)
     if path == '/api/proverb/random' or path == '/api/proverbs/random' then
         if method ~= 'GET' and method ~= 'POST' then
-            return {error = 'Method not allowed.'}, 405
+            return { error = 'Method not allowed.' }, 405
         end
         local src = (params and params.source) or (payload and payload.source)
         if src == 'fortune' and ffi.os == 'Windows' then
             return { error = 'Fortune requires Linux. Select another proverb source on Windows.' }, 400
         end
         local quote_fn = background and function()
-            local result = background.run(function() return content.fetch_quote(require('net').fetch, src) end, 75)
-            if background.guard and not background.guard() then return nil end
+            local result = background.run(function()
+                return content.fetch_quote(require('net').fetch, src)
+            end, 75)
+            if background.guard and not background.guard() then
+                return nil
+            end
             return result
         end or nil
         local proverb = db.random_proverb and db:random_proverb(nil, src, quote_fn)
@@ -121,44 +166,52 @@ function M.route(db, method, path, params, payload, background)
         if not proverb then
             proverb = content.daily(os.time() - math.random(1, 365) * 86400).proverb
         end
-        return {proverb = proverb}, 200
+        return { proverb = proverb }, 200
     end
+
     if path == '/api/word/random' or path == '/api/words/random' then
         if method ~= 'GET' and method ~= 'POST' then
-            return {error = 'Method not allowed.'}, 405
+            return { error = 'Method not allowed.' }, 405
         end
         local word = db.random_word and db:random_word()
         if not word then
             word = content.random_word and content.random_word() or content.daily().word
         end
-        return {word = word}, 200
+        return { word = word }, 200
     end
+
     if method == 'GET' then
         if path == '/api/daily' then
             local fetch = background and function(url)
-                local result, err = background.run(function() return require('net').fetch(url) end, 15)
-                if background.guard and not background.guard() then return nil, 'Request cancelled.' end
+                local result, err = background.run(function()
+                    return require('net').fetch(url)
+                end, 15)
+                if background.guard and not background.guard() then
+                    return nil, 'Request cancelled.'
+                end
                 return result, err
             end or nil
             return db.daily and db:daily(nil, fetch) or content.daily(), 200
         end
-        if path == '/api/stats' then return db:statistics(), 200 end
+        if path == '/api/stats' then
+            return db:statistics(), 200
+        end
         if path == '/api/session' then
             local result, err = db:session(params)
             return result or { error = err }, result and 200 or 400
         end
         if path == '/api/words' then
-            return {words = db:words(params.q, params.due == '1')}, 200
+            return { words = db:words(params.q, params.due == '1') }, 200
         end
         if path == '/api/proverbs' then
-            return {proverbs = db.proverbs and db:proverbs(params.q) or {}}, 200
+            return { proverbs = db.proverbs and db:proverbs(params.q) or {} }, 200
         end
         if path == '/api/suggest' then
-            return {suggestions = db.suggest and db:suggest(params.q, 6) or {}}, 200
+            return { suggestions = db.suggest and db:suggest(params.q, 6) or {} }, 200
         end
     elseif method == 'POST' then
         if type(payload) ~= 'table' then
-            return {error = 'Expected a JSON object.'}, 400
+            return { error = 'Expected a JSON object.' }, 400
         end
         if path == '/api/restore' then
             local result, err = db:restore(payload)
@@ -166,19 +219,21 @@ function M.route(db, method, path, params, payload, background)
         end
         if path == '/api/search' then
             local provider = background and function(source, word)
-                return background.run(function() return providers.lookup(source, word) end, 30)
+                return background.run(function()
+                    return providers.lookup(source, word)
+                end, 30)
             end or nil
             local result, err = M.search(db, payload, provider, nil, background and background.guard)
-            return result or {error = err}, result and 200 or 400
+            return result or { error = err }, result and 200 or 400
         end
         if path == '/api/review' or path == '/api/note' or path == '/api/delete'
             or path == '/api/organize' or path == '/api/meaning' or path == '/api/example' then
             local collection = payload.collection or 'web'
             if collection ~= 'web' and collection ~= 'tui' then
-                return {error = 'Invalid word collection.'}, 400
+                return { error = 'Invalid word collection.' }, 400
             end
             if type(payload.id) ~= 'number' or payload.id < 1 or payload.id % 1 ~= 0 then
-                return {error = 'Invalid word ID.'}, 400
+                return { error = 'Invalid word ID.' }, 400
             end
             local result, err
             if path == '/api/example' then
@@ -198,22 +253,24 @@ function M.route(db, method, path, params, payload, background)
             elseif path == '/api/delete' then
                 result, err = db:delete(payload.id, collection)
             elseif path == '/api/review' then
-                if payload.grade ~= nil and (type(payload.grade) ~= 'number' or payload.grade % 1 ~= 0 or payload.grade < 0 or payload.grade > 3) then
-                    return {error = 'Invalid review grade.'}, 400
+                if payload.grade ~= nil and (type(payload.grade) ~= 'number' or payload.grade % 1 ~= 0
+                    or payload.grade < 0 or payload.grade > 3) then
+                    return { error = 'Invalid review grade.' }, 400
                 end
                 if type(payload.remembered) ~= 'boolean' then
-                    return {error = 'Invalid review grade.'}, 400
+                    return { error = 'Invalid review grade.' }, 400
                 end
                 result, err = db:review(payload.id, payload.remembered, nil, collection, payload.grade)
             else
                 if type(payload.note) ~= 'string' or #payload.note > 4000 then
-                    return {error = 'Study notes must be at most 4000 bytes.'}, 400
+                    return { error = 'Study notes must be at most 4000 bytes.' }, 400
                 end
                 result, err = db:note(payload.id, payload.note, collection)
             end
-            return result or {error = err}, result and 200 or 404
+            return result or { error = err }, result and 200 or 404
         end
     end
-    return {error = 'Not found.'}, 404
+    return { error = 'Not found.' }, 404
 end
+
 return M

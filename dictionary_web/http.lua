@@ -1,7 +1,16 @@
--- HTTP/1.1 through POSIX or Winsock FFI; bounded concurrent requests and coroutine I/O.
+--------------------------------------------------------------------------------
+-- http.lua
+-- HTTP/1.1 server via POSIX / Winsock FFI with coroutine-based non-blocking I/O.
+--------------------------------------------------------------------------------
+
 local ffi = require('ffi')
 local json = require('json')
 local bit = require('bit')
+
+--------------------------------------------------------------------------------
+-- FFI & OS Socket Definitions
+--------------------------------------------------------------------------------
+
 ffi.cdef[[
 struct wb_sockaddr_in { uint16_t family; uint16_t port; uint32_t address; unsigned char zero[8]; };
 struct wb_sockaddr_in6 { uint16_t family; uint16_t port; uint32_t flow;
@@ -9,36 +18,43 @@ struct wb_sockaddr_in6 { uint16_t family; uint16_t port; uint32_t flow;
 struct wb_timespec { long seconds; long nanoseconds; };
 typedef struct { unsigned long bits[16]; } wb_sigset;
 ]]
+
 ffi.cdef(ffi.os == 'Windows'
     and 'struct wb_pollfd { uintptr_t fd; short events; short revents; };'
     or 'struct wb_pollfd { int fd; short events; short revents; };')
-if ffi.os ~= 'Windows' then ffi.cdef[[
-int clock_gettime(int, struct wb_timespec *);
-int socket(int, int, int);
-int setsockopt(int, int, int, const void *, unsigned int);
-int bind(int, const void *, unsigned int);
-int listen(int, int);
-int accept(int, void *, unsigned int *);
-int getsockname(int, void *, unsigned int *);
-int poll(struct wb_pollfd *, unsigned long, int);
-long recv(int, void *, size_t, int);
-long send(int, const void *, size_t, int);
-long read(int, void *, size_t);
-int close(int);
-uint16_t htons(uint16_t);
-uint16_t ntohs(uint16_t);
-uint32_t htonl(uint32_t);
-int sigemptyset(wb_sigset *);
-int sigaddset(wb_sigset *, int);
-int sigprocmask(int, const wb_sigset *, wb_sigset *);
-int signalfd(int, const wb_sigset *, int);
-]] end
+
+if ffi.os ~= 'Windows' then
+    ffi.cdef[[
+    int clock_gettime(int, struct wb_timespec *);
+    int socket(int, int, int);
+    int setsockopt(int, int, int, const void *, unsigned int);
+    int bind(int, const void *, unsigned int);
+    int listen(int, int);
+    int accept(int, void *, unsigned int *);
+    int getsockname(int, void *, unsigned int *);
+    int poll(struct wb_pollfd *, unsigned long, int);
+    long recv(int, void *, size_t, int);
+    long send(int, const void *, size_t, int);
+    long read(int, void *, size_t);
+    int close(int);
+    uint16_t htons(uint16_t);
+    uint16_t ntohs(uint16_t);
+    uint32_t htonl(uint32_t);
+    int sigemptyset(wb_sigset *);
+    int sigaddset(wb_sigset *, int);
+    int sigprocmask(int, const wb_sigset *, wb_sigset *);
+    int signalfd(int, const wb_sigset *, int);
+    ]]
+end
+
 local windows = ffi.os == 'Windows' and require('http_windows') or nil
 local C = windows and windows.C or ffi.C
 local socket_errno = windows and windows.errno or ffi.errno
+
 local function socket_failure(message)
     error(message .. ' (socket error ' .. socket_errno() .. ')')
 end
+
 -- ffi_dict also declares poll with its own identically laid-out pollfd type.
 local poll_fds = windows and windows.poll or ffi.cast('int (*)(struct wb_pollfd *, unsigned long, int)', C.poll)
 
@@ -61,16 +77,26 @@ local SIG_SETMASK     = 2
 local M = {}
 local owned_fds = {}
 local clock_gettime = not windows and ffi.cast('int (*)(int, struct wb_timespec *)', C.clock_gettime)
+
+--------------------------------------------------------------------------------
+-- Monotonic Timing & Socket Status Constants
+--------------------------------------------------------------------------------
+
 local function now_seconds()
-    if windows then return windows.now() end
+    if windows then
+        return windows.now()
+    end
     local stamp = ffi.new('struct wb_timespec[1]')
     assert(clock_gettime(1, stamp) == 0, 'Cannot read monotonic clock')
     return tonumber(stamp[0].seconds) + tonumber(stamp[0].nanoseconds) / 1e9
 end
 
 function M.close_inherited()
-    for fd in pairs(owned_fds) do C.close(fd) end
+    for fd in pairs(owned_fds) do
+        C.close(fd)
+    end
 end
+
 local reasons = {
     [200] = 'OK',
     [400] = 'Bad Request',
@@ -88,6 +114,10 @@ local function readable(fd, milliseconds)
     return coroutine.yield({ events = POLLIN, deadline = now_seconds() + milliseconds / 1000 }) ~= false
 end
 
+--------------------------------------------------------------------------------
+-- HTTP Header Parsing & Request Intake
+--------------------------------------------------------------------------------
+
 function M.parse_headers(raw, body_limits)
     local method, target, version = raw:match('^(%u+) ([^%s]+) (HTTP/1%.[01])\r\n')
     if not method or not target:match('^/') then
@@ -97,9 +127,13 @@ function M.parse_headers(raw, body_limits)
     for line in raw:sub((raw:find('\r\n', 1, true) or 0) + 2):gmatch('(.-)\r\n') do
         if line ~= '' then
             local key, value = line:match('^([%w%-]+):%s*(.-)%s*$')
-            if not key then return nil, 'Invalid request header.' end
+            if not key then
+                return nil, 'Invalid request header.'
+            end
             key = key:lower()
-            if headers[key] then return nil, 'Duplicate request header.' end
+            if headers[key] then
+                return nil, 'Duplicate request header.'
+            end
             headers[key] = value
         end
     end
@@ -117,7 +151,13 @@ function M.parse_headers(raw, body_limits)
     if length > maximum then
         return nil, 'Request body is too large.', 413
     end
-    return {method = method, target = target, version = version, headers = headers, length = length}
+    return {
+        method = method,
+        target = target,
+        version = version,
+        headers = headers,
+        length = length,
+    }
 end
 
 local function read_request(fd, body_limits)
@@ -172,11 +212,17 @@ function M.target(target)
     return path, params
 end
 
+--------------------------------------------------------------------------------
+-- Response Serialization & Content-Security-Policy
+--------------------------------------------------------------------------------
+
 function M.respond(fd, status, body, content_type, head, extra_headers)
     local headers = extra_headers or {}
     local custom_csp
     for key, value in pairs(headers) do
-        if key:lower() == 'content-security-policy' then custom_csp = value end
+        if key:lower() == 'content-security-policy' then
+            custom_csp = value
+        end
     end
     local csp = custom_csp or ("default-src 'self'; style-src 'self'; script-src 'self'; "
         .. "connect-src 'self' https://bible-api.com; "
@@ -197,13 +243,22 @@ function M.respond(fd, status, body, content_type, head, extra_headers)
     local offset, deadline = 0, now_seconds() + 5
     local pointer = ffi.cast('const char *', frame)
     while offset < #frame and now_seconds() <= deadline do
-        if coroutine.yield({ events = POLLOUT, deadline = deadline }) == false then return false end
+        if coroutine.yield({ events = POLLOUT, deadline = deadline }) == false then
+            return false
+        end
         local bytes = tonumber(C.send(fd, pointer + offset, #frame - offset, MSG_NOSIGNAL + MSG_DONTWAIT))
-        if bytes > 0 then offset = offset + bytes
-        elseif bytes == 0 or (socket_errno() ~= 4 and socket_errno() ~= 11) then return false end
+        if bytes > 0 then
+            offset = offset + bytes
+        elseif bytes == 0 or (socket_errno() ~= 4 and socket_errno() ~= 11) then
+            return false
+        end
     end
     return offset == #frame
 end
+
+--------------------------------------------------------------------------------
+-- Server Event Loop & Client Dispatch
+--------------------------------------------------------------------------------
 
 function M.serve(port, handler, ready, host, workers, options)
     assert(ffi.os == 'Linux' or windows, 'This HTTP server supports Linux and Windows.')
@@ -215,7 +270,8 @@ function M.serve(port, handler, ready, host, workers, options)
     local clients = {}
     local ok, err = xpcall(function()
         local mask = ffi.new('wb_sigset[1]')
-        assert(C.sigemptyset(mask) == 0 and C.sigaddset(mask, SIGINT) == 0 and C.sigaddset(mask, SIGTERM) == 0, 'Signal setup failed')
+        assert(C.sigemptyset(mask) == 0 and C.sigaddset(mask, SIGINT) == 0 and C.sigaddset(mask, SIGTERM) == 0,
+            'Signal setup failed')
         assert(C.sigprocmask(SIG_BLOCK, mask, previous) == 0, 'Signal mask failed')
         blocked = true
         signals = C.signalfd(-1, mask, SFD_NONBLOCK)
@@ -225,7 +281,8 @@ function M.serve(port, handler, ready, host, workers, options)
         listener = C.socket(family, SOCK_STREAM + SOCK_NONBLOCK, 0)
         if listener < 0 then
             socket_failure(dual_stack
-                and 'Cannot create IPv4 + IPv6 server socket; enable operating system IPv6 support or use --host 127.0.0.1'
+                and 'Cannot create IPv4 + IPv6 server socket; enable operating system IPv6 support '
+                    .. 'or use --host 127.0.0.1'
                 or 'Cannot create server socket')
         end
         local enabled = ffi.new('int[1]', 1)
@@ -244,36 +301,52 @@ function M.serve(port, handler, ready, host, workers, options)
             AF_INET,
             C.htons(port),
             C.htonl(host == '0.0.0.0' and 0 or INADDR_LOOPBACK),
-            {0},
+            { 0 },
         })
         if C.bind(listener, address, ffi.sizeof(address)) ~= 0 then
             socket_failure('Cannot bind port ' .. port .. ' on ' .. host)
         end
-        if C.listen(listener, 16) ~= 0 then socket_failure('Cannot listen on ' .. host .. ':' .. port) end
+        if C.listen(listener, 16) ~= 0 then
+            socket_failure('Cannot listen on ' .. host .. ':' .. port)
+        end
         local length = ffi.new('unsigned int[1]', ffi.sizeof(address))
-        if C.getsockname(listener, address, length) ~= 0 then socket_failure('Cannot read server port') end
+        if C.getsockname(listener, address, length) ~= 0 then
+            socket_failure('Cannot read server port')
+        end
         port = tonumber(C.ntohs(address.port))
         ready(port)
         owned_fds[listener], owned_fds[signals] = true, true
+
         local function discard(index)
             local client = clients[index]
-            if workers then workers:cancel(client) end
+            if workers then
+                workers:cancel(client)
+            end
             owned_fds[client.fd] = nil
             C.close(client.fd)
             table.remove(clients, index)
         end
+
         local function serve_client(client)
             local request, message, status = read_request(client.fd, options and options.body_limits)
-            if not request then M.respond(client.fd, status, json.encode({ error = message })); return end
+            if not request then
+                M.respond(client.fd, status, json.encode({ error = message }))
+                return
+            end
             request.background = workers and function(run, timeout)
-                if client.cancelled then return nil, 'Request cancelled.' end
+                if client.cancelled then
+                    return nil, 'Request cancelled.'
+                end
                 return workers:run(client, run, timeout)
             end or nil
             local body, code, mime, headers = handler(request, port)
             M.respond(client.fd, code, body, mime, request.method == 'HEAD', headers)
         end
+
         while true do
-            if workers then workers:tick() end
+            if workers then
+                workers:tick()
+            end
             local count = #clients
             local fds = ffi.new('struct wb_pollfd[?]', count + 2)
             fds[0].fd, fds[0].events = listener, POLLIN
@@ -283,7 +356,9 @@ function M.serve(port, handler, ready, host, workers, options)
                 fds[i + 1].events = client.pending.events or (client.eof and 0 or POLLIN)
             end
             local result = poll_fds(fds, count + 2, 50)
-            if result < 0 and socket_errno() ~= 4 then error('Server poll failed') end
+            if result < 0 and socket_errno() ~= 4 then
+                error('Server poll failed')
+            end
             if fds[1].revents ~= 0 then
                 local signal = ffi.new('char[128]')
                 C.read(signals, signal, 128)
@@ -299,27 +374,36 @@ function M.serve(port, handler, ready, host, workers, options)
                     local resume = pending.events and (events ~= 0 or expired) or pending.done
                     if not pending.events and now - client.started >= 120 then
                         client.cancelled = true
-                        if workers then workers:cancel(client) end
+                        if workers then
+                            workers:cancel(client)
+                        end
                         resume = true
                     end
                     if not pending.events and events ~= 0 and not resume then
                         -- TCP half-close is legal after sending a complete request.
                         local probe = ffi.new('char[4096]')
-                        if C.recv(client.fd, probe, 4096, MSG_DONTWAIT) == 0 then client.eof = true end
+                        if C.recv(client.fd, probe, 4096, MSG_DONTWAIT) == 0 then
+                            client.eof = true
+                        end
                     end
                     if resume then
                         local served, waiting = coroutine.resume(client.thread, not expired)
                         if not served or coroutine.status(client.thread) == 'dead' then
-                            if not served then io.stderr:write('Request failed: ' .. tostring(waiting) .. '\n') end
+                            if not served then
+                                io.stderr:write('Request failed: ' .. tostring(waiting) .. '\n')
+                            end
                             discard(i)
-                        else client.pending = waiting end
+                        else
+                            client.pending = waiting
+                        end
                     end
                 end
             end
             if fds[0].revents ~= 0 then
                 local fd = C.accept(listener, nil, nil)
                 if fd >= 0 then
-                    if #clients >= 64 then C.close(fd)
+                    if #clients >= 64 then
+                        C.close(fd)
                     else
                         local client = { fd = tonumber(fd), started = now_seconds() }
                         owned_fds[client.fd] = true
@@ -334,19 +418,38 @@ function M.serve(port, handler, ready, host, workers, options)
                         if served and coroutine.status(client.thread) ~= 'dead' then
                             client.pending = waiting
                             clients[#clients + 1] = client
-                        else owned_fds[client.fd] = nil; C.close(client.fd) end
+                        else
+                            owned_fds[client.fd] = nil
+                            C.close(client.fd)
+                        end
                     end
                 end
             end
         end
     end, debug.traceback)
-    if workers then workers:close() end
-    for _, client in ipairs(clients) do C.close(client.fd) end
+
+    if workers then
+        workers:close()
+    end
+    for _, client in ipairs(clients) do
+        C.close(client.fd)
+    end
     owned_fds = {}
-    if listener >= 0 then C.close(listener) end
-    if signals >= 0 then C.close(signals) end
-    if blocked then C.sigprocmask(SIG_SETMASK, previous, nil) end
-    if windows then windows.cleanup() end
-    if not ok then error(err) end
+    if listener >= 0 then
+        C.close(listener)
+    end
+    if signals >= 0 then
+        C.close(signals)
+    end
+    if blocked then
+        C.sigprocmask(SIG_SETMASK, previous, nil)
+    end
+    if windows then
+        windows.cleanup()
+    end
+    if not ok then
+        error(err)
+    end
 end
+
 return M

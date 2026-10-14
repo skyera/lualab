@@ -1,15 +1,27 @@
 #!/usr/bin/env luajit
+--------------------------------------------------------------------------------
+-- test_learning.lua
 -- Organization, review session, backup validation and rollback regression tests.
+--------------------------------------------------------------------------------
+
 local directory = (arg[0]:match('^(.*)/') or '.') .. '/..'
 package.path = directory .. '/?.lua;' .. directory .. '/../?.lua;' .. package.path
+
 local Store = require('store')
 local DB = require('db')
 local dictionary = require('ffi_dict')
 local service = require('service')
 local backup = require('backup')
 local json = require('json')
+
 local file = assert(io.open(directory .. '/schema.sql', 'rb'))
-local schema = file:read('*a'); file:close()
+local schema = file:read('*a')
+file:close()
+
+--------------------------------------------------------------------------------
+-- Test Harness & Fixtures
+--------------------------------------------------------------------------------
+
 local count = 0
 
 local function test(name, run)
@@ -25,20 +37,31 @@ local function fixture(shared, run)
     local store = Store.open(web_path, schema, shared and shared_path or 'none')
     local ok, err = pcall(run, store, native, web_path, shared_path)
     store:close()
-    if native then native:close() end
+    if native then
+        native:close()
+    end
     for _, path in ipairs({ web_path, shared_path }) do
-        os.remove(path); os.remove(path .. '-wal'); os.remove(path .. '-shm')
+        os.remove(path)
+        os.remove(path .. '-wal')
+        os.remove(path .. '-shm')
     end
     assert(ok, err)
 end
 
 local function save(store, word, source, stamp)
-    return store:save(word, source or 'dict.cn', { definitions = { 'Meaning of ' .. word }, examples = {} }, stamp or 100)
+    return store:save(word, source or 'dict.cn', {
+        definitions = { 'Meaning of ' .. word },
+        examples = {},
+    }, stamp or 100)
 end
 
 local function clone(value)
     return json.decode(json.encode(value))
 end
+
+--------------------------------------------------------------------------------
+-- Schema Upgrades & Identity Propagation
+--------------------------------------------------------------------------------
 
 test('old journals upgrade without changing notes or review progress', function()
     local path = os.tmpname()
@@ -50,9 +73,12 @@ test('old journals upgrade without changing notes or review progress', function(
     old:close()
     local store = Store.open(path, schema, 'none')
     local after = store.web:get('legacy', 'dict.cn')
-    for key, value in pairs(prior) do assert(after[key] == value, key) end
+    for key, value in pairs(prior) do
+        assert(after[key] == value, key)
+    end
     assert(store:organize(row.id, 'web', 'Books', { 'study' }).saved)
-    store:close(); os.remove(path)
+    store:close()
+    os.remove(path)
 end)
 
 test('organization follows word identity across providers and overlapping shared IDs', function()
@@ -77,8 +103,14 @@ test('invalid tags and collections never overwrite saved organization', function
     fixture(false, function(store)
         local row = save(store, 'word')
         assert(store:organize(row.id, 'web', 'Books', { 'valid' }).saved)
-        for _, tags in ipairs({ { '' }, { 'a,b' }, { '\255' }, { key = 'bad' },
-            { '1', '2', '3', '4', '5', '6', '7', '8', '9' }, { string.rep('词', 65) } }) do
+        for _, tags in ipairs({
+            { '' },
+            { 'a,b' },
+            { '\255' },
+            { key = 'bad' },
+            { '1', '2', '3', '4', '5', '6', '7', '8', '9' },
+            { string.rep('词', 65) },
+        }) do
             local result, _, status = store:organize(row.id, 'web', 'Other', tags)
             assert(not result and status == 400)
         end
@@ -87,6 +119,10 @@ test('invalid tags and collections never overwrite saved organization', function
         assert(store:organize(row.id, 'web', string.rep('词', 64), { string.rep('词', 64) }))
     end)
 end)
+
+--------------------------------------------------------------------------------
+-- Bounded Study Sessions
+--------------------------------------------------------------------------------
 
 test('sessions select new, due, reviewed-overdue and future cards with filters and limits', function()
     fixture(true, function(store, native)
@@ -107,33 +143,44 @@ test('sessions select new, due, reviewed-overdue and future cards with filters a
         assert(#limited.words == 1 and limited.total_matching == 3 and limited.words[1].word == 'first')
         assert(#assert(store:session({ folder = 'missing' }, 700)).words == 0)
         assert(#assert(store:session({ tag = 'missing' }, 700)).words == 0)
-        for _, limit in ipairs({ '0', '201', '1.5', 'bad' }) do assert(not store:session({ limit = limit })) end
+        for _, limit in ipairs({ '0', '201', '1.5', 'bad' }) do
+            assert(not store:session({ limit = limit }))
+        end
         assert(not store:session({ mode = 'bad' }))
         assert(not store:session({ tag = '\0' }))
     end)
 end)
 
+--------------------------------------------------------------------------------
+-- Backup Validation, Restore & CSV Serialization
+--------------------------------------------------------------------------------
+
 test('full backup restores both decks, notes, schedules, study plans and organization', function()
     fixture(true, function(store, native)
         local id = assert(native:deck_add({ word = 'shared', definition = 'Shared', mnem = 'note\0tail' }, 100))
         assert(native:srs_apply(id, 3, 200))
-        assert(native:run('INSERT INTO study_plan(id,track,daily_new,updated_at) VALUES(1,?,?,?)', { 'custom', 5, 100 }))
+        assert(native:run('INSERT INTO study_plan(id,track,daily_new,updated_at) VALUES(1,?,?,?)',
+            { 'custom', 5, 100 }))
         assert(native:run('INSERT INTO study_plan_words(word_id,source_track,plan_date) VALUES(?,?,?)',
             { id, 'custom', '2026-10-11' }))
         assert(native:dict_replace_word('dictionary-only', { { definition = 'Keep this imported entry.' } }) == 1)
         local row = save(store, 'web')
-        store:note(row.id, 'web\0note', 'web'); store:review(row.id, true, 100, 'web')
+        store:note(row.id, 'web\0note', 'web')
+        store:review(row.id, true, 100, 'web')
         store:organize(id, 'tui', 'Books', { 'study' })
         store.web:save_proverb({ date = '2026-10-11', text = 'Practice.', chinese = '学习', explanation = '' })
         save(store, 'private-provider', 'youdao')
         local exported = clone(store:export_backup())
         assert(exported.format == 'wordbook' and exported.shared.words[1].mnem == 'note\0tail')
         for _, value in ipairs(exported.web.words) do
-            if value.source == 'youdao' then assert(not value.entry and not value.fetched_at) end
+            if value.source == 'youdao' then
+                assert(not value.entry and not value.fetched_at)
+            end
         end
         assert(not exported.shared.dict and not exported.credentials)
         save(store, 'extra')
-        store:note(id, 'changed', 'tui'); store:organize(id, 'tui', 'Other', {})
+        store:note(id, 'changed', 'tui')
+        store:organize(id, 'tui', 'Other', {})
         local restored = assert(store:restore(exported))
         assert(restored.web_words == 2 and restored.shared_words == 1)
         assert(not store.web:get('extra', 'dict.cn'))
@@ -161,12 +208,24 @@ test('malformed backups and missing shared integration leave existing data untou
         save(store, 'original')
         local original = store:export_backup()
         local invalid = {}
-        local bad = clone(original); bad.version = 99; invalid[#invalid + 1] = bad
-        bad = clone(original); bad.web.words[1].due_at = -1; invalid[#invalid + 1] = bad
-        bad = clone(original); bad.web.words[1].entry = '{bad'; invalid[#invalid + 1] = bad
-        bad = clone(original); bad.web.words[2] = clone(bad.web.words[1]); invalid[#invalid + 1] = bad
-        bad = clone(original); bad.web['evil;DROP TABLE words'] = {}; invalid[#invalid + 1] = bad
-        bad = clone(original); bad.web.words[1].id = 1.5; invalid[#invalid + 1] = bad
+        local bad = clone(original)
+        bad.version = 99
+        invalid[#invalid + 1] = bad
+        bad = clone(original)
+        bad.web.words[1].due_at = -1
+        invalid[#invalid + 1] = bad
+        bad = clone(original)
+        bad.web.words[1].entry = '{bad'
+        invalid[#invalid + 1] = bad
+        bad = clone(original)
+        bad.web.words[2] = clone(bad.web.words[1])
+        invalid[#invalid + 1] = bad
+        bad = clone(original)
+        bad.web['evil;DROP TABLE words'] = {}
+        invalid[#invalid + 1] = bad
+        bad = clone(original)
+        bad.web.words[1].id = 1.5
+        invalid[#invalid + 1] = bad
         for _, payload in ipairs(invalid) do
             assert(not store:restore(payload))
             assert(store.web:get('original', 'dict.cn'))
@@ -213,4 +272,5 @@ test('CSV quotes Unicode, multiline notes and formula-like text safely', functio
         assert(csv:find('"\'=HYPERLINK(""evil"")\n学习\\0tail"', 1, true))
     end)
 end)
+
 print('Passed ' .. count .. ' learning/backup tests.')

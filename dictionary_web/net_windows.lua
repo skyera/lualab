@@ -1,5 +1,14 @@
+--------------------------------------------------------------------------------
+-- net_windows.lua
 -- Built-in Windows HTTPS transport: automatic proxy/authentication, no curl DLL.
+--------------------------------------------------------------------------------
+
 local ffi = require('ffi')
+
+--------------------------------------------------------------------------------
+-- FFI & WinHTTP Declarations
+--------------------------------------------------------------------------------
+
 ffi.cdef[[
 void * __stdcall WinHttpOpen(const uint16_t *, unsigned long, const uint16_t *, const uint16_t *, unsigned long);
 int __stdcall WinHttpSetTimeouts(void *, int, int, int, int);
@@ -19,13 +28,20 @@ int __stdcall WideCharToMultiByte(unsigned int, unsigned long, const uint16_t *,
 unsigned long __stdcall GetLastError(void);
 uint64_t __stdcall GetTickCount64(void);
 ]]
+
 local W, K = ffi.load('winhttp'), ffi.load('kernel32')
 local M = {}
 local ERRORS = {
-    [12002] = 'Request timed out', [12007] = 'Host name could not be resolved',
-    [12029] = 'Could not connect', [12175] = 'TLS certificate or handshake failed',
+    [12002] = 'Request timed out',
+    [12007] = 'Host name could not be resolved',
+    [12029] = 'Could not connect',
+    [12175] = 'TLS certificate or handshake failed',
     [12180] = 'Automatic proxy could not be resolved',
 }
+
+--------------------------------------------------------------------------------
+-- Wide-String & Error Helpers
+--------------------------------------------------------------------------------
 
 local function wide(text)
     local count = K.MultiByteToWideChar(65001, 8, text, #text, nil, 0)
@@ -56,33 +72,52 @@ local function location(request)
     return ffi.string(text)
 end
 
+--------------------------------------------------------------------------------
+-- Windows HTTPS Fetch Execution
+--------------------------------------------------------------------------------
+
 function M.fetch(url, body, proxy)
     local handles = {}
     local deadline = tonumber(K.GetTickCount64()) + 18000
+
     local function budget(handle)
         local remaining = deadline - tonumber(K.GetTickCount64())
         assert(remaining > 0, 'Request timed out (18-second total limit)')
         check(W.WinHttpSetTimeouts(handle, math.min(5000, remaining), math.min(5000, remaining),
             math.min(12000, remaining), math.min(12000, remaining)), 'Set request deadline')
     end
+
     local function own(value, operation)
-        check(value, operation); handles[#handles + 1] = value; return value
+        check(value, operation)
+        handles[#handles + 1] = value
+        return value
     end
+
     local function close()
-        for index = #handles, 1, -1 do W.WinHttpCloseHandle(handles[index]); handles[index] = nil end
+        for index = #handles, 1, -1 do
+            W.WinHttpCloseHandle(handles[index])
+            handles[index] = nil
+        end
     end
+
     local ok, result = pcall(function()
         local access, proxy_name = 4, nil -- automatic system/per-user proxies on Windows 8.1+
-        if proxy == 'none' then access = 1
+        if proxy == 'none' then
+            access = 1
         elseif proxy and proxy ~= 'auto' then
-            assert(proxy:match('^http://'), 'Windows HTTP supports HTTP proxies. Use --http-client curl for other proxy types.')
+            assert(proxy:match('^http://'),
+                'Windows HTTP supports HTTP proxies. Use --http-client curl for other proxy types.')
             access, proxy_name = 3, wide(proxy:sub(8))
         end
         for redirects = 0, 4 do
             assert(type(url) == 'string' and not url:find('[%z\1-\32\127]'), 'Invalid request URL')
             local authority, path = url:match('^https://([^/?#]+)(.*)$')
             path = path and path:gsub('#.*$', '') or '/'
-            if path == '' then path = '/' elseif path:sub(1, 1) == '?' then path = '/' .. path end
+            if path == '' then
+                path = '/'
+            elseif path:sub(1, 1) == '?' then
+                path = '/' .. path
+            end
             assert(authority, 'Only HTTPS URLs and redirects are allowed')
             local host, port = authority:match('^([^:]+):(%d+)$')
             host, port = host or authority, tonumber(port) or 443
@@ -111,8 +146,10 @@ function M.fetch(url, body, proxy)
             if not body and (code == 301 or code == 302 or code == 303 or code == 307 or code == 308) then
                 assert(redirects < 4, 'Too many HTTPS redirects')
                 local target = location(request)
-                if target:sub(1, 2) == '//' then target = 'https:' .. target
-                elseif target:sub(1, 1) == '/' then target = 'https://' .. authority .. target
+                if target:sub(1, 2) == '//' then
+                    target = 'https:' .. target
+                elseif target:sub(1, 1) == '/' then
+                    target = 'https://' .. authority .. target
                 elseif not target:match('^%a[%w+.-]*:') then
                     target = 'https://' .. authority .. (path:match('^(.*)/') or '') .. '/' .. target
                 end
@@ -128,16 +165,22 @@ function M.fetch(url, body, proxy)
                     check(W.WinHttpReadData(request, buffer, 16384, read), 'Read HTTPS response')
                     total = total + tonumber(read[0])
                     assert(total <= 2 * 1024 * 1024, 'Dictionary response exceeds 2 MB')
-                    if read[0] > 0 then chunks[#chunks + 1] = ffi.string(buffer, read[0]) end
+                    if read[0] > 0 then
+                        chunks[#chunks + 1] = ffi.string(buffer, read[0])
+                    end
                 until read[0] == 0
                 return table.concat(chunks)
             end
         end
     end)
     close()
-    if not ok then return nil, 'Dictionary connection failed: ' .. tostring(result)
-        .. ' (Windows WinHTTP, proxy: ' .. (proxy == 'none' and 'direct' or proxy == 'auto' and 'automatic' or 'configured')
-        .. ', URL: ' .. tostring(url) .. ')' end
+    if not ok then
+        return nil, 'Dictionary connection failed: ' .. tostring(result)
+            .. ' (Windows WinHTTP, proxy: '
+            .. (proxy == 'none' and 'direct' or proxy == 'auto' and 'automatic' or 'configured')
+            .. ', URL: ' .. tostring(url) .. ')'
+    end
     return result
 end
+
 return M
