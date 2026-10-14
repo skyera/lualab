@@ -784,6 +784,117 @@ test('Markdown table recognition rejects malformed dividers and preserves code a
   assert.equal(frame.querySelectorAll('blockquote').length, 1);
 });
 
+test('journal periods cover Monday weeks, year transitions, leap months, and short months', () => {
+  const { context } = harness();
+  const period = (key, mode) => Array.from(context.journalPeriod(new Date(key + 'T12:00:00'), mode));
+  assert.deepEqual(period('2026-10-18', 'week'), ['2026-10-12', '2026-10-13', '2026-10-14', '2026-10-15', '2026-10-16', '2026-10-17', '2026-10-18']);
+  const cross = period('2026-01-01', 'week');
+  assert.equal(cross[0], '2025-12-29'); assert.equal(cross[6], '2026-01-04');
+  assert.equal(period('2024-02-15', 'month').length, 29);
+  assert.equal(period('2025-02-15', 'month').length, 28);
+  assert.equal(period('2026-04-30', 'month').length, 30);
+  assert.equal(period('2026-01-31', 'month').length, 31);
+});
+
+test('journal overview renders empty days, safe Unicode entries, excerpts, and read-only tasks without writes', async () => {
+  const { context, state, get } = harness();
+  state.journalDate = '2026-10-13';
+  const id = 'Journal/2026/10/2026-10-13'; state.pages.push({ id, revision: 'r1' });
+  const calls = [];
+  context.api = async (route, body) => {
+    assert.equal(body, undefined); calls.push(route);
+    return { id, content: '# 学习\n<script>bad</script>\n\n- [ ] Review\n\n' + 'long '.repeat(900) };
+  };
+  await get('journal-overview-open').handlers.click();
+  const entries = get('journal-overview-entries');
+  assert.equal(get('journal-overview-dialog').open, true);
+  assert.equal(entries.children.length, 7);
+  assert.match(texts(entries.children[0]), /No entry yet/);
+  assert.match(texts(entries), /学习/);
+  assert.match(texts(entries), /First 4,000 characters/);
+  assert.equal(entries.querySelectorAll('script').length, 0);
+  assert.equal(entries.querySelectorAll('input')[0].disabled, true);
+  assert.deepEqual(calls, ['/api/page?id=' + encodeURIComponent(id)]);
+  assert.match(get('journal-overview-status').textContent, /1 entries · 6 empty days/);
+  assert.equal(state.page.id, 'Home'); assert.equal(get('editor').value, 'Initial');
+  get('journal-overview-close').handlers.click(); assert.equal(get('journal-overview-dialog').open, false);
+  assert.equal(state.page.id, 'Home');
+});
+
+test('journal overview mode and navigation handle month ends, Today, and empty periods', async () => {
+  const { context, state, get } = harness();
+  state.journalDate = '2026-01-31'; await context.openJournalOverview();
+  get('journal-overview-mode').value = 'month'; await get('journal-overview-mode').handlers.change();
+  assert.equal(get('journal-overview-entries').children.length, 31);
+  await get('journal-overview-next').handlers.click();
+  assert.match(get('journal-overview-range').textContent, /2026-02-01 – 2026-02-28/);
+  assert.equal(get('journal-overview-entries').children.length, 28);
+  await get('journal-overview-prev').handlers.click();
+  assert.match(get('journal-overview-range').textContent, /2026-01-01 – 2026-01-31/);
+  await get('journal-overview-today').handlers.click();
+  assert.match(get('journal-overview-range').textContent, new RegExp(context.dateKey(new Date()).slice(0, 7)));
+  assert.equal(state.journalDate, '2026-01-31');
+  get('journal-overview-dialog').handlers.cancel({ preventDefault() {} });
+  assert.equal(get('journal-overview-dialog').open, false);
+});
+
+test('journal overview blocks on save failure and creates missing entries only when their date is opened', async () => {
+  const { context, state, get } = harness();
+  state.dirty = true; get('editor').value = 'Unsaved';
+  context.api = async () => { throw new Error('Cannot save'); };
+  await context.openJournalOverview(); assert.equal(get('journal-overview-dialog').open, false);
+  assert.equal(get('editor').value, 'Unsaved');
+  state.dirty = false; state.journalDate = '2026-10-13';
+  await context.openJournalOverview();
+  const id = 'Journal/2026/10/2026-10-12'; const calls = [];
+  context.api = async (route, body) => {
+    calls.push(route);
+    if (body) { state.pages.push({ id: body.id, revision: 'r2' }); return {}; }
+    return { id, title: 'Monday', content: '# Monday', revision: 'r2' };
+  };
+  await get('journal-overview-entries').children[0].querySelectorAll('button')[0].handlers.click();
+  assert.equal(calls[0], '/api/page'); assert.equal(state.page.id, id);
+  assert.equal(get('journal-overview-dialog').open, false);
+});
+
+test('journal overview ignores stale or closed responses and displays actionable entry and refresh errors', async () => {
+  const { context, state, get } = harness();
+  state.journalDate = '2026-10-13';
+  const id = 'Journal/2026/10/2026-10-13'; state.pages.push({ id });
+  const pending = deferred(); context.api = () => pending.promise;
+  const opening = context.openJournalOverview();
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  get('journal-overview-next').handlers.click(); await Promise.resolve(); await Promise.resolve();
+  pending.resolve({ content: '# Stale response' }); await opening;
+  assert.doesNotMatch(texts(get('journal-overview-entries')), /Stale response/);
+  get('journal-overview-prev').handlers.click(); await Promise.resolve(); await Promise.resolve();
+  context.api = async () => { throw new Error('Unreadable file'); };
+  await context.loadJournalOverview();
+  assert.match(texts(get('journal-overview-entries')), /Could not load Journal\/2026\/10\/2026-10-13.*Unreadable file.*Refresh/);
+  assert.match(get('journal-overview-status').textContent, /1 failed to load/);
+  const late = deferred(); context.api = () => late.promise;
+  const loading = context.loadJournalOverview(); await Promise.resolve();
+  get('journal-overview-close').handlers.click(); late.resolve({ content: 'Late text' }); await loading;
+  assert.doesNotMatch(texts(get('journal-overview-entries')), /Late text/);
+  context.refresh = async () => { throw new Error('Notebook unavailable'); };
+  get('journal-overview-dialog').showModal(); await context.loadJournalOverview();
+  assert.match(get('journal-overview-error').textContent, /Notebook unavailable.*Refresh/);
+});
+
+test('journal overview retains editor and dialog on failed date navigation and blocks closing during navigation', async () => {
+  const { context, state, get } = harness();
+  state.journalDate = '2026-10-13'; await context.openJournalOverview();
+  const pending = deferred(); context.api = () => pending.promise;
+  const opening = get('journal-overview-entries').children[0].querySelectorAll('button')[0].handlers.click();
+  await Promise.resolve(); await Promise.resolve();
+  get('journal-overview-dialog').handlers.cancel({ preventDefault() {} });
+  assert.equal(get('journal-overview-dialog').open, true);
+  pending.reject(new Error('Write denied')); await opening;
+  assert.match(get('journal-overview-error').textContent, /Write denied/);
+  assert.equal(state.page.id, 'Home'); assert.equal(get('editor').value, 'Initial');
+  get('journal-overview-close').handlers.click(); assert.equal(get('journal-overview-dialog').open, false);
+});
+
 test('journal calendar marks existing dates and navigates across month boundaries', () => {
   const { context, state, get } = harness();
   state.journalMonth = new Date(2026, 9, 1);

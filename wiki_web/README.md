@@ -179,6 +179,26 @@ or replaced as part of recovery advice.
   around matching terms with highlighted search keywords in titles, paths, and snippets.
   **Ctrl K** (or Cmd K) focuses search; **Ctrl S** (or Cmd S) saves immediately.
 
+## Weekly and monthly journal overviews
+
+Click **Overview** below the journal calendar to browse daily notes together.
+Choose **Week** (Monday–Sunday) or **Month**, then use **Previous**, **Next**,
+**Today**, or **Refresh**. The overview initially uses the selected calendar date,
+or today when no date is selected. It reads the existing `Journal/YYYY/MM/YYYY-MM-DD.md`
+pages and does not create entries simply by browsing.
+
+Each day shows a read-only Markdown preview of up to 4,000 characters. Long
+entries display an excerpt notice; click a date to open the full daily page.
+Clicking an empty day's date creates its daily page through the existing journal
+flow. Task checkboxes are display-only. A failed entry load shows its path and
+error alongside a Refresh instruction; other entries remain available.
+
+Opening the overview first saves the current draft. Save failures or unresolved
+conflicts prevent opening it and preserve the draft. Closing the overview with
+**Close** or **Esc** keeps the current editor page. Changing the period or closing
+the dialog ignores late responses from earlier loads. Overview navigation remains
+local to the dialog and does not change the calendar selection until a date is opened.
+
 ## Pinned and recent pages
 
 Click **☆ Pin page** in the page toolbar to add the current page to **PINNED**

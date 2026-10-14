@@ -74,7 +74,7 @@ $('pin-page').addEventListener('click', () => {
     ? navigationState.pinned.filter(value => value !== id) : [...navigationState.pinned, id];
   saveNavigation(); renderNavigation();
 });
-const MODAL_DIALOGS = ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks', 'capture', 'verse'];
+const MODAL_DIALOGS = ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks', 'capture', 'verse', 'journal-overview'];
 function anyDialogOpen() { return MODAL_DIALOGS.some(id => $(id + '-dialog').open); }
 
 function openCapture() {
@@ -825,6 +825,124 @@ function backlinks(rows) {
   $('backlinks').replaceChildren(...rows.map(row => button(row.id.replaceAll('/', ' › '), () => openPage(row.id))));
   if (!rows.length) $('backlinks').textContent = 'No incoming links yet.';
 }
+const journalOverviewState = { date: new Date(), mode: 'week', request: 0, opening: false };
+function journalPeriod(date, mode) {
+  const start = new Date(date.getFullYear(), date.getMonth(), mode === 'month' ? 1 : date.getDate());
+  if (mode === 'week') start.setDate(start.getDate() - (start.getDay() + 6) % 7);
+  const end = new Date(start);
+  if (mode === 'month') end.setMonth(end.getMonth() + 1);
+  else end.setDate(end.getDate() + 7);
+  const days = [];
+  for (const cursor = new Date(start); cursor < end; cursor.setDate(cursor.getDate() + 1)) days.push(dateKey(cursor));
+  return days;
+}
+function closeJournalOverview() {
+  if (journalOverviewState.opening) return;
+  ++journalOverviewState.request; $('journal-overview-dialog').close();
+}
+async function openOverviewDate(key) {
+  if (journalOverviewState.opening) return false;
+  journalOverviewState.opening = true; ++journalOverviewState.request;
+  $('journal-overview-error').textContent = '';
+  try {
+    const opened = await openJournalDate(key);
+    if (opened) $('journal-overview-dialog').close();
+    else $('journal-overview-error').textContent = $('message').textContent || 'Could not open the journal entry. Your editor is preserved.';
+    return opened;
+  } finally { journalOverviewState.opening = false; }
+}
+function renderJournalOverview(days, existing) {
+  const cards = new Map();
+  $('journal-overview-entries').replaceChildren(...days.map(key => {
+    const card = document.createElement('section'); card.className = 'journal-entry';
+    const heading = document.createElement('h3');
+    const label = journalHeading(key).slice(2);
+    heading.append(button(label, () => openOverviewDate(key)));
+    const content = document.createElement('div'); content.className = 'journal-entry-content';
+    content.textContent = existing.has(journalPageId(key)) ? 'Loading entry…' : 'No entry yet — click the date to create one.';
+    card.append(heading, content); cards.set(key, { card, content }); return card;
+  }));
+  return cards;
+}
+async function loadJournalOverview() {
+  if (journalOverviewState.opening || !$('journal-overview-dialog').open) return;
+  const request = ++journalOverviewState.request;
+  const active = () => request === journalOverviewState.request && $('journal-overview-dialog').open;
+  const days = journalPeriod(journalOverviewState.date, journalOverviewState.mode);
+  $('journal-overview-range').textContent = days[0] + ' – ' + days.at(-1)
+    + (journalOverviewState.mode === 'week' ? ' · Monday–Sunday' : '');
+  $('journal-overview-error').textContent = '';
+  $('journal-overview-status').textContent = 'Refreshing notebook…';
+  $('journal-overview-entries').replaceChildren();
+  try {
+    await refresh(); if (!active()) return;
+    const existing = new Set(state.pages.map(page => page.id));
+    const cards = renderJournalOverview(days, existing);
+    const entries = days.filter(key => existing.has(journalPageId(key)));
+    let failures = 0;
+    for (let index = 0; index < entries.length; index++) {
+      if (!active()) return;
+      const key = entries[index], id = journalPageId(key), { card, content } = cards.get(key);
+      $('journal-overview-status').textContent = 'Loading entry ' + (index + 1) + ' of ' + entries.length + '…';
+      try {
+        const page = await api('/api/page?id=' + encodeURIComponent(id)); if (!active()) return;
+        if (typeof page.content !== 'string') throw new Error('Entry has no Markdown text');
+        content.replaceChildren(WikiMarkdown.render(page.content.slice(0, 4000), id, existing, async (target, anchor) => {
+          if (journalOverviewState.opening) return;
+          if (!state.pages.some(item => item.id === target)) {
+            $('journal-overview-error').textContent = 'Missing page: ' + target + '. Close the overview to create it.'; return;
+          }
+          journalOverviewState.opening = true; ++journalOverviewState.request;
+          try {
+            if (await openPage(target, anchor)) $('journal-overview-dialog').close();
+            else $('journal-overview-error').textContent = $('message').textContent || 'Could not open this link. Close the overview to create a missing page.';
+          } finally { journalOverviewState.opening = false; }
+        }));
+        if (page.content.length > 4000) {
+          const note = document.createElement('p'); note.className = 'journal-entry-note';
+          note.textContent = 'First 4,000 characters shown. Click the date to read the full entry.'; card.append(note);
+        }
+      } catch (error) {
+        if (!active()) return;
+        failures++; content.className = 'journal-entry-error';
+        content.textContent = 'Could not load ' + id + ': ' + error.message + '. Use Refresh to retry.';
+      }
+    }
+    if (active()) $('journal-overview-status').textContent = entries.length + ' entries · ' + (days.length - entries.length)
+      + ' empty days' + (failures ? ' · ' + failures + ' failed to load' : '');
+  } catch (error) {
+    if (active()) {
+      $('journal-overview-status').textContent = 'Overview unavailable.';
+      $('journal-overview-error').textContent = 'Could not load journal overview: ' + error.message + '. Use Refresh to retry.';
+    }
+  }
+}
+async function openJournalOverview() {
+  if (anyDialogOpen() || !(await ensureSaved())) return;
+  if (anyDialogOpen()) return;
+  journalOverviewState.date = state.journalDate ? new Date(state.journalDate + 'T12:00:00') : new Date();
+  $('journal-overview-mode').value = journalOverviewState.mode;
+  $('journal-overview-dialog').showModal(); await loadJournalOverview();
+}
+$('journal-overview-open').addEventListener('click', openJournalOverview);
+$('journal-overview-close').addEventListener('click', closeJournalOverview);
+$('journal-overview-dialog').addEventListener('cancel', event => { event.preventDefault(); closeJournalOverview(); });
+$('journal-overview-refresh').addEventListener('click', loadJournalOverview);
+$('journal-overview-mode').addEventListener('change', () => {
+  if (journalOverviewState.opening) return;
+  journalOverviewState.mode = $('journal-overview-mode').value === 'month' ? 'month' : 'week'; return loadJournalOverview();
+});
+for (const [id, direction] of [['prev', -1], ['next', 1]]) $('journal-overview-' + id).addEventListener('click', () => {
+  if (journalOverviewState.opening) return;
+  const date = journalOverviewState.date;
+  if (journalOverviewState.mode === 'month') journalOverviewState.date = new Date(date.getFullYear(), date.getMonth() + direction, 1);
+  else date.setDate(date.getDate() + direction * 7);
+  return loadJournalOverview();
+});
+$('journal-overview-today').addEventListener('click', () => {
+  if (journalOverviewState.opening) return;
+  journalOverviewState.date = new Date(); return loadJournalOverview();
+});
 function dateKey(date) {
   return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'),
     String(date.getDate()).padStart(2, '0')].join('-');

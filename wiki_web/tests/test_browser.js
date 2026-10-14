@@ -49,6 +49,19 @@ test('real browser selects words in editor/preview and keeps dictionary within d
       await page.locator('#pin-page').click();
       assert.equal(await page.locator('#pin-page').getAttribute('aria-pressed'), 'false');
       assert.match(await page.locator('#pinned-pages').innerText(), /No pinned pages/);
+      const beforeOverview = await page.locator('#editor').inputValue();
+      await page.locator('#journal-overview-open').click();
+      await page.waitForFunction(() => document.getElementById('journal-overview-status').textContent.includes('empty days'));
+      assert.equal(await page.locator('.journal-entry').count(), 7);
+      await page.locator('#journal-overview-mode').selectOption('month');
+      await page.waitForFunction(() => document.querySelectorAll('.journal-entry').length >= 28);
+      assert.ok(await page.locator('.journal-entry').count() <= 31);
+      await page.setViewportSize({ width: 320, height: 850 });
+      const overviewBounds = await page.locator('#journal-overview-dialog').boundingBox();
+      assert.ok(overviewBounds.x >= 0 && overviewBounds.x + overviewBounds.width <= 320);
+      await page.locator('#journal-overview-close').click();
+      assert.equal(await page.locator('#editor').inputValue(), beforeOverview);
+      await page.setViewportSize({ width: 1440, height: 1000 });
       await page.locator('#editor').evaluate(editor => {
         editor.focus(); const index = editor.value.indexOf('ephemeral'); editor.setSelectionRange(index, index + 9);
       });

@@ -27,6 +27,7 @@
         <div class="journal-month"><button id="journal-prev" aria-label="Previous month">‹</button><strong id="journal-month-name"></strong><button id="journal-next" aria-label="Next month">›</button></div>
         <div class="journal-weekdays" aria-hidden="true"><span>Su</span><span>Mo</span><span>Tu</span><span>We</span><span>Th</span><span>Fr</span><span>Sa</span></div>
         <div id="journal-days" class="journal-days" role="group" aria-label="Days in month"></div>
+        <button id="journal-overview-open" type="button">Overview</button>
       </section>
       <section class="page-shortcuts" aria-label="Page shortcuts">
         <h2>PINNED</h2><nav id="pinned-pages" aria-label="Pinned pages"></nav>
@@ -127,6 +128,21 @@
     <p id="tasks-error" role="alert"></p>
     <div id="tasks-results"></div>
     <button id="tasks-more" hidden>Show more</button>
+  </dialog>
+  <dialog id="journal-overview-dialog" aria-labelledby="journal-overview-title">
+    <div class="journal-overview-heading"><h2 id="journal-overview-title">Journal overview</h2><button id="journal-overview-close" type="button">Close</button></div>
+    <div class="journal-overview-controls">
+      <button id="journal-overview-prev" type="button">Previous</button>
+      <label for="journal-overview-mode" class="sr-only">Journal period</label>
+      <select id="journal-overview-mode"><option value="week">Week</option><option value="month">Month</option></select>
+      <button id="journal-overview-next" type="button">Next</button>
+      <button id="journal-overview-today" type="button">Today</button>
+      <button id="journal-overview-refresh" type="button">Refresh</button>
+    </div>
+    <p id="journal-overview-range"></p>
+    <p id="journal-overview-status" role="status" aria-live="polite"></p>
+    <p id="journal-overview-error" role="alert"></p>
+    <div id="journal-overview-entries"></div>
   </dialog>
   <dialog id="capture-dialog" aria-labelledby="capture-title">
     <form id="capture-form">
