@@ -74,8 +74,101 @@ $('pin-page').addEventListener('click', () => {
     ? navigationState.pinned.filter(value => value !== id) : [...navigationState.pinned, id];
   saveNavigation(); renderNavigation();
 });
-const MODAL_DIALOGS = ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks', 'capture', 'verse', 'journal-overview'];
+const MODAL_DIALOGS = ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks', 'capture', 'verse', 'journal-overview', 'saved-search'];
 function anyDialogOpen() { return MODAL_DIALOGS.some(id => $(id + '-dialog').open); }
+
+const savedSearchState = { root: null, rows: [], writable: true, error: '', query: '' };
+function savedSearchKey() { return 'leaf-searches:' + state.root; }
+function loadSavedSearches() {
+  if (savedSearchState.root === state.root) return;
+  Object.assign(savedSearchState, { root: state.root, rows: [], writable: true, error: '' });
+  try {
+    const raw = localStorage.getItem(savedSearchKey());
+    if (raw === null || raw === undefined) return;
+    const rows = JSON.parse(raw);
+    if (!Array.isArray(rows) || rows.length > 100 || rows.some(row => !row
+        || typeof row.name !== 'string' || !row.name.trim() || row.name.length > 120
+        || typeof row.query !== 'string' || !row.query.trim() || row.query.length > 4096)
+        || new Set(rows.map(row => row.query)).size !== rows.length
+        || new Set(rows.map(row => row.name.trim().toLowerCase())).size !== rows.length) {
+      throw new Error('Invalid saved search data');
+    }
+    savedSearchState.rows = rows.map(row => ({ name: row.name.trim(), query: row.query }));
+  } catch (error) {
+    savedSearchState.writable = false;
+    savedSearchState.error = 'Could not load saved searches from browser storage (' + savedSearchKey() + '): '
+      + error.message + '. Searches work for this session only. Repair or remove this storage entry and reload to retry.';
+  }
+}
+function saveSavedSearches() {
+  if (!savedSearchState.writable) return false;
+  try {
+    const text = JSON.stringify(savedSearchState.rows);
+    localStorage.setItem(savedSearchKey(), text);
+    if (localStorage.getItem(savedSearchKey()) !== text) throw new Error('Saved searches failed read-back verification');
+    savedSearchState.error = ''; return true;
+  } catch (error) {
+    savedSearchState.error = 'Could not save searches to browser storage (' + savedSearchKey() + '): '
+      + error.message + '. Changes remain in this session. Enable storage or free space, then save again to retry.';
+    return false;
+  }
+}
+function renderSavedSearches() {
+  $('save-search').disabled = !state.root || !$('search').value.trim();
+  const nodes = savedSearchState.rows.map(row => {
+    const node = document.createElement('div'); node.className = 'saved-search-row';
+    const open = button(row.name, () => restoreSavedSearch(row.query), 'tree-page'); open.title = row.query;
+    const query = document.createElement('p'); query.className = 'saved-search-query'; query.textContent = row.query;
+    const actions = document.createElement('div'); actions.className = 'saved-search-actions';
+    const rename = button('Rename', () => editSavedSearch(row.query, row.name));
+    rename.setAttribute('aria-label', 'Rename saved search ' + row.name);
+    const remove = button('Delete', () => {
+      if (!confirm('Delete saved search “' + row.name + '”?')) return;
+      savedSearchState.rows = savedSearchState.rows.filter(item => item.query !== row.query);
+      saveSavedSearches(); renderSavedSearches();
+    });
+    remove.setAttribute('aria-label', 'Delete saved search ' + row.name);
+    actions.append(rename, remove); node.append(open, query, actions); return node;
+  });
+  if (!nodes.length) { const node = document.createElement('p'); node.textContent = 'No saved searches.'; node.className = 'saved-search-query'; nodes.push(node); }
+  $('saved-search-list').replaceChildren(...nodes); $('saved-search-status').textContent = savedSearchState.error;
+}
+function editSavedSearch(query, name) {
+  if (anyDialogOpen() || !state.root || !query.trim()) return;
+  loadSavedSearches();
+  const existing = savedSearchState.rows.find(row => row.query === query);
+  savedSearchState.query = query;
+  $('saved-search-title').textContent = existing ? 'Rename saved search' : 'Save search';
+  $('saved-search-name').value = name ?? existing?.name ?? query.trim().slice(0, 120);
+  $('saved-search-query').textContent = query; $('saved-search-error').textContent = '';
+  $('saved-search-dialog').showModal(); $('saved-search-name').focus();
+}
+async function restoreSavedSearch(query) {
+  if (anyDialogOpen()) return;
+  selectedTag = ''; $('tag-filter').value = ''; $('search').value = query;
+  renderSavedSearches(); return searchPages(0);
+}
+$('save-search').addEventListener('click', () => editSavedSearch($('search').value));
+$('saved-search-cancel').addEventListener('click', () => $('saved-search-dialog').close());
+$('saved-search-dialog').addEventListener('cancel', event => { event.preventDefault(); $('saved-search-dialog').close(); });
+$('saved-search-form').addEventListener('submit', event => {
+  event.preventDefault();
+  const name = $('saved-search-name').value.trim(), query = savedSearchState.query;
+  const existing = savedSearchState.rows.find(row => row.query === query);
+  if (!name || name.length > 120 || !query.trim() || query.length > 4096) {
+    $('saved-search-error').textContent = 'Use a name of 1–120 characters and a query of 1–4,096 characters.'; return;
+  }
+  if (savedSearchState.rows.some(row => row !== existing && row.name.toLowerCase() === name.toLowerCase())) {
+    $('saved-search-error').textContent = 'A saved search already uses that name. Choose another name.'; return;
+  }
+  if (!existing && savedSearchState.rows.length >= 100) {
+    $('saved-search-error').textContent = 'Up to 100 searches can be saved. Delete one before adding another.'; return;
+  }
+  if (existing) existing.name = name; else savedSearchState.rows.push({ name, query });
+  const saved = saveSavedSearches(); renderSavedSearches();
+  if (!saved && savedSearchState.writable) { $('saved-search-error').textContent = savedSearchState.error; return; }
+  $('saved-search-dialog').close();
+});
 
 function openCapture() {
   if (state.loading || state.uploading || anyDialogOpen()) return;
@@ -1009,6 +1102,7 @@ async function openJournalDate(key) {
 async function refresh() {
   const data = await api('/api/state'); state.pages = data.pages; state.trash = data.trash; state.root = data.data_dir;
   loadNavigation(); renderNavigation();
+  loadSavedSearches(); renderSavedSearches();
   $('data-path').textContent = state.root; renderTagFilter(); renderTree(); renderJournal(); preview();
   if ($('switcher-dialog').open && !switcherState.busy) renderSwitcher(true);
   return data;
@@ -1244,15 +1338,18 @@ $('reload-page').addEventListener('click', async () => {
   if (!state.page || !confirm('Discard this editor draft and load the file? Copy your draft first.')) return;
   clearDraft(state.page.id); state.dirty = false; state.blocked = false; await openPage(state.page.id);
 });
-$('search').addEventListener('input', () => {
+function searchPages(delay = 120) {
   clearTimeout(searchTimer); const request = ++state.searchRequest, query = $('search').value;
-  searchTimer = setTimeout(async () => {
+  const run = async () => {
     try {
       const result = await api('/api/state?q=' + encodeURIComponent(query));
       if (request === state.searchRequest && query === $('search').value) renderTree(result.pages, result.terms || []);
     } catch (error) { if (request === state.searchRequest) message(error.message); }
-  }, 120);
-});
+  };
+  if (delay === 0) return run();
+  searchTimer = setTimeout(run, delay);
+}
+$('search').addEventListener('input', () => { renderSavedSearches(); searchPages(); });
 $('menu').addEventListener('click', () => {
   const open = document.querySelector('.workspace').classList.toggle('menu-open'); $('menu').setAttribute('aria-expanded', String(open));
 });

@@ -697,6 +697,125 @@ test('shortcut storage failures are visible, preserve malformed data, and verify
   assert.match(unavailable.get('shortcuts-status').textContent, /Storage disabled/);
 });
 
+test('saved searches persist exact queries, reload per notebook, rename duplicates, and confirm deletion', () => {
+  const { context, state, get, stored } = harness();
+  context.loadSavedSearches(); context.renderSavedSearches();
+  assert.equal(get('save-search').disabled, true);
+  assert.match(texts(get('saved-search-list')), /No saved searches/);
+  const query = '  tag:学习 path:"My Projects"  design ';
+  get('search').value = query; get('search').handlers.input();
+  assert.equal(get('save-search').disabled, false);
+  get('save-search').handlers.click(); get('saved-search-name').value = '学习 projects';
+  get('saved-search-form').handlers.submit({ preventDefault() {} });
+  assert.equal(get('saved-search-dialog').open, false);
+  assert.deepEqual(JSON.parse(stored.get('leaf-searches:/notebook')), [{ name: '学习 projects', query }]);
+  const reload = harness(); reload.stored.set('leaf-searches:/notebook', stored.get('leaf-searches:/notebook'));
+  reload.context.loadSavedSearches(); reload.context.renderSavedSearches();
+  assert.match(texts(reload.get('saved-search-list')), /学习 projects/);
+  get('save-search').handlers.click(); assert.equal(get('saved-search-title').textContent, 'Rename saved search');
+  get('saved-search-name').value = 'Renamed'; get('saved-search-form').handlers.submit({ preventDefault() {} });
+  assert.equal(JSON.parse(stored.get('leaf-searches:/notebook')).length, 1);
+  assert.equal(JSON.parse(stored.get('leaf-searches:/notebook'))[0].query, query);
+  state.root = '/other'; context.loadSavedSearches(); context.renderSavedSearches();
+  assert.match(texts(get('saved-search-list')), /No saved searches/);
+  state.root = '/notebook'; context.loadSavedSearches(); context.renderSavedSearches();
+  const remove = get('saved-search-list').children[0].querySelectorAll('button')[2];
+  context.confirm = () => false; remove.handlers.click();
+  assert.equal(JSON.parse(stored.get('leaf-searches:/notebook')).length, 1);
+  context.confirm = () => true; remove.handlers.click();
+  assert.deepEqual(JSON.parse(stored.get('leaf-searches:/notebook')), []);
+});
+
+test('saved search selection runs immediately, clears separate tag filters, and preserves dirty editor drafts', async () => {
+  const { context, state, get, stored } = harness();
+  const query = 'tag:work path:"My Projects" 学习';
+  stored.set('leaf-searches:/notebook', JSON.stringify([{ name: 'Work', query }]));
+  context.loadSavedSearches(); context.renderSavedSearches();
+  vm.runInContext("selectedTag = 'reading'", context); get('tag-filter').value = 'reading';
+  state.dirty = true; get('editor').value = 'Unsaved draft';
+  const calls = [];
+  context.api = async route => { calls.push(route); return { pages: [{ id: 'Other', title: 'Other', tags: ['work'] }] }; };
+  await get('saved-search-list').children[0].querySelectorAll('button')[0].handlers.click();
+  assert.deepEqual(calls, ['/api/state?q=' + encodeURIComponent(query)]);
+  assert.equal(get('search').value, query); assert.equal(get('tag-filter').value, '');
+  assert.equal(get('tree').querySelectorAll('button').length, 1);
+  assert.equal(get('editor').value, 'Unsaved draft'); assert.equal(state.dirty, true); assert.equal(state.page.id, 'Home');
+  const pending = deferred(); context.api = () => pending.promise;
+  const search = context.restoreSavedSearch(query);
+  get('search').value = 'new'; get('search').handlers.input();
+  pending.resolve({ pages: [{ id: 'Stale', title: 'Stale' }] }); await search;
+  assert.doesNotMatch(texts(get('tree')), /Stale/);
+  context.api = async () => { throw new Error('Search unavailable'); };
+  await context.restoreSavedSearch(query); assert.match(get('message').textContent, /Search unavailable/);
+});
+
+test('saved search names validate, render safely, rename via controls, and retain input on cancellation', () => {
+  const { context, get, stored } = harness();
+  get('search').value = 'one'; get('save-search').handlers.click();
+  get('saved-search-name').value = ' '; get('saved-search-form').handlers.submit({ preventDefault() {} });
+  assert.match(get('saved-search-error').textContent, /1–120/);
+  get('saved-search-name').value = '<img>学习'; get('saved-search-form').handlers.submit({ preventDefault() {} });
+  assert.equal(get('saved-search-list').querySelectorAll('img').length, 0);
+  get('search').value = 'two'; get('save-search').handlers.click(); get('saved-search-name').value = '<IMG>学习';
+  get('saved-search-form').handlers.submit({ preventDefault() {} });
+  assert.match(get('saved-search-error').textContent, /already uses that name/);
+  assert.equal(JSON.parse(stored.get('leaf-searches:/notebook')).length, 1);
+  get('saved-search-dialog').handlers.cancel({ preventDefault() {} });
+  assert.equal(get('saved-search-dialog').open, false);
+  assert.equal(get('saved-search-name').value, '<IMG>学习');
+  get('saved-search-list').children[0].querySelectorAll('button')[1].handlers.click();
+  get('saved-search-name').value = 'Renamed'; get('saved-search-form').handlers.submit({ preventDefault() {} });
+  assert.equal(JSON.parse(stored.get('leaf-searches:/notebook'))[0].name, 'Renamed');
+});
+
+test('saved search storage errors preserve data and input, verify writes, and allow retries', () => {
+  for (const raw of ['{bad', '{}', '[{"name":"X","query":12}]', '[{"name":"X","query":"a"},{"name":"x","query":"b"}]']) {
+    const { context, get, stored } = harness(); stored.set('leaf-searches:/notebook', raw);
+    context.loadSavedSearches(); context.renderSavedSearches();
+    assert.match(get('saved-search-status').textContent, /Could not load.*leaf-searches:\/notebook/);
+    get('search').value = 'work'; get('save-search').handlers.click();
+    get('saved-search-form').handlers.submit({ preventDefault() {} });
+    assert.equal(stored.get('leaf-searches:/notebook'), raw);
+    assert.match(texts(get('saved-search-list')), /work/);
+  }
+  const { context, get, stored } = harness(); context.loadSavedSearches();
+  get('search').value = 'work'; get('save-search').handlers.click(); get('saved-search-name').value = 'My work';
+  context.localStorage.setItem = () => { throw new Error('Quota exceeded'); };
+  get('saved-search-form').handlers.submit({ preventDefault() {} });
+  assert.equal(get('saved-search-dialog').open, true);
+  assert.equal(get('saved-search-name').value, 'My work');
+  assert.match(get('saved-search-error').textContent, /Quota exceeded/);
+  context.localStorage.setItem = () => {};
+  get('saved-search-form').handlers.submit({ preventDefault() {} });
+  assert.match(get('saved-search-error').textContent, /read-back verification/);
+  context.localStorage.setItem = (key, value) => stored.set(key, value);
+  get('saved-search-form').handlers.submit({ preventDefault() {} });
+  assert.equal(get('saved-search-dialog').open, false);
+  assert.equal(get('saved-search-status').textContent, '');
+  assert.equal(JSON.parse(stored.get('leaf-searches:/notebook')).length, 1);
+});
+
+test('saved search limits and unavailable storage produce actionable diagnostics without altering shortcuts', () => {
+  const { context, get, stored } = harness();
+  const rows = Array.from({ length: 100 }, (_, index) => ({ name: 'Name' + index, query: 'Query' + index }));
+  stored.set('leaf-searches:/notebook', JSON.stringify(rows));
+  stored.set('leaf-navigation:/notebook', '{"pinned":["Home"],"recent":[]}');
+  context.loadSavedSearches(); context.renderSavedSearches();
+  get('search').value = 'extra'; get('save-search').handlers.click();
+  get('saved-search-form').handlers.submit({ preventDefault() {} });
+  assert.match(get('saved-search-error').textContent, /100 searches/);
+  assert.equal(JSON.parse(stored.get('leaf-searches:/notebook')).length, 100);
+  get('saved-search-cancel').handlers.click();
+  get('search').value = 'x'.repeat(4097); get('save-search').handlers.click();
+  get('saved-search-form').handlers.submit({ preventDefault() {} });
+  assert.match(get('saved-search-error').textContent, /4,096/);
+  assert.equal(stored.get('leaf-navigation:/notebook'), '{"pinned":["Home"],"recent":[]}');
+  const unavailable = harness();
+  unavailable.context.localStorage.getItem = () => { throw new Error('Storage disabled'); };
+  unavailable.context.loadSavedSearches(); unavailable.context.renderSavedSearches();
+  assert.match(unavailable.get('saved-search-status').textContent, /Storage disabled/);
+});
+
 test('safe preview renders empty, Unicode, code, tasks, links, images and hostile markup', () => {
   const { markdown } = harness();
   const pages = new Set(['Home', 'Other']); const navigation = [];

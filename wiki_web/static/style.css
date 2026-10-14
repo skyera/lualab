@@ -12,6 +12,15 @@
 .page-shortcuts .empty-shortcuts{font-size:12px;color:var(--muted);margin:4px 10px}
 #shortcuts-status{font-size:12px;color:var(--error);overflow-wrap:anywhere;margin:8px 10px 0}
 #shortcuts-status:empty{display:none}
+.saved-searches{margin:0 0 18px;min-width:0}
+.saved-searches h2{font:11px system-ui;letter-spacing:1.4px;color:var(--muted);margin:0 10px 8px}
+.saved-search-row{padding:6px 0;border-bottom:1px solid var(--line)}
+.saved-search-query{font:11px/1.5 monospace;color:var(--muted);overflow-wrap:anywhere;margin:2px 10px 6px}
+.saved-search-actions{display:flex;gap:4px;margin:0 10px}
+.saved-search-actions button{font-size:11px;padding:3px 7px}
+#saved-search-status,#saved-search-error{font-size:12px;color:var(--error);overflow-wrap:anywhere}
+#saved-search-status:empty{display:none}
+#saved-search-query{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--paper);padding:10px}
 #journal-overview-dialog{max-width:min(850px,calc(100vw - 32px));max-height:85vh;overflow:auto}
 .journal-overview-heading,.journal-overview-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .journal-overview-heading{justify-content:space-between}

@@ -14,6 +14,7 @@
     <button id="menu" aria-label="Toggle notebook tree" aria-expanded="false">☰</button>
     <a class="brand" href="/">Leaf<span> Wiki</span></a>
     <label class="search"><span class="sr-only">Search pages</span><input id="search" type="search" placeholder="Search pages…" autocomplete="off"><kbd>Ctrl K</kbd></label>
+    <button id="save-search" type="button" disabled>Save search</button>
     <button id="new-page" class="primary">+ Page</button>
     <button id="switcher-open" title="Open page (Ctrl P / Cmd P)">Open page</button>
     <button id="export-open">Export</button>
@@ -35,6 +36,10 @@
         <p id="shortcuts-status" role="status" aria-live="polite"></p>
       </section>
       <div class="sidebar-heading">YOUR NOTEBOOK <span id="page-count">0</span></div>
+      <section class="saved-searches" aria-label="Saved searches">
+        <h2>SAVED SEARCHES</h2><nav id="saved-search-list" aria-label="Saved searches"></nav>
+        <p id="saved-search-status" role="status" aria-live="polite"></p>
+      </section>
       <label for="tag-filter" class="tag-label">Filter by tag</label><select id="tag-filter"><option value="">All tags</option></select>
       <nav id="tree" aria-label="Notebook pages"></nav>
       <div class="sidebar-bottom"><button id="trash-list">Trash</button><p id="data-path"></p></div>
@@ -128,6 +133,15 @@
     <p id="tasks-error" role="alert"></p>
     <div id="tasks-results"></div>
     <button id="tasks-more" hidden>Show more</button>
+  </dialog>
+  <dialog id="saved-search-dialog" aria-labelledby="saved-search-title">
+    <form id="saved-search-form">
+      <h2 id="saved-search-title">Save search</h2>
+      <label for="saved-search-name">Name</label><input id="saved-search-name" maxlength="120" required autocomplete="off">
+      <pre id="saved-search-query" aria-label="Search query"></pre>
+      <p id="saved-search-error" role="alert"></p>
+      <div class="dialog-actions"><button id="saved-search-cancel" type="button">Cancel</button><button type="submit">Save</button></div>
+    </form>
   </dialog>
   <dialog id="journal-overview-dialog" aria-labelledby="journal-overview-title">
     <div class="journal-overview-heading"><h2 id="journal-overview-title">Journal overview</h2><button id="journal-overview-close" type="button">Close</button></div>

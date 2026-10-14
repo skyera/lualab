@@ -62,6 +62,17 @@ test('real browser selects words in editor/preview and keeps dictionary within d
       await page.locator('#journal-overview-close').click();
       assert.equal(await page.locator('#editor').inputValue(), beforeOverview);
       await page.setViewportSize({ width: 1440, height: 1000 });
+      await page.locator('#search').fill('ephemeral');
+      await page.locator('#save-search').click();
+      await page.locator('#saved-search-name').fill('Reading 学习');
+      await page.locator('#saved-search-form button[type="submit"]').click();
+      assert.equal(await page.locator('#saved-search-list .tree-page').innerText(), 'Reading 学习');
+      await page.reload(); await page.locator('#editor').waitFor({ state: 'visible' });
+      await page.locator('#saved-search-list .tree-page').click();
+      assert.equal(await page.locator('#search').inputValue(), 'ephemeral');
+      await page.waitForFunction(() => document.querySelectorAll('#tree .tree-search-item').length === 1);
+      assert.equal(await page.locator('#editor').inputValue(), beforeOverview);
+      await page.locator('#search').fill('');
       await page.locator('#editor').evaluate(editor => {
         editor.focus(); const index = editor.value.indexOf('ephemeral'); editor.setSelectionRange(index, index + 9);
       });

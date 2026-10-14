@@ -179,6 +179,29 @@ or replaced as part of recovery advice.
   around matching terms with highlighted search keywords in titles, paths, and snippets.
   **Ctrl K** (or Cmd K) focuses search; **Ctrl S** (or Cmd S) saves immediately.
 
+## Saved searches
+
+Enter a query, click **Save search** beside the search field, and give it a name.
+Saved searches appear in the sidebar with their exact queries. Click a name to
+restore and run its query immediately. This clears the separate sidebar tag
+filter; include `tag:work` in the query when a tag restriction should be saved.
+Searches do not navigate away from the editor or modify its draft.
+
+Use **Rename** to change a saved search's name without changing its query, or
+**Delete** to remove it after confirmation. Saving an identical query opens its
+rename dialog rather than creating a duplicate. Names are unique regardless of
+case. Up to 100 searches can be stored, with names of 1–120 characters and
+queries of 1–4,096 characters. Query spacing, quotes, and Unicode are preserved.
+
+Searches use browser storage keyed by notebook path, separately from pinned and
+recent pages. They survive reloads on the same browser origin, but are not synced
+or included in notebook backups. Saves are read back and verified. Storage
+errors remain visible in the sidebar and naming dialog; failed writes keep
+changes in this session and allow retry without losing the name or query.
+Malformed stored data is preserved; repair or remove the storage entry named in
+the diagnostic and reload. When storage cannot be loaded, searches still work
+for the session only.
+
 ## Weekly and monthly journal overviews
 
 Click **Overview** below the journal calendar to browse daily notes together.
