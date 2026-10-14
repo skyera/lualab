@@ -94,7 +94,22 @@
         </section>
         <div id="conflict" hidden><p>Your draft is still in the editor. Copy it before loading the changed file.</p><button id="copy-draft">Copy draft</button><button id="reload-page">Load saved file…</button></div>
         <div id="panes" class="split">
-          <div class="editor-pane"><label for="editor">MARKDOWN</label><textarea id="editor" spellcheck="true" placeholder="# A new thought…"></textarea><p class="editor-tip">Link with [[Page]] · Paste an image · Ctrl S to save</p></div>
+          <div class="editor-pane">
+            <label for="editor">MARKDOWN</label>
+            <div class="format-toolbar" role="group" aria-label="Markdown formatting">
+              <button id="format-bold" type="button" title="Bold selected text">Bold</button>
+              <button id="format-italic" type="button" title="Italicize selected text">Italic</button>
+              <button id="format-heading" type="button" title="Make selected lines level-one headings">Heading</button>
+              <button id="format-link" type="button" title="Insert a wiki link">Link</button>
+              <button id="format-code" type="button" title="Format selected text as code">Code</button>
+              <button id="format-task" type="button" title="Make selected lines tasks">Task</button>
+              <button id="format-table" type="button" title="Insert a Markdown table">Table</button>
+              <button id="format-undo" type="button" disabled>Undo format</button>
+            </div>
+            <p id="format-status" role="status" aria-live="polite"></p>
+            <textarea id="editor" spellcheck="true" placeholder="# A new thought…"></textarea>
+            <p class="editor-tip">Link with [[Page]] · Paste an image · Ctrl S to save</p>
+          </div>
           <div class="preview-pane"><p class="pane-label">PREVIEW</p><article id="preview"></article></div>
         </div>
         <section class="backlinks"><h2>Linked from <span id="backlink-count">0</span></h2><div id="backlinks"></div></section>

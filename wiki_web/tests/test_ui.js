@@ -1012,6 +1012,98 @@ test('page statistics survive successful saves and revision conflicts without ch
   assert.equal(get('statistics-words').textContent, '3'); assert.equal(get('editor').value, 'Two words another');
 });
 
+test('Markdown formatting buttons wrap Unicode selections, preserve neighboring text, and support undo', () => {
+  for (const [kind, prefix, suffix] of [['bold', '**', '**'], ['italic', '*', '*'], ['link', '[[', ']]'], ['code', '`', '`']]) {
+    const { get, state, stored } = harness();
+    get('editor').value = 'before 学习 after'; get('editor').setSelectionRange(7, 9);
+    let prevented = false; get('format-' + kind).handlers.pointerdown({ preventDefault() { prevented = true; } });
+    assert.equal(prevented, true);
+    get('format-' + kind).handlers.click();
+    assert.equal(get('editor').value, 'before ' + prefix + '学习' + suffix + ' after');
+    assert.equal(get('editor').selectionStart, 7 + prefix.length);
+    assert.equal(get('editor').selectionEnd, 9 + prefix.length);
+    assert.equal(get('editor').focused, true); assert.equal(state.dirty, true);
+    assert.equal(JSON.parse(stored.get('leaf-draft:/notebook:Home')).content, get('editor').value);
+    get('format-undo').handlers.click();
+    assert.equal(get('editor').value, 'before 学习 after');
+    assert.equal(get('editor').selectionStart, 7); assert.equal(get('editor').selectionEnd, 9);
+    assert.equal(get('format-undo').disabled, true);
+  }
+});
+
+test('Markdown line formatting handles partial selections, trailing newlines, empty first lines and completed tasks', () => {
+  const { context, get } = harness();
+  const heading = context.formatEdit('heading', 'one\n\ntwo\nthree', 1, 9);
+  assert.equal(heading.replacement, '# one\n\n# two');
+  const task = context.formatEdit('task', '- item\n- [x] Done\nlast', 0, 17);
+  assert.equal(task.replacement, '- [ ] item\n- [x] Done');
+  for (const [kind, expected, offset] of [['heading', '# Heading', 2], ['task', '- [ ] Task', 6]]) {
+    get('editor').value = '\nnext'; get('editor').setSelectionRange(0, 0);
+    get('format-' + kind).handlers.click();
+    assert.equal(get('editor').value, expected + '\nnext'); assert.equal(get('editor').selectionStart, offset);
+    get('format-undo').handlers.click(); assert.equal(get('editor').value, '\nnext');
+  }
+  get('editor').value = '- [x] Done'; get('editor').setSelectionRange(0, 0);
+  get('format-task').handlers.click(); assert.equal(get('editor').value, '- [x] Done');
+});
+
+test('Markdown code formatting chooses safe fences and table templates never discard selected text', () => {
+  const { get, markdown } = harness();
+  for (const text of ['line one\n```\nline two', '`literal`']) {
+    get('editor').value = text; get('editor').setSelectionRange(0, text.length);
+    get('format-code').handlers.click();
+    const frame = markdown.render(get('editor').value, 'Home', new Set(), () => {});
+    assert.equal(frame.querySelectorAll('pre').length, 1);
+    assert.equal(frame.querySelectorAll('code')[0].textContent, text);
+    get('format-undo').handlers.click(); assert.equal(get('editor').value, text);
+  }
+  get('editor').value = 'keep this text'; get('editor').setSelectionRange(5, 9);
+  get('format-table').handlers.click();
+  assert.match(get('editor').value, /keep \n\n\| Column 1/);
+  assert.match(get('editor').value, /\n\nthis text$/);
+  assert.equal(markdown.render(get('editor').value, 'Home', new Set(), () => {}).querySelectorAll('table').length, 1);
+  assert.equal(get('editor').value.slice(get('editor').selectionStart, get('editor').selectionEnd), 'Column 1');
+  get('format-undo').handlers.click(); assert.equal(get('editor').value, 'keep this text');
+});
+
+test('Markdown formatting uses native insertion when supported, verifies it, and visibly falls back on failure', () => {
+  const { context, get } = harness(); const editor = get('editor');
+  editor.value = 'text'; editor.setSelectionRange(0, 4);
+  context.document.execCommand = (command, ui, text) => {
+    assert.equal(command, 'insertText'); assert.equal(ui, false);
+    editor.setRangeText(text, editor.selectionStart, editor.selectionEnd);
+    editor.handlers.input(); return true;
+  };
+  get('format-bold').handlers.click(); assert.equal(editor.value, '**text**');
+  assert.match(get('format-status').textContent, /browser’s Undo/);
+  get('format-undo').handlers.click(); assert.equal(editor.value, 'text');
+  editor.setSelectionRange(0, 4);
+  context.document.execCommand = () => { throw new Error('Command unavailable'); };
+  get('format-italic').handlers.click(); assert.equal(editor.value, '*text*');
+  assert.match(get('format-status').textContent, /Command unavailable/);
+  get('format-undo').handlers.click(); assert.equal(editor.value, 'text');
+  editor.setSelectionRange(0, 4); context.document.execCommand = () => true;
+  get('format-bold').handlers.click(); assert.equal(editor.value, '**text**');
+});
+
+test('formatting respects busy editors, validates wiki names, invalidates undo on typing and saves normally', async () => {
+  const { context, state, get } = harness(); const editor = get('editor');
+  editor.value = 'hello'; editor.setSelectionRange(0, 5); state.loading = true;
+  get('format-bold').handlers.click(); assert.equal(editor.value, 'hello'); state.loading = false;
+  editor.readOnly = true; get('format-bold').handlers.click(); assert.equal(editor.value, 'hello'); editor.readOnly = false;
+  editor.value = 'bad\nname'; editor.setSelectionRange(0, 8);
+  get('format-link').handlers.click(); assert.equal(editor.value, 'bad\nname'); assert.match(get('format-status').textContent, /valid wiki page name/);
+  editor.value = 'hello'; editor.setSelectionRange(0, 5); get('format-bold').handlers.click();
+  let saved;
+  context.api = async (route, body) => { saved = body; return { revision: 'r2', tags: [] }; };
+  assert.equal(await context.save(), true); assert.equal(saved.content, '**hello**');
+  editor.setRangeText('!', editor.value.length, editor.value.length); editor.handlers.input();
+  assert.equal(get('format-undo').disabled, true);
+  get('format-undo').handlers.click(); assert.equal(editor.value, '**hello**!');
+  context.api = async () => ({ id: 'Other', title: 'Other', content: '', revision: 'r2' }); state.dirty = false;
+  await context.openPage('Other'); assert.equal(get('format-undo').disabled, true);
+});
+
 test('safe preview renders empty, Unicode, code, tasks, links, images and hostile markup', () => {
   const { markdown } = harness();
   const pages = new Set(['Home', 'Other']); const navigation = [];

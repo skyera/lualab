@@ -46,6 +46,10 @@
 .statistics-grid dt{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
 .statistics-grid dd{font-size:20px;margin:3px 0 0;overflow-wrap:anywhere}
 .statistics-panel p{font-size:12px;color:var(--muted);margin:0;overflow-wrap:anywhere}
+.format-toolbar{display:flex;gap:5px;flex-wrap:wrap;margin:0 0 8px}
+.format-toolbar button{font-size:12px;padding:5px 8px}
+#format-status{font-size:12px;color:var(--muted);margin:0 0 8px;overflow-wrap:anywhere}
+#format-status:empty{display:none}
 #journal-overview-dialog{max-width:min(850px,calc(100vw - 32px));max-height:85vh;overflow:auto}
 .journal-overview-heading,.journal-overview-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .journal-overview-heading{justify-content:space-between}

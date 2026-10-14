@@ -39,6 +39,21 @@ test('real browser selects words in editor/preview and keeps dictionary within d
       const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
       const errors = []; page.on('pageerror', error => errors.push(error.message));
       await page.goto(url); await page.locator('#editor').waitFor({ state: 'visible' });
+      const originalEditor = await page.locator('#editor').inputValue();
+      await page.locator('#editor').evaluate(editor => {
+        editor.focus(); const index = editor.value.indexOf('ephemeral'); editor.setSelectionRange(index, index + 9);
+      });
+      await page.locator('#format-bold').click();
+      assert.match(await page.locator('#editor').inputValue(), /\*\*ephemeral\*\*/);
+      if ((await page.locator('#format-status').innerText()).includes('browser’s Undo')) {
+        await page.locator('#editor').press(process.platform === 'darwin' ? 'Meta+z' : 'Control+z');
+      } else await page.locator('#format-undo').click();
+      assert.equal(await page.locator('#editor').inputValue(), originalEditor);
+      await page.locator('#editor').evaluate(editor => editor.setSelectionRange(editor.value.length, editor.value.length));
+      await page.locator('#format-table').click();
+      assert.equal(await page.locator('#preview table').count(), 1);
+      await page.locator('#format-undo').click();
+      assert.equal(await page.locator('#editor').inputValue(), originalEditor);
       await page.locator('#statistics-toggle').click();
       assert.equal(await page.locator('#statistics-words').innerText(), '4');
       assert.equal(await page.locator('#statistics-headings').innerText(), '1');

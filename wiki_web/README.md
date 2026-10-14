@@ -179,6 +179,29 @@ or replaced as part of recovery advice.
   around matching terms with highlighted search keywords in titles, paths, and snippets.
   **Ctrl K** (or Cmd K) focuses search; **Ctrl S** (or Cmd S) saves immediately.
 
+## Markdown editing toolbar
+
+Use the buttons above the Markdown editor to format selected text or insert a
+starter at the cursor:
+
+- **Bold** and **Italic** wrap the selection in `**` or `*` markers.
+- **Heading** makes selected lines level-one headings. **Task** turns selected
+  lines into task checkboxes, preserving already completed tasks and blank lines.
+- **Link** wraps a valid selected wiki page name in `[[...]]`, or inserts `[[Page]]`.
+- **Code** wraps short selections in backticks. Multiline selections or selections
+  beginning/ending with backticks use fenced blocks with a safe delimiter length.
+- **Table** inserts a two-column starter with two data rows. Existing selected
+  text is preserved after the inserted template. The first column name is selected
+  for editing.
+
+Formatting returns focus to the editor and uses normal draft recovery, preview,
+statistics, and autosave. When no text is selected, placeholder text is selected
+for replacement. Browser insertion preserves native undo when available; the
+status reports the fallback when it is unavailable. **Undo format** reverts the
+latest toolbar action and restores its original selection. Typing, page reloads,
+and other editor changes invalidate that button so it cannot overwrite newer text.
+Loading or read-only editors reject formatting with a visible diagnostic.
+
 ## Page statistics
 
 Click **Statistics** in a page's toolbar to open a panel that updates as you type.

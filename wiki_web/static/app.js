@@ -1029,6 +1029,7 @@ $('statistics-toggle').addEventListener('click', () => {
 });
 $('statistics-close').addEventListener('click', closeStatistics);
 function preview() {
+  if (formatState.undo && (state.page?.id !== formatState.undo.page || $('editor').value !== formatState.undo.after)) resetFormat();
   if (!state.page) { pageStatistics = null; renderStatistics(); return; }
   $('preview').replaceChildren(WikiMarkdown.render($('editor').value, state.page.id,
     new Set(state.pages.map(page => page.id)), openPage));
@@ -1378,6 +1379,7 @@ async function openPage(id, anchor) {
   try {
     const page = await api('/api/page?id=' + encodeURIComponent(id));
     if (request !== state.request) return false;
+    resetFormat();
     state.page = page; state.dirty = false; state.blocked = false;
     dictionaryState.selection = '';
     $('editor').value = page.content;
@@ -1424,10 +1426,125 @@ async function uploadImages(files) {
   } catch (error) { message(error.message); status('Attachment failed', true); }
   finally { state.uploading = false; }
 }
-$('editor').addEventListener('input', () => {
+const formatState = { undo: null, applying: false };
+function resetFormat() { formatState.undo = null; $('format-undo').disabled = true; $('format-status').textContent = ''; }
+function codeFence(text, minimum) {
+  let length = minimum;
+  for (const run of text.matchAll(/`+/g)) length = Math.max(length, run[0].length + 1);
+  return '`'.repeat(length);
+}
+function editorChanged() {
   if (!state.page) return;
   state.dirty = true; rememberDraft(); preview(); renderOutline();
   if (!state.blocked) { status('Unsaved edits'); clearTimeout(saveTimer); saveTimer = setTimeout(save, 650); }
+}
+function formatEdit(kind, text, start, end) {
+  const selected = text.slice(start, end);
+  if (kind === 'heading' || kind === 'task') {
+    const first = start === 0 ? 0 : text.lastIndexOf('\n', start - 1) + 1;
+    const boundary = end > start && text[end - 1] === '\n' ? end - 1 : end;
+    let last = text.indexOf('\n', boundary); if (last < 0) last = text.length;
+    const lines = text.slice(first, last).split('\n');
+    const replacement = lines.map(line => {
+      if (!line.trim()) return lines.length > 1 ? line : kind === 'heading' ? '# Heading' : '- [ ] Task';
+      if (kind === 'heading') return '# ' + (line.replace(/^#{1,6}\s+/, '') || 'Heading');
+      if (/^\s*[-*]\s+\[[ xX]\]\s*/.test(line)) return line;
+      return '- [ ] ' + (line.replace(/^\s*(?:[-*]|\d+\.)\s+/, '') || 'Task');
+    }).join('\n');
+    const placeholder = lines.length === 1 && !lines[0].trim();
+    return { start: first, end: last, replacement,
+      selectStart: first + (placeholder ? kind === 'heading' ? 2 : 6 : 0), selectEnd: first + replacement.length };
+  }
+  if (kind === 'table') {
+    // Insert beside the selection; inserting a template must not discard a draft.
+    const prefix = start && text[start - 1] !== '\n' ? '\n\n' : '';
+    const table = '| Column 1 | Column 2 |\n| --- | --- |\n| Value A | Value B |\n| Value C | Value D |';
+    const suffix = start < text.length ? '\n\n' : '\n';
+    return { start, end: start, replacement: prefix + table + suffix,
+      selectStart: start + prefix.length + 2, selectEnd: start + prefix.length + 10 };
+  }
+  if (kind === 'code' && (selected.includes('\n') || selected.startsWith('`') || selected.endsWith('`'))) {
+    const fence = codeFence(selected, 3);
+    const prefix = (start && text[start - 1] !== '\n' ? '\n' : '') + fence + '\n';
+    const body = selected.endsWith('\n') ? selected : selected + '\n';
+    const replacement = prefix + body + fence + (end < text.length && text[end] !== '\n' ? '\n' : '');
+    return { start, end, replacement, selectStart: start + prefix.length,
+      selectEnd: start + prefix.length + selected.replace(/\n$/, '').length };
+  }
+  const body = selected || ({ bold: 'bold text', italic: 'italic text', link: 'Page', code: 'code' })[kind];
+  let prefix = ({ bold: '**', italic: '*', link: '[[', code: '`' })[kind];
+  if (kind === 'code') {
+    prefix = codeFence(body, 1);
+  }
+  const suffix = kind === 'link' ? ']]' : prefix;
+  return { start, end, replacement: prefix + body + suffix,
+    selectStart: start + prefix.length, selectEnd: start + prefix.length + body.length };
+}
+function replaceEditorRange(start, end, replacement) {
+  const editor = $('editor'); editor.focus(); editor.setSelectionRange(start, end);
+  const before = editor.value, expected = before.slice(0, start) + replacement + before.slice(end);
+  let native = false, error = '';
+  formatState.applying = true;
+  try {
+    if (typeof document.execCommand === 'function') {
+      try { native = document.execCommand('insertText', false, replacement); }
+      catch (failure) { error = 'Browser insertion unavailable: ' + failure.message + '. '; }
+    }
+    if (editor.value !== expected) {
+      if (editor.value !== before) {
+        editor.value = before;
+        error += 'Browser insertion produced unexpected text; the draft was restored. ';
+      }
+      editor.setRangeText(replacement, start, end, 'end'); native = false;
+    }
+    if (editor.value !== expected) throw new Error('Editor insertion failed verification');
+  } finally { formatState.applying = false; }
+  return { native, error };
+}
+function applyFormat(kind) {
+  const editor = $('editor');
+  if (!state.page || state.loading || state.uploading || editor.readOnly || anyDialogOpen()) {
+    $('format-status').textContent = 'Finish the current operation before formatting.'; return;
+  }
+  const before = editor.value, start = editor.selectionStart, end = editor.selectionEnd;
+  if (kind === 'link' && start !== end && !WikiMarkdown.resolve(state.page.id, before.slice(start, end).split('|')[0])) {
+    $('format-status').textContent = 'Select a valid wiki page name, or insert a link at the cursor.'; return;
+  }
+  const edit = formatEdit(kind, before, start, end);
+  const expected = before.slice(0, edit.start) + edit.replacement + before.slice(edit.end);
+  if (expected === before) { $('format-status').textContent = 'Selected lines already have this format.'; return; }
+  let insertion;
+  try { insertion = replaceEditorRange(edit.start, edit.end, edit.replacement); }
+  catch (error) { editor.value = before; $('format-status').textContent = 'Could not format ' + state.page.id + ': ' + error.message + '. Draft preserved.'; return; }
+  editor.setSelectionRange(edit.selectStart, edit.selectEnd);
+  formatState.undo = { page: state.page.id, before, after: editor.value, start, end };
+  $('format-undo').disabled = false;
+  $('format-status').textContent = insertion.error + (insertion.native
+    ? 'Formatting applied. Use Undo format or your browser’s Undo to revert.'
+    : 'Formatting applied. Use Undo format to revert this change.');
+  editorChanged();
+}
+for (const kind of ['bold', 'italic', 'heading', 'link', 'code', 'task', 'table']) {
+  $('format-' + kind).addEventListener('pointerdown', event => { event.preventDefault(); });
+  $('format-' + kind).addEventListener('click', () => applyFormat(kind));
+}
+$('format-undo').addEventListener('click', () => {
+  const undo = formatState.undo, editor = $('editor');
+  if (!undo || state.loading || state.uploading || editor.readOnly || anyDialogOpen()) return;
+  if (state.page?.id !== undo.page || editor.value !== undo.after) {
+    formatState.undo = null; $('format-undo').disabled = true;
+    $('format-status').textContent = 'The editor changed. Undo format cannot overwrite newer text.'; return;
+  }
+  let insertion;
+  try { insertion = replaceEditorRange(0, editor.value.length, undo.before); }
+  catch (error) { editor.value = undo.after; $('format-status').textContent = 'Could not undo formatting: ' + error.message + '. Text preserved.'; return; }
+  editor.setSelectionRange(undo.start, undo.end); formatState.undo = null;
+  $('format-undo').disabled = true; $('format-status').textContent = insertion.error + 'Last formatting change undone.'; editorChanged();
+});
+$('editor').addEventListener('input', () => {
+  if (formatState.applying) return;
+  resetFormat();
+  editorChanged();
 });
 $('editor').addEventListener('paste', event => {
   const files = [...(event.clipboardData?.items || [])].filter(item => item.kind === 'file' && item.type.startsWith('image/')).map(item => item.getAsFile()).filter(Boolean);
