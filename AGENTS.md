@@ -11,6 +11,7 @@ For any issue, feature request, review, or modification task, the agent MUST fol
 3.  **Approval Gate**: Wait for user approval before starting implementation (unless the user has indicated auto-approval).
 4.  **Implement**: Perform surgical and idiomatic changes to the codebase directly.
 5.  **Verify**: Validate the changes through testing, manual verification, or relevant shell commands to ensure the solution is correct and does not introduce regressions. Double check and verify every fix/solution thoroughly before concluding.
+6.  **Ship Directly**: Once verification passes, ship directly — create the atomic commit locally and push to the remote repository without waiting for intermediate confirmation.
 
 Verification is the only path to finality. Do not assume success. Always double check and verify every fix or solution for correctness.
 
@@ -61,6 +62,7 @@ When the user asks about an issue, problem, feature, or modification, the agent 
 7.  **Approval Mode**:
     *   If the user has indicated **"approve always"**, **"do it"**, **"auto approve"**, or explicitly asks to fix/implement directly: proceed immediately with implementation and verification without asking for confirmation.
     *   Otherwise: **WAIT for user approval before applying changes or starting implementation.**
+8.  **Ship After Verification**: Once changes are implemented and verified, **ship directly** (create the atomic commit locally and push to remote) without waiting for intermediate prompts.
 
 ## TUI Performance & Refresh Standards
 
@@ -133,8 +135,9 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
 ## Commit Workflow
 
 *   **One commit per issue**: Each fix should be its own atomic commit with a descriptive message.
-*   **"commit"**: When the user says "commit", create the commit(s) locally. Do NOT push.
-*   **"push"**: When the user says "push", push all local commits to the remote repository.
+*   **Ship Directly After Verification**: Once verification passes, create the atomic commit locally and push to the remote repository directly without stopping for manual prompts.
+*   **"commit"**: When the user explicitly says "commit", create the commit(s) locally. Do NOT push.
+*   **"push"**: When the user explicitly says "push", push all local commits to the remote repository.
 
 ## Shorthand Triggers
 
