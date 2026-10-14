@@ -23,19 +23,78 @@ const WikiMarkdown = (() => {
     if (text !== undefined) node.textContent = text;
     return node;
   }
+  function inlinePattern() {
+    return /(`+)([\s\S]*?)\1|!\[([^\]]*)\]\(([^)\s]+)\)|\[\[([^\]]+)\]\]|\[([^\]]+)\]\(([^)\s]+)\)|\*\*([^*]+)\*\*|\*([^*]+)\*/g;
+  }
+  function imageFile(page, target) {
+    const folder = page.split('/').at(-1) + '.attachments/';
+    const file = target.startsWith(folder) ? target.slice(folder.length) : '';
+    return /^[\w-]+\.(png|jpg|gif|webp)$/.test(file) ? file : null;
+  }
+  function imageOptions(text) {
+    const match = text.match(/^\{width=(small|medium|full)(?: caption=("(?:\\.|[^"\\])*"))?\}/);
+    if (!match) return { length: 0, width: 'full', caption: '',
+      error: text.startsWith('{width=') ? 'Unrecognized or malformed image options' : undefined };
+    try {
+      const caption = match[2] ? JSON.parse(match[2]) : '';
+      if (caption.length > 500) throw new Error('Caption exceeds 500 characters');
+      return { length: match[0].length, width: match[1], caption };
+    } catch (error) { return { length: 0, width: 'full', caption: '', error: error.message }; }
+  }
+  function images(text, page) {
+    const items = []; let offset = 0, fence = null, chunk = '', chunkStart = 0;
+    function flush() {
+      const pattern = inlinePattern(); let match;
+      while ((match = pattern.exec(chunk))) {
+        if (match[3] === undefined || !imageFile(page, match[4])) continue;
+        const options = imageOptions(chunk.slice(pattern.lastIndex));
+        items.push({ start: chunkStart + match.index, end: chunkStart + pattern.lastIndex + options.length,
+          base: match[0], alt: match[3], target: match[4], file: imageFile(page, match[4]), options });
+        pattern.lastIndex += options.length;
+      }
+      chunk = '';
+    }
+    for (const raw of text.split('\n')) {
+      const line = raw.replace(/\r$/, '');
+      const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+      if (marker) {
+        flush();
+        if (!fence) fence = marker[1];
+        else if (marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = null;
+      } else if (fence || /^( {4}|\t)/.test(line) || !line.trim()) flush();
+      else {
+        const block = /^(#{1,6}\s+|\s*(?:[-*]|\d+\.)\s+|> )/.test(line);
+        if (block) flush();
+        if (!chunk) chunkStart = offset;
+        chunk += raw + '\n';
+        if (block) flush();
+      }
+      offset += raw.length + 1;
+    }
+    flush(); return items;
+  }
   function inline(text, target, page, pages, navigate) {
-    const pattern = /(`+)([\s\S]*?)\1|!\[([^\]]*)\]\(([^)\s]+)\)|\[\[([^\]]+)\]\]|\[([^\]]+)\]\(([^)\s]+)\)|\*\*([^*]+)\*\*|\*([^*]+)\*/g;
+    const pattern = inlinePattern();
     let start = 0, match;
     while ((match = pattern.exec(text))) {
       target.append(document.createTextNode(text.slice(start, match.index)));
       let node;
       if (match[1]) node = element('code', match[2]);
       else if (match[3] !== undefined) {
-        const folder = page.split('/').at(-1) + '.attachments/';
-        const file = match[4].startsWith(folder) ? match[4].slice(folder.length) : '';
-        if (/^[\w-]+\.(png|jpg|gif|webp)$/.test(file)) {
+        const file = imageFile(page, match[4]);
+        if (file) {
           node = element('img'); node.alt = match[3]; node.loading = 'lazy';
           node.src = '/api/attachment?' + new URLSearchParams({ page, file });
+          const options = imageOptions(text.slice(pattern.lastIndex));
+          if (options.length) {
+            const wrapper = element('span'); wrapper.className = 'wiki-image image-' + options.width;
+            wrapper.setAttribute('role', 'figure'); wrapper.append(node);
+            if (options.caption) {
+              const caption = element('span', options.caption); caption.className = 'image-caption'; wrapper.append(caption);
+              wrapper.setAttribute('aria-label', options.caption);
+            }
+            node = wrapper; pattern.lastIndex += options.length;
+          } else if (options.error) node.title = 'Invalid image options: ' + options.error;
         } else node = element('span', '[Unsupported image path: ' + match[4] + ']');
       } else if (match[5]) {
         const separator = match[5].indexOf('|');
@@ -207,5 +266,5 @@ const WikiMarkdown = (() => {
     return { words, characters, readingMinutes: words ? Math.ceil(words / 200) : 0,
       headings: headingCount, outgoing: targets.size, images: frame.querySelectorAll('img').length };
   }
-  return { render, resolve, headings, statistics };
+  return { render, resolve, headings, statistics, images, imageOptions };
 })();

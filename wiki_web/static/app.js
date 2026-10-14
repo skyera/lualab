@@ -74,8 +74,69 @@ $('pin-page').addEventListener('click', () => {
     ? navigationState.pinned.filter(value => value !== id) : [...navigationState.pinned, id];
   saveNavigation(); renderNavigation();
 });
-const MODAL_DIALOGS = ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks', 'capture', 'verse', 'journal-overview', 'saved-search', 'attachments', 'backup', 'folder'];
+const MODAL_DIALOGS = ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks', 'capture', 'verse', 'journal-overview', 'saved-search', 'attachments', 'backup', 'folder', 'image-options'];
 function anyDialogOpen() { return MODAL_DIALOGS.some(id => $(id + '-dialog').open); }
+
+const imageOptionsState = { page: null, before: '', items: [] };
+function populateImageOptions() {
+  const item = imageOptionsState.items[Number($('image-options-image').value)];
+  if (!item) { $('image-options-error').textContent = 'Choose an available image.'; return; }
+  $('image-options-path').textContent = item.target;
+  $('image-options-caption').value = item.options.caption;
+  $('image-options-width').value = item.options.width;
+  $('image-options-error').textContent = item.options.error
+    ? item.options.error + '. Repair the image options in Markdown before applying changes.' : '';
+}
+$('image-options-open').addEventListener('click', () => {
+  const editor = $('editor');
+  if (!state.page || state.loading || state.uploading || editor.readOnly || anyDialogOpen()) return;
+  const items = WikiMarkdown.images(editor.value, state.page.id);
+  if (!items.length) { message('No supported local images in this page. Paste or drop an image into the editor first.'); return; }
+  imageOptionsState.page = state.page.id; imageOptionsState.before = editor.value; imageOptionsState.items = items;
+  $('image-options-image').replaceChildren(...items.map((item, index) => {
+    const option = document.createElement('option'); option.value = String(index);
+    option.textContent = (index + 1) + '. ' + (item.alt || item.file); return option;
+  }));
+  const selected = items.findIndex(item => editor.selectionStart >= item.start && editor.selectionStart <= item.end);
+  $('image-options-image').value = String(selected < 0 ? 0 : selected);
+  populateImageOptions(); $('image-options-dialog').showModal(); $('image-options-caption').focus();
+});
+$('image-options-image').addEventListener('change', populateImageOptions);
+$('image-options-cancel').addEventListener('click', () => { $('image-options-dialog').close(); $('editor').focus(); });
+$('image-options-dialog').addEventListener('cancel', event => {
+  event.preventDefault(); $('image-options-dialog').close(); $('editor').focus();
+});
+$('image-options-form').addEventListener('submit', event => {
+  event.preventDefault(); const editor = $('editor');
+  const item = imageOptionsState.items[Number($('image-options-image').value)];
+  const width = $('image-options-width').value, caption = $('image-options-caption').value;
+  if (!item || !['small', 'medium', 'full'].includes(width) || caption.length > 500) {
+    $('image-options-error').textContent = 'Choose an image and width, with a caption of at most 500 characters.'; return;
+  }
+  if (item.options.error) { $('image-options-error').textContent = 'Repair invalid image options in Markdown before applying changes.'; return; }
+  if (state.page?.id !== imageOptionsState.page || editor.value !== imageOptionsState.before) {
+    $('image-options-error').textContent = 'The editor changed. Cancel and reopen Image options to avoid replacing newer text.'; return;
+  }
+  if (state.loading || state.uploading || editor.readOnly) {
+    $('image-options-error').textContent = 'Finish the current operation before editing image options.'; return;
+  }
+  const encodedCaption = JSON.stringify(caption).replace(/[|\[\]`#]/g,
+    character => '\\u' + character.charCodeAt(0).toString(16).padStart(4, '0'));
+  const replacement = item.base + '{width=' + width + (caption ? ' caption=' + encodedCaption : '') + '}';
+  const start = editor.selectionStart, end = editor.selectionEnd;
+  $('image-options-dialog').close();
+  let insertion;
+  try { insertion = replaceEditorRange(item.start, item.end, replacement); }
+  catch (error) {
+    editor.value = imageOptionsState.before;
+    $('image-options-dialog').showModal(); $('image-options-error').textContent = 'Could not apply image options: ' + error.message + '. Draft preserved.'; return;
+  }
+  editor.setSelectionRange(item.start + replacement.length, item.start + replacement.length);
+  formatState.undo = { page: state.page.id, before: imageOptionsState.before, after: editor.value, start, end };
+  $('format-undo').disabled = false;
+  $('format-status').textContent = insertion.error + 'Image options applied. Use Undo format to revert.';
+  editorChanged();
+});
 
 const folderState = { busy: false, plan: null };
 function folderControls() {

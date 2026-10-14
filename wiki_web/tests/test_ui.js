@@ -15,7 +15,9 @@ class Node {
   contains(node) { return this === node || this.children.some(child => child.contains?.(node)); }
   replaceChildren(...nodes) { this.children = nodes; this.textContent = ''; }
   addEventListener(name, run) { this.handlers[name] = run; }
-  setAttribute() {}
+  setAttribute(name, value) { this.attributes ||= {}; this.attributes[name] = String(value); }
+  getAttribute(name) { return this.attributes?.[name] ?? this[name] ?? null; }
+  removeAttribute(name) { if (this.attributes) delete this.attributes[name]; delete this[name]; }
   focus() { this.focused = true; }
   select() {}
   setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
@@ -1102,6 +1104,92 @@ test('formatting respects busy editors, validates wiki names, invalidates undo o
   get('format-undo').handlers.click(); assert.equal(editor.value, '**hello**!');
   context.api = async () => ({ id: 'Other', title: 'Other', content: '', revision: 'r2' }); state.dirty = false;
   await context.openPage('Other'); assert.equal(get('format-undo').disabled, true);
+});
+
+test('image options render safe captions and fixed width classes while preserving legacy and malformed images', () => {
+  const { markdown } = harness(); const caption = '学习 "quote" <script>bad</script> | [[Other]]';
+  for (const width of ['small', 'medium', 'full']) {
+    const source = '![Diagram](Home.attachments/test.png){width=' + width + ' caption=' + JSON.stringify(caption) + '}';
+    const frame = markdown.render(source, 'Home', new Set(), () => {});
+    const wrapper = frame.querySelectorAll('span').find(node => node.className === 'wiki-image image-' + width);
+    assert.ok(wrapper); assert.equal(wrapper.getAttribute('role'), 'figure');
+    assert.equal(wrapper.children[1].textContent, caption);
+    assert.equal(frame.querySelectorAll('script').length, 0); assert.equal(frame.querySelectorAll('a').length, 0);
+    assert.equal(frame.querySelectorAll('img')[0].alt, 'Diagram');
+  }
+  const legacy = markdown.render('![x](Home.attachments/test.png)', 'Home', new Set(), () => {});
+  assert.equal(legacy.querySelectorAll('img').length, 1);
+  assert.equal(legacy.querySelectorAll('span').length, 0);
+  const invalid = markdown.render('![x](Home.attachments/test.png){width=giant caption="bad"}', 'Home', new Set(), () => {});
+  assert.match(texts(invalid), /width=giant/);
+  assert.match(invalid.querySelectorAll('img')[0].title, /Invalid image options/);
+});
+
+test('image source extraction excludes code and unsupported paths and returns exact CRLF offsets', () => {
+  const { markdown } = harness();
+  const image = '![学习](Home.attachments/a.png){width=small caption="Caption"}';
+  const source = '# Heading\r\n' + image + '\r\n\r\n`![hidden](Home.attachments/code.png)`\r\n'
+    + '\r\n```\r\n![hidden](Home.attachments/fence.png)\r\n```\r\n'
+    + '\r\n    ![hidden](Home.attachments/indent.png)\r\n\r\n![bad](https://example.com/a.png)';
+  const items = markdown.images(source, 'Home'); assert.equal(items.length, 1);
+  assert.equal(source.slice(items[0].start, items[0].end), image);
+  assert.equal(items[0].options.caption, 'Caption');
+  assert.equal(markdown.images('`multiline\n![hidden](Home.attachments/code.png)`', 'Home').length, 0);
+});
+
+test('image options choose individual occurrences, preserve surrounding Markdown, support undo and autosave', async () => {
+  const { context, state, get, markdown } = harness();
+  const image = '![Image](Home.attachments/a.png)'; const source = 'Before\n' + image + '\n' + image + '\nAfter';
+  const editor = get('editor'); editor.value = source; editor.setSelectionRange(source.lastIndexOf(image), source.lastIndexOf(image));
+  get('image-options-open').handlers.click();
+  assert.equal(get('image-options-image').value, '1');
+  const caption = '学习 "quotes" | [[Other]] #tag `literal`';
+  get('image-options-caption').value = caption; get('image-options-width').value = 'medium';
+  get('image-options-form').handlers.submit({ preventDefault() {} });
+  assert.equal(get('image-options-dialog').open, false); assert.equal(state.dirty, true);
+  const items = markdown.images(editor.value, 'Home');
+  assert.equal(items.length, 2); assert.equal(items[0].options.length, 0);
+  assert.equal(items[1].options.caption, caption); assert.equal(items[1].options.width, 'medium');
+  assert.ok(editor.value.startsWith('Before\n' + image + '\n')); assert.ok(editor.value.endsWith('\nAfter'));
+  assert.doesNotMatch(editor.value.slice(items[1].start), /\[\[Other\]\]/);
+  let saved; context.api = async (route, body) => { saved = body; return { revision: 'r2', tags: [] }; };
+  assert.equal(await context.save(), true); assert.equal(saved.content, editor.value);
+  get('format-undo').handlers.click(); assert.equal(editor.value, source);
+});
+
+test('image options retain fields on stale drafts, malformed metadata and locked editors', () => {
+  const { get } = harness(); const editor = get('editor');
+  get('image-options-open').handlers.click(); assert.equal(get('image-options-dialog').open, false);
+  editor.value = '![x](Home.attachments/a.png)'; editor.setSelectionRange(0, 0);
+  get('image-options-open').handlers.click(); get('image-options-caption').value = 'Keep caption';
+  editor.value += '\nNewer draft';
+  get('image-options-form').handlers.submit({ preventDefault() {} });
+  assert.match(get('image-options-error').textContent, /editor changed/); assert.match(editor.value, /Newer draft/);
+  assert.equal(get('image-options-caption').value, 'Keep caption');
+  get('image-options-cancel').handlers.click();
+  editor.value = '![x](Home.attachments/a.png){width=giant}';
+  get('image-options-open').handlers.click(); get('image-options-form').handlers.submit({ preventDefault() {} });
+  assert.match(get('image-options-error').textContent, /Repair invalid/);
+  get('image-options-dialog').handlers.cancel({ preventDefault() {} });
+  editor.value = '![x](Home.attachments/a.png)'; get('image-options-open').handlers.click(); editor.readOnly = true;
+  get('image-options-form').handlers.submit({ preventDefault() {} });
+  assert.match(get('image-options-error').textContent, /Finish the current operation/);
+});
+
+test('HTML export embeds images and retains caption text and width styles through the shared renderer', async () => {
+  const { context } = harness(); let root;
+  const create = context.document.createElement;
+  context.document.createElement = tag => { const node = create(tag); if (tag === 'main') root = node; return node; };
+  context.btoa = binary => Buffer.from(binary, 'binary').toString('base64');
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../static/export.js'), 'utf8'), context);
+  const page = { id: 'Home', revision: 'r1', content: '![x](Home.attachments/a.png){width=small caption="学习"}' };
+  context.fetch = async route => route.startsWith('/api/attachment')
+    ? { ok: true, headers: { get: () => 'image/png' }, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer }
+    : { ok: true, json: async () => route === '/api/state' ? { pages: [page] } : page };
+  const html = await vm.runInContext('WikiExport', context).generate('page', 'Home', new AbortController().signal);
+  assert.equal(root.querySelectorAll('img')[0].src, 'data:image/png;base64,AQID');
+  assert.equal(root.querySelectorAll('span').find(node => node.className === 'image-caption').textContent, '学习');
+  assert.match(html, /\.image-small\{width:240px\}/);
 });
 
 test('safe preview renders empty, Unicode, code, tasks, links, images and hostile markup', () => {

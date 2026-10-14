@@ -63,6 +63,7 @@
           <div class="modes" aria-label="Editor layout"><button data-mode="edit">Edit</button><button data-mode="split" class="selected">Split</button><button data-mode="preview">Preview</button></div>
           <button id="outline-toggle" aria-controls="outline-panel" aria-expanded="false">Outline</button>
           <button id="statistics-toggle" aria-controls="statistics-panel" aria-expanded="false">Statistics</button>
+          <button id="image-options-open" type="button">Image options</button>
           <button id="verse-open" title="Insert random Bible verse">Verse</button>
           <button id="dictionary-open" aria-controls="dictionary-panel" aria-expanded="false">Look up</button>
           <button id="pin-page" aria-pressed="false">☆ Pin page</button>
@@ -165,6 +166,17 @@
     <p id="tasks-error" role="alert"></p>
     <div id="tasks-results"></div>
     <button id="tasks-more" hidden>Show more</button>
+  </dialog>
+  <dialog id="image-options-dialog" aria-labelledby="image-options-title">
+    <form id="image-options-form">
+      <h2 id="image-options-title">Image options</h2>
+      <label for="image-options-image">Image</label><select id="image-options-image"></select>
+      <p id="image-options-path"></p>
+      <label for="image-options-caption">Caption</label><input id="image-options-caption" maxlength="500">
+      <label for="image-options-width">Width</label><select id="image-options-width"><option value="small">Small · 240px</option><option value="medium">Medium · 480px</option><option value="full">Full width</option></select>
+      <p id="image-options-error" role="alert"></p>
+      <div class="dialog-actions"><button id="image-options-cancel" type="button">Cancel</button><button type="submit">Apply</button></div>
+    </form>
   </dialog>
   <dialog id="folder-dialog" aria-labelledby="folder-title">
     <h2 id="folder-title">Move folder</h2>

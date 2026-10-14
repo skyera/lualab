@@ -240,6 +240,17 @@ test('real browser selects words in editor/preview and keeps dictionary within d
       const attachmentBounds = await page.locator('#attachments-dialog').boundingBox();
       assert.ok(attachmentBounds.x >= 0 && attachmentBounds.x + attachmentBounds.width <= 375);
       await page.locator('#attachments-close').click();
+      await page.locator('#image-options-open').click();
+      await page.locator('#image-options-caption').fill('Storage architecture · 学习');
+      await page.locator('#image-options-width').selectOption('small');
+      const imageOptionsBounds = await page.locator('#image-options-dialog').boundingBox();
+      assert.ok(imageOptionsBounds.x >= 0 && imageOptionsBounds.x + imageOptionsBounds.width <= 375);
+      await page.locator('#image-options-form button[type="submit"]').click();
+      assert.equal(await page.locator('#preview .image-caption').innerText(), 'Storage architecture · 学习');
+      await page.locator('[data-mode="preview"]').click();
+      const sizedImage = await page.locator('#preview .wiki-image').boundingBox();
+      assert.ok(sizedImage.width <= 240 && sizedImage.width > 0);
+      await page.locator('[data-mode="edit"]').click();
       await page.locator('#export-open').click(); await page.locator('#export-scope').selectOption('notebook');
       assert.equal(await page.locator('#preview table').count(), 1);
       assert.equal(await page.locator('#preview td.align-right').evaluate(cell => getComputedStyle(cell).textAlign), 'right');
@@ -256,6 +267,8 @@ test('real browser selects words in editor/preview and keeps dictionary within d
       assert.ok(await offline.locator('article').count() > 1);
       assert.equal(await offline.locator('img').first().evaluate(image => image.complete && image.naturalWidth > 0), true);
       assert.equal(await offline.locator('script').count(), 0);
+      assert.equal(await offline.locator('.image-caption').innerText(), 'Storage architecture · 学习');
+      assert.ok((await offline.locator('.wiki-image').boundingBox()).width <= 240);
       assert.equal(await offline.locator('table').count(), 1);
       assert.equal(await offline.locator('td.align-right').evaluate(cell => getComputedStyle(cell).textAlign), 'right');
       const link = offline.locator('article a[href^="#page-"]').first();

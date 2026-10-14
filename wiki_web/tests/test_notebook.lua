@@ -161,6 +161,23 @@ test('restore read-back mismatch is fatal and preserves the incomplete marker', 
     end)
 end)
 
+test('image caption metadata survives rename and history restore with owning-page references', function()
+    fixture(function(n)
+        local page = n:save('Notes/学习', '# Image', '')
+        local image = n:image(page.id, '\137PNG\r\n\26\nbytes')
+        local small = '{width=small caption="学习 \\u005b\\u005bOther\\u005d\\u005d"}'
+        local first = n:save(page.id, image.markdown .. small, page.revision)
+        page = n:save(page.id, image.markdown .. '{width=medium caption="New caption"}', first.revision)
+        page = n:rename(page.id, 'Archive/Plan', page.revision)
+        assert(page.content:find('Plan.attachments/' .. image.file, 1, true))
+        assert(page.content:find('{width=medium caption="New caption"}', 1, true))
+        page = n:restore_version(page.id, first.revision, page.revision)
+        assert(page.content:find('Plan.attachments/' .. image.file .. ')' .. small, 1, true))
+        assert(#n:backlinks('Other') == 0)
+        assert(n:attachment(page.id, image.file) == '\137PNG\r\n\26\nbytes')
+    end)
+end)
+
 test('folder moves preserve nested links, images and restorable historical peer links', function()
     fixture(function(n)
         local first = n:save('Projects/Wiki/Design', '# Before\n[[./Tasks#next|Tasks]] [[../Other]] [[./Missing]]', '')

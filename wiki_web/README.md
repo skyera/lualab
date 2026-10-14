@@ -533,6 +533,38 @@ Removing an image link does not delete its file; unused attachments remain in
 the notebook. Images already linked before an interrupted upload remain stored
 even if the Markdown save fails, so you can recover them from the folder.
 
+## Image captions and sizing
+
+Open **Image options** in the page toolbar, choose a local image occurrence, enter
+a caption, and select **Small**, **Medium**, or **Full width**. The image at the
+editor cursor is selected when possible. Repeated occurrences can have different
+settings. **Apply** updates only that image's Markdown, preserving its link, alt
+text, and surrounding content. Changes use normal draft recovery and autosave;
+**Undo format** can revert the latest change. Cancel and reopen the dialog if the
+editor changes while it is open.
+
+Settings use this Leaf Wiki Markdown extension immediately after the image:
+
+```markdown
+![Diagram](Design.attachments/example.png){width=medium caption="Storage architecture"}
+```
+
+Small is 240px, Medium is 480px, and Full uses the available width. All sizes are
+clamped to the containing pane; aspect ratio is preserved. Captions render below
+the image as plain text, including in HTML exports and journal overviews. They
+do not interpret HTML or inline formatting. Images without this extension retain
+their existing natural sizing. Page rename, folder moves, and revision restoration
+preserve the settings while adjusting owning-page attachment references.
+
+Captions are optional and limited to 500 UTF-16 code units, matching browser input
+limits. The caption value is a JSON string, so quotes and backslashes are escaped.
+The dialog also escapes Markdown metacharacters with JSON Unicode escapes to
+avoid table-cell splitting and accidental wiki-link/tag parsing in metadata.
+For example, a caption containing a pipe uses `\u007c` in its stored string.
+Malformed options remain visible as literal source text and show an image tooltip
+diagnostic; repair them in Markdown before editing through the dialog. Image
+options do not apply to code examples, remote images, or unsupported image paths.
+
 ## Notebook backup and restore
 
 Open **Backup** in the header and choose **Download notebook backup**. This

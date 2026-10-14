@@ -50,6 +50,17 @@
 .format-toolbar button{font-size:12px;padding:5px 8px}
 #format-status{font-size:12px;color:var(--muted);margin:0 0 8px;overflow-wrap:anywhere}
 #format-status:empty{display:none}
+.wiki-image{display:inline-block;max-width:100%;vertical-align:top}
+.wiki-image.image-small{width:240px}
+.wiki-image.image-medium{width:480px}
+.wiki-image.image-full{width:100%}
+.wiki-image img{display:block;width:100%;height:auto}
+.image-caption{display:block;font-size:13px;color:var(--muted);white-space:pre-wrap;overflow-wrap:anywhere}
+#image-options-dialog{max-height:85vh;overflow:auto}
+#image-options-dialog label{margin-top:12px}
+#image-options-dialog select{width:100%;padding:9px;border:1px solid var(--line);border-radius:6px;background:var(--paper)}
+#image-options-path{font:12px/1.5 monospace;overflow-wrap:anywhere;color:var(--muted)}
+#image-options-error{color:var(--error);font-size:13px;overflow-wrap:anywhere}
 #journal-overview-dialog{max-width:min(850px,calc(100vw - 32px));max-height:85vh;overflow:auto}
 .journal-overview-heading,.journal-overview-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .journal-overview-heading{justify-content:space-between}
