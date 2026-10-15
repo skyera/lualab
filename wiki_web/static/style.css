@@ -369,3 +369,8 @@ mark.search-highlight{background:var(--mark-bg);color:var(--mark-ink);padding:0 
 #graph-canvas.grabbing{cursor:grabbing}
 .graph-tooltip{position:absolute;pointer-events:none;z-index:10;padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink);font-size:12px;box-shadow:0 2px 8px rgba(0,0,0,.15);white-space:nowrap;transform:translate(-50%,-100%);margin-top:-10px}
 @media(max-width:650px){#graph-dialog{padding:12px;height:calc(100vh - 32px)}.graph-heading{flex-direction:column;align-items:stretch}.graph-controls{flex-wrap:wrap}.graph-meta{flex-direction:column;align-items:flex-start}}
+.editor-pane{position:relative}
+.link-suggest{position:absolute;left:16px;right:16px;bottom:44px;z-index:20;display:flex;flex-direction:column;max-height:240px;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--surface);box-shadow:0 4px 16px rgba(0,0,0,.18)}
+.link-suggest[hidden]{display:none}
+.link-suggest-option{text-align:left;border:0;border-radius:0;background:transparent;color:var(--ink);padding:7px 12px;font:13px/1.4 system-ui,sans-serif;overflow-wrap:anywhere;cursor:pointer}
+.link-suggest-option.selected,.link-suggest-option:hover{background:var(--soft);color:var(--green)}

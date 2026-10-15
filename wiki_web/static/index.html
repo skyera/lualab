@@ -122,8 +122,9 @@
               <button id="format-undo" type="button" disabled>Undo format</button>
             </div>
             <p id="format-status" role="status" aria-live="polite"></p>
-            <textarea id="editor" spellcheck="true" placeholder="# A new thought…"></textarea>
-            <p class="editor-tip">Link with [[Page]] · Paste an image · Ctrl S to save</p>
+            <textarea id="editor" spellcheck="true" placeholder="# A new thought…" aria-autocomplete="list" aria-controls="link-suggest" aria-expanded="false"></textarea>
+            <div id="link-suggest" class="link-suggest" role="listbox" aria-label="Page suggestions" hidden></div>
+            <p class="editor-tip">Link with [[Page]] (suggestions as you type) · Paste an image · Ctrl S to save</p>
           </div>
           <div class="preview-pane"><p class="pane-label">PREVIEW</p><article id="preview"></article></div>
         </div>

@@ -2003,3 +2003,61 @@ test('graph view opens, fetches nodes/edges, updates stats, filters nodes and na
   assert.equal(get('graph-dialog').open, true);
   get('graph-close').handlers.click();
 });
+
+test('typing [[ suggests ranked pages and keyboard or mouse selection completes the link', () => {
+  const { context, state, get } = harness();
+  state.pages = [
+    { id: 'Projects/Wiki/Design' }, { id: 'Home' }, { id: 'Projects/Wiki' },
+    { id: 'Journal/2026/10/2026-10-11' }, { id: 'Wiki' }
+  ];
+  assert.equal(context.findLinkQuery('no link here', 12), null);
+  assert.equal(context.findLinkQuery('done [[Page]] text', 18), null);
+  assert.equal(context.findLinkQuery('line [[Pa\nge', 12), null);
+  assert.deepEqual({ ...context.findLinkQuery('see [[Wi', 8) }, { start: 6, query: 'Wi' });
+  assert.deepEqual([...context.rankLinkPages(state.pages, 'wiki')], ['Wiki', 'Projects/Wiki', 'Projects/Wiki/Design']);
+  assert.deepEqual([...context.rankLinkPages(state.pages, 'proj design')], ['Projects/Wiki/Design']);
+  assert.deepEqual([...context.rankLinkPages(state.pages, 'zzz')], []);
+
+  const editor = get('editor');
+  editor.value = 'See [[wi';
+  editor.setSelectionRange(8, 8);
+  editor.handlers.input();
+  assert.equal(get('link-suggest').hidden, false);
+  assert.equal(get('link-suggest').children.length, 3);
+  assert.equal(get('link-suggest').children[0].textContent, 'Wiki');
+
+  let prevented = 0;
+  const key = name => editor.handlers.keydown({ key: name, preventDefault() { prevented++; }, stopPropagation() {} });
+  key('ArrowDown');
+  assert.equal(get('link-suggest').children[1].className.includes('selected'), true);
+  key('ArrowUp'); key('ArrowUp');
+  assert.equal(get('link-suggest').children[2].className.includes('selected'), true);
+  key('ArrowDown');
+  key('Enter');
+  assert.equal(editor.value, 'See [[Wiki]]');
+  assert.equal(editor.selectionStart, 12);
+  assert.equal(get('link-suggest').hidden, true);
+  assert.equal(state.dirty, true);
+
+  editor.value = 'See [[Pro]] later';
+  editor.setSelectionRange(9, 9);
+  editor.handlers.input();
+  key('Tab');
+  assert.equal(editor.value, 'See [[Projects/Wiki]] later');
+
+  editor.value = 'Go [[home';
+  editor.setSelectionRange(9, 9);
+  editor.handlers.input();
+  const before = prevented;
+  key('Escape');
+  assert.equal(prevented, before + 1);
+  assert.equal(get('link-suggest').hidden, true);
+  key('Enter');
+  assert.equal(prevented, before + 1);
+
+  editor.value = 'Go [[Wiki';
+  editor.setSelectionRange(9, 9);
+  editor.handlers.input();
+  get('link-suggest').children[1].handlers.mousedown({ preventDefault() {} });
+  assert.equal(editor.value, 'Go [[Projects/Wiki]]');
+});

@@ -1757,11 +1757,120 @@ $('format-undo').addEventListener('click', () => {
   editor.setSelectionRange(undo.start, undo.end); formatState.undo = null;
   $('format-undo').disabled = true; $('format-status').textContent = insertion.error + 'Last formatting change undone.'; editorChanged();
 });
+// =============================================================================
+// Wiki link autocomplete: typing [[ suggests existing page names
+// =============================================================================
+const linkSuggestState = { open: false, items: [], index: 0, start: 0 };
+const LINK_SUGGEST_LIMIT = 8;
+
+function findLinkQuery(text, caret) {
+  const before = text.slice(0, caret);
+  const open = before.lastIndexOf('[[');
+  if (open < 0) return null;
+  const query = before.slice(open + 2);
+  if (/[\]\n|#]/.test(query)) return null;
+  return { start: open + 2, query };
+}
+
+function rankLinkPages(pages, query) {
+  const needle = query.trim().toLowerCase().replaceAll(':', '/');
+  const parts = needle.split(/\s+/).filter(Boolean);
+  const scored = [];
+  for (const page of pages) {
+    const id = page.id.toLowerCase();
+    const name = id.split('/').at(-1);
+    let score;
+    if (!parts.length) score = 4;
+    else if (id === needle || name === needle) score = 0;
+    else if (name.startsWith(needle)) score = 1;
+    else if (id.startsWith(needle)) score = 2;
+    else if (parts.every(part => id.includes(part))) score = 3;
+    else continue;
+    scored.push({ id: page.id, score });
+  }
+  scored.sort((a, b) => a.score - b.score || a.id.length - b.id.length || a.id.localeCompare(b.id));
+  return scored.slice(0, LINK_SUGGEST_LIMIT).map(item => item.id);
+}
+
+function closeLinkSuggest() {
+  linkSuggestState.open = false;
+  linkSuggestState.items = [];
+  const box = $('link-suggest');
+  box.hidden = true;
+  box.replaceChildren();
+  $('editor').setAttribute('aria-expanded', 'false');
+}
+
+function renderLinkSuggest() {
+  const box = $('link-suggest');
+  box.replaceChildren(...linkSuggestState.items.map((id, index) => {
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.className = 'link-suggest-option' + (index === linkSuggestState.index ? ' selected' : '');
+    option.setAttribute('role', 'option');
+    option.textContent = id;
+    option.addEventListener('mousedown', event => {
+      event.preventDefault();
+      acceptLinkSuggest(index);
+    });
+    return option;
+  }));
+  box.hidden = false;
+  $('editor').setAttribute('aria-expanded', 'true');
+}
+
+function updateLinkSuggest() {
+  const editor = $('editor');
+  const found = findLinkQuery(editor.value, editor.selectionStart ?? editor.value.length);
+  if (!found || !state.page) { closeLinkSuggest(); return; }
+  const items = rankLinkPages(state.pages, found.query);
+  if (!items.length) { closeLinkSuggest(); return; }
+  linkSuggestState.open = true;
+  linkSuggestState.items = items;
+  linkSuggestState.index = 0;
+  linkSuggestState.start = found.start;
+  renderLinkSuggest();
+}
+
+function acceptLinkSuggest(index = linkSuggestState.index) {
+  const id = linkSuggestState.items[index];
+  if (id === undefined) return false;
+  const editor = $('editor');
+  const caret = editor.selectionStart ?? editor.value.length;
+  const hasClosing = editor.value.slice(caret).startsWith(']]');
+  editor.setRangeText(hasClosing ? id : id + ']]', linkSuggestState.start, caret, 'end');
+  const end = linkSuggestState.start + id.length + 2;
+  editor.setSelectionRange(end, end);
+  closeLinkSuggest();
+  editor.focus();
+  resetFormat();
+  editorChanged();
+  return true;
+}
+
 $('editor').addEventListener('input', () => {
   if (formatState.applying) return;
   resetFormat();
   editorChanged();
+  updateLinkSuggest();
 });
+$('editor').addEventListener('keydown', event => {
+  if (!linkSuggestState.open || event.isComposing) return;
+  const count = linkSuggestState.items.length;
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault();
+    linkSuggestState.index = (linkSuggestState.index + (event.key === 'ArrowDown' ? 1 : count - 1)) % count;
+    renderLinkSuggest();
+  } else if (event.key === 'Enter' || event.key === 'Tab') {
+    event.preventDefault();
+    acceptLinkSuggest();
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    closeLinkSuggest();
+  }
+});
+$('editor').addEventListener('blur', () => closeLinkSuggest());
 $('editor').addEventListener('paste', event => {
   const files = [...(event.clipboardData?.items || [])].filter(item => item.kind === 'file' && item.type.startsWith('image/')).map(item => item.getAsFile()).filter(Boolean);
   if (files.length) { event.preventDefault(); uploadImages(files); }

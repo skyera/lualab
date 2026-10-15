@@ -182,6 +182,10 @@ or replaced as part of recovery advice.
   around matching terms with highlighted search keywords in titles, paths, and snippets.
   **Ctrl K** (or Cmd K) focuses search; **Ctrl S** (or Cmd S) saves immediately.
   Press **?** (or click **?** in the header) to open the keyboard shortcuts reference.
+- Typing `[[` in the editor opens page-name suggestions ranked by exact name, prefix, then
+  substring match (`:` works as `/`). Use **Up/Down** to choose, **Enter** or **Tab** (or a click)
+  to insert `Page]]`, and **Esc** to dismiss. Suggestions use the loaded notebook list, so no
+  network requests are made.
 - **Graph** opens an interactive 2D node-link graph of note connections. Drag nodes,
   scroll to zoom, drag the background to pan, hover to highlight connected neighbors,
   filter by title/tag in real time, and click any node to navigate directly to it.
