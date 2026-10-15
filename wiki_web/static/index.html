@@ -27,6 +27,7 @@
     <button id="shortcuts-open" type="button" title="Keyboard shortcuts (?)">?</button>
     <button id="new-page" class="primary">+ Page</button>
     <button id="switcher-open" title="Open page (Ctrl P / Cmd P)">Open page</button>
+    <button id="graph-open" type="button" title="Notebook graph view">Graph</button>
     <button id="export-open">Export</button>
     <button id="tasks-open">Tasks</button>
     <button id="attachments-open" type="button">Attachments</button>
@@ -183,7 +184,7 @@
   <dialog id="dashboard-dialog" aria-labelledby="dashboard-title">
     <div class="notebook-dashboard-heading"><h2 id="dashboard-title">Your notebook</h2><button id="dashboard-refresh" type="button">Refresh</button><button id="dashboard-close" type="button">Back to editor</button></div>
     <div class="notebook-dashboard-summary"><p><strong id="dashboard-pages-count">—</strong> pages</p><p><strong id="dashboard-images-count">—</strong> images</p><p><strong id="dashboard-tasks-count">—</strong> open tasks</p></div>
-    <div class="notebook-dashboard-actions"><button id="dashboard-today" type="button">Today’s journal</button><button id="dashboard-capture" type="button">Quick capture</button><button id="dashboard-new" type="button">+ Page</button><button id="dashboard-all-tasks" type="button">All tasks</button></div>
+    <div class="notebook-dashboard-actions"><button id="dashboard-today" type="button">Today’s journal</button><button id="dashboard-capture" type="button">Quick capture</button><button id="dashboard-new" type="button">+ Page</button><button id="dashboard-all-tasks" type="button">All tasks</button><button id="dashboard-graph" type="button">Graph view</button></div>
     <p id="dashboard-status" role="status" aria-live="polite"></p><p id="dashboard-error" role="alert"></p>
     <div class="notebook-dashboard-grid">
       <section><h3>Pinned pages</h3><nav id="dashboard-pinned" aria-label="Dashboard pinned pages"></nav></section>
@@ -320,6 +321,27 @@
           <div><dt><code>~~strike~~</code></dt><dd>Strikethrough text</dd></div>
         </dl>
       </section>
+    </div>
+  </dialog>
+  <dialog id="graph-dialog" aria-labelledby="graph-title">
+    <div class="graph-heading">
+      <h2 id="graph-title">Notebook graph</h2>
+      <div class="graph-controls">
+        <label for="graph-filter" class="sr-only">Filter graph nodes</label>
+        <input id="graph-filter" type="search" placeholder="Filter nodes or tags…" autocomplete="off">
+        <button id="graph-reset" type="button" title="Reset view zoom and position">Reset view</button>
+        <button id="graph-refresh" type="button" title="Refresh graph data">Refresh</button>
+        <button id="graph-close" type="button">Close</button>
+      </div>
+    </div>
+    <div class="graph-meta">
+      <span id="graph-count">— nodes · — links</span>
+      <span class="graph-hint">Scroll to zoom · Drag background to pan · Drag nodes · Click node to open</span>
+    </div>
+    <p id="graph-status" role="status" aria-live="polite"></p>
+    <div id="graph-viewport" class="graph-viewport">
+      <canvas id="graph-canvas"></canvas>
+      <div id="graph-tooltip" class="graph-tooltip" hidden></div>
     </div>
   </dialog>
 </body>

@@ -295,6 +295,7 @@ function M.run(root)
             end
             if path == '/api/state' then return reply(notebook:state(params.q)) end
             if path == '/api/tasks' then return reply(notebook:tasks()) end
+            if path == '/api/graph' then return reply(notebook:graph()) end
             if path == '/api/attachments' then return reply(notebook:attachments()) end
             if path == '/api/backup' then
                 return backup.export(notebook, startup.report), 200, 'application/json; charset=utf-8'

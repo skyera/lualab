@@ -74,7 +74,7 @@ $('pin-page').addEventListener('click', () => {
     ? navigationState.pinned.filter(value => value !== id) : [...navigationState.pinned, id];
   saveNavigation(); renderNavigation();
 });
-const MODAL_DIALOGS = ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks', 'capture', 'verse', 'journal-overview', 'saved-search', 'attachments', 'backup', 'folder', 'image-options', 'dashboard', 'shortcuts'];
+const MODAL_DIALOGS = ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks', 'capture', 'verse', 'journal-overview', 'saved-search', 'attachments', 'backup', 'folder', 'image-options', 'dashboard', 'shortcuts', 'graph'];
 function anyDialogOpen() { return MODAL_DIALOGS.some(id => $(id + '-dialog').open); }
 
 const dashboardState = { request: 0, busy: false, pages: null, tasks: null, images: null, errors: [] };
@@ -83,7 +83,7 @@ function closeDashboard() {
   ++dashboardState.request; $('dashboard-dialog').close(); $('dashboard-open').focus();
 }
 function dashboardControls() {
-  for (const id of ['dashboard-refresh', 'dashboard-close', 'dashboard-today', 'dashboard-capture', 'dashboard-new', 'dashboard-all-tasks']) $(id).disabled = dashboardState.busy;
+  for (const id of ['dashboard-refresh', 'dashboard-close', 'dashboard-today', 'dashboard-capture', 'dashboard-new', 'dashboard-all-tasks', 'dashboard-graph']) $(id).disabled = dashboardState.busy;
 }
 function dashboardPlaceholder(target, text) {
   const node = document.createElement('p'); node.className = 'dashboard-help'; node.textContent = text;
@@ -195,7 +195,7 @@ $('dashboard-today').addEventListener('click', async () => {
   } catch (error) { $('dashboard-error').textContent = error.message; }
   finally { dashboardState.busy = false; dashboardControls(); }
 });
-for (const [id, action] of [['dashboard-capture', openCapture], ['dashboard-all-tasks', openTasks], ['dashboard-new', () => ask('create')]]) {
+for (const [id, action] of [['dashboard-capture', openCapture], ['dashboard-all-tasks', openTasks], ['dashboard-new', () => ask('create')], ['dashboard-graph', () => openGraph()]]) {
   $(id).addEventListener('click', () => { if (!dashboardState.busy) { closeDashboard(); return action(); } });
 }
 
@@ -1939,6 +1939,462 @@ $('shortcuts-dialog').addEventListener('cancel', event => {
   event.preventDefault();
   closeShortcuts();
 });
+
+// =============================================================================
+// Notebook Graph View
+// =============================================================================
+const graphState = {
+  request: 0,
+  busy: false,
+  data: null,
+  nodes: [],
+  edges: [],
+  transform: { x: 0, y: 0, k: 1 },
+  animating: false,
+  hoveredNode: null,
+  draggedNode: null,
+  dragMoved: false,
+  dragStart: null,
+  isPanning: false,
+  panStart: { x: 0, y: 0 },
+  filter: '',
+  alpha: 1,
+  raf: null
+};
+
+function getGraphCanvas() {
+  return $('graph-canvas');
+}
+
+function getGraphCtx() {
+  const canvas = getGraphCanvas();
+  if (!canvas || typeof canvas.getContext !== 'function') return null;
+  return canvas.getContext('2d');
+}
+
+function resizeGraphCanvas() {
+  const canvas = getGraphCanvas();
+  if (!canvas) return;
+  const rect = typeof canvas.getBoundingClientRect === 'function' ? canvas.getBoundingClientRect() : { width: 800, height: 540 };
+  const width = Math.max(300, Math.floor(rect.width || 800));
+  const height = Math.max(260, Math.floor(rect.height || 540));
+  const dpr = window.devicePixelRatio || 1;
+  if (canvas.width !== width * dpr || canvas.height !== height * dpr) {
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+  }
+}
+
+function resetGraphView() {
+  graphState.transform = { x: 0, y: 0, k: 1 };
+  renderGraph();
+}
+
+function canvasToGraph(clientX, clientY) {
+  const canvas = getGraphCanvas();
+  if (!canvas || typeof canvas.getBoundingClientRect !== 'function') {
+    return { x: 0, y: 0, screenX: 0, screenY: 0 };
+  }
+  const rect = canvas.getBoundingClientRect();
+  const sx = clientX - (rect.left || 0);
+  const sy = clientY - (rect.top || 0);
+  const k = graphState.transform.k || 1;
+  return {
+    x: (sx - graphState.transform.x) / k,
+    y: (sy - graphState.transform.y) / k,
+    screenX: sx,
+    screenY: sy
+  };
+}
+
+function findGraphNodeAt(gx, gy) {
+  const nodes = graphState.nodes;
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    const node = nodes[i];
+    const dx = node.x - gx;
+    const dy = node.y - gy;
+    const hitRadius = (node.radius || 6) + 6;
+    if (dx * dx + dy * dy <= hitRadius * hitRadius) {
+      return node;
+    }
+  }
+  return null;
+}
+
+function wakeGraphSimulation() {
+  graphState.alpha = Math.max(graphState.alpha, 0.35);
+  if (!graphState.animating) {
+    graphState.animating = true;
+    stepGraphSimulation();
+  }
+}
+
+function stepGraphSimulation() {
+  if (graphState.alpha < 0.005) {
+    graphState.animating = false;
+    renderGraph();
+    return;
+  }
+  const canvas = getGraphCanvas();
+  const width = canvas ? (canvas.clientWidth || 800) : 800;
+  const height = canvas ? (canvas.clientHeight || 540) : 540;
+  const cx = width / 2;
+  const cy = height / 2;
+  const nodes = graphState.nodes;
+  const edges = graphState.edges;
+  const alpha = graphState.alpha;
+
+  for (let i = 0; i < nodes.length; i++) {
+    const a = nodes[i];
+    for (let j = i + 1; j < nodes.length; j++) {
+      const b = nodes[j];
+      let dx = b.x - a.x;
+      let dy = b.y - a.y;
+      let distSq = dx * dx + dy * dy;
+      if (distSq < 1) {
+        dx = (Math.random() - 0.5) * 4;
+        dy = (Math.random() - 0.5) * 4;
+        distSq = dx * dx + dy * dy;
+      }
+      const dist = Math.sqrt(distSq);
+      if (dist > 400) continue;
+      const force = (3200 / (distSq + 120)) * alpha;
+      const fx = (dx / dist) * force;
+      const fy = (dy / dist) * force;
+      if (a !== graphState.draggedNode) { a.vx -= fx; a.vy -= fy; }
+      if (b !== graphState.draggedNode) { b.vx += fx; b.vy += fy; }
+    }
+  }
+
+  const restLength = 80;
+  for (const edge of edges) {
+    const a = edge.sourceNode;
+    const b = edge.targetNode;
+    if (!a || !b) continue;
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+    const force = (dist - restLength) * 0.045 * alpha;
+    const fx = (dx / dist) * force;
+    const fy = (dy / dist) * force;
+    if (a !== graphState.draggedNode) { a.vx -= fx; a.vy -= fy; }
+    if (b !== graphState.draggedNode) { b.vx += fx; b.vy += fy; }
+  }
+
+  for (const node of nodes) {
+    if (node === graphState.draggedNode) continue;
+    node.vx += (cx - node.x) * 0.015 * alpha;
+    node.vy += (cy - node.y) * 0.015 * alpha;
+    node.vx *= 0.82;
+    node.vy *= 0.82;
+    node.x += node.vx;
+    node.y += node.vy;
+  }
+
+  graphState.alpha *= 0.975;
+  renderGraph();
+
+  if (graphState.animating && typeof requestAnimationFrame === 'function') {
+    graphState.raf = requestAnimationFrame(stepGraphSimulation);
+  } else {
+    graphState.animating = false;
+  }
+}
+
+function renderGraph() {
+  const ctx = getGraphCtx();
+  const canvas = getGraphCanvas();
+  if (!ctx || !canvas) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.width / dpr;
+  const height = canvas.height / dpr;
+
+  ctx.save();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.scale(dpr, dpr);
+
+  ctx.translate(graphState.transform.x, graphState.transform.y);
+  ctx.scale(graphState.transform.k, graphState.transform.k);
+
+  const style = typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement) : null;
+  const green = style ? style.getPropertyValue('--green').trim() || '#32634c' : '#32634c';
+  const orange = style ? style.getPropertyValue('--orange').trim() || '#b45b30' : '#b45b30';
+  const ink = style ? style.getPropertyValue('--ink').trim() || '#25382e' : '#25382e';
+  const line = style ? style.getPropertyValue('--line').trim() || '#dedfd6' : '#dedfd6';
+  const muted = style ? style.getPropertyValue('--muted').trim() || '#6a766e' : '#6a766e';
+  const paper = style ? style.getPropertyValue('--paper').trim() || '#f8f7f3' : '#f8f7f3';
+
+  const filter = (graphState.filter || '').toLowerCase();
+  const hovered = graphState.hoveredNode;
+  const neighbors = new Set();
+  if (hovered) {
+    neighbors.add(hovered.id);
+    for (const edge of graphState.edges) {
+      if (edge.source === hovered.id) neighbors.add(edge.target);
+      if (edge.target === hovered.id) neighbors.add(edge.source);
+    }
+  }
+
+  for (const edge of graphState.edges) {
+    const a = edge.sourceNode;
+    const b = edge.targetNode;
+    if (!a || !b) continue;
+
+    const isConnected = hovered && (neighbors.has(a.id) && neighbors.has(b.id));
+    const isFiltered = filter && (
+      (a.title.toLowerCase().includes(filter) || a.tags.some(t => t.toLowerCase().includes(filter))) ||
+      (b.title.toLowerCase().includes(filter) || b.tags.some(t => t.toLowerCase().includes(filter)))
+    );
+
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+
+    if (isConnected) {
+      ctx.strokeStyle = orange;
+      ctx.lineWidth = 2.2;
+      ctx.globalAlpha = 0.9;
+    } else if (hovered || (filter && !isFiltered)) {
+      ctx.strokeStyle = line;
+      ctx.lineWidth = 1;
+      ctx.globalAlpha = 0.15;
+    } else {
+      ctx.strokeStyle = line;
+      ctx.lineWidth = 1.2;
+      ctx.globalAlpha = 0.65;
+    }
+    ctx.stroke();
+  }
+
+  for (const node of graphState.nodes) {
+    const isHovered = hovered === node;
+    const isNeighbor = hovered && neighbors.has(node.id);
+    const matchesFilter = !filter || node.title.toLowerCase().includes(filter) || node.id.toLowerCase().includes(filter) || node.tags.some(t => t.toLowerCase().includes(filter));
+    const isCurrentPage = state.page && state.page.id === node.id;
+
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
+
+    let alpha = 1;
+    if (hovered && !isHovered && !isNeighbor) alpha = 0.2;
+    else if (filter && !matchesFilter) alpha = 0.18;
+    ctx.globalAlpha = alpha;
+
+    if (isHovered) {
+      ctx.fillStyle = orange;
+    } else if (isNeighbor) {
+      ctx.fillStyle = green;
+    } else if (isCurrentPage) {
+      ctx.fillStyle = green;
+    } else {
+      ctx.fillStyle = matchesFilter ? green : muted;
+    }
+    ctx.fill();
+
+    ctx.strokeStyle = paper;
+    ctx.lineWidth = isCurrentPage ? 2.5 : 1.5;
+    ctx.stroke();
+
+    const showLabel = isHovered || isNeighbor || graphState.transform.k >= 0.75 || node.degree >= 3 || (filter && matchesFilter);
+    if (showLabel) {
+      ctx.font = '11px system-ui, -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = ink;
+      ctx.globalAlpha = isHovered || isNeighbor ? 1 : (alpha * 0.9);
+      ctx.fillText(node.title, node.x, node.y + node.radius + 3);
+    }
+  }
+
+  ctx.restore();
+}
+
+async function loadGraph() {
+  if (graphState.busy) return;
+  graphState.busy = true;
+  $('graph-status').textContent = 'Loading graph…';
+  const reqId = ++graphState.request;
+  try {
+    const data = await api('/api/graph');
+    if (reqId !== graphState.request) return;
+    graphState.data = data;
+    $('graph-status').textContent = '';
+
+    const nodes = data.nodes || [];
+    const edges = data.edges || [];
+    const countText = nodes.length + ' notes · ' + edges.length + ' connections';
+    $('graph-count').textContent = countText;
+
+    if (nodes.length === 0) {
+      $('graph-status').textContent = 'Your notebook is empty. Create pages and links to visualize the graph.';
+      graphState.nodes = [];
+      graphState.edges = [];
+      renderGraph();
+      return;
+    }
+
+    const canvas = getGraphCanvas();
+    resizeGraphCanvas();
+    const width = canvas ? (canvas.clientWidth || 800) : 800;
+    const height = canvas ? (canvas.clientHeight || 540) : 540;
+    const cx = width / 2;
+    const cy = height / 2;
+    const radiusBase = Math.min(width, height) * 0.32;
+
+    const nodeMap = new Map();
+    const simNodes = nodes.map((node, index) => {
+      const angle = (index / nodes.length) * 2 * Math.PI;
+      const simNode = {
+        id: node.id,
+        title: node.title,
+        tags: node.tags || [],
+        degree: node.degree || 0,
+        x: cx + radiusBase * Math.cos(angle) + (Math.random() - 0.5) * 30,
+        y: cy + radiusBase * Math.sin(angle) + (Math.random() - 0.5) * 30,
+        vx: 0,
+        vy: 0,
+        radius: Math.max(5, Math.min(18, 5 + Math.sqrt(node.degree || 0) * 3))
+      };
+      nodeMap.set(node.id, simNode);
+      return simNode;
+    });
+
+    const simEdges = edges.map(edge => ({
+      source: edge.source,
+      target: edge.target,
+      sourceNode: nodeMap.get(edge.source),
+      targetNode: nodeMap.get(edge.target)
+    })).filter(e => e.sourceNode && e.targetNode);
+
+    graphState.nodes = simNodes;
+    graphState.edges = simEdges;
+    graphState.hoveredNode = null;
+    graphState.draggedNode = null;
+    graphState.alpha = 1.0;
+    graphState.animating = true;
+    stepGraphSimulation();
+  } catch (error) {
+    if (reqId !== graphState.request) return;
+    $('graph-status').textContent = error.message;
+  } finally {
+    graphState.busy = false;
+  }
+}
+
+async function openGraph() {
+  if (anyDialogOpen() || !(await ensureSaved()) || anyDialogOpen()) return;
+  $('graph-dialog').showModal();
+  resizeGraphCanvas();
+  await loadGraph();
+}
+
+function closeGraph() {
+  graphState.animating = false;
+  if (graphState.raf && typeof cancelAnimationFrame === 'function') {
+    cancelAnimationFrame(graphState.raf);
+  }
+  $('graph-dialog').close();
+  $('graph-open').focus();
+}
+
+$('graph-open').addEventListener('click', openGraph);
+$('graph-close').addEventListener('click', closeGraph);
+$('graph-dialog').addEventListener('cancel', event => { event.preventDefault(); closeGraph(); });
+$('graph-reset').addEventListener('click', resetGraphView);
+$('graph-refresh').addEventListener('click', loadGraph);
+$('graph-filter').addEventListener('input', () => {
+  graphState.filter = $('graph-filter').value.trim();
+  renderGraph();
+});
+
+const graphCanvas = getGraphCanvas();
+if (graphCanvas && typeof graphCanvas.addEventListener === 'function') {
+  graphCanvas.addEventListener('mousedown', event => {
+    const pt = canvasToGraph(event.clientX, event.clientY);
+    const node = findGraphNodeAt(pt.x, pt.y);
+    if (node) {
+      graphState.draggedNode = node;
+      graphState.dragMoved = false;
+      graphState.dragStart = { x: pt.x, y: pt.y, clientX: event.clientX, clientY: event.clientY };
+      graphCanvas.classList.add('grabbing');
+    } else {
+      graphState.isPanning = true;
+      graphState.panStart = { x: event.clientX, y: event.clientY };
+      graphCanvas.classList.add('grabbing');
+    }
+  });
+
+  window.addEventListener('mousemove', event => {
+    if (!$('graph-dialog').open) return;
+    const pt = canvasToGraph(event.clientX, event.clientY);
+    if (graphState.draggedNode) {
+      const dx = event.clientX - graphState.dragStart.clientX;
+      const dy = event.clientY - graphState.dragStart.clientY;
+      if (dx * dx + dy * dy > 16) graphState.dragMoved = true;
+      graphState.draggedNode.x = pt.x;
+      graphState.draggedNode.y = pt.y;
+      graphState.draggedNode.vx = 0;
+      graphState.draggedNode.vy = 0;
+      wakeGraphSimulation();
+    } else if (graphState.isPanning) {
+      graphState.transform.x += event.clientX - graphState.panStart.x;
+      graphState.transform.y += event.clientY - graphState.panStart.y;
+      graphState.panStart = { x: event.clientX, y: event.clientY };
+      renderGraph();
+    } else {
+      const node = findGraphNodeAt(pt.x, pt.y);
+      if (node !== graphState.hoveredNode) {
+        graphState.hoveredNode = node;
+        graphCanvas.style.cursor = node ? 'pointer' : 'grab';
+        const tooltip = $('graph-tooltip');
+        if (node && tooltip) {
+          tooltip.hidden = false;
+          tooltip.style.left = pt.screenX + 'px';
+          tooltip.style.top = pt.screenY + 'px';
+          tooltip.textContent = `${node.title} (${node.degree} links)`;
+        } else if (tooltip) {
+          tooltip.hidden = true;
+        }
+        renderGraph();
+      }
+    }
+  });
+
+  window.addEventListener('mouseup', async () => {
+    if (!$('graph-dialog').open) return;
+    graphCanvas.classList.remove('grabbing');
+    if (graphState.draggedNode) {
+      const node = graphState.draggedNode;
+      const moved = graphState.dragMoved;
+      graphState.draggedNode = null;
+      if (!moved) {
+        closeGraph();
+        await openPage(node.id);
+      }
+    }
+    graphState.isPanning = false;
+  });
+
+  graphCanvas.addEventListener('wheel', event => {
+    event.preventDefault();
+    const zoomFactor = event.deltaY < 0 ? 1.15 : 0.87;
+    const newK = Math.max(0.25, Math.min(3.5, graphState.transform.k * zoomFactor));
+    const pt = canvasToGraph(event.clientX, event.clientY);
+    const rect = typeof graphCanvas.getBoundingClientRect === 'function' ? graphCanvas.getBoundingClientRect() : { left: 0, top: 0 };
+    const sx = event.clientX - (rect.left || 0);
+    const sy = event.clientY - (rect.top || 0);
+    graphState.transform.x = sx - pt.x * newK;
+    graphState.transform.y = sy - pt.y * newK;
+    graphState.transform.k = newK;
+    renderGraph();
+  });
+
+  graphCanvas.addEventListener('dblclick', () => {
+    resetGraphView();
+  });
+}
+
 window.addEventListener('keydown', event => {
   if ($('capture-dialog').open) return;
   if (!event.isComposing && (event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'j') {

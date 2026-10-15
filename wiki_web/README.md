@@ -182,6 +182,9 @@ or replaced as part of recovery advice.
   around matching terms with highlighted search keywords in titles, paths, and snippets.
   **Ctrl K** (or Cmd K) focuses search; **Ctrl S** (or Cmd S) saves immediately.
   Press **?** (or click **?** in the header) to open the keyboard shortcuts reference.
+- **Graph** opens an interactive 2D node-link graph of note connections. Drag nodes,
+  scroll to zoom, drag the background to pan, hover to highlight connected neighbors,
+  filter by title/tag in real time, and click any node to navigate directly to it.
 
 ## Notebook dashboard
 
@@ -204,13 +207,33 @@ changes the text. If it changed, the dashboard reports the conflict; return to
 the editor to inspect it or refresh the task list. Clicking a popular tag clears
 the search and filters the sidebar while keeping the current editor page.
 
-Quick actions open **Today’s journal**, **Quick capture**, **+ Page**, or **All
-tasks** using their existing safeguards. **Refresh** reloads the overview. Page,
+Quick actions open **Today’s journal**, **Quick capture**, **+ Page**, **All
+tasks**, or **Graph view** using their existing safeguards. **Refresh** reloads the overview. Page,
 image, and task requests fail independently: an unavailable count is shown as
 `—` with a visible error and retry guidance, while successfully loaded sections
 remain usable. Closing or refreshing ignores late responses from previous loads.
 The dashboard itself is read-only; quick actions can create or edit pages through
 the normal flows. Header controls wrap to remain accessible on smaller screens.
+
+## Interactive notebook graph view
+
+Click **Graph** in the header or **Graph view** in the dashboard to open the
+interactive 2D graph view. The graph visualizes notes as nodes and wiki links as
+edges, powered by a physics-based force simulation:
+
+- **Node sizing & connections**: Node diameter scales with connection degree
+  (incoming and outgoing links). Connected notes naturally cluster together.
+- **Navigation**: Click any node to close the graph and jump directly to that note.
+- **Pan & Zoom**: Drag the canvas background to pan across large notebooks; use
+  the mouse wheel to zoom in and out smoothly. Double-click or click **Reset view**
+  to re-center.
+- **Neighbor highlighting**: Hover over any note to highlight its immediate 1-hop
+  connections and labels while softly dimming unrelated notes. Tooltips display note
+  title, link counts, and tags.
+- **Real-time filtering**: Enter text or `#tags` into the graph search box to
+  instantly highlight matching notes and dim non-matching notes.
+- **Theme integration**: Graph nodes, links, and background automatically adapt to
+  the active color theme (Paper, Midnight, Sepia, Ocean).
 
 ## Color themes
 

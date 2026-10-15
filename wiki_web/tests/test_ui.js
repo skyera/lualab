@@ -1952,3 +1952,54 @@ test('strikethrough renders del elements and format-callout wraps selected lines
   get('format-undo').handlers.click();
   assert.equal(get('editor').value, 'First line\nSecond line');
 });
+
+test('graph view opens, fetches nodes/edges, updates stats, filters nodes and navigates to page', async () => {
+  const { context, state, get } = harness();
+  let requestedRoute;
+  context.api = async route => {
+    requestedRoute = route;
+    if (route === '/api/graph') {
+      return {
+        nodes: [
+          { id: 'PageA', title: 'Page A', degree: 2, tags: ['science'] },
+          { id: 'PageB', title: 'Page B', degree: 1, tags: ['math'] },
+          { id: 'PageC', title: 'Page C', degree: 1, tags: [] }
+        ],
+        edges: [
+          { source: 'PageA', target: 'PageB' },
+          { source: 'PageA', target: 'PageC' }
+        ]
+      };
+    }
+    if (route.startsWith('/api/page?id=')) {
+      return { id: 'PageB', title: 'Page B', content: '# Page B', revision: 'r2', backlinks: [] };
+    }
+    throw new Error('Unexpected route: ' + route);
+  };
+
+  // Open graph via header button
+  await get('graph-open').handlers.click();
+  assert.equal(get('graph-dialog').open, true);
+  assert.equal(requestedRoute, '/api/graph');
+  assert.match(get('graph-count').textContent, /3 notes · 2 connections/);
+
+  // Filter nodes
+  get('graph-filter').value = 'science';
+  get('graph-filter').handlers.input();
+  const graphState = vm.runInContext('graphState', context);
+  assert.equal(graphState.filter, 'science');
+
+  // Reset view
+  get('graph-reset').handlers.click();
+  assert.equal(graphState.transform.k, 1);
+
+  // Close graph
+  get('graph-close').handlers.click();
+  assert.equal(get('graph-dialog').open, false);
+
+  // Open graph via dashboard action
+  state.dirty = false;
+  await get('dashboard-graph').handlers.click();
+  assert.equal(get('graph-dialog').open, true);
+  get('graph-close').handlers.click();
+});

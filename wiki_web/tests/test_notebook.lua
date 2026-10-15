@@ -694,4 +694,31 @@ test('rich search filters by tag and path and extracts contextual snippets with 
         assert(#title_match.pages == 1 and title_match.pages[1].snippet:find('Roadmap', 1, true))
     end)
 end)
+test('graph returns nodes, edges, tags and degree excluding dangling links', function()
+    fixture(function(n)
+        assert(n:save('PageA', '# Page A #science\n\nLink to [[PageB]] and [[PageC]] and [[MissingPage]].', ''))
+        assert(n:save('PageB', '# Page B #math\n\nLink back to [[PageA]].', ''))
+        assert(n:save('PageC', '# Page C\n\nStandalone note.', ''))
+
+        local graph = n:graph()
+        assert(#graph.nodes == 3)
+        assert(#graph.edges == 3)
+
+        local nodes_by_id = {}
+        for _, node in ipairs(graph.nodes) do
+            nodes_by_id[node.id] = node
+        end
+
+        assert(nodes_by_id['PageA'].title == 'PageA')
+        assert(nodes_by_id['PageA'].degree == 3)
+        assert(nodes_by_id['PageA'].tags[1] == 'science')
+
+        assert(nodes_by_id['PageB'].title == 'PageB')
+        assert(nodes_by_id['PageB'].degree == 2)
+        assert(nodes_by_id['PageB'].tags[1] == 'math')
+
+        assert(nodes_by_id['PageC'].title == 'PageC')
+        assert(nodes_by_id['PageC'].degree == 1)
+    end)
+end)
 print('Passed ' .. count .. ' notebook tests.')

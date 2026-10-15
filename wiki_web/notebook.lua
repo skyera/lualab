@@ -174,6 +174,41 @@ function Notebook:backlinks(id)
     return self.db:query('SELECT source AS id FROM links WHERE target=? ORDER BY source', { id })
 end
 
+function Notebook:graph()
+    self:sync()
+    local pages = self.db:query('SELECT id, title FROM pages ORDER BY id')
+    local links_rows = self.db:query('SELECT source, target FROM links ORDER BY source, target')
+    local nodes = {}
+    local valid = {}
+    for _, page in ipairs(pages) do
+        nodes[#nodes + 1] = {
+            id = page.id,
+            title = page.title,
+            tags = self.page_tags[page.id] or {},
+        }
+        valid[page.id] = true
+    end
+    local edges = {}
+    local degree = {}
+    for _, link in ipairs(links_rows) do
+        if valid[link.source] and valid[link.target] then
+            edges[#edges + 1] = {
+                source = link.source,
+                target = link.target,
+            }
+            degree[link.source] = (degree[link.source] or 0) + 1
+            degree[link.target] = (degree[link.target] or 0) + 1
+        end
+    end
+    for _, node in ipairs(nodes) do
+        node.degree = degree[node.id] or 0
+    end
+    return {
+        nodes = nodes,
+        edges = edges,
+    }
+end
+
 function Notebook:tasks()
     self:sync()
     local result = {}
