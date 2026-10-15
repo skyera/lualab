@@ -42,19 +42,31 @@ local words = {
 }
 
 local proverbs = {
-    { 'Practice makes perfect.', '熟能生巧。', 'Regular practice helps you improve. Review a few words every day.' },
+    {
+        'Practice makes perfect.',
+        '熟能生巧。',
+        'Regular practice helps you improve. Review a few words every day.',
+    },
     {
         'A journey of a thousand miles begins with a single step.',
         '千里之行，始于足下。',
         'Start with one small action, even when your goal feels far away.',
     },
-    { 'Where there is a will, there is a way.', '有志者事竟成。', 'Determination helps you find a path through obstacles.' },
+    {
+        'Where there is a will, there is a way.',
+        '有志者事竟成。',
+        'Determination helps you find a path through obstacles.',
+    },
     {
         'Actions speak louder than words.',
         '行动胜于言语。',
         'What you do demonstrates your intentions more clearly than promises.',
     },
-    { 'Better late than never.', '迟做总比不做好。', 'Starting late is still better than giving up before you start.' },
+    {
+        'Better late than never.',
+        '迟做总比不做好。',
+        'Starting late is still better than giving up before you start.',
+    },
     { 'Many hands make light work.', '众人拾柴火焰高。', 'Sharing a task makes it easier for everyone.' },
     { 'Look before you leap.', '三思而后行。', 'Consider the consequences before making a decision.' },
 }

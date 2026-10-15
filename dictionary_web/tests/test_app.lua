@@ -92,7 +92,9 @@ end)
 test('dict.cn phrase definitions use plain lists inside the basic block', function()
     local result = assert(providers.parse_dict([[<strong>unrelated heading</strong>
         <div class="basic clearfix"><ul ><li><strong>供 ... 使用； 可以自由处理</strong></li></ul></div>
-        <div class="section sent"><ol><li>Her property is at her disposition.<br/>她的财产由她自由处理。</li></ol></div>
+        <div class="section sent"><ol>
+            <li>Her property is at her disposition.<br/>她的财产由她自由处理。</li>
+        </ol></div>
         <strong>unrelated footer</strong>]]))
     assert(#result.definitions == 1 and result.definitions[1] == '供 ... 使用； 可以自由处理')
     assert(result.examples[1] == 'Her property is at her disposition. / 她的财产由她自由处理。')

@@ -4,7 +4,7 @@
 --------------------------------------------------------------------------------
 
 local directory = debug.getinfo(1, 'S').source:sub(2):gsub('\\', '/'):match('^(.*)/') or '.'
-package.path = directory .. '/../wiki_web/?.lua;' .. package.path
+package.path = directory .. '/?.lua;' .. directory .. '/../wiki_web/?.lua;' .. package.path
 
 local ffi = require('ffi')
 local Fs = require('fs')
