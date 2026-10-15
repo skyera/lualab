@@ -24,7 +24,7 @@ const WikiMarkdown = (() => {
     return node;
   }
   function inlinePattern() {
-    return /(`+)([\s\S]*?)\1|!\[([^\]]*)\]\(([^)\s]+)\)|\[\[([^\]]+)\]\]|\[([^\]]+)\]\(([^)\s]+)\)|\*\*([^*]+)\*\*|\*([^*]+)\*/g;
+    return /(`+)([\s\S]*?)\1|!\[([^\]]*)\]\(([^)\s]+)\)|\[\[([^\]]+)\]\]|\[([^\]]+)\]\(([^)\s]+)\)|~~([^~]+)~~|\*\*([^*]+)\*\*|\*([^*]+)\*/g;
   }
   function imageFile(page, target) {
     const folder = page.split('/').at(-1) + '.attachments/';
@@ -63,7 +63,7 @@ const WikiMarkdown = (() => {
         else if (marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = null;
       } else if (fence || /^( {4}|\t)/.test(line) || !line.trim()) flush();
       else {
-        const block = /^(#{1,6}\s+|\s*(?:[-*]|\d+\.)\s+|> )/.test(line);
+        const block = /^(#{1,6}\s+|\s*(?:[-*]|\d+\.)\s+| {0,3}>)/.test(line);
         if (block) flush();
         if (!chunk) chunkStart = offset;
         chunk += raw + '\n';
@@ -112,7 +112,9 @@ const WikiMarkdown = (() => {
         if (/^(https?:\/\/|mailto:)/i.test(match[7])) {
           node.href = match[7]; node.target = '_blank'; node.rel = 'noopener noreferrer';
         } else node = element('span', match[6]);
-      } else node = element(match[8] ? 'strong' : 'em', match[8] || match[9]);
+      } else if (match[8] !== undefined) {
+        node = element('del', match[8]);
+      } else node = element(match[9] ? 'strong' : 'em', match[9] || match[10]);
       target.append(node); start = pattern.lastIndex;
     }
     target.append(document.createTextNode(text.slice(start)));
@@ -157,6 +159,41 @@ const WikiMarkdown = (() => {
       }
       list = null;
     }
+    function codeBlock(bodyText) {
+      const container = element('div');
+      container.className = 'code-block';
+      const pre = element('pre');
+      pre.append(element('code', bodyText));
+      const copyBtn = element('button', 'Copy');
+      copyBtn.type = 'button';
+      copyBtn.className = 'code-copy-btn';
+      copyBtn.setAttribute('aria-label', 'Copy code to clipboard');
+      copyBtn.title = 'Copy code';
+      copyBtn.addEventListener('click', () => {
+        const reset = () => {
+          setTimeout(() => {
+            copyBtn.textContent = 'Copy';
+            copyBtn.classList.remove('copied');
+          }, 2000);
+        };
+        if (typeof navigator !== 'undefined' && navigator?.clipboard?.writeText) {
+          navigator.clipboard.writeText(bodyText).then(() => {
+            copyBtn.textContent = 'Copied!';
+            copyBtn.classList.add('copied');
+            reset();
+          }).catch(() => {
+            copyBtn.textContent = 'Error';
+            reset();
+          });
+        } else {
+          copyBtn.textContent = 'Copied!';
+          copyBtn.classList.add('copied');
+          reset();
+        }
+      });
+      container.append(pre, copyBtn);
+      return container;
+    }
     for (let index = 0; index < lines.length; index++) {
       const line = lines[index];
       const fence = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
@@ -167,12 +204,12 @@ const WikiMarkdown = (() => {
           if (ending && ending[1][0] === fence[1][0] && ending[1].length >= fence[1].length) break;
           body.push(lines[index]);
         }
-        const pre = element('pre'); pre.append(element('code', body.join('\n'))); root.append(pre); continue;
+        root.append(codeBlock(body.join('\n'))); continue;
       }
       if (/^( {4}|\t)/.test(line)) {
         flush(); const body = [line.replace(/^( {4}|\t)/, '')];
         while (index + 1 < lines.length && /^( {4}|\t)/.test(lines[index + 1])) body.push(lines[++index].replace(/^( {4}|\t)/, ''));
-        const pre = element('pre'); pre.append(element('code', body.join('\n'))); root.append(pre); continue;
+        root.append(codeBlock(body.join('\n'))); continue;
       }
       const headers = table_row(line);
       const divider = index + 1 < lines.length ? table_row(lines[index + 1]) : null;
@@ -224,8 +261,91 @@ const WikiMarkdown = (() => {
           li.append(check, document.createTextNode(' ')); inline(task[2], li, page, pages, navigate);
         } else inline(item[2], li, page, pages, navigate);
         list.append(li);
-      } else if (line.startsWith('> ')) {
-        flush(); const node = element('blockquote'); inline(line.slice(2), node, page, pages, navigate); root.append(node);
+      } else if (/^ {0,3}> ?/.test(line)) {
+        const bqMatch = line.match(/^ {0,3}> ?(.*)$/);
+        flush();
+        const bqLines = [bqMatch[1]];
+        while (index + 1 < lines.length) {
+          const nextBq = lines[index + 1].match(/^ {0,3}> ?(.*)$/);
+          if (!nextBq) break;
+          bqLines.push(nextBq[1]);
+          index++;
+        }
+        const alertMatch = bqLines[0].match(/^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\](?:\s*(.*))?$/i);
+        if (alertMatch) {
+          const kind = alertMatch[1].toLowerCase();
+          const defaultTitles = {
+            note: 'Note',
+            tip: 'Tip',
+            important: 'Important',
+            warning: 'Warning',
+            caution: 'Caution'
+          };
+          const customTitle = alertMatch[2]?.trim();
+          let title = customTitle || defaultTitles[kind] || 'Note';
+          const bodyLines = bqLines.slice(1);
+          if (customTitle && bodyLines.length === 0) {
+            title = defaultTitles[kind] || 'Note';
+            bodyLines.push(customTitle);
+          }
+          const alertNode = element('div');
+          alertNode.className = 'markdown-alert markdown-alert-' + kind;
+          alertNode.setAttribute('role', 'region');
+          alertNode.setAttribute('aria-label', title);
+
+          const titleP = element('p');
+          titleP.className = 'markdown-alert-title';
+          const icon = element('span');
+          icon.className = 'markdown-alert-icon';
+          icon.setAttribute('aria-hidden', 'true');
+          titleP.append(icon, document.createTextNode(title));
+          alertNode.append(titleP);
+
+          let currentParagraph = [];
+          for (const bodyLine of bodyLines) {
+            if (!bodyLine.trim()) {
+              if (currentParagraph.length) {
+                const p = element('p');
+                inline(currentParagraph.join('\n'), p, page, pages, navigate);
+                alertNode.append(p);
+                currentParagraph = [];
+              }
+            } else {
+              currentParagraph.push(bodyLine);
+            }
+          }
+          if (currentParagraph.length) {
+            const p = element('p');
+            inline(currentParagraph.join('\n'), p, page, pages, navigate);
+            alertNode.append(p);
+          }
+          root.append(alertNode);
+        } else {
+          const node = element('blockquote');
+          let currentParagraph = [];
+          for (const bqLine of bqLines) {
+            if (!bqLine.trim()) {
+              if (currentParagraph.length) {
+                const p = element('p');
+                inline(currentParagraph.join('\n'), p, page, pages, navigate);
+                node.append(p);
+                currentParagraph = [];
+              }
+            } else {
+              currentParagraph.push(bqLine);
+            }
+          }
+          if (currentParagraph.length) {
+            if (node.children.length === 0 && currentParagraph.length === 1) {
+              inline(currentParagraph[0], node, page, pages, navigate);
+            } else {
+              const p = element('p');
+              inline(currentParagraph.join('\n'), p, page, pages, navigate);
+              node.append(p);
+            }
+          }
+          root.append(node);
+        }
       } else if (/^\s*---+\s*$/.test(line)) { flush(); root.append(element('hr')); }
       else if (!line.trim()) flush();
       else { if (list) list = null; paragraph.push(line); }

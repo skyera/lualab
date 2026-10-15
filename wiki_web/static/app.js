@@ -1654,6 +1654,23 @@ function formatEdit(kind, text, start, end) {
     return { start: first, end: last, replacement,
       selectStart: first + (placeholder ? kind === 'heading' ? 2 : 6 : 0), selectEnd: first + replacement.length };
   }
+  if (kind === 'callout') {
+    const first = start === 0 ? 0 : text.lastIndexOf('\n', start - 1) + 1;
+    const boundary = end > start && text[end - 1] === '\n' ? end - 1 : end;
+    let last = text.indexOf('\n', boundary); if (last < 0) last = text.length;
+    const lines = text.slice(first, last).split('\n');
+    const replacement = '> [!NOTE]\n' + lines.map(line => {
+      const stripped = line.replace(/^>\s*/, '');
+      return '> ' + (stripped || 'Note content');
+    }).join('\n');
+    return {
+      start: first,
+      end: last,
+      replacement,
+      selectStart: first + 10,
+      selectEnd: first + replacement.length
+    };
+  }
   if (kind === 'table') {
     // Insert beside the selection; inserting a template must not discard a draft.
     const prefix = start && text[start - 1] !== '\n' ? '\n\n' : '';
@@ -1670,8 +1687,8 @@ function formatEdit(kind, text, start, end) {
     return { start, end, replacement, selectStart: start + prefix.length,
       selectEnd: start + prefix.length + selected.replace(/\n$/, '').length };
   }
-  const body = selected || ({ bold: 'bold text', italic: 'italic text', link: 'Page', code: 'code' })[kind];
-  let prefix = ({ bold: '**', italic: '*', link: '[[', code: '`' })[kind];
+  const body = selected || ({ bold: 'bold text', italic: 'italic text', strike: 'strikethrough text', link: 'Page', code: 'code' })[kind];
+  let prefix = ({ bold: '**', italic: '*', strike: '~~', link: '[[', code: '`' })[kind];
   if (kind === 'code') {
     prefix = codeFence(body, 1);
   }
@@ -1723,7 +1740,7 @@ function applyFormat(kind) {
     : 'Formatting applied. Use Undo format to revert this change.');
   editorChanged();
 }
-for (const kind of ['bold', 'italic', 'heading', 'link', 'code', 'task', 'table']) {
+for (const kind of ['bold', 'italic', 'heading', 'link', 'code', 'strike', 'callout', 'task', 'table']) {
   $('format-' + kind).addEventListener('pointerdown', event => { event.preventDefault(); });
   $('format-' + kind).addEventListener('click', () => applyFormat(kind));
 }

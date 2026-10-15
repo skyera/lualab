@@ -159,10 +159,12 @@ or replaced as part of recovery advice.
 - Choose **Edit**, **Split**, or **Preview**. Narrow screens default to Edit;
   the notebook tree opens with the menu button.
 - Supported Markdown includes headings, paragraphs, lists, task checkboxes,
-  emphasis, inline/fenced code, blockquotes, tables, links, and local images. Task
-  checkboxes in the rendered preview can be clicked directly to toggle completion;
-  checking or unchecking updates its Markdown in the editor and schedules an autosave.
-  Raw HTML is shown as text. This is a deliberately limited renderer, not full CommonMark.
+  emphasis, strikethrough (`~~text~~`), inline/fenced code with one-click copy buttons,
+  blockquotes, GitHub-style alert callouts (`> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`,
+  `> [!WARNING]`, `> [!CAUTION]`), tables, links, and local images. Task checkboxes in
+  the rendered preview can be clicked directly to toggle completion; checking or unchecking
+  updates its Markdown in the editor and schedules an autosave. Raw HTML is shown as text.
+  This is a deliberately limited renderer, not full CommonMark.
 - Use `[[Home]]`, `[[Projects:Wiki:Tasks|Tasks]]`, or
   `[[Projects/Wiki/Tasks#next-steps]]` for notebook links. Unprefixed links address
   the notebook root. `[[./Tasks]]` and `[[../Other]]` resolve relative to the
@@ -224,12 +226,15 @@ All palettes maintain a minimum 4.5:1 WCAG AA contrast ratio for high readabilit
 Use the buttons above the Markdown editor to format selected text or insert a
 starter at the cursor:
 
-- **Bold** and **Italic** wrap the selection in `**` or `*` markers.
+- **Bold**, **Italic**, and **Strike** wrap the selection in `**`, `*`, or `~~` markers.
 - **Heading** makes selected lines level-one headings. **Task** turns selected
   lines into task checkboxes, preserving already completed tasks and blank lines.
 - **Link** wraps a valid selected wiki page name in `[[...]]`, or inserts `[[Page]]`.
 - **Code** wraps short selections in backticks. Multiline selections or selections
   beginning/ending with backticks use fenced blocks with a safe delimiter length.
+  Rendered code blocks include a one-click **Copy** button.
+- **Callout** turns selected lines into a GitHub-style `> [!NOTE]` callout card
+  with icon, border accent, and theme palette colors.
 - **Table** inserts a two-column starter with two data rows. Existing selected
   text is preserved after the inserted template. The first column name is selected
   for editing.

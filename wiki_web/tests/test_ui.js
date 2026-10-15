@@ -1015,7 +1015,7 @@ test('page statistics survive successful saves and revision conflicts without ch
 });
 
 test('Markdown formatting buttons wrap Unicode selections, preserve neighboring text, and support undo', () => {
-  for (const [kind, prefix, suffix] of [['bold', '**', '**'], ['italic', '*', '*'], ['link', '[[', ']]'], ['code', '`', '`']]) {
+  for (const [kind, prefix, suffix] of [['bold', '**', '**'], ['italic', '*', '*'], ['link', '[[', ']]'], ['code', '`', '`'], ['strike', '~~', '~~']]) {
     const { get, state, stored } = harness();
     get('editor').value = 'before 学习 after'; get('editor').setSelectionRange(7, 9);
     let prevented = false; get('format-' + kind).handlers.pointerdown({ preventDefault() { prevented = true; } });
@@ -1866,4 +1866,89 @@ test('keyboard shortcuts modal opens via ? key and button, closes on Esc or clos
   events.keydown({ key: '?', preventDefault() { prevented = true; } });
   assert.equal(prevented, false);
   assert.equal(get('shortcuts-dialog').open, false);
+});
+
+test('GitHub-style alert callouts render all 5 types with accessible titles, custom headings, and paragraphs', () => {
+  const { markdown } = harness();
+  const pages = new Set(['Home']);
+
+  // Test all 5 alert types: NOTE, TIP, IMPORTANT, WARNING, CAUTION
+  for (const kind of ['NOTE', 'TIP', 'IMPORTANT', 'WARNING', 'CAUTION']) {
+    const source = `> [!${kind}]\n> Content for ${kind} with **bold** text.`;
+    const frame = markdown.render(source, 'Home', pages, () => {});
+    const alert = frame.querySelectorAll('div').find(d => d.className?.includes('markdown-alert'));
+    assert.ok(alert, `Alert div rendered for ${kind}`);
+    assert.equal(alert.className, `markdown-alert markdown-alert-${kind.toLowerCase()}`);
+    assert.equal(alert.getAttribute('role'), 'region');
+    assert.equal(alert.getAttribute('aria-label').toLowerCase(), kind.toLowerCase());
+    const titleP = alert.querySelectorAll('p')[0];
+    assert.equal(titleP.className, 'markdown-alert-title');
+    assert.equal(titleP.querySelectorAll('span')[0].className, 'markdown-alert-icon');
+    assert.match(texts(alert), new RegExp(`Content for ${kind}`));
+  }
+
+  // Custom alert title
+  const customSource = '> [!NOTE] Custom Alert Header\n> First line\n>\n> Second paragraph with [[Home]] link.';
+  const customFrame = markdown.render(customSource, 'Home', pages, () => {});
+  const customAlert = customFrame.querySelectorAll('div').find(d => d.className?.includes('markdown-alert'));
+  assert.equal(customAlert.getAttribute('aria-label'), 'Custom Alert Header');
+  assert.match(texts(customAlert.querySelectorAll('p')[0]), /Custom Alert Header/);
+  assert.equal(customAlert.querySelectorAll('p').length, 3);
+  assert.equal(customAlert.querySelectorAll('a').length, 1);
+
+  // Single line alert without separate newline
+  const singleSource = '> [!TIP] Single line quick tip';
+  const singleFrame = markdown.render(singleSource, 'Home', pages, () => {});
+  const singleAlert = singleFrame.querySelectorAll('div').find(d => d.className?.includes('markdown-alert'));
+  assert.equal(singleAlert.className, 'markdown-alert markdown-alert-tip');
+  assert.match(texts(singleAlert), /Single line quick tip/);
+
+  // Standard blockquotes (not starting with [!TYPE]) still render as <blockquote>
+  const bqSource = '> A standard quote\n> with two lines.';
+  const bqFrame = markdown.render(bqSource, 'Home', pages, () => {});
+  assert.equal(bqFrame.querySelectorAll('blockquote').length, 1);
+  assert.equal(bqFrame.querySelectorAll('div').filter(d => d.className?.includes('markdown-alert')).length, 0);
+  assert.match(texts(bqFrame.querySelectorAll('blockquote')[0]), /A standard quote/);
+});
+
+test('code blocks wrap in code-block containers with Copy buttons and clipboard copy feedback', async () => {
+  const { markdown } = harness();
+  const source = '```python\ndef hello():\n    return "world"\n```\n\n    four_space_indented_code()';
+  const frame = markdown.render(source, 'Home', new Set(), () => {});
+
+  const codeBlocks = frame.querySelectorAll('div').filter(d => d.className === 'code-block');
+  assert.equal(codeBlocks.length, 2);
+  assert.equal(frame.querySelectorAll('pre').length, 2);
+
+  const copyButtons = frame.querySelectorAll('button').filter(b => b.className === 'code-copy-btn');
+  assert.equal(copyButtons.length, 2);
+  assert.equal(copyButtons[0].textContent, 'Copy');
+  assert.equal(copyButtons[0].getAttribute('aria-label'), 'Copy code to clipboard');
+
+  // Click copy button triggers copied state
+  copyButtons[0].handlers.click();
+  await Promise.resolve();
+  assert.equal(copyButtons[0].textContent, 'Copied!');
+  assert.ok(copyButtons[0].classList.contains('copied'));
+});
+
+test('strikethrough renders del elements and format-callout wraps selected lines with undo', () => {
+  const { get, markdown } = harness();
+
+  // Strikethrough syntax in markdown renderer
+  const source = 'Regular text ~~strikethrough text~~ and **bold** text';
+  const frame = markdown.render(source, 'Home', new Set(), () => {});
+  const delNodes = frame.querySelectorAll('del');
+  assert.equal(delNodes.length, 1);
+  assert.equal(delNodes[0].textContent, 'strikethrough text');
+
+  // format-callout toolbar button
+  get('editor').value = 'First line\nSecond line';
+  get('editor').setSelectionRange(0, 22);
+  get('format-callout').handlers.click();
+  assert.equal(get('editor').value, '> [!NOTE]\n> First line\n> Second line');
+
+  // Undo restores original text
+  get('format-undo').handlers.click();
+  assert.equal(get('editor').value, 'First line\nSecond line');
 });
