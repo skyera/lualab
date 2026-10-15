@@ -725,6 +725,45 @@ on startup. Recovery stops on conflicting external edits or attachment collision
 and preserves the journal for inspection. Pause external writers during a move;
 revision checks cannot eliminate the final filesystem race with independent tools.
 
+## Zim desktop wiki import
+
+Convert an existing Zim Desktop Wiki notebook into a Leaf Wiki Markdown notebook
+using the built-in migration utility. The converter preserves wiki hierarchy,
+translates Zim formatting, normalizes task checklists, and copies page-level
+image attachments into Leaf Wiki's `<Page>.attachments/` structure.
+
+Run the converter standalone or via `wiki_web.lua`:
+
+```sh
+# Standalone CLI utility:
+luajit wiki_web/zim.lua <path/to/zim_notebook> <path/to/destination_leaf_wiki>
+
+# Integrated via wiki_web.lua:
+luajit wiki_web.lua --import-zim <path/to/zim_notebook> --data-dir <path/to/destination_leaf_wiki>
+```
+
+Supported conversions:
+
+- **Headers**: Zim RFC822 metadata (`Content-Type: text/x-zim-wiki`, `Wiki-Format`,
+  `Creation-Date`) are cleanly stripped from page text.
+- **Headings**: Zim's inverted heading hierarchy (`====== Heading 1 ======` down
+  to `== Heading 5 ==`) translates to standard Markdown `#` down to `#####`.
+- **Text formatting**: `**bold**`, `//italic//`, `~~strikethrough~~`, `__underline__`
+  (`<u>text</u>`), inline verbatim `''code''` (`` `code` ``), and fenced code blocks
+  `'''lang ... '''` (```` ```lang ... ``` ````).
+- **Checklists & tasks**: Open tasks `[ ]` become `- [ ]`; completed tasks `[*]`,
+  `[x]`, and `[X]` become `- [x]`; cancelled tasks `[-]` become `- [x] ~~task~~`.
+- **Wiki links**: Page links `[[Page]]`, subpage links `[[+Subpage]]` (resolved to
+  `[[CurrentPage/Subpage]]`), root links `[[:Root]]` (`[[Root]]`), and labeled
+  links `[[target|label]]` are preserved. External web links `[[http:...|Label]]`
+  become Markdown `[Label](http:...)`.
+- **Image attachments**: Zim image tags `{{image.png?width=300}}` translate to
+  Leaf Wiki Markdown `![](image.png){width=300}`. Associated image files
+  (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`) are copied into corresponding
+  `<Page>.attachments/` folders.
+
+The importer operates non-destructively: original Zim notebooks are never modified.
+
 ## Limits and compatibility
 
 Pages are limited to 1 MiB, names to 240 UTF-8 bytes, nesting to 16 components,
@@ -736,9 +775,10 @@ and other reparse points are also excluded. Windows device names, reserved
 filename characters, and names ending in a dot are rejected; the spelling and
 case of existing filenames must match exactly to prevent duplicate index entries.
 
-The app does not read Zim's wiki-text format. Existing `.md` files can be placed
-in the notebook and indexed automatically. Zim import and weekly/monthly journal
-views remain future work.
+The app does not read Zim's wiki-text format directly at runtime. Use the built-in
+Zim importer (`--import-zim` or `wiki_web/zim.lua`) to convert Zim notebooks into
+Leaf Wiki Markdown notes. Existing `.md` files can be placed in the notebook and
+indexed automatically.
 
 ## HTML export
 
@@ -763,6 +803,7 @@ From the repository root:
 
 ```sh
 luajit wiki_web/tests/test_notebook.lua
+luajit wiki_web/tests/test_zim.lua
 python3 wiki_web/tests/test_linux_http.py
 node --test wiki_web/tests/test_http.js wiki_web/tests/test_ui.js wiki_web/tests/test_theme.js
 node --check wiki_web/static/app.js

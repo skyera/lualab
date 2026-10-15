@@ -119,6 +119,7 @@ function M.run(root)
         if flag == '-h' or flag == '--help' then
             print('Usage: luajit wiki_web.lua [--data-dir PATH] [--cache-dir PATH] '
                 .. '[--config FILE] [--save-config] [--dict-db PATH|none] '
+                .. '[--import-zim PATH] '
                 .. '[--sqlite-dll PATH] [--sqlite-list] [--sqlite-select] [--host 127.0.0.1|0.0.0.0] [--port 8020]')
             return
         elseif flag == '--save-config' then
@@ -128,6 +129,10 @@ function M.run(root)
         elseif flag == '--sqlite-select' then
             options.sqlite_select = true
             options.save_config = true
+        elseif flag == '--import-zim' then
+            index = index + 1
+            assert(arg[index] and arg[index]:sub(1, 2) ~= '--', 'Missing value for --import-zim')
+            options.import_zim = arg[index]
         elseif flag == '--data-dir' or flag == '--cache-dir' or flag == '--config'
             or flag == '--dict-db' or flag == '--sqlite-dll' or flag == '--host' or flag == '--port' then
             index = index + 1
@@ -168,6 +173,31 @@ function M.run(root)
         return
     end
     local data_dir = Fs.resolve(options.data_dir or getenv('LEAF_WIKI_DATA_DIR') or config.data_dir or home .. '/LeafWiki')
+    if options.import_zim then
+        local zim = require('zim')
+        local source_zim = Fs.resolve(options.import_zim)
+        print('=== Leaf Wiki: Zim Notebook Importer ===')
+        print('Source Zim:      ' .. source_zim)
+        print('Target Notebook: ' .. data_dir)
+        print('')
+        local result = zim.import_notebook(source_zim, data_dir, {
+            progress = function(msg)
+                print('  -> ' .. msg)
+            end,
+        })
+        print('')
+        if #result.errors > 0 then
+            print('Encountered warnings or errors:')
+            for _, err in ipairs(result.errors) do
+                print('  [!] ' .. err)
+            end
+            print('')
+        end
+        print(string.format('Migration complete: %d pages converted, %d image attachments copied.',
+            result.pages_converted, result.images_copied))
+        io.stdout:flush()
+        return
+    end
     cache = Fs.resolve(cache)
     local cache_dir = Fs.resolve(options.cache_dir or cache)
     local dictionary_path = options.dict_db or config.dict_db or root .. '/.dict.db'
