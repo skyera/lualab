@@ -24,6 +24,7 @@
       <option value="ocean">Theme: Ocean</option>
       <option value="system">Theme: System</option>
     </select>
+    <button id="shortcuts-open" type="button" title="Keyboard shortcuts (?)">?</button>
     <button id="new-page" class="primary">+ Page</button>
     <button id="switcher-open" title="Open page (Ctrl P / Cmd P)">Open page</button>
     <button id="export-open">Export</button>
@@ -283,6 +284,38 @@
     <div class="dialog-actions">
       <button type="button" id="verse-cancel">Cancel</button>
       <button id="verse-insert" class="primary" type="button">Insert into note</button>
+    </div>
+  </dialog>
+  <dialog id="shortcuts-dialog" aria-labelledby="shortcuts-title">
+    <div class="shortcuts-heading"><h2 id="shortcuts-title">Keyboard shortcuts</h2><button id="shortcuts-close" type="button">Close</button></div>
+    <div class="shortcuts-grid">
+      <section>
+        <h3>Navigation</h3>
+        <dl>
+          <div><dt><kbd>Ctrl</kbd> <kbd>P</kbd></dt><dd>Open page switcher</dd></div>
+          <div><dt><kbd>Ctrl</kbd> <kbd>K</kbd></dt><dd>Focus search</dd></div>
+          <div><dt><kbd>?</kbd></dt><dd>Show shortcuts</dd></div>
+          <div><dt><kbd>Esc</kbd></dt><dd>Close dialog / panel</dd></div>
+        </dl>
+      </section>
+      <section>
+        <h3>Writing &amp; Tasks</h3>
+        <dl>
+          <div><dt><kbd>Ctrl</kbd> <kbd>S</kbd></dt><dd>Save current page</dd></div>
+          <div><dt><kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>J</kbd></dt><dd>Quick capture</dd></div>
+          <div><dt><kbd>Ctrl</kbd> <kbd>Enter</kbd></dt><dd>Submit capture</dd></div>
+          <div><dt>Click <code>[ ]</code></dt><dd>Toggle task in preview</dd></div>
+        </dl>
+      </section>
+      <section>
+        <h3>Markdown &amp; Links</h3>
+        <dl>
+          <div><dt><code>[[Page]]</code></dt><dd>Wiki link to note</dd></div>
+          <div><dt><code>[[./Note]]</code></dt><dd>Relative wiki link</dd></div>
+          <div><dt><code>#tag</code></dt><dd>Hashtag filter</dd></div>
+          <div><dt><code>due:YYYY-MM-DD</code></dt><dd>Task due date</dd></div>
+        </dl>
+      </section>
     </div>
   </dialog>
 </body>

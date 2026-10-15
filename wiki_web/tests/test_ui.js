@@ -1776,3 +1776,94 @@ test('random Bible verse dialog fetches verse, handles errors, and inserts forma
   get('verse-close').handlers.click();
   assert.equal(get('verse-dialog').open, false);
 });
+
+test('interactive task checkboxes in preview toggle status, update editor markdown, and trigger autosave', () => {
+  const { context, state, get, timers } = harness();
+  state.page = { id: 'Tasks', title: 'Tasks', content: '# My Tasks\n- [ ] First item\n- [x] Second item\n', revision: 'r1' };
+  get('editor').value = state.page.content;
+  context.preview();
+
+  const checkboxes = get('preview').querySelectorAll('input');
+  assert.equal(checkboxes.length, 2);
+  assert.equal(checkboxes[0].checked, false);
+  assert.equal(checkboxes[1].checked, true);
+
+  // Toggle first task from [ ] to [x]
+  checkboxes[0].checked = true;
+  checkboxes[0].handlers.change();
+
+  assert.equal(get('editor').value, '# My Tasks\n- [x] First item\n- [x] Second item\n');
+  assert.equal(state.dirty, true);
+  assert.equal(timers.size > 0, true);
+
+  // Toggle second task from [x] to [ ]
+  const updatedCheckboxes = get('preview').querySelectorAll('input');
+  assert.equal(updatedCheckboxes[1].checked, true);
+  updatedCheckboxes[1].checked = false;
+  updatedCheckboxes[1].handlers.change();
+
+  assert.equal(get('editor').value, '# My Tasks\n- [x] First item\n- [ ] Second item\n');
+  assert.equal(state.dirty, true);
+});
+
+test('task checkbox click is ignored when editor is read-only, loading, uploading, or blocked', () => {
+  const { context, state, get } = harness();
+  state.page = { id: 'Tasks', title: 'Tasks', content: '- [ ] Guarded task\n', revision: 'r1' };
+  get('editor').value = state.page.content;
+  context.preview();
+
+  const check = get('preview').querySelectorAll('input')[0];
+  assert.equal(check.checked, false);
+
+  // Read-only guard
+  get('editor').readOnly = true;
+  check.checked = true;
+  check.handlers.change();
+  assert.equal(get('editor').value, '- [ ] Guarded task\n');
+
+  // Loading guard
+  get('editor').readOnly = false;
+  state.loading = true;
+  check.checked = true;
+  check.handlers.change();
+  assert.equal(get('editor').value, '- [ ] Guarded task\n');
+
+  // Blocked guard
+  state.loading = false;
+  state.blocked = true;
+  check.checked = true;
+  check.handlers.change();
+  assert.equal(get('editor').value, '- [ ] Guarded task\n');
+});
+
+test('keyboard shortcuts modal opens via ? key and button, closes on Esc or close button, and ignores typing in inputs', () => {
+  const { context, get, events } = harness();
+  assert.equal(get('shortcuts-dialog').open, false);
+
+  // Button click opens dialog
+  get('shortcuts-open').handlers.click();
+  assert.equal(get('shortcuts-dialog').open, true);
+
+  // Close button closes dialog
+  get('shortcuts-close').handlers.click();
+  assert.equal(get('shortcuts-dialog').open, false);
+
+  // Key ? opens shortcuts dialog when not typing
+  let prevented = false;
+  events.keydown({ key: '?', preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+  assert.equal(get('shortcuts-dialog').open, true);
+
+  // Cancel closes shortcuts dialog
+  get('shortcuts-dialog').handlers.cancel({ preventDefault() {} });
+  assert.equal(get('shortcuts-dialog').open, false);
+
+  // Key ? is ignored when document.activeElement is an INPUT
+  const input = get('search');
+  input.tagName = 'INPUT';
+  context.document.activeElement = input;
+  prevented = false;
+  events.keydown({ key: '?', preventDefault() { prevented = true; } });
+  assert.equal(prevented, false);
+  assert.equal(get('shortcuts-dialog').open, false);
+});

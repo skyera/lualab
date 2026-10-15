@@ -147,7 +147,7 @@ const WikiMarkdown = (() => {
     if (text.endsWith('|') && cells.at(-1) === '') cells.pop();
     return cells;
   }
-  function render(text, page, pages, navigate) {
+  function render(text, page, pages, navigate, onTaskToggle) {
     const root = document.createDocumentFragment();
     const lines = text.split(/\r?\n/);
     let paragraph = [], list = null;
@@ -202,7 +202,7 @@ const WikiMarkdown = (() => {
         table.append(head, body); wrapper.append(table); root.append(wrapper); continue;
       }
       const heading = line.match(/^(#{1,6})\s+(.+)$/);
-      const item = line.match(/^\s*([-*]|\d+\.)\s+(.+)$/);
+      const item = line.match(/^\s*([-*+]|\d+\.)\s+(.+)$/);
       if (heading) {
         flush(); const node = element('h' + heading[1].length);
         node.id = heading[2].toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '');
@@ -214,7 +214,13 @@ const WikiMarkdown = (() => {
         const li = element('li');
         const task = item[2].match(/^\[([ xX])\]\s*(.*)$/);
         if (task) {
-          li.className = 'task-item'; const check = element('input'); check.type = 'checkbox'; check.checked = task[1] !== ' '; check.disabled = true;
+          li.className = 'task-item'; const check = element('input'); check.type = 'checkbox'; check.checked = task[1] !== ' ';
+          if (onTaskToggle) {
+            const lineIndex = index;
+            check.addEventListener('change', () => onTaskToggle(lineIndex, check.checked));
+          } else {
+            check.disabled = true;
+          }
           li.append(check, document.createTextNode(' ')); inline(task[2], li, page, pages, navigate);
         } else inline(item[2], li, page, pages, navigate);
         list.append(li);

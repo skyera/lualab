@@ -160,8 +160,9 @@ or replaced as part of recovery advice.
   the notebook tree opens with the menu button.
 - Supported Markdown includes headings, paragraphs, lists, task checkboxes,
   emphasis, inline/fenced code, blockquotes, tables, links, and local images. Task
-  checkboxes are display-only; change `[ ]` to `[x]` in the editor. Raw HTML is
-  shown as text. This is a deliberately limited renderer, not full CommonMark.
+  checkboxes in the rendered preview can be clicked directly to toggle completion;
+  checking or unchecking updates its Markdown in the editor and schedules an autosave.
+  Raw HTML is shown as text. This is a deliberately limited renderer, not full CommonMark.
 - Use `[[Home]]`, `[[Projects:Wiki:Tasks|Tasks]]`, or
   `[[Projects/Wiki/Tasks#next-steps]]` for notebook links. Unprefixed links address
   the notebook root. `[[./Tasks]]` and `[[../Other]]` resolve relative to the
@@ -178,6 +179,7 @@ or replaced as part of recovery advice.
   alongside free-text terms. Search results display contextual snippets centered
   around matching terms with highlighted search keywords in titles, paths, and snippets.
   **Ctrl K** (or Cmd K) focuses search; **Ctrl S** (or Cmd S) saves immediately.
+  Press **?** (or click **?** in the header) to open the keyboard shortcuts reference.
 
 ## Notebook dashboard
 

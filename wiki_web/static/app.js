@@ -74,7 +74,7 @@ $('pin-page').addEventListener('click', () => {
     ? navigationState.pinned.filter(value => value !== id) : [...navigationState.pinned, id];
   saveNavigation(); renderNavigation();
 });
-const MODAL_DIALOGS = ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks', 'capture', 'verse', 'journal-overview', 'saved-search', 'attachments', 'backup', 'folder', 'image-options', 'dashboard'];
+const MODAL_DIALOGS = ['prompt', 'trash', 'history', 'switcher', 'export', 'tasks', 'capture', 'verse', 'journal-overview', 'saved-search', 'attachments', 'backup', 'folder', 'image-options', 'dashboard', 'shortcuts'];
 function anyDialogOpen() { return MODAL_DIALOGS.some(id => $(id + '-dialog').open); }
 
 const dashboardState = { request: 0, busy: false, pages: null, tasks: null, images: null, errors: [] };
@@ -1215,11 +1215,23 @@ $('statistics-toggle').addEventListener('click', () => {
   $('statistics-panel').hidden = false; $('statistics-toggle').setAttribute('aria-expanded', 'true'); renderStatistics();
 });
 $('statistics-close').addEventListener('click', closeStatistics);
+function onTaskToggle(lineIndex, checked) {
+  const editor = $('editor');
+  if (!state.page || state.loading || state.uploading || editor.readOnly || state.blocked || anyDialogOpen()) return;
+  const text = editor.value;
+  const lines = text.split(/\r?\n/);
+  const line = lines[lineIndex];
+  if (!line || !/^\s*(?:[-*+]|\d+[.)])\s+\[[ xX]\]/.test(line)) return;
+  lines[lineIndex] = line.replace(/^(\s*(?:[-*+]|\d+[.)])\s+\[)[ xX](\])/, '$1' + (checked ? 'x' : ' ') + '$2');
+  const newline = text.includes('\r\n') ? '\r\n' : '\n';
+  editor.value = lines.join(newline);
+  editorChanged();
+}
 function preview() {
   if (formatState.undo && (state.page?.id !== formatState.undo.page || $('editor').value !== formatState.undo.after)) resetFormat();
   if (!state.page) { pageStatistics = null; renderStatistics(); return; }
   $('preview').replaceChildren(WikiMarkdown.render($('editor').value, state.page.id,
-    new Set(state.pages.map(page => page.id)), openPage));
+    new Set(state.pages.map(page => page.id)), openPage, onTaskToggle));
   pageStatistics = WikiMarkdown.statistics($('editor').value, state.page.id, $('preview'));
   const words = pageStatistics.words;
   $('word-count').textContent = words + (words === 1 ? ' word' : ' words');
@@ -1895,6 +1907,21 @@ $('dictionary-word').addEventListener('input', () => {
   $('dictionary-status').textContent = 'Press Find to look up this word.';
 });
 $('dictionary-word').addEventListener('keydown', event => { if (event.key === 'Escape') closeDictionary(); });
+function openShortcuts() {
+  if (anyDialogOpen()) return;
+  $('shortcuts-dialog').showModal();
+  $('shortcuts-close').focus();
+}
+function closeShortcuts() {
+  $('shortcuts-dialog').close();
+  $('shortcuts-open').focus();
+}
+$('shortcuts-open').addEventListener('click', openShortcuts);
+$('shortcuts-close').addEventListener('click', closeShortcuts);
+$('shortcuts-dialog').addEventListener('cancel', event => {
+  event.preventDefault();
+  closeShortcuts();
+});
 window.addEventListener('keydown', event => {
   if ($('capture-dialog').open) return;
   if (!event.isComposing && (event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'j') {
@@ -1908,6 +1935,13 @@ window.addEventListener('keydown', event => {
   }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); save(); }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); $('search').focus(); $('search').select(); }
+  if (!event.isComposing && !event.ctrlKey && !event.metaKey && !event.altKey && event.key === '?') {
+    const active = document.activeElement;
+    const isInput = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
+    if (!isInput && !anyDialogOpen()) {
+      event.preventDefault(); openShortcuts();
+    }
+  }
 });
 window.addEventListener('beforeunload', event => {
   if (state.dirty || state.uploading || captureState.busy || backupState.busy || folderState.busy || $('capture-text').value.trim()) {
