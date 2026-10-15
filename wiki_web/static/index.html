@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Leaf Wiki</title>
+  <script src="/theme.js"></script>
   <link rel="stylesheet" href="/style.css">
   <script src="/markdown.js" defer></script>
   <script src="/export.js" defer></script>
@@ -15,6 +16,14 @@
     <a class="brand" href="/">Leaf<span> Wiki</span></a>
     <label class="search"><span class="sr-only">Search pages</span><input id="search" type="search" placeholder="Search pages…" autocomplete="off"><kbd>Ctrl K</kbd></label>
     <button id="save-search" type="button" disabled>Save search</button>
+    <label for="theme-select" class="sr-only">Color theme</label>
+    <select id="theme-select" title="Select color theme">
+      <option value="paper">Theme: Paper</option>
+      <option value="midnight">Theme: Midnight</option>
+      <option value="sepia">Theme: Sepia</option>
+      <option value="ocean">Theme: Ocean</option>
+      <option value="system">Theme: System</option>
+    </select>
     <button id="new-page" class="primary">+ Page</button>
     <button id="switcher-open" title="Open page (Ctrl P / Cmd P)">Open page</button>
     <button id="export-open">Export</button>

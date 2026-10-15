@@ -44,6 +44,7 @@ local M = {}
 --------------------------------------------------------------------------------
 local STATIC = {
     ['/'] = { 'index.html', 'text/html; charset=utf-8' },
+    ['/theme.js'] = { 'theme.js', 'text/javascript; charset=utf-8' },
     ['/app.js'] = { 'app.js', 'text/javascript; charset=utf-8' },
     ['/markdown.js'] = { 'markdown.js', 'text/javascript; charset=utf-8' },
     ['/export.js'] = { 'export.js', 'text/javascript; charset=utf-8' },

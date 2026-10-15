@@ -208,6 +208,15 @@ remain usable. Closing or refreshing ignores late responses from previous loads.
 The dashboard itself is read-only; quick actions can create or edit pages through
 the normal flows. Header controls wrap to remain accessible on smaller screens.
 
+## Color themes
+
+Use the header's **Theme** selector for Paper (the default), Midnight (Dark Mode),
+Sepia, Ocean, or System. System follows OS dark/light mode automatically via
+`prefers-color-scheme`. Themes are applied immediately before page rendering to
+avoid screen flashes, and choices persist across reloads in `localStorage`. Theme
+selection remains fully functional in memory even when browser storage is blocked.
+All palettes maintain a minimum 4.5:1 WCAG AA contrast ratio for high readability.
+
 ## Markdown editing toolbar
 
 Use the buttons above the Markdown editor to format selected text or insert a
@@ -748,10 +757,11 @@ From the repository root:
 ```sh
 luajit wiki_web/tests/test_notebook.lua
 python3 wiki_web/tests/test_linux_http.py
-node --test wiki_web/tests/test_http.js wiki_web/tests/test_ui.js
+node --test wiki_web/tests/test_http.js wiki_web/tests/test_ui.js wiki_web/tests/test_theme.js
 node --check wiki_web/static/app.js
 node --check wiki_web/static/markdown.js
 node --check wiki_web/static/export.js
+node --check wiki_web/static/theme.js
 node --test dictionary_web/tests/test_http.js dictionary_web/tests/test_ui.js dictionary_web/tests/test_theme.js
 ```
 
