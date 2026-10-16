@@ -2061,3 +2061,95 @@ test('typing [[ suggests ranked pages and keyboard or mouse selection completes 
   get('link-suggest').children[1].handlers.mousedown({ preventDefault() {} });
   assert.equal(editor.value, 'Go [[Projects/Wiki]]');
 });
+
+test('journal streak, heat-map classes, and Templates/Journal daily template work with fallbacks', async () => {
+  let created = null;
+  let templateResponse = {
+    id: 'Templates/Journal',
+    content: '# {{date}} ({{weekday}})\nPath: {{path}}\nTitle: {{title}}\n\n## Log\n',
+    revision: 't1'
+  };
+  let failTemplate = false;
+  const { context, state, get } = harness();
+  context.api = async (path, body) => {
+    if (path === '/api/page' && body) {
+      created = body;
+      return { id: body.id, revision: 'r1' };
+    }
+    if (path === '/api/state') {
+      return { pages: state.pages, trash: [], data_dir: '/notes' };
+    }
+    if (path.startsWith('/api/page?id=Templates%2FJournal')) {
+      if (failTemplate) throw new Error('Disk read error');
+      return templateResponse;
+    }
+    if (path.startsWith('/api/page?id=')) {
+      return {
+        id: decodeURIComponent(path.slice('/api/page?id='.length)),
+        title: '2026-10-12',
+        content: created ? created.content : '# 2026-10-12 Monday\n\n',
+        revision: 'r1',
+        backlinks: []
+      };
+    }
+    return {};
+  };
+
+  // Verify heat buckets
+  assert.equal(context.journalHeat(0), 0);
+  assert.equal(context.journalHeat(80), 1);
+  assert.equal(context.journalHeat(250), 2);
+  assert.equal(context.journalHeat(600), 3);
+  assert.equal(context.journalHeat(1500), 4);
+
+  // Heading-only page ("# 2026-10-08 Thursday\n\n" = 23 bytes) should not count toward written streak
+  const pages = [
+    { id: 'Journal/2026/10/2026-10-01', size: 120 },
+    { id: 'Journal/2026/10/2026-10-02', size: 300 },
+    { id: 'Journal/2026/10/2026-10-03', size: 700 },
+    { id: 'Journal/2026/10/2026-10-04', size: 1400 },
+    { id: 'Journal/2026/10/2026-10-08', size: 23 },
+    { id: 'Journal/2026/10/2026-10-10', size: 200 },
+    { id: 'Journal/2026/10/2026-10-11', size: 500 }
+  ];
+  const stats = context.journalStats(pages, '2026-10-11');
+  assert.equal(stats.current, 2);
+  assert.equal(stats.longest, 4);
+  assert.equal(stats.entries.get('2026-10-08').written, false);
+  assert.equal(stats.entries.get('2026-10-08').heat, 1);
+  assert.equal(stats.entries.get('2026-10-04').heat, 4);
+
+  state.pages = pages;
+  state.journalMonth = new Date(2026, 9, 1);
+  context.renderJournal();
+  assert.match(get('journal-stats').textContent, /Best: 4d · Month: 6d/);
+  const dayButtons = get('journal-days').children;
+  const oct4 = dayButtons.find(btn => btn.dataset.date === '2026-10-04');
+  const oct8 = dayButtons.find(btn => btn.dataset.date === '2026-10-08');
+  assert.equal(oct4.classList.contains('heat-4'), true);
+  assert.equal(oct8.classList.contains('heat-1'), true);
+
+  // Create new journal entry using Templates/Journal
+  state.pages = [...pages, { id: 'Templates/Journal', size: 64 }];
+  await context.openJournalDate('2026-10-12');
+  assert.equal(created.id, 'Journal/2026/10/2026-10-12');
+  assert.equal(
+    created.content,
+    '# 2026-10-12 (Monday)\nPath: Journal/2026/10/2026-10-12\nTitle: 2026-10-12\n\n## Log\n'
+  );
+
+  // Fallback with visible message when Templates/Journal is empty
+  templateResponse = { id: 'Templates/Journal', content: '   \n  ', revision: 't2' };
+  created = null;
+  await context.openJournalDate('2026-10-13');
+  assert.equal(created.content, '# 2026-10-13 Tuesday\n\n');
+  assert.match(get('message').textContent, /Template "Templates\/Journal" is empty/);
+
+  // Fallback with visible message when loading Templates/Journal fails
+  failTemplate = true;
+  created = null;
+  await context.openJournalDate('2026-10-14');
+  assert.equal(created.content, '# 2026-10-14 Wednesday\n\n');
+  assert.match(get('message').textContent, /Could not load "Templates\/Journal" \(Disk read error\)/);
+});
+

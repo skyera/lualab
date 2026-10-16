@@ -130,7 +130,8 @@ function Notebook:state(query)
     local parsed = search.parse(query or '')
     local rows
     if #parsed.terms == 0 and #parsed.paths == 0 and #parsed.tags == 0 then
-        rows = self.db:query('SELECT id,title,revision,substr(content,1,160) AS snippet FROM pages ORDER BY id')
+        rows = self.db:query('SELECT id,title,revision,substr(content,1,160) AS snippet,'
+            .. 'length(CAST(content AS BLOB)) AS size FROM pages ORDER BY id')
     else
         local sql = 'SELECT id,title,revision,content FROM pages WHERE 1=1'
         local params = {}
@@ -153,6 +154,7 @@ function Notebook:state(query)
             row.tags = self.page_tags[row.id] or {}
             if search.matches_tags(row.tags, parsed.tags) then
                 row.snippet = search.snippet(row.content, parsed.terms)
+                row.size = #row.content
                 row.content = nil
                 rows[#rows + 1] = row
             end

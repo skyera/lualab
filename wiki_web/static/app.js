@@ -1459,10 +1459,76 @@ function dateKey(date) {
 function journalPageId(date) {
   return 'Journal/' + date.slice(0, 4) + '/' + date.slice(5, 7) + '/' + date;
 }
+const JOURNAL_TEMPLATE_ID = 'Templates/Journal';
 function journalHeading(date) {
   const [year, month, day] = date.split('-').map(Number);
   const weekday = new Date(year, month - 1, day).toLocaleDateString('en-US', { weekday: 'long' });
   return '# ' + date + ' ' + weekday;
+}
+function journalHeat(size) {
+  if (!size || size <= 0) return 0;
+  if (size < 160) return 1;
+  if (size < 450) return 2;
+  if (size < 1000) return 3;
+  return 4;
+}
+function dayNumber(key) {
+  const [year, month, day] = key.split('-').map(Number);
+  return Math.floor(Date.UTC(year, month - 1, day) / 86400000);
+}
+function journalStats(pages = state.pages, todayKey = dateKey(new Date())) {
+  const entries = new Map();
+  for (const page of pages) {
+    const match = page.id.match(/^Journal\/\d{4}\/\d{2}\/(\d{4}-\d{2}-\d{2})$/);
+    if (!match) continue;
+    const key = match[1];
+    const minBytes = journalHeading(key).length + 2;
+    const size = typeof page.size === 'number' ? page.size : (page.snippet ? page.snippet.length : minBytes + 1);
+    const written = typeof page.size !== 'number' || page.size > minBytes;
+    entries.set(key, { size, written, heat: written ? journalHeat(size) : 1 });
+  }
+  const writtenDays = Array.from(entries.entries())
+    .filter(([, info]) => info.written)
+    .map(([key]) => dayNumber(key))
+    .sort((a, b) => a - b);
+  let longest = 0, run = 0, prev = null;
+  for (const day of writtenDays) {
+    if (prev !== null && day === prev) continue;
+    run = prev !== null && day === prev + 1 ? run + 1 : 1;
+    if (run > longest) longest = run;
+    prev = day;
+  }
+  const writtenSet = new Set(writtenDays);
+  const todayNum = dayNumber(todayKey);
+  let cursor = writtenSet.has(todayNum) ? todayNum : (writtenSet.has(todayNum - 1) ? todayNum - 1 : null);
+  let current = 0;
+  while (cursor !== null && writtenSet.has(cursor)) { current++; cursor--; }
+  return { entries, current, longest };
+}
+function renderJournalStats(stats, year, monthIndex) {
+  const prefix = year + '-' + String(monthIndex + 1).padStart(2, '0') + '-';
+  let monthDays = 0;
+  for (const [key, info] of stats.entries) {
+    if (key.startsWith(prefix) && info.written) monthDays++;
+  }
+  const node = $('journal-stats');
+  if (!node) return;
+  node.textContent = 'Streak: ' + stats.current + 'd · Best: ' + stats.longest + 'd · Month: ' + monthDays + 'd';
+}
+async function newJournalContent(key, id) {
+  const fallback = journalHeading(key) + '\n\n';
+  if (!state.pages.some(page => page.id === JOURNAL_TEMPLATE_ID)) return fallback;
+  try {
+    const tpl = await api('/api/page?id=' + encodeURIComponent(JOURNAL_TEMPLATE_ID));
+    if (!tpl || typeof tpl.content !== 'string' || !tpl.content.trim()) {
+      message('Template "' + JOURNAL_TEMPLATE_ID + '" is empty; using default journal heading.');
+      return fallback;
+    }
+    return templateText(tpl.content, id);
+  } catch (error) {
+    message('Could not load "' + JOURNAL_TEMPLATE_ID + '" (' + error.message + '); using default journal heading.');
+    return fallback;
+  }
 }
 function renderJournal() {
   const month = state.journalMonth;
@@ -1471,10 +1537,12 @@ function renderJournal() {
   const today = dateKey(new Date());
   $('journal-month-name').textContent = first.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
   const existing = new Set(state.pages.map(page => page.id));
+  const stats = journalStats(state.pages, today);
   const days = [];
   const date = new Date(year, monthIndex, 1 - first.getDay());
   for (let index = 0; index < 42; index++) {
     const key = dateKey(date), id = journalPageId(key);
+    const info = stats.entries.get(key);
     const node = button(String(date.getDate()), () => openJournalDate(key), 'journal-day');
     node.dataset.date = key;
     node.setAttribute('aria-label', key);
@@ -1482,10 +1550,12 @@ function renderJournal() {
     node.classList.toggle('today', key === today);
     node.classList.toggle('selected', key === state.journalDate);
     node.classList.toggle('has-entry', existing.has(id));
+    if (info && info.heat > 0) node.classList.add('heat-' + info.heat);
     days.push(node);
     date.setDate(date.getDate() + 1);
   }
   $('journal-days').replaceChildren(...days);
+  renderJournalStats(stats, year, monthIndex);
 }
 async function openJournalDate(key) {
   const match = key.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -1499,7 +1569,8 @@ async function openJournalDate(key) {
   const exists = state.pages.some(page => page.id === id);
   try {
     if (!exists) {
-      try { await api('/api/page', { id, content: journalHeading(key) + '\n\n', revision: '' }); }
+      const content = await newJournalContent(key, id);
+      try { await api('/api/page', { id, content, revision: '' }); }
       catch (error) { if (error.status !== 409) throw error; }
       await refresh();
     } else {
