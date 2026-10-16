@@ -160,8 +160,9 @@ or replaced as part of recovery advice.
   weekday while preserving its entry text. Calendar days are shaded by entry
   length (`heat-1` to `heat-4`), and the sidebar displays your current streak,
   best streak, and days written in the viewed month. **Today** jumps to the current date.
-- Choose **Edit**, **Split**, or **Preview**. Narrow screens default to Edit;
-  the notebook tree opens with the menu button.
+- Choose **Edit**, **Split**, or **Preview**. In **Split** mode, scrolling either
+  the Markdown editor or the rendered preview keeps both panes proportionally aligned.
+  Narrow screens default to Edit; the notebook tree opens with the menu button.
 - Supported Markdown includes headings, paragraphs, lists, task checkboxes,
   emphasis, strikethrough (`~~text~~`), inline/fenced code with one-click copy buttons,
   blockquotes, GitHub-style alert callouts (`> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`,

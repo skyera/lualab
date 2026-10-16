@@ -2153,3 +2153,51 @@ test('journal streak, heat-map classes, and Templates/Journal daily template wor
   assert.match(get('message').textContent, /Could not load "Templates\/Journal" \(Disk read error\)/);
 });
 
+test('synchronized split scrolling aligns editor and preview proportionally, suppresses echo loops, and ignores single-pane modes', () => {
+  const { context, state, get } = harness();
+  const editor = get('editor');
+  const preview = get('preview');
+
+  editor.scrollHeight = 1400;
+  editor.clientHeight = 400;   // max scroll = 1000
+  preview.scrollHeight = 2400;
+  preview.clientHeight = 400;  // max scroll = 2000
+
+  context.setMode('split');
+  assert.equal(state.mode, 'split');
+
+  // Scroll editor to 25% -> preview scrolls to 25% (500)
+  editor.scrollTop = 250;
+  editor.handlers.scroll();
+  assert.equal(preview.scrollTop, 500);
+
+  // Echoed scroll event on preview at the same targetTop is suppressed and does not overwrite editor
+  editor.scrollTop = 260;
+  assert.equal(preview.handlers.scroll(), false);
+  assert.equal(editor.scrollTop, 260);
+
+  // Genuine scroll on preview to 75% (1500) -> editor scrolls to 75% (750)
+  preview.scrollTop = 1500;
+  preview.handlers.scroll();
+  assert.equal(editor.scrollTop, 750);
+
+  // Clamping at boundaries (0% and 100%)
+  editor.scrollTop = 0;
+  editor.handlers.scroll();
+  assert.equal(preview.scrollTop, 0);
+  editor.scrollTop = 1000;
+  editor.handlers.scroll();
+  assert.equal(preview.scrollTop, 2000);
+
+  // In Edit or Preview mode, scrolling does not mutate the other pane
+  context.setMode('edit');
+  preview.scrollTop = 123;
+  editor.scrollTop = 500;
+  assert.equal(editor.handlers.scroll(), false);
+  assert.equal(preview.scrollTop, 123);
+
+  // Switching back to Split mode immediately aligns preview to current editor scroll
+  context.setMode('split');
+  assert.equal(preview.scrollTop, 1000);
+});
+

@@ -1236,6 +1236,7 @@ function preview() {
   const words = pageStatistics.words;
   $('word-count').textContent = words + (words === 1 ? ' word' : ' words');
   renderStatistics();
+  if (state.mode === 'split') syncScroll('editor');
 }
 function button(text, action, className) {
   const node = document.createElement('button'); node.textContent = text;
@@ -1627,10 +1628,34 @@ async function ensureSaved() {
   for (let count = 0; state.dirty && count < 5; count++) if (!(await save())) return false;
   return !state.dirty;
 }
+const scrollSyncState = { source: null, targetTop: 0, timer: null };
+function syncScroll(from) {
+  if (state.mode !== 'split') return false;
+  const source = $(from === 'editor' ? 'editor' : 'preview');
+  const target = $(from === 'editor' ? 'preview' : 'editor');
+  if (!source || !target) return false;
+  if (scrollSyncState.source && scrollSyncState.source !== from) {
+    if (Math.abs((source.scrollTop || 0) - scrollSyncState.targetTop) <= 1) {
+      scrollSyncState.source = null;
+      return false;
+    }
+  }
+  const maxSource = (source.scrollHeight || 0) - (source.clientHeight || 0);
+  const maxTarget = Math.max(0, (target.scrollHeight || 0) - (target.clientHeight || 0));
+  const ratio = maxSource > 0 ? Math.min(1, Math.max(0, (source.scrollTop || 0) / maxSource)) : 0;
+  const nextTop = Math.round(ratio * maxTarget);
+  scrollSyncState.source = from;
+  scrollSyncState.targetTop = nextTop;
+  clearTimeout(scrollSyncState.timer);
+  scrollSyncState.timer = setTimeout(() => { scrollSyncState.source = null; }, 60);
+  target.scrollTop = nextTop;
+  return true;
+}
 function setMode(mode) {
   if (innerWidth <= 950 && mode === 'split') mode = 'edit';
   state.mode = mode; $('panes').className = mode;
   document.querySelectorAll('[data-mode]').forEach(node => node.classList.toggle('selected', node.dataset.mode === mode));
+  if (mode === 'split') syncScroll('editor');
 }
 function ask(kind, value = '') {
   ++templateState.request;
@@ -2083,6 +2108,8 @@ $('menu').addEventListener('click', () => {
   const open = document.querySelector('.workspace').classList.toggle('menu-open'); $('menu').setAttribute('aria-expanded', String(open));
 });
 document.querySelectorAll('[data-mode]').forEach(node => node.addEventListener('click', () => setMode(node.dataset.mode)));
+$('editor').addEventListener('scroll', () => syncScroll('editor'));
+$('preview').addEventListener('scroll', () => syncScroll('preview'));
 $('outline-toggle').addEventListener('click', toggleOutline);
 $('outline-close').addEventListener('click', closeOutline);
 $('verse-open').addEventListener('click', openVerse);
