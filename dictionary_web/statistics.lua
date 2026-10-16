@@ -69,16 +69,52 @@ function M.get(store, stamp)
     end
 
     local words, unique, due = store:words(), {}, 0
+    local mastery = { new = 0, learning = 0, reviewing = 0, mastered = 0 }
+    local forecast_counts = { 0, 0, 0, 0, 0, 0, 0 }
+    local today_end = (day + 1) * 86400 - 1
+
     for _, row in ipairs(words) do
-        unique[row.word:lower()] = true
+        local key = row.word:lower()
         if row.due_at <= stamp then
             due = due + 1
+        end
+        if row.due_at <= today_end then
+            forecast_counts[1] = forecast_counts[1] + 1
+        else
+            local due_day = math.floor(row.due_at / 86400)
+            local diff = due_day - day
+            if diff >= 1 and diff <= 6 then
+                forecast_counts[diff + 1] = forecast_counts[diff + 1] + 1
+            end
+        end
+        if not unique[key] then
+            unique[key] = row
         end
     end
 
     local word_count = 0
-    for _ in pairs(unique) do
+    for _, row in pairs(unique) do
         word_count = word_count + 1
+        local reviews = row.review_count or 0
+        local is_tui = row.collection == 'tui'
+        local span = is_tui and (row.interval_days or 0) or (row.streak or 0)
+        if reviews == 0 then
+            mastery.new = mastery.new + 1
+        elseif (is_tui and span >= 14) or (not is_tui and (span >= 4 or reviews >= 5)) then
+            mastery.mastered = mastery.mastered + 1
+        elseif (is_tui and span >= 3) or (not is_tui and (span >= 2 or reviews >= 2)) then
+            mastery.reviewing = mastery.reviewing + 1
+        else
+            mastery.learning = mastery.learning + 1
+        end
+    end
+
+    local forecast = {}
+    for offset = 0, 6 do
+        forecast[#forecast + 1] = {
+            date = os.date('!%Y-%m-%d', (day + offset) * 86400),
+            due = forecast_counts[offset + 1],
+        }
     end
 
     local lifetime = store.web:query('SELECT COALESCE(sum(review_count),0) AS total FROM words')[1].total
@@ -114,6 +150,8 @@ function M.get(store, stamp)
         period_reviews = total,
         recalled = recalled,
         recall_rate = total > 0 and recalled / total * 100 or nil,
+        mastery = mastery,
+        forecast = forecast,
         days = days,
         difficult = hardest,
     }

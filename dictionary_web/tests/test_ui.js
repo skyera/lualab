@@ -703,3 +703,171 @@ test('a pending restore blocks grading and navigation and recovers after failure
   assert.equal(get('restore-button').disabled, false);
   assert.equal(get('backup-status').textContent, 'Invalid backup');
 });
+
+test('My words filters by definition/meaning/example/note, filters by status, and sorts entries', () => {
+  const { context, state, get } = harness();
+  const nowSec = Math.floor(Date.now() / 1000);
+  state.words = [
+    {
+      ...card(1, 'web'),
+      word: 'zeal',
+      lookup_count: 2,
+      review_count: 0,
+      streak: 0,
+      due_at: nowSec - 60,
+      study_meaning: 'great energy or enthusiasm',
+      study_example: 'She worked with tireless zeal.',
+      entry: { definitions: ['fervor for a cause'], examples: [] }
+    },
+    {
+      ...card(2, 'tui'),
+      word: 'alacrity',
+      lookup_count: 9,
+      review_count: 6,
+      interval_days: 21,
+      due_at: nowSec + 86400 * 5,
+      study_meaning: '',
+      note: 'cheerful readiness',
+      entry: { definitions: ['brisk and cheerful readiness'], examples: ['She accepted with alacrity.'] }
+    },
+    {
+      ...card(3, 'web'),
+      word: 'candor',
+      lookup_count: 4,
+      review_count: 5,
+      streak: 4,
+      due_at: nowSec + 86400 * 2,
+      study_meaning: 'frankness and honesty',
+      entry: { definitions: ['the quality of being open and honest'], examples: [] }
+    }
+  ];
+
+  const listedWords = () => get('word-list').querySelectorAll('h2').map(node => node.textContent);
+
+  // Full-text search across definition, note, and personal meaning
+  get('word-filter').value = 'cheerful';
+  context.renderWords();
+  assert.deepEqual(listedWords(), ['alacrity']);
+  assert.equal(get('word-list').querySelectorAll('.word-match-snippet').length, 1);
+
+  get('word-filter').value = 'fervor';
+  context.renderWords();
+  assert.deepEqual(listedWords(), ['zeal']);
+
+  get('word-filter').value = '';
+
+  // Status filters: due, new, mastered, missing-meaning
+  get('word-status').value = 'due';
+  context.renderWords();
+  assert.deepEqual(listedWords(), ['zeal']);
+
+  get('word-status').value = 'new';
+  context.renderWords();
+  assert.deepEqual(listedWords(), ['zeal']);
+
+  get('word-status').value = 'mastered';
+  context.renderWords();
+  assert.deepEqual(listedWords(), ['alacrity', 'candor']);
+
+  get('word-status').value = 'missing-meaning';
+  context.renderWords();
+  assert.deepEqual(listedWords(), ['alacrity']);
+
+  get('word-status').value = '';
+
+  // Sorting: alpha, lookups, due, reviews
+  get('word-sort').value = 'alpha';
+  context.renderWords();
+  assert.deepEqual(listedWords(), ['alacrity', 'candor', 'zeal']);
+
+  get('word-sort').value = 'lookups';
+  context.renderWords();
+  assert.deepEqual(listedWords(), ['alacrity', 'candor', 'zeal']);
+
+  get('word-sort').value = 'due';
+  context.renderWords();
+  assert.deepEqual(listedWords(), ['zeal', 'candor', 'alacrity']);
+
+  get('word-sort').value = 'reviews';
+  context.renderWords();
+  assert.deepEqual(listedWords(), ['zeal', 'candor', 'alacrity']);
+});
+
+test('active recall quiz modes mask target word, check answers, and render mastery and forecast stats', () => {
+  const { context, state, get } = harness();
+  const word = {
+    ...card(1, 'web'),
+    word: 'serendipity',
+    study_meaning: 'finding good things by serendipity without looking for them',
+    study_example: 'Meeting her there was pure serendipity.',
+    entry: { definitions: ['the occurrence of events by chance in a happy way'] }
+  };
+  state.view = 'review';
+  state.queue = [word];
+  state.total = 1;
+  state.revealed = false;
+
+  // Cloze mode masks the target word in the example prompt
+  get('review-quiz').value = 'cloze';
+  context.renderReview();
+  const promptText = get('review-card').querySelectorAll('.quiz-prompt')[0].textContent;
+  assert.equal(promptText, 'Meeting her there was pure _____.');
+  assert.equal(get('review-card').querySelectorAll('h2')[0].textContent, 'Fill in the blank');
+
+  // Submit correct answer (case-insensitive)
+  const form = get('review-card').querySelectorAll('form')[0];
+  const input = get('review-card').querySelectorAll('input')[0];
+  input.value = '  Serendipity ';
+  form.handlers.submit({ preventDefault() {} });
+  assert.equal(state.revealed, true);
+  assert.equal(state.quizChecked.correct, true);
+  assert.match(get('review-card').querySelectorAll('.quiz-feedback')[0].textContent, /✓ Correct!/);
+
+  // Reverse mode with wrong answer
+  state.revealed = false;
+  state.quizChecked = null;
+  get('review-quiz').value = 'reverse';
+  context.renderReview();
+  assert.equal(get('review-card').querySelectorAll('h2')[0].textContent, 'Guess the word');
+  assert.doesNotMatch(get('review-card').querySelectorAll('.quiz-prompt')[0].textContent, /serendipity/i);
+  const reverseForm = get('review-card').querySelectorAll('form')[0];
+  const reverseInput = get('review-card').querySelectorAll('input')[0];
+  reverseInput.value = 'luck';
+  reverseForm.handlers.submit({ preventDefault() {} });
+  assert.equal(state.revealed, true);
+  assert.equal(state.quizChecked.correct, false);
+  assert.match(get('review-card').querySelectorAll('.quiz-feedback')[0].textContent, /✗ Expected “serendipity”/);
+
+  // Dictation mode offers audio button
+  state.revealed = false;
+  state.quizChecked = null;
+  get('review-quiz').value = 'dictation';
+  context.renderReview();
+  assert.equal(get('review-card').querySelectorAll('h2')[0].textContent, 'Audio dictation');
+
+  // Statistics renders mastery and 7-day forecast
+  context.renderStatistics({
+    saved_words: 10,
+    due_cards: 3,
+    today_reviews: 4,
+    streak: 5,
+    lifetime_reviews: 40,
+    period_reviews: 20,
+    recall_rate: 85,
+    mastery: { new: 2, learning: 3, reviewing: 1, mastered: 4 },
+    forecast: [
+      { date: '2026-10-15', due: 3 },
+      { date: '2026-10-16', due: 1 },
+      { date: '2026-10-17', due: 0 },
+      { date: '2026-10-18', due: 2 },
+      { date: '2026-10-19', due: 0 },
+      { date: '2026-10-20', due: 4 },
+      { date: '2026-10-21', due: 0 }
+    ],
+    days: [{ date: '2026-10-15', total: 4, recalled: 3 }],
+    difficult: []
+  });
+  assert.equal(get('stats-mastery').children.length, 4);
+  assert.equal(get('stats-forecast').children.length, 7);
+  assert.equal(get('stats-forecast').children[0].querySelectorAll('time')[0].textContent, 'Today');
+});

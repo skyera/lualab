@@ -64,13 +64,27 @@
       <div class="journal-tools">
         <label>Collection <select id="word-folder" class="voice-select"><option value="">All collections</option></select></label>
         <label>Tag <select id="word-tag" class="voice-select"><option value="">All tags</option></select></label>
+        <label>Status <select id="word-status" class="voice-select">
+          <option value="">All statuses</option>
+          <option value="due">Due now</option>
+          <option value="new">New (unreviewed)</option>
+          <option value="mastered">Mastered</option>
+          <option value="missing-meaning">Needs personal meaning</option>
+        </select></label>
+        <label>Sort by <select id="word-sort" class="voice-select">
+          <option value="recent">Recently seen</option>
+          <option value="alpha">Alphabetical (A–Z)</option>
+          <option value="lookups">Most looked up</option>
+          <option value="due">Due soonest</option>
+          <option value="reviews">Least reviewed</option>
+        </select></label>
         <a class="secondary" href="/api/export?format=json">Download backup</a>
         <a class="secondary" href="/api/export?format=csv">Export CSV</a>
         <button id="restore-button" class="secondary" type="button">Restore backup…</button>
         <input id="restore-file" type="file" accept=".json,application/json" hidden>
       </div>
       <p id="backup-status" role="status" class="tool-status"></p>
-      <label class="filter-label" for="word-filter">Find a saved word</label><input id="word-filter" class="filter" placeholder="Filter your words…" type="search">
+      <label class="filter-label" for="word-filter">Find a saved word</label><input id="word-filter" class="filter" placeholder="Filter by word, definition, note, or example…" type="search">
       <p id="words-status" role="status"></p><div id="word-list" class="word-list"></div>
     </section>
     <section id="review-view" class="view" hidden>
@@ -83,6 +97,12 @@
           <option value="new">New only</option>
           <option value="overdue">Overdue: reviewed words</option>
           <option value="all">All saved words</option>
+        </select></label>
+        <label>Practice <select id="review-quiz" class="voice-select">
+          <option value="flashcard">Flashcard (Word → Meaning)</option>
+          <option value="reverse">Reverse (Meaning → Type word)</option>
+          <option value="cloze">Cloze sentence (Fill in blank)</option>
+          <option value="dictation">Dictation (Listen → Type word)</option>
         </select></label>
         <label>Limit <input id="review-limit" class="session-limit" type="number" min="1" max="200" value="20" required></label>
         <button id="review-start" class="primary" type="submit">Start session</button>
@@ -98,6 +118,8 @@
       <div class="page-heading"><p class="eyebrow">SMALL STEPS, VISIBLE PROGRESS</p><h1>Your learning progress.</h1><p>Review activity and recall over the last 30 days.</p></div>
       <p id="stats-status" role="status"></p>
       <div id="stats-summary" class="stats-summary"></div>
+      <h2>Vocabulary mastery</h2><div id="stats-mastery" class="stats-summary"></div>
+      <h2>7-day review forecast</h2><div id="stats-forecast" class="stats-forecast"></div>
       <h2>Daily activity</h2><div id="stats-activity" class="stats-activity"></div>
       <p class="tool-status">Dates use UTC. Recall rate is the share of recorded reviews graded remembered, Hard, Good, or Easy. Older web review totals may not have dated history.</p>
       <h2>Words to revisit</h2><div id="stats-difficult" class="word-list"></div>

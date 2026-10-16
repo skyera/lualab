@@ -309,7 +309,9 @@ value clears it. The limit is 4,000 UTF-8 bytes. Version 3 JSON backups and CSV
 exports include personal examples; restoring version 1 or 2 leaves them empty.
 
 **Statistics** shows saved words, due cards, today's reviews, a review streak,
-a 30-day activity grid, and words with the most **Again** grades. Dates use UTC.
+vocabulary mastery (**New**, **Learning**, **Reviewing**, **Mastered**), a
+**7-day review forecast**, a 30-day activity grid, and words with the most
+**Again** grades. Dates use UTC.
 Recall rate is the share of recorded grades above Again, based on your own
 ratings. A streak continues through yesterday until today's first review.
 Web and shared TUI review events are combined. Existing web review counts still
@@ -325,12 +327,18 @@ API: `GET /api/stats`, and `POST /api/meaning` with
 
 In **My words**, use **Organize** to assign a collection and up to eight tags.
 Names allow up to 64 characters; tags are entered with commas between them.
+Filter saved entries by **Collection**, **Tag**, **Status** (`Due now`,
+`New (unreviewed)`, `Mastered`, or `Needs personal meaning`), or full-text search
+across words, definitions, personal meanings, example sentences, and study notes,
+and sort by **Recently seen**, **Alphabetical (A–Z)**, **Most looked up**,
+**Due soonest**, or **Least reviewed**.
 Collection and tag filters also appear in Review. Organization follows a word
 across its online sources and shared TUI entry. It is stored in Wordbook; the
 TUI's existing notes and review schedule remain shared as before.
 
-Review starts with up to 20 due cards. Choose a collection, tag, mode, and a
-limit of 1–200 cards, then select **Start session**. **Due** includes new and
+Review starts with up to 20 due cards. Choose a collection, tag, card mode,
+practice mode (**Flashcard**, **Reverse**, **Cloze sentence**, or **Dictation**),
+and a limit of 1–200 cards, then select **Start session**. **Due** includes new and
 previously reviewed words whose scheduled time has arrived. **New only** means
 never reviewed; **Overdue** means previously reviewed and due; **All saved words**
 also permits practice before the scheduled date. Cards use the existing web or

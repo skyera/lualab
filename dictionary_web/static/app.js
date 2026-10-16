@@ -857,6 +857,32 @@ function renderStatistics(data) {
   });
   $('stats-summary').replaceChildren(...tiles);
 
+  if ($('stats-mastery') && data.mastery) {
+    const masteryTiles = [
+      ['New', data.mastery.new || 0],
+      ['Learning', data.mastery.learning || 0],
+      ['Reviewing', data.mastery.reviewing || 0],
+      ['Mastered', data.mastery.mastered || 0]
+    ].map(([label, value]) => {
+      const tile = element('article', undefined, 'stat-tile');
+      tile.append(element('strong', String(value)), element('span', label));
+      return tile;
+    });
+    $('stats-mastery').replaceChildren(...masteryTiles);
+  }
+
+  if ($('stats-forecast') && Array.isArray(data.forecast)) {
+    const forecastTiles = data.forecast.map((day, idx) => {
+      const tile = element('div', undefined, 'activity-day' + (day.due ? ' active' : ''));
+      const label = element('time', idx === 0 ? 'Today' : day.date.slice(5));
+      label.dateTime = day.date;
+      tile.title = `${day.date}: ${day.due} card${day.due === 1 ? '' : 's'} due`;
+      tile.append(label, element('strong', String(day.due)));
+      return tile;
+    });
+    $('stats-forecast').replaceChildren(...forecastTiles);
+  }
+
   const days = data.days.map(day => {
     const tile = element('div', undefined, 'activity-day' + (day.total ? ' active' : ''));
     const date = element('time', day.date.slice(5));
@@ -884,16 +910,93 @@ function renderStatistics(data) {
   $('stats-difficult').replaceChildren(...words);
 }
 
+function wordMatchesFilter(word, filter) {
+  if (!filter) {
+    return { matched: true, context: '' };
+  }
+  if ((word.word || '').toLocaleLowerCase().includes(filter)) {
+    return { matched: true, context: '' };
+  }
+  const fields = [
+    ['Meaning', word.study_meaning],
+    ['Note', word.note],
+    ['Example', word.study_example],
+    ...(word.entry?.definitions || []).map(def => ['Definition', def]),
+    ...(word.entry?.examples || []).map(ex => ['Example', ex])
+  ];
+  for (const [label, text] of fields) {
+    if (typeof text === 'string' && text.toLocaleLowerCase().includes(filter)) {
+      return { matched: true, context: `${label}: ${text}` };
+    }
+  }
+  return { matched: false, context: '' };
+}
+
+function wordMatchesStatus(word, status, nowSec = Date.now() / 1000) {
+  if (!status) {
+    return true;
+  }
+  if (status === 'due') {
+    return (word.due_at || 0) <= nowSec;
+  }
+  if (status === 'new') {
+    return (word.review_count || 0) === 0;
+  }
+  if (status === 'mastered') {
+    return word.collection === 'tui'
+      ? (word.interval_days || 0) >= 14
+      : (word.streak || 0) >= 4 || (word.review_count || 0) >= 5;
+  }
+  if (status === 'missing-meaning') {
+    return !(word.study_meaning && word.study_meaning.trim());
+  }
+  return true;
+}
+
+function sortWords(words, sortKey) {
+  const list = [...words];
+  if (sortKey === 'alpha') {
+    list.sort((a, b) => (a.word || '').localeCompare(b.word || ''));
+  } else if (sortKey === 'lookups') {
+    list.sort((a, b) => (b.lookup_count || 0) - (a.lookup_count || 0) || (a.word || '').localeCompare(b.word || ''));
+  } else if (sortKey === 'due') {
+    list.sort((a, b) => (a.due_at || 0) - (b.due_at || 0) || (a.word || '').localeCompare(b.word || ''));
+  } else if (sortKey === 'reviews') {
+    list.sort((a, b) => (a.review_count || 0) - (b.review_count || 0) || (a.word || '').localeCompare(b.word || ''));
+  }
+  return list;
+}
+
 function renderWords() {
   const filter = $('word-filter').value.trim().toLocaleLowerCase();
   const folder = organizationKey($('word-folder')?.value || '');
   const tag = organizationKey($('word-tag')?.value || '');
-  const words = state.words.filter(word => (
-    word.word.toLocaleLowerCase().includes(filter)
-    && (!folder || organizationKey(word.folder || '') === folder)
-    && (!tag || (word.tags || []).some(value => organizationKey(value) === tag))
-  ));
+  const status = $('word-status')?.value || '';
+  const sortKey = $('word-sort')?.value || 'recent';
+  const nowSec = Date.now() / 1000;
+  const matchContexts = new Map();
 
+  const filtered = state.words.filter(word => {
+    if (folder && organizationKey(word.folder || '') !== folder) {
+      return false;
+    }
+    if (tag && !(word.tags || []).some(value => organizationKey(value) === tag)) {
+      return false;
+    }
+    if (!wordMatchesStatus(word, status, nowSec)) {
+      return false;
+    }
+    const match = wordMatchesFilter(word, filter);
+    if (!match.matched) {
+      return false;
+    }
+    if (match.context) {
+      matchContexts.set(word, match.context);
+    }
+    return true;
+  });
+
+  const words = sortWords(filtered, sortKey);
   $('words-status').textContent = `${words.length} saved entr${words.length === 1 ? 'y' : 'ies'}`;
   const fragment = document.createDocumentFragment();
 
@@ -909,10 +1012,14 @@ function renderWords() {
     if (word.study_example) {
       copy.append(element('p', word.study_example, 'personal-example'));
     }
+    const matchedContext = matchContexts.get(word);
+    if (matchedContext) {
+      copy.append(element('p', 'Matched · ' + matchedContext, 'word-match-snippet'));
+    }
     const history = word.collection === 'tui'
       ? 'Shared with TUI'
       : `${word.lookup_count} lookup${word.lookup_count === 1 ? '' : 's'}`;
-    const nextReview = word.due_at <= Date.now() / 1000
+    const nextReview = word.due_at <= nowSec
       ? 'Ready for review'
       : 'Next review ' + formatTime(word.due_at);
     copy.append(element(
@@ -949,19 +1056,69 @@ function renderWords() {
     fragment.append(row);
   }
 
+  const hasActiveFilter = Boolean(filter || folder || tag || status);
   if (!words.length) {
     fragment.append(empty(
-      filter ? 'No matching words.' : 'Your first word is waiting.',
-      filter ? 'Try a different filter.' : 'Look up something new. It will appear here automatically.',
-      !filter
+      hasActiveFilter ? 'No matching words.' : 'Your first word is waiting.',
+      hasActiveFilter ? 'Try a different filter.' : 'Look up something new. It will appear here automatically.',
+      !hasActiveFilter
     ));
   }
   $('word-list').replaceChildren(fragment);
 }
 
 // -----------------------------------------------------------------------------
-// SRS Review & Grading
+// SRS Review, Active Recall Quiz Modes & Grading
 // -----------------------------------------------------------------------------
+
+function quizMode() {
+  return $('review-quiz')?.value || 'flashcard';
+}
+
+function maskWordInText(text, targetWord) {
+  if (!text || !targetWord) {
+    return text || '';
+  }
+  const escaped = targetWord.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (!escaped) {
+    return text;
+  }
+  const regex = new RegExp(escaped + '[a-z]*', 'gi');
+  return text.replace(regex, '_____');
+}
+
+function buildQuizPrompt(word, mode) {
+  if (mode === 'dictation') {
+    return 'Listen to the pronunciation and type the word.';
+  }
+  if (mode === 'cloze') {
+    const raw = word.study_example
+      || word.entry?.examples?.[0]
+      || word.study_meaning
+      || word.entry?.definitions?.[0]
+      || word.note
+      || '';
+    if (!raw) {
+      return '_____ (no example sentence saved yet)';
+    }
+    const masked = maskWordInText(raw, word.word);
+    return masked.includes('_____') ? masked : `${masked} (_____)`;
+  }
+  const meaning = word.study_meaning
+    || word.entry?.definitions?.[0]
+    || word.note
+    || 'Recall the word for this card.';
+  return maskWordInText(meaning, word.word);
+}
+
+function checkQuizAnswer(typed, expected) {
+  const normTyped = String(typed || '').trim().toLocaleLowerCase().replace(/\s+/g, ' ');
+  const normExpected = String(expected || '').trim().toLocaleLowerCase().replace(/\s+/g, ' ');
+  return {
+    correct: Boolean(normExpected && normTyped === normExpected),
+    typed: String(typed || '').trim()
+  };
+}
 
 async function gradeWord(word, remembered, gradeValue) {
   if (state.grading || state.reviewLoading || state.restoring || state.view !== 'review') {
@@ -988,6 +1145,7 @@ async function gradeWord(word, remembered, gradeValue) {
     state.queue.splice(index, 1);
     state.reviewed++;
     state.revealed = false;
+    state.quizChecked = null;
     renderReview();
     await refreshCounts();
   } catch (error) {
@@ -1026,6 +1184,44 @@ function renderReview() {
   }
 
   const word = state.queue[0];
+  const mode = quizMode();
+
+  if (!state.revealed && mode !== 'flashcard') {
+    target.append(
+      element('p', sourceNames[word.source], 'eyebrow'),
+      element('h2', mode === 'cloze' ? 'Fill in the blank' : mode === 'dictation' ? 'Audio dictation' : 'Guess the word'),
+      element('p', buildQuizPrompt(word, mode), 'study-answer quiz-prompt')
+    );
+    if (mode === 'dictation') {
+      target.append(button('🔊 Play audio', () => pronounceWord(word.word), 'secondary', 'P'));
+    }
+    const form = element('form', undefined, 'quiz-form');
+    const input = element('input', undefined, 'filter quiz-input');
+    input.id = 'quiz-input';
+    input.type = 'text';
+    input.placeholder = 'Type the word…';
+    input.autocomplete = 'off';
+    const submit = element('button', 'Check answer', 'primary');
+    submit.type = 'submit';
+    const skip = button('Reveal meaning', () => {
+      state.quizChecked = null;
+      state.revealed = true;
+      renderReview();
+    }, 'secondary', 'Space');
+    form.append(input, submit, skip);
+    form.addEventListener('submit', event => {
+      event.preventDefault();
+      state.quizChecked = checkQuizAnswer(input.value, word.word);
+      state.revealed = true;
+      renderReview();
+    });
+    target.append(
+      form,
+      element('p', 'Shortcuts: [Enter] check typed word · [Space] reveal · [P] pronounce', 'review-shortcuts-hint')
+    );
+    return;
+  }
+
   target.append(element('p', sourceNames[word.source], 'eyebrow'), element('h2', word.word));
 
   if (!state.revealed) {
@@ -1035,6 +1231,17 @@ function renderReview() {
       element('p', 'Shortcuts: [Space] reveal · [P] pronounce', 'review-shortcuts-hint')
     );
     return;
+  }
+
+  if (state.quizChecked) {
+    const feedbackText = state.quizChecked.correct
+      ? `✓ Correct! You typed “${state.quizChecked.typed}”.`
+      : `✗ Expected “${word.word}” (you typed “${state.quizChecked.typed || 'nothing'}”).`;
+    target.append(element(
+      'p',
+      feedbackText,
+      'quiz-feedback ' + (state.quizChecked.correct ? 'correct' : 'incorrect')
+    ));
   }
 
   if (word.study_meaning) {
@@ -1143,6 +1350,7 @@ async function showView(view) {
       state.reviewed = 0;
       state.total = data.words.length;
       state.revealed = false;
+      state.quizChecked = null;
       renderReview();
     }
   } catch (error) {
@@ -1378,6 +1586,16 @@ $('search-form').addEventListener('submit', event => {
 $('word-filter').addEventListener('input', renderWords);
 $('word-folder')?.addEventListener('change', renderWords);
 $('word-tag')?.addEventListener('change', renderWords);
+$('word-status')?.addEventListener('change', renderWords);
+$('word-sort')?.addEventListener('change', renderWords);
+
+$('review-quiz')?.addEventListener('change', () => {
+  if (state.view === 'review' && !state.grading && !state.reviewLoading) {
+    state.revealed = false;
+    state.quizChecked = null;
+    renderReview();
+  }
+});
 
 $('review-options')?.addEventListener('submit', event => {
   event.preventDefault();
