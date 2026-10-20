@@ -1587,8 +1587,9 @@ async function openJournalDate(key) {
   } catch (error) { message(error.message); return false; }
   return openPage(id);
 }
-async function refresh() {
-  const data = await api('/api/state'); state.pages = data.pages; state.trash = data.trash; state.root = data.data_dir;
+async function refresh(fresh = false) {
+  const data = await api('/api/state' + (fresh ? '?fresh=1' : ''));
+  state.pages = data.pages; state.trash = data.trash; state.root = data.data_dir;
   loadNavigation(); renderNavigation();
   loadSavedSearches(); renderSavedSearches();
   $('data-path').textContent = state.root; renderTagFilter(); renderTree(); renderJournal(); preview();
@@ -2630,17 +2631,28 @@ window.addEventListener('beforeunload', event => {
 });
 window.addEventListener('resize', () => { if (innerWidth <= 950 && state.mode === 'split') setMode('edit'); });
 async function checkExternal() {
-  if (state.loading || state.uploading || state.saving || $('search').value || anyDialogOpen()) return;
+  if (state.loading || state.uploading || state.saving || state.blocked
+      || $('search').value || anyDialogOpen()) return;
   const page = state.page, revision = page?.revision;
+  if (!page) return;
   try {
-    await refresh();
-    if (state.saving || state.loading || state.uploading || state.page !== page || page?.revision !== revision) return;
-    const indexed = state.page && state.pages.find(page => page.id === state.page.id);
-    if (state.page && (!indexed || indexed.revision !== state.page.revision)) {
-      state.blocked = true; $('conflict').hidden = false; status('File changed · Reload needed', true);
-      message('This page changed outside Leaf Wiki. Your editor content is preserved.');
-    }
-  } catch (error) { message(error.message); }
+    const result = await api('/api/revision?id=' + encodeURIComponent(page.id));
+    if (state.saving || state.loading || state.uploading || state.page !== page
+        || page.revision !== revision || result.revision === revision) return;
+    state.blocked = true; $('conflict').hidden = false;
+    status('File changed · Reload needed', true);
+    message('This page changed outside Leaf Wiki. Your editor content is preserved.');
+    await refresh(true);
+    if (state.page === page) $('conflict').hidden = false;
+  } catch (error) {
+    if (error.status === 404) {
+      if (state.saving || state.loading || state.uploading || state.page !== page
+          || page.revision !== revision) return;
+      state.blocked = true; $('conflict').hidden = false;
+      status('File removed · Reload needed', true);
+      message('This page was removed outside Leaf Wiki. Your editor content is preserved.');
+    } else message(error.message);
+  }
 }
 async function start() {
   setMode('split');

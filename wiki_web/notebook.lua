@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS links(source TEXT NOT NULL, target TEXT NOT NULL, PRI
 CREATE INDEX IF NOT EXISTS links_target ON links(target);
 ]]
 
+local SYNC_INTERVAL = 1 -- seconds; full rescans are coalesced for read endpoints
+
 --------------------------------------------------------------------------------
 -- Notebook Lifecycle & Database Initialization
 --------------------------------------------------------------------------------
@@ -83,6 +85,13 @@ function Notebook:page(id)
     return { id = id, title = id:match('[^/]+$'), content = text, revision = hash.sha256(text), tags = tags.parse(text) }
 end
 
+function Notebook:revision(id)
+    require_id(id)
+    local page = self:page(id)
+    if not page then return nil, 'Page not found.', 404 end
+    return { id = id, revision = page.revision }
+end
+
 function Notebook:sync(progress)
     local seen, page_tags = {}, {}
     self.db:query('BEGIN;')
@@ -123,10 +132,63 @@ function Notebook:sync(progress)
         error(err)
     end
     self.page_tags = page_tags
+    self.last_sync = os.time()
 end
 
-function Notebook:state(query)
-    self:sync()
+-- Index one page after a single-file change instead of rescanning the notebook.
+function Notebook:sync_page(id)
+    require_id(id)
+    local page = self:page(id)
+    local current = self.db:query('SELECT revision FROM pages WHERE id=?', { id })[1]
+    if not page then
+        if current then
+            self.db:query('BEGIN;')
+            local ok, err = pcall(function()
+                self.db:query('DELETE FROM pages WHERE id=?', { id })
+                self.db:query('DELETE FROM links WHERE source=?', { id })
+            end)
+            if not ok then
+                self.db:query('ROLLBACK;')
+                error(err)
+            end
+            self.db:query('COMMIT;')
+            self.page_tags[id] = nil
+        end
+        return
+    end
+    if not current or current.revision ~= page.revision then
+        self.db:query('BEGIN;')
+        local ok, err = pcall(function()
+            self.db:query([[INSERT INTO pages VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+                title=excluded.title,content=excluded.content,revision=excluded.revision]],
+                { id, page.title, page.content, page.revision })
+            self.db:query('DELETE FROM links WHERE source=?', { id })
+            for target in pairs(links.targets(id, page.content)) do
+                self.db:query('INSERT INTO links VALUES(?,?)', { id, target })
+            end
+        end)
+        if not ok then
+            self.db:query('ROLLBACK;')
+            error(err)
+        end
+        self.db:query('COMMIT;')
+    end
+    self.page_tags[id] = page.tags
+end
+
+-- Read endpoints reuse a recent full scan; external changes appear within one interval.
+function Notebook:sync_if_stale(interval)
+    interval = interval or SYNC_INTERVAL
+    local now = os.time()
+    local indexed = self.db:query('SELECT COUNT(*) AS count FROM pages')[1]
+    if not indexed or indexed.count == 0 or not self.last_sync
+        or now < self.last_sync or now - self.last_sync >= interval then
+        self:sync()
+    end
+end
+
+function Notebook:state(query, fresh)
+    self:sync_if_stale(fresh and 0 or nil)
     local parsed = search.parse(query or '')
     local rows
     if #parsed.terms == 0 and #parsed.paths == 0 and #parsed.tags == 0 then
@@ -172,12 +234,12 @@ end
 
 function Notebook:backlinks(id)
     require_id(id)
-    self:sync()
+    self:sync_if_stale()
     return self.db:query('SELECT source AS id FROM links WHERE target=? ORDER BY source', { id })
 end
 
-function Notebook:graph()
-    self:sync()
+function Notebook:graph(fresh)
+    self:sync_if_stale(fresh and 0 or nil)
     local pages = self.db:query('SELECT id, title FROM pages ORDER BY id')
     local links_rows = self.db:query('SELECT source, target FROM links ORDER BY source, target')
     local nodes = {}
@@ -211,8 +273,8 @@ function Notebook:graph()
     }
 end
 
-function Notebook:tasks()
-    self:sync()
+function Notebook:tasks(fresh)
+    self:sync_if_stale(fresh and 0 or nil)
     local result = {}
     for _, page in ipairs(self.db:query('SELECT id,content,revision FROM pages ORDER BY id')) do
         for _, task in ipairs(tasks.parse(page.content)) do
@@ -275,7 +337,7 @@ function Notebook:save(id, content, revision)
     end
     if old and old.content ~= content then self.history:remember(old) end
     self.fs:write(id .. '.md', content)
-    self:sync()
+    self:sync_page(id)
     return self:page(id)
 end
 
@@ -334,8 +396,8 @@ function Notebook:image(id, bytes)
     return { file = name, markdown = '![' .. 'Image' .. '](' .. id:match('[^/]+$') .. '.attachments/' .. name .. ')' }
 end
 
-function Notebook:attachments()
-    self:sync()
+function Notebook:attachments(fresh)
+    self:sync_if_stale(fresh and 0 or nil)
     local rows = {}
     for _, page in ipairs(self.db:query('SELECT id, content FROM pages ORDER BY id')) do
         local referenced = {}

@@ -487,7 +487,7 @@ test('configured folder, autosave conflicts, images, links, maintenance and clea
     assert.equal((await fetch(server.url + '/api/image?page=Home', { method: 'POST', body: '<svg/>' })).status, 400);
     fs.writeFileSync(path.join(notebook, 'Projects', 'Plan.md'), 'External change');
     assert.equal((await post(server, '/api/page', { id: page.id, content: 'Overwrite', revision: page.revision })).status, 409);
-    assert.equal((await (await fetch(server.url + '/api/state?q=External')).json()).pages.length, 1);
+    assert.equal((await (await fetch(server.url + '/api/state?fresh=1&q=External')).json()).pages.length, 1);
     const searchRes = await (await fetch(server.url + '/api/state?q=' + encodeURIComponent('path:Projects External'))).json();
     assert.equal(searchRes.pages.length, 1);
     assert.match(searchRes.pages[0].snippet, /External change/);
@@ -725,6 +725,27 @@ test('Content-Security-Policy header allows bible-api.com for verse fetching and
     assert.ok(csp, 'Content-Security-Policy header must be present');
     assert.match(csp, /default-src 'self'/);
     assert.match(csp, /connect-src 'self' https:\/\/bible-api\.com/);
+  } finally {
+    if (server) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('revision endpoint reports the open page and detects external edits without returning notebook state', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-revision-'));
+  let server;
+  try {
+    const notebook = path.join(directory, 'notebook');
+    server = await start(directory, ['--data-dir', notebook, '--dict-db', 'none']);
+    const created = await post(server, '/api/page', { id: 'Home', content: '# Home', revision: '' });
+    assert.equal(created.status, 200);
+    const revision = await (await fetch(server.url + '/api/revision?id=Home')).json();
+    assert.deepEqual(revision, { id: 'Home', revision: created.data.revision });
+    assert.equal((await fetch(server.url + '/api/revision?id=Missing')).status, 404);
+    fs.writeFileSync(path.join(notebook, 'Home.md'), '# Changed externally\n');
+    const changed = await (await fetch(server.url + '/api/revision?id=Home')).json();
+    assert.notEqual(changed.revision, created.data.revision);
+    assert.equal('pages' in changed, false);
   } finally {
     if (server) await stop(server);
     fs.rmSync(directory, { recursive: true, force: true });

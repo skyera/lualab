@@ -293,16 +293,20 @@ function M.run(root)
             if STATIC[path] then
                 return assert(read(root .. '/wiki_web/static/' .. STATIC[path][1])), 200, STATIC[path][2]
             end
-            if path == '/api/state' then return reply(notebook:state(params.q)) end
-            if path == '/api/tasks' then return reply(notebook:tasks()) end
-            if path == '/api/graph' then return reply(notebook:graph()) end
-            if path == '/api/attachments' then return reply(notebook:attachments()) end
+            if path == '/api/state' then return reply(notebook:state(params.q, params.fresh == '1')) end
+            if path == '/api/tasks' then return reply(notebook:tasks(params.fresh == '1')) end
+            if path == '/api/graph' then return reply(notebook:graph(params.fresh == '1')) end
+            if path == '/api/attachments' then return reply(notebook:attachments(params.fresh == '1')) end
             if path == '/api/backup' then
                 return backup.export(notebook, startup.report), 200, 'application/json; charset=utf-8'
             end
             if path == '/api/dictionary' then
                 local value, status = dictionary.lookup(dictionary_path, params.word)
                 return reply(value, status)
+            end
+            if path == '/api/revision' then
+                local value, err, status = notebook:revision(params.id)
+                return reply(value or { error = err }, status or 200)
             end
             if path == '/api/page' then
                 local page = notebook:page(params.id)

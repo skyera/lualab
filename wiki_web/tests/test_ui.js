@@ -1614,7 +1614,10 @@ test('trash dialogs, missing-page prompts and long tree names render through act
 
 test('external revisions preserve editor text and stale search results cannot replace newer matches', async () => {
   const { context, state, get, timers } = harness();
-  context.refresh = async () => { state.pages[0] = { ...state.pages[0], revision: 'external' }; };
+  context.api = async route => {
+    assert.equal(route, '/api/revision?id=Home');
+    return { id: 'Home', revision: 'external' };
+  };
   await context.checkExternal();
   assert.equal(state.blocked, true); assert.equal(get('editor').value, 'Initial');
   const first = deferred(), second = deferred(); let requests = 0;
@@ -1631,16 +1634,37 @@ test('external revisions preserve editor text and stale search results cannot re
 test('an external-change poll cannot flag a save that completed while the poll was pending', async () => {
   const { context, state, get } = harness();
   const pending = deferred();
-  context.refresh = async () => pending.promise;
+  context.api = async route => route === '/api/revision?id=Home'
+    ? pending.promise : { revision: 'new-save' };
   get('conflict').hidden = true;
   const polling = context.checkExternal();
   get('editor').value = 'New content'; get('editor').handlers.input();
-  context.api = async () => ({ revision: 'new-save' });
   await context.save();
   state.pages[0] = { id: 'Home', title: 'Home', revision: 'r1' };
-  pending.resolve(); await polling;
+  pending.resolve({ id: 'Home', revision: 'external' }); await polling;
   assert.equal(state.blocked, false); assert.equal(get('conflict').hidden, true);
   assert.equal(get('save-status').textContent, '✓ Saved');
+});
+
+test('an idle external check reads only the open page revision and never rebuilds the notebook', async () => {
+  const { context, state, get } = harness();
+  const calls = []; let refreshed = 0;
+  context.api = async route => { calls.push(route); return { id: 'Home', revision: 'r1' }; };
+  context.refresh = async () => { refreshed++; };
+  await context.checkExternal();
+  assert.deepEqual(calls, ['/api/revision?id=Home']);
+  assert.equal(refreshed, 0); assert.equal(state.blocked, false);
+  assert.equal(get('conflict').hidden, false);
+});
+
+test('a removed page is reported as an external conflict without reloading notebook state', async () => {
+  const { context, state, get } = harness();
+  let refreshed = 0;
+  context.api = async () => { const error = new Error('Page not found.'); error.status = 404; throw error; };
+  context.refresh = async () => { refreshed++; };
+  await context.checkExternal();
+  assert.equal(state.blocked, true); assert.equal(get('conflict').hidden, false);
+  assert.equal(refreshed, 0); assert.equal(get('save-status').textContent, 'File removed · Reload needed');
 });
 
 test('search renders matching snippets and highlights query terms', async () => {

@@ -559,8 +559,11 @@ own save succeeds.
 The editor keeps a recovery draft in browser storage when available. On a save
 failure, the editor retains your text. If the file changed externally, copy the
 draft before using **Load saved file**; the server rejects stale revisions.
-External changes are scanned on notebook requests and every five seconds while
-the editor is idle. Reloading the file requires confirmation.
+While the editor is idle, Leaf Wiki checks the open page's revision every five
+seconds and flags an external edit without refreshing the whole notebook. Other
+pages are rescanned on notebook requests, with full scans coalesced to at most
+once per second; the open page is always read directly. Reloading the file
+requires confirmation.
 
 Do not depend on browser drafts as a backup: they are specific to this browser
 origin, including its port, and may be disabled or cleared. Revision checks cover
