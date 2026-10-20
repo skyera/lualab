@@ -8,6 +8,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const net = require('node:net');
+const crypto = require('node:crypto');
 const root = path.resolve(__dirname, '../..');
 const windows = process.platform === 'win32';
 const normalized = value => value.replace(/\\/g, '/');
@@ -746,6 +747,29 @@ test('revision endpoint reports the open page and detects external edits without
     const changed = await (await fetch(server.url + '/api/revision?id=Home')).json();
     assert.notEqual(changed.revision, created.data.revision);
     assert.equal('pages' in changed, false);
+  } finally {
+    if (server) await stop(server);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('large request bodies are read linearly and validated correctly', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'leaf-body-'));
+  let server;
+  try {
+    server = await start(directory, ['--data-dir', path.join(directory, 'notebook'), '--dict-db', 'none']);
+    const data = 'x'.repeat(16 * 1024 * 1024);
+    const backup = { format: 'leaf-wiki-backup', version: 1, files: [{
+      path: 'Big.md', bytes: Buffer.byteLength(data),
+      sha256: crypto.createHash('sha256').update(data).digest('hex'),
+      encoding: 'utf8', data
+    }] };
+    const started = Date.now();
+    const result = await post(server, '/api/backup/validate', { backup });
+    const elapsed = Date.now() - started;
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.data, { files: 1, bytes: 16 * 1024 * 1024 });
+    assert.ok(elapsed < 4000, `16 MiB body took ${elapsed} ms`);
   } finally {
     if (server) await stop(server);
     fs.rmSync(directory, { recursive: true, force: true });

@@ -3,8 +3,8 @@
 Date: 2026-10-20
 Scope: `wiki_web/` backend, `wiki_web/static/` frontend, and the shared
 `dictionary_web/` HTTP/DB modules it uses.
-Status: Item 1 was implemented and verified on 2026-10-20. Items 2–8 remain
-proposals.
+Status: Items 1–2 were implemented and verified on 2026-10-20. Item 3 was
+resolved with item 1. Items 4–8 remain proposals.
 
 ## Summary
 
@@ -229,6 +229,14 @@ Optionally, avoid building `headers .. body` in `M.respond` for large
 responses by sending the header frame and body in two loops; this removes one
 full-body copy on backup downloads.
 
+### Implementation result (2026-10-20)
+
+`read_request` now receives directly into a preallocated FFI buffer and
+converts once. A new HTTP regression test posts a valid 16 MiB backup bundle
+(including Node's JSON serialization, server-side JSON parsing, SHA-256
+verification, and validation) in ~1.1 s end to end, bounded at 4 s. The
+isolated 16 MiB concatenation cost of 7.7 s is gone.
+
 ### Verification
 
 - Time POSTs of 4, 8, 16, and 32 MiB against the real server; acceptance:
@@ -260,6 +268,12 @@ open page actually changed. For changes elsewhere, refresh on user actions
 (navigation, search, explicit refresh) as today. If a notebook-wide poll is
 still desired, return a cheap fingerprint (page count plus max revision or a
 write counter) and skip all rendering when it matches the previous value.
+
+### Implementation result (2026-10-20)
+
+Resolved with item 1: `checkExternal` now polls `/api/revision` for the open
+page and calls `refresh(true)` only when that revision changed. The idle poll
+no longer fetches notebook state or rebuilds the tree, calendar, and preview.
 
 ### Verification
 
@@ -484,4 +498,4 @@ with the largest measured payoff and no user-facing contract changes. Then item
 4 (small and immediately useful), then item 5. Items 6–8 are independent
 patches suitable for separate commits.
 
-Items 2–8 remain proposals.
+Items 4–8 remain proposals.

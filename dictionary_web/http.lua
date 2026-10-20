@@ -182,18 +182,23 @@ local function read_request(fd, body_limits)
     if not request then
         return nil, err, status or 400
     end
-    local body = buffer:sub(header_end + 4)
-    while #body < request.length do
+    -- Receive into one preallocated buffer; string concatenation here is
+    -- quadratic and dominates large image uploads and notebook backups.
+    local rest = buffer:sub(header_end + 4)
+    local body = ffi.new('char[?]', math.max(request.length, 1))
+    local filled = math.min(#rest, request.length)
+    if filled > 0 then ffi.copy(body, rest, filled) end
+    while filled < request.length do
         if now_seconds() >= deadline or not readable(fd, 1000) then
             return nil, 'Request timed out.', 408
         end
-        local bytes = tonumber(C.recv(fd, chunk, math.min(4096, request.length - #body), MSG_DONTWAIT))
+        local bytes = tonumber(C.recv(fd, body + filled, request.length - filled, MSG_DONTWAIT))
         if bytes <= 0 then
             return nil, 'Incomplete request body.', 400
         end
-        body = body .. ffi.string(chunk, bytes)
+        filled = filled + bytes
     end
-    request.body = body:sub(1, request.length)
+    request.body = ffi.string(body, request.length)
     return request
 end
 
