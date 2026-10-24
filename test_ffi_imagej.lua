@@ -281,6 +281,17 @@ run_test("Test 10: CLI Help & Argument Options", function()
 
     local ret_target = imagej.main({ "--target=usaf", "--test" })
     assert_eq(ret_target, 0, "--target=usaf return code")
+
+    -- Test interactive 'l' and 'L' LUT cycling
+    local buf = imagej.ImageBuffer.generate_cells(32, 32)
+    local app = imagej.build_tui_app(buf, "test.pgm")
+    assert_eq(app.lut_idx, 1, "initial lut is grayscale")
+    app:handle_key("l")
+    assert_eq(app.lut_idx, 2, "l key cycles to Fire")
+    app:handle_key("l")
+    assert_eq(app.lut_idx, 3, "l key cycles to Viridis")
+    app:handle_key("L")
+    assert_eq(app.lut_idx, 2, "L key cycles backward to Fire")
 end)
 
 print("================================================================================")

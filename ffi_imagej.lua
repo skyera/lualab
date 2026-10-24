@@ -1388,13 +1388,13 @@ local function build_tui_app(initial_img, filename)
             end
         else
             -- Normal Viewport Keybindings
-            if key == "UP" or key == "k" then
+            if key == "UP" then
                 self.probe_y = math.max(0, self.probe_y - 1)
-            elseif key == "DOWN" or key == "j" then
+            elseif key == "DOWN" then
                 self.probe_y = math.min(self.img.height - 1, self.probe_y + 1)
-            elseif key == "LEFT" or key == "h" then
+            elseif key == "LEFT" then
                 self.probe_x = math.max(0, self.probe_x - 1)
-            elseif key == "RIGHT" or key == "l" then
+            elseif key == "RIGHT" then
                 self.probe_x = math.min(self.img.width - 1, self.probe_x + 1)
             elseif key == "K" then
                 self.probe_y = math.max(0, self.probe_y - 8)
@@ -1402,8 +1402,12 @@ local function build_tui_app(initial_img, filename)
                 self.probe_y = math.min(self.img.height - 1, self.probe_y + 8)
             elseif key == "H" then
                 self.probe_x = math.max(0, self.probe_x - 8)
+            elseif key == "l" or key == "c" or key == "C" then
+                self.lut_idx = (self.lut_idx % #LUT_NAMES) + 1
+                self.status_msg = "LUT changed to: " .. LUT_NAMES[self.lut_idx]
             elseif key == "L" then
-                self.probe_x = math.min(self.img.width - 1, self.probe_x + 8)
+                self.lut_idx = ((self.lut_idx - 2) % #LUT_NAMES) + 1
+                self.status_msg = "LUT changed to: " .. LUT_NAMES[self.lut_idx]
             elseif key == "r" then
                 self.roi.active = not self.roi.active
                 if self.roi.active then
@@ -1420,9 +1424,6 @@ local function build_tui_app(initial_img, filename)
             elseif key == "t" then
                 self.mode = "threshold"
                 self.threshold_val = compute_otsu_threshold(self.img)
-            elseif key == "l" then
-                self.lut_idx = (self.lut_idx % #LUT_NAMES) + 1
-                self.status_msg = "LUT changed to: " .. LUT_NAMES[self.lut_idx]
             elseif key == "w" then
                 self.win_high = math.max(self.win_low + 5, self.win_high - 10)
                 self.status_msg = string.format("Window adjusted: %d - %d", self.win_low, self.win_high)
