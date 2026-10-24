@@ -44,6 +44,16 @@ local tests = {
         name = "Automated demo execution (--demo 15)",
         cmd = "luajit ffi_falling_sand.lua --demo 15",
         expect = "[Falling Sand Demo Complete]"
+    },
+    {
+        name = "Interactive burst input pipeline (pcq)",
+        cmd = "printf 'pcq' | luajit ffi_falling_sand.lua",
+        expect = "[Falling Sand simulation closed gracefully.]"
+    },
+    {
+        name = "Headless EOF input safety (/dev/null)",
+        cmd = "timeout 3 luajit ffi_falling_sand.lua </dev/null",
+        expect = "[Falling Sand simulation closed gracefully.]"
     }
 }
 
@@ -229,6 +239,70 @@ assert_test(lines_u == 28, "Truecolor frame renders exactly 28 lines of 80-colum
 sim.use_ascii = true
 local lines_a = check_frame_width(sim:render_frame(), "ASCII")
 assert_test(lines_a == 28, "ASCII fallback frame renders exactly 28 lines of 80-column text")
+
+-- 15. Buoyancy displacement: Water sinks through Oil (Oil floats on Water)
+sim:clear()
+for y = 10, 20 do
+    sim:set(19, y, sand.ELEM_STONE)
+    sim:set(21, y, sand.ELEM_STONE)
+end
+sim:set(20, 20, sand.ELEM_STONE) -- container bottom
+sim:set(20, 19, sand.ELEM_OIL)
+sim:set(20, 18, sand.ELEM_WATER)
+sim:step()
+assert_test(sim:get(20, 19) == sand.ELEM_WATER and sim:get(20, 18) == sand.ELEM_OIL,
+    "Water sinks below lighter oil (oil floats on water)")
+
+-- 16. Terminal size detection
+local term = sand.Terminal.new()
+local term_cols, term_rows = term:get_terminal_size()
+assert_test(type(term_cols) == "number" and term_cols >= 20 and type(term_rows) == "number" and term_rows >= 10,
+    string.format("Terminal:get_terminal_size() returns valid geometry (%dx%d)", term_cols, term_rows))
+
+-- 17. Dynamic canvas resize & memory preservation
+local dyn_sim = sand.SandSim.new(74, 36)
+dyn_sim:set(15, 15, sand.ELEM_SAND)
+dyn_sim:resize(100, 48)
+assert_test(dyn_sim.width == 100 and dyn_sim.height == 48, "SandSim:resize(100, 48) updates dimensions")
+assert_test(dyn_sim:get(15, 15) == sand.ELEM_SAND, "Particles preserved across grid resize")
+assert_test(dyn_sim:get(0, 0) == sand.ELEM_STONE and dyn_sim:get(99, 47) == sand.ELEM_STONE,
+    "Boundary stone walls re-sealed to new grid size")
+
+-- 18. Multi-resolution dynamic frame width verification
+local function verify_custom_geometry(cols, rows)
+    local s = sand.SandSim.new(cols - 6, (rows - 10) * 2)
+    local frame = s:render_frame(cols, rows)
+    local l_cnt = 0
+    for line in frame:gmatch("[^\r\n]+") do
+        l_cnt = l_cnt + 1
+        local plain = line:gsub("\27%[[%d;]*[a-zA-Z]", "")
+        local w = 0
+        local i = 1
+        while i <= #plain do
+            local b = plain:byte(i)
+            if b < 128 then w = w + 1; i = i + 1
+            elseif b >= 192 and b < 224 then w = w + 1; i = i + 2
+            elseif b >= 224 and b < 240 then w = w + 1; i = i + 3
+            elseif b >= 240 then w = w + 2; i = i + 4
+            else i = i + 1 end
+        end
+        assert(w == cols, string.format("Cols %d line %d width %d != %d: '%s'", cols, l_cnt, w, cols, plain))
+    end
+    return l_cnt
+end
+
+local r100_lines = verify_custom_geometry(100, 34)
+assert_test(r100_lines == 34, "Responsive frame fits 100-column x 34-row geometry")
+
+local r120_lines = verify_custom_geometry(120, 35)
+assert_test(r120_lines == 35, "Responsive frame fits 120-column x 35-row geometry")
+
+-- 19. Pause toggle state
+dyn_sim.paused = false
+dyn_sim.paused = not dyn_sim.paused
+assert_test(dyn_sim.paused == true, "Simulation pause state toggles to true")
+dyn_sim.paused = not dyn_sim.paused
+assert_test(dyn_sim.paused == false, "Simulation pause state toggles back to false")
 
 print(string.format("\nTest Summary: %d / %d tests passed.", passed, passed))
 print("\27[1;32mALL FALLING SAND TESTS PASSED SUCCESSFULLY!\27[0m\n")

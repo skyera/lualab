@@ -38,6 +38,13 @@ ffi.cdef[[
         uint32_t active_particles;
         uint32_t frame_count;
     } SandGrid;
+
+    typedef struct {
+        uint32_t active_particles;
+        uint32_t frame_count;
+        uint32_t capacity;
+        Cell cells[?];
+    } DynamicSandGrid;
 ]]
 
 if is_windows then
@@ -45,6 +52,15 @@ if is_windows then
         typedef void* HANDLE;
         typedef unsigned long DWORD;
         typedef int BOOL;
+        typedef struct { short X; short Y; } COORD;
+        typedef struct { short Left; short Top; short Right; short Bottom; } SMALL_RECT;
+        typedef struct {
+            COORD      dwSize;
+            COORD      dwCursorPosition;
+            unsigned short wAttributes;
+            SMALL_RECT srWindow;
+            COORD      dwMaximumWindowSize;
+        } CONSOLE_SCREEN_BUFFER_INFO;
 
         typedef struct _INPUT_RECORD {
             unsigned short EventType;
@@ -71,23 +87,24 @@ if is_windows then
         BOOL SetConsoleMode(HANDLE hConsoleHandle, DWORD dwMode);
         BOOL GetNumberOfConsoleInputEvents(HANDLE hConsoleInput, DWORD *lpcNumberOfEvents);
         BOOL ReadConsoleInputA(HANDLE hConsoleInput, INPUT_RECORD *lpBuffer, DWORD nLength, DWORD *lpNumberOfEventsRead);
+        BOOL GetConsoleScreenBufferInfo(HANDLE hConsoleOutput, CONSOLE_SCREEN_BUFFER_INFO *lpConsoleScreenBufferInfo);
         void Sleep(DWORD dwMilliseconds);
     ]]
 else
     -- macOS/BSD declare tcflag_t/speed_t as 64-bit and set NCCS to 20, while Linux
--- uses 32-bit and NCCS=32.  Picking the wrong layout shifts every field offset
--- and makes tcgetattr overrun the LuaJIT buffer, so select it at cdef time.
--- On Linux the definition below passes through byte-for-byte unchanged.
-local function posix_termios_cdef(def)
-    if ffi.os == "OSX" or ffi.os == "BSD" then
-        def = def:gsub("unsigned%s+int(%s+[%w_]*tcflag_t)", "unsigned long%1")
-        def = def:gsub("unsigned%s+int(%s+[%w_]*speed_t)", "unsigned long%1")
-        def = def:gsub("c_cc%[32%]", "c_cc[20]")
+    -- uses 32-bit and NCCS=32.  Picking the wrong layout shifts every field offset
+    -- and makes tcgetattr overrun the LuaJIT buffer, so select it at cdef time.
+    -- On Linux the definition below passes through byte-for-byte unchanged.
+    local function posix_termios_cdef(def)
+        if ffi.os == "OSX" or ffi.os == "BSD" then
+            def = def:gsub("unsigned%s+int(%s+[%w_]*tcflag_t)", "unsigned long%1")
+            def = def:gsub("unsigned%s+int(%s+[%w_]*speed_t)", "unsigned long%1")
+            def = def:gsub("c_cc%[32%]", "c_cc[20]")
+        end
+        return def
     end
-    return def
-end
 
-ffi.cdef(posix_termios_cdef[[
+    ffi.cdef(posix_termios_cdef[[
         typedef unsigned int   tcflag_t;
         typedef unsigned char  cc_t;
         typedef unsigned int   speed_t;
@@ -114,14 +131,56 @@ ffi.cdef(posix_termios_cdef[[
             long tv_nsec;
         };
 
+        struct winsize {
+            unsigned short ws_row;
+            unsigned short ws_col;
+            unsigned short ws_xpixel;
+            unsigned short ws_ypixel;
+        };
+
         int tcgetattr(int fd, struct termios *termios_p);
         int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
         int poll(struct pollfd *fds, unsigned long nfds, int timeout);
         long read(int fd, void *buf, unsigned long count);
         int nanosleep(const struct timespec *req, struct timespec *rem);
         int clock_gettime(int clk_id, struct timespec *tp);
-]])
+        int ioctl(int fd, unsigned long request, ...);
+    ]])
+end
 
+-- Measure visual character width in terminal (accounting for multibyte UTF-8 and ANSI escapes)
+local function visual_len(str)
+    local plain = str:gsub("\27%[[%d;]*[a-zA-Z]", "")
+    local w = 0
+    local i = 1
+    while i <= #plain do
+        local b = plain:byte(i)
+        if b < 128 then
+            w = w + 1
+            i = i + 1
+        elseif b >= 192 and b < 224 then
+            w = w + 1
+            i = i + 2
+        elseif b >= 224 and b < 240 then
+            w = w + 1
+            i = i + 3
+        elseif b >= 240 then
+            w = w + 2
+            i = i + 4
+        else
+            i = i + 1
+        end
+    end
+    return w
+end
+
+-- Pad or clamp text to target visual width
+local function pad_to(str, target_len)
+    local vlen = visual_len(str)
+    if vlen >= target_len then
+        return str:sub(1, target_len)
+    end
+    return str .. string.rep(" ", target_len - vlen)
 end
 
 local WIDTH  = 74
@@ -244,6 +303,7 @@ function Terminal.new()
         self.pollfd[0].events = 1 -- POLLIN
         self.buf          = ffi.new("char[128]")
     end
+    self.key_queue = {}
     return self
 end
 
@@ -269,7 +329,7 @@ function Terminal:enable_raw_mode()
         io.write("\27[?1000h\27[?1002h\27[?1006h")
     end
     self.raw_enabled = true
-    io.write("\27[?25l") -- Hide cursor
+    io.write("\27[?1049h\27[?7l\27[?25l") -- Alternate buffer, disable auto-wrap, hide cursor
     io.flush()
 end
 
@@ -278,7 +338,7 @@ function Terminal:disable_raw_mode()
     if not self.is_windows then
         io.write("\27[?1006l\27[?1002l\27[?1000l") -- Disable mouse tracking
     end
-    io.write("\27[?25h\27[0m") -- Show cursor & reset styles
+    io.write("\27[?25h\27[?7h\27[?1049l\27[0m") -- Show cursor, enable auto-wrap, exit alt buffer, reset styles
     io.flush()
     if self.is_windows then
         if self.orig_mode then ffi.C.SetConsoleMode(self.hIn, self.orig_mode) end
@@ -290,6 +350,9 @@ end
 
 -- Read event (keyboard or mouse)
 function Terminal:read_event()
+    if #self.key_queue > 0 then
+        return table.remove(self.key_queue, 1)
+    end
     if self.is_windows then
         local num_events = ffi.new("DWORD[1]")
         if ffi.C.GetNumberOfConsoleInputEvents(self.hIn, num_events) ~= 0 and num_events[0] > 0 then
@@ -311,28 +374,53 @@ function Terminal:read_event()
         local ret = ffi.C.poll(self.pollfd, 1, 0)
         if ret > 0 and bit.band(self.pollfd[0].revents, 1) ~= 0 then
             local n = ffi.C.read(0, self.buf, 127)
-            if n > 0 then
-                local s = ffi.string(self.buf, n)
-                -- Check for SGR mouse event: \27[<b;x;yM or \27[<b;x;ym
-                local b, mx, my, action = s:match("^\27%[<(%d+);(%d+);(%d+)([Mm])")
-                if b then
-                    b = tonumber(b)
-                    mx = tonumber(mx)
-                    my = tonumber(my)
-                    local down = (action == 'M' and (b == 0 or b == 32))
-                    return { type = "mouse", x = mx, y = my, down = down, btn = b }
-                end
-                -- Check for Arrow keys
-                if s == "\27[A" then return { type = "key", key = "up" }
-                elseif s == "\27[B" then return { type = "key", key = "down" }
-                elseif s == "\27[C" then return { type = "key", key = "right" }
-                elseif s == "\27[D" then return { type = "key", key = "left" }
-                end
-                return { type = "key", key = s:sub(1, 1) }
+            if n <= 0 then
+                return { type = "key", key = "q" } -- Graceful EOF termination
             end
+            local s = ffi.string(self.buf, n)
+            -- Check for SGR mouse event: \27[<b;x;yM or \27[<b;x;ym
+            local b, mx, my, action = s:match("^\27%[<(%d+);(%d+);(%d+)([Mm])")
+            if b then
+                b = tonumber(b)
+                mx = tonumber(mx)
+                my = tonumber(my)
+                local down = (action == 'M' and (b == 0 or b == 32))
+                return { type = "mouse", x = mx, y = my, down = down, btn = b }
+            end
+            -- Check for Arrow keys
+            if s == "\27[A" then return { type = "key", key = "up" }
+            elseif s == "\27[B" then return { type = "key", key = "down" }
+            elseif s == "\27[C" then return { type = "key", key = "right" }
+            elseif s == "\27[D" then return { type = "key", key = "left" }
+            end
+            -- If multiple characters arrived in burst, queue the remaining tokens
+            if #s > 1 then
+                for idx = 2, #s do
+                    self.key_queue[#self.key_queue + 1] = { type = "key", key = s:sub(idx, idx) }
+                end
+            end
+            return { type = "key", key = s:sub(1, 1) }
         end
         return nil
     end
+end
+
+function Terminal:get_terminal_size()
+    if self.is_windows then
+        local csbi = ffi.new("CONSOLE_SCREEN_BUFFER_INFO")
+        if ffi.C.GetConsoleScreenBufferInfo(self.hOut, csbi) ~= 0 then
+            local w = csbi.srWindow.Right - csbi.srWindow.Left + 1
+            local h = csbi.srWindow.Bottom - csbi.srWindow.Top + 1
+            if w > 0 and h > 0 then return tonumber(w), tonumber(h) end
+        end
+    else
+        local ws = ffi.new("struct winsize")
+        local TIOCGWINSZ = (ffi.os == "OSX" or ffi.os == "BSD") and 0x40087468 or 0x5413
+        if pcall(function() return ffi.C.ioctl(1, TIOCGWINSZ, ws) end) and ws.ws_col > 0 and ws.ws_row > 0 then
+            return tonumber(ws.ws_col), tonumber(ws.ws_row)
+        end
+    end
+    return 80, 25
 end
 
 function Terminal:get_time_sec()
@@ -357,18 +445,25 @@ function Terminal:sleep_ms(ms)
 end
 
 -- ============================================================================
+-- ============================================================================
 -- 3. SANDBOX PHYSICS & CELLULAR SIMULATION ENGINE
 -- ============================================================================
 local SandSim = {}
 SandSim.__index = SandSim
 
-function SandSim.new()
+function SandSim.new(w, h)
     local self = setmetatable({}, SandSim)
-    self.grid = ffi.new("SandGrid")
-    self.width = WIDTH
-    self.height = HEIGHT
-    self.cursor_x = math.floor(WIDTH / 2)
-    self.cursor_y = math.floor(HEIGHT / 2)
+    w = w or WIDTH
+    h = h or HEIGHT
+    self.width = w
+    self.height = h
+    if w == WIDTH and h == HEIGHT then
+        self.grid = ffi.new("SandGrid")
+    else
+        self.grid = ffi.new("DynamicSandGrid", w * h)
+    end
+    self.cursor_x = math.floor(w / 2)
+    self.cursor_y = math.floor(h / 2)
     self.brush_elem = ELEM_SAND
     self.brush_size = 2
     self.paused = false
@@ -379,20 +474,65 @@ function SandSim.new()
     return self
 end
 
+function SandSim:resize(new_w, new_h)
+    new_w = math.max(20, new_w)
+    new_h = math.max(16, new_h)
+    if new_h % 2 ~= 0 then new_h = new_h - 1 end
+    if new_w == self.width and new_h == self.height then return end
+
+    local old_w, old_h = self.width, self.height
+    local old_grid = self.grid
+    local new_grid = (new_w == WIDTH and new_h == HEIGHT) and ffi.new("SandGrid") or ffi.new("DynamicSandGrid", new_w * new_h)
+    ffi.fill(new_grid.cells, ffi.sizeof("Cell") * new_w * new_h, 0)
+    new_grid.active_particles = 0
+    new_grid.frame_count = old_grid.frame_count
+
+    local copy_w = math.min(old_w, new_w)
+    local copy_h = math.min(old_h, new_h)
+    for y = 0, copy_h - 1 do
+        for x = 0, copy_w - 1 do
+            local oc = old_grid.cells[y * old_w + x]
+            local nc = new_grid.cells[y * new_w + x]
+            nc.type = oc.type
+            nc.life = oc.life
+            nc.color_idx = oc.color_idx
+            nc.updated = 0
+            if oc.type ~= ELEM_EMPTY and oc.type ~= ELEM_STONE then
+                new_grid.active_particles = new_grid.active_particles + 1
+            end
+        end
+    end
+
+    -- Seal outer containment walls for the new dimensions
+    for x = 0, new_w - 1 do
+        new_grid.cells[(new_h - 1) * new_w + x].type = ELEM_STONE
+    end
+    for y = 0, new_h - 1 do
+        new_grid.cells[y * new_w + 0].type = ELEM_STONE
+        new_grid.cells[y * new_w + (new_w - 1)].type = ELEM_STONE
+    end
+
+    self.width = new_w
+    self.height = new_h
+    self.grid = new_grid
+    self.cursor_x = math.min(new_w - 2, math.max(1, self.cursor_x))
+    self.cursor_y = math.min(new_h - 2, math.max(1, self.cursor_y))
+end
+
 function SandSim:idx(x, y)
-    return y * WIDTH + x
+    return y * self.width + x
 end
 
 function SandSim:get(x, y)
-    if x < 0 or x >= WIDTH or y < 0 or y >= HEIGHT then
+    if x < 0 or x >= self.width or y < 0 or y >= self.height then
         return ELEM_STONE
     end
-    return self.grid.cells[y * WIDTH + x].type
+    return self.grid.cells[y * self.width + x].type
 end
 
 function SandSim:set(x, y, elem_type)
-    if x < 0 or x >= WIDTH or y < 0 or y >= HEIGHT then return end
-    local cell = self.grid.cells[y * WIDTH + x]
+    if x < 0 or x >= self.width or y < 0 or y >= self.height then return end
+    local cell = self.grid.cells[y * self.width + x]
     cell.type = elem_type
     cell.updated = 1
     cell.color_idx = math.random(1, #PALETTES[elem_type] or 1)
@@ -411,8 +551,8 @@ function SandSim:set(x, y, elem_type)
 end
 
 function SandSim:swap(x1, y1, x2, y2)
-    local i1 = y1 * WIDTH + x1
-    local i2 = y2 * WIDTH + x2
+    local i1 = y1 * self.width + x1
+    local i2 = y2 * self.width + x2
     local c1 = self.grid.cells[i1]
     local c2 = self.grid.cells[i2]
 
@@ -424,7 +564,7 @@ function SandSim:swap(x1, y1, x2, y2)
 end
 
 function SandSim:clear()
-    ffi.fill(self.grid.cells, ffi.sizeof("Cell") * WIDTH * HEIGHT, 0)
+    ffi.fill(self.grid.cells, ffi.sizeof("Cell") * self.width * self.height, 0)
     self.grid.active_particles = 0
     self.grid.frame_count = 0
 end
@@ -437,7 +577,7 @@ function SandSim:paint(cx, cy, elem_type, radius)
         for dx = -radius, radius do
             if dx * dx + dy * dy <= r2 then
                 local px, py = cx + dx, cy + dy
-                if px >= 0 and px < WIDTH and py >= 0 and py < HEIGHT then
+                if px >= 0 and px < self.width and py >= 0 and py < self.height then
                     if elem_type == ELEM_EMPTY or math.random() > 0.15 then
                         self:set(px, py, elem_type)
                     end
@@ -456,7 +596,7 @@ function SandSim:explode(cx, cy, radius)
             local dist2 = dx * dx + dy * dy
             if dist2 <= r2 then
                 local px, py = cx + dx, cy + dy
-                if px >= 0 and px < WIDTH and py >= 0 and py < HEIGHT then
+                if px >= 0 and px < self.width and py >= 0 and py < self.height then
                     local current = self:get(px, py)
                     if current ~= ELEM_STONE then
                         if dist2 <= (radius - 1) * (radius - 1) then
@@ -481,20 +621,20 @@ function SandSim:step()
     local active = 0
 
     -- Clear updated flags
-    for i = 0, WIDTH * HEIGHT - 1 do
+    for i = 0, self.width * self.height - 1 do
         g.cells[i].updated = 0
     end
 
     -- Alternate horizontal scan order each frame to remove directional bias
     local left_to_right = (frame % 2 == 0)
-    local x_start = left_to_right and 0 or (WIDTH - 1)
-    local x_end   = left_to_right and (WIDTH - 1) or 0
+    local x_start = left_to_right and 0 or (self.width - 1)
+    local x_end   = left_to_right and (self.width - 1) or 0
     local x_step  = left_to_right and 1 or -1
 
     -- Bottom-to-top traversal for falling solids and liquids
-    for y = HEIGHT - 1, 0, -1 do
+    for y = self.height - 1, 0, -1 do
         for x = x_start, x_end, x_step do
-            local cell = g.cells[y * WIDTH + x]
+            local cell = g.cells[y * self.width + x]
             local t = cell.type
 
             if t ~= ELEM_EMPTY and t ~= ELEM_STONE then
@@ -518,10 +658,10 @@ function SandSim:step()
                         end
                     end
 
-                -- 2. WATER (Dense liquid)
+                -- 2. WATER (Dense liquid - sinks through lighter oil)
                 elseif t == ELEM_WATER then
                     local below = self:get(x, y + 1)
-                    if below == ELEM_EMPTY or below == ELEM_FIRE then
+                    if below == ELEM_EMPTY or below == ELEM_FIRE or below == ELEM_OIL then
                         if below == ELEM_FIRE then
                             self:set(x, y + 1, ELEM_STEAM)
                             self:set(x, y, ELEM_EMPTY)
@@ -532,9 +672,9 @@ function SandSim:step()
                         local dir = (math.random(0, 1) == 0) and -1 or 1
                         local d1 = self:get(x + dir, y + 1)
                         local d2 = self:get(x - dir, y + 1)
-                        if d1 == ELEM_EMPTY then
+                        if d1 == ELEM_EMPTY or d1 == ELEM_OIL then
                             self:swap(x, y, x + dir, y + 1)
-                        elseif d2 == ELEM_EMPTY then
+                        elseif d2 == ELEM_EMPTY or d2 == ELEM_OIL then
                             self:swap(x, y, x - dir, y + 1)
                         else
                             -- Lateral fluid dispersion
@@ -631,9 +771,9 @@ function SandSim:step()
     end
 
     -- Top-to-bottom traversal for rising gases (Fire, Smoke, Steam)
-    for y = 0, HEIGHT - 1 do
+    for y = 0, self.height - 1 do
         for x = x_start, x_end, x_step do
-            local cell = g.cells[y * WIDTH + x]
+            local cell = g.cells[y * self.width + x]
             local t = cell.type
 
             if cell.updated == 0 then
@@ -702,120 +842,173 @@ end
 function SandSim:load_preset(name)
     self:clear()
     self.current_preset = name
+    local w = self.width
+    local h = self.height
 
     -- 1. Outer stone containment walls
-    for x = 0, WIDTH - 1 do
-        self:set(x, HEIGHT - 1, ELEM_STONE)
+    for x = 0, w - 1 do
+        self:set(x, h - 1, ELEM_STONE)
     end
-    for y = 0, HEIGHT - 1 do
+    for y = 0, h - 1 do
         self:set(0, y, ELEM_STONE)
-        self:set(WIDTH - 1, y, ELEM_STONE)
+        self:set(w - 1, y, ELEM_STONE)
     end
 
     if name == "hourglass" then
-        -- Diagonal funnels
-        for d = 0, 18 do
-            self:set(12 + d, 8 + d, ELEM_STONE)
-            self:set(WIDTH - 13 - d, 8 + d, ELEM_STONE)
-        end
-        -- Sand reservoir in upper chamber
-        for y = 2, 7 do
-            for x = 16, WIDTH - 17 do
-                self:set(x, y, ELEM_SAND)
+        if w == WIDTH and h == HEIGHT then
+            -- Exact canonical hourglass
+            for d = 0, 18 do
+                self:set(12 + d, 8 + d, ELEM_STONE)
+                self:set(w - 13 - d, 8 + d, ELEM_STONE)
+            end
+            for y = 2, 7 do
+                for x = 16, w - 17 do
+                    self:set(x, y, ELEM_SAND)
+                end
+            end
+        else
+            -- Proportional hourglass for dynamic dimensions
+            local mid_x = math.floor(w / 2)
+            local mid_y = math.floor(h / 2)
+            local funnel_d = math.min(mid_x - 3, mid_y - 3)
+            for d = 0, funnel_d - 2 do
+                self:set(mid_x - funnel_d + d, mid_y - funnel_d + d, ELEM_STONE)
+                self:set(mid_x + funnel_d - d, mid_y - funnel_d + d, ELEM_STONE)
+            end
+            for y = 2, math.max(3, mid_y - funnel_d + 1) do
+                for x = mid_x - funnel_d + 3, mid_x + funnel_d - 3 do
+                    self:set(x, y, ELEM_SAND)
+                end
             end
         end
 
     elseif name == "lake" then
-        -- Stone dam
-        for y = 14, HEIGHT - 2 do
-            self:set(36, y, ELEM_STONE)
+        if w == WIDTH and h == HEIGHT then
+            -- Stone dam
+            for y = 14, h - 2 do self:set(36, y, ELEM_STONE) end
+            for y = 18, h - 2 do for x = 2, 35 do self:set(x, y, ELEM_WATER) end end
+            for y = 15, 17 do for x = 2, 35 do self:set(x, y, ELEM_OIL) end end
+            for x = 37, 56 do self:set(x, 22, ELEM_WOOD) end
+            for y = 23, h - 2 do self:set(46, y, ELEM_WOOD) end
+            self:set(18, 10, ELEM_STONE)
+            self:set(18, 9, ELEM_BURNING_WOOD)
+        else
+            local dam_x = math.floor(w * 0.48)
+            local water_top = math.floor(h * 0.50)
+            local oil_top = math.max(2, water_top - 3)
+            for y = oil_top - 1, h - 2 do self:set(dam_x, y, ELEM_STONE) end
+            for y = water_top, h - 2 do for x = 2, dam_x - 1 do self:set(x, y, ELEM_WATER) end end
+            for y = oil_top, water_top - 1 do for x = 2, dam_x - 1 do self:set(x, y, ELEM_OIL) end end
+            local pier_y = math.floor(h * 0.65)
+            for x = dam_x + 1, math.min(w - 2, dam_x + math.floor(w * 0.28)) do self:set(x, pier_y, ELEM_WOOD) end
+            for y = pier_y + 1, h - 2 do self:set(dam_x + math.floor(w * 0.14), y, ELEM_WOOD) end
+            self:set(math.floor(dam_x / 2), math.max(2, oil_top - 5), ELEM_STONE)
+            self:set(math.floor(dam_x / 2), math.max(1, oil_top - 6), ELEM_BURNING_WOOD)
         end
-        -- Water on left
-        for y = 18, HEIGHT - 2 do
-            for x = 2, 35 do self:set(x, y, ELEM_WATER) end
-        end
-        -- Floating oil on top of water
-        for y = 15, 17 do
-            for x = 2, 35 do self:set(x, y, ELEM_OIL) end
-        end
-        -- Wooden pier on right
-        for x = 37, 56 do
-            self:set(x, 22, ELEM_WOOD)
-        end
-        for y = 23, HEIGHT - 2 do
-            self:set(46, y, ELEM_WOOD)
-        end
-        -- Fire torch suspended above oil
-        self:set(18, 10, ELEM_STONE)
-        self:set(18, 9, ELEM_BURNING_WOOD)
 
     elseif name == "fireworks" then
-        -- Gunpowder storage silo
-        for y = 16, HEIGHT - 2 do
-            self:set(20, y, ELEM_STONE)
-            self:set(53, y, ELEM_STONE)
-            for x = 21, 52 do
-                self:set(x, y, ELEM_GUNPOWDER)
+        if w == WIDTH and h == HEIGHT then
+            for y = 16, h - 2 do
+                self:set(20, y, ELEM_STONE)
+                self:set(53, y, ELEM_STONE)
+                for x = 21, 52 do self:set(x, y, ELEM_GUNPOWDER) end
             end
+            for x = 21, 52 do self:set(x, 15, ELEM_OIL) end
+            for y = 7, 14 do self:set(36, y, ELEM_WOOD) end
+            self:set(36, 6, ELEM_BURNING_WOOD)
+        else
+            local silo_left = math.floor(w * 0.28)
+            local silo_right = math.floor(w * 0.72)
+            local silo_top = math.floor(h * 0.45)
+            for y = silo_top + 1, h - 2 do
+                self:set(silo_left, y, ELEM_STONE)
+                self:set(silo_right, y, ELEM_STONE)
+                for x = silo_left + 1, silo_right - 1 do self:set(x, y, ELEM_GUNPOWDER) end
+            end
+            for x = silo_left + 1, silo_right - 1 do self:set(x, silo_top, ELEM_OIL) end
+            local mid_fuse = math.floor((silo_left + silo_right) / 2)
+            for y = math.max(3, silo_top - 8), silo_top - 1 do self:set(mid_fuse, y, ELEM_WOOD) end
+            self:set(mid_fuse, math.max(2, silo_top - 9), ELEM_BURNING_WOOD)
         end
-        -- Oil cap
-        for x = 21, 52 do
-            self:set(x, 15, ELEM_OIL)
-        end
-        -- Spark emitter
-        self:set(36, 6, ELEM_FIRE)
 
     elseif name == "acid" then
-        -- Tiered platforms of wood and sand
-        for x = 8, 30 do self:set(x, 12, ELEM_WOOD) end
-        for x = 42, 65 do self:set(x, 18, ELEM_WOOD) end
-        for x = 18, 50 do self:set(x, 26, ELEM_SAND) end
-        -- Acid cloud at top
-        for y = 2, 4 do
-            for x = 12, 26 do self:set(x, y, ELEM_ACID) end
-            for x = 48, 62 do self:set(x, y, ELEM_ACID) end
+        if w == WIDTH and h == HEIGHT then
+            for x = 8, 30 do self:set(x, 12, ELEM_WOOD) end
+            for x = 42, 65 do self:set(x, 18, ELEM_WOOD) end
+            for x = 18, 50 do self:set(x, 26, ELEM_SAND) end
+            for y = 2, 4 do
+                for x = 12, 26 do self:set(x, y, ELEM_ACID) end
+                for x = 48, 62 do self:set(x, y, ELEM_ACID) end
+            end
+        else
+            local p1_y = math.floor(h * 0.35)
+            local p2_y = math.floor(h * 0.50)
+            local p3_y = math.floor(h * 0.72)
+            for x = math.floor(w * 0.10), math.floor(w * 0.40) do self:set(x, p1_y, ELEM_WOOD) end
+            for x = math.floor(w * 0.55), math.floor(w * 0.88) do self:set(x, p2_y, ELEM_WOOD) end
+            for x = math.floor(w * 0.25), math.floor(w * 0.70) do self:set(x, p3_y, ELEM_SAND) end
+            for y = 2, math.max(3, p1_y - 6) do
+                for x = math.floor(w * 0.15), math.floor(w * 0.35) do self:set(x, y, ELEM_ACID) end
+                for x = math.floor(w * 0.65), math.floor(w * 0.85) do self:set(x, y, ELEM_ACID) end
+            end
         end
     end
 end
 
 -- ============================================================================
--- 5. PIXEL-PERFECT 80-COLUMN TERMINAL RENDERER
+-- 5. PIXEL-PERFECT TERMINAL RENDERER (RESPONSIVE & BUFFERED)
 -- ============================================================================
-function SandSim:render_frame()
+function SandSim:render_frame(term_cols, term_rows)
+    term_cols = term_cols or (self.width + 6)
+    term_rows = term_rows or (math.floor(self.height / 2) + 10)
+
     local lines = {}
     local g = self.grid
+    local inner_w = term_cols - 4
 
-    -- 1. Header Banner (80 columns: 1 space + 78 chars + 1 space)
+    -- 1. Header Banner
     if self.use_ascii then
-        lines[#lines + 1] = " +============================================================================+ "
-        lines[#lines + 1] = " |       FALLING SAND & CELLULAR AUTOMATA SANDBOX - LUAJIT FFI ENGINE         | "
-        lines[#lines + 1] = " +============================================================================+ "
+        lines[#lines + 1] = " +" .. string.rep("=", inner_w) .. "+ "
+        local title = "FALLING SAND & CELLULAR AUTOMATA SANDBOX - LUAJIT FFI ENGINE"
+        local pad = math.max(0, math.floor((inner_w - #title) / 2))
+        local pad_r = math.max(0, inner_w - #title - pad)
+        lines[#lines + 1] = " |" .. string.rep(" ", pad) .. title .. string.rep(" ", pad_r) .. "| "
+        lines[#lines + 1] = " +" .. string.rep("=", inner_w) .. "+ "
     else
-        lines[#lines + 1] = " ╔════════════════════════════════════════════════════════════════════════════╗ "
-        lines[#lines + 1] = string.format(" ║         %s⏳  FALLING SAND & CELLULAR PHYSICS SANDBOX - LUAJIT FFI  ⏳%s         ║ ",
-            "\27[1;33m", "\27[0m")
-        lines[#lines + 1] = " ╚════════════════════════════════════════════════════════════════════════════╝ "
+        lines[#lines + 1] = " ╔" .. string.rep("═", inner_w) .. "╗ "
+        local title = "⏳  FALLING SAND & CELLULAR PHYSICS SANDBOX - LUAJIT FFI  ⏳"
+        local tlen = visual_len(title)
+        local pad = math.max(0, math.floor((inner_w - tlen) / 2))
+        local pad_r = math.max(0, inner_w - tlen - pad)
+        lines[#lines + 1] = string.format(" ║%s%s%s%s%s║ ",
+            string.rep(" ", pad), "\27[1;33m", title, "\27[0m", string.rep(" ", pad_r))
+        lines[#lines + 1] = " ╚" .. string.rep("═", inner_w) .. "╝ "
     end
 
-    -- 2. Canvas Top Border (80 cols)
-    local preset_title = string.format(" CANVAS [74x36] - Preset: %-9s ", self.current_preset:upper())
-    local pad_len = 74 - #preset_title
+    -- 2. Canvas Top Border
+    local preset_title = string.format(" CANVAS [%dx%d] - Preset: %-9s ", self.width, self.height, self.current_preset:upper())
+    local pt_len = visual_len(preset_title)
+    local pad_len = math.max(0, inner_w - pt_len - 2)
     if self.use_ascii then
         lines[#lines + 1] = " +--" .. preset_title .. string.rep("-", pad_len) .. "+ "
     else
         lines[#lines + 1] = " ┌──" .. "\27[1;36m" .. preset_title .. "\27[0m" .. string.rep("─", pad_len) .. "┐ "
     end
 
-    -- 3. Canvas Body: 36 pixels vertically compressed into 18 terminal lines using half-blocks
-    for row = 0, 17 do
+    -- 3. Canvas Body: 2 vertical pixels per line using half-blocks
+    local canvas_rows = math.floor(self.height / 2)
+    local extra_w = math.max(0, term_cols - (self.width + 6))
+    local right_pad = string.rep(" ", extra_w)
+
+    for row = 0, canvas_rows - 1 do
         local y_top = row * 2
         local y_bot = row * 2 + 1
         local line_parts = {}
 
         if self.use_ascii then
-            for col = 0, WIDTH - 1 do
-                local t_top = g.cells[y_top * WIDTH + col].type
-                local t_bot = g.cells[y_bot * WIDTH + col].type
+            for col = 0, self.width - 1 do
+                local t_top = g.cells[y_top * self.width + col].type
+                local t_bot = g.cells[y_bot * self.width + col].type
                 local ch = ASCII_CHARS[t_top]
                 if ch == " " then ch = ASCII_CHARS[t_bot] end
                 -- Cursor overlay
@@ -824,11 +1017,11 @@ function SandSim:render_frame()
                 end
                 line_parts[#line_parts + 1] = ch
             end
-            lines[#lines + 1] = string.format(" | %s | ", table.concat(line_parts))
+            lines[#lines + 1] = string.format(" | %s | %s", table.concat(line_parts), right_pad)
         else
-            for col = 0, WIDTH - 1 do
-                local c_top = g.cells[y_top * WIDTH + col]
-                local c_bot = g.cells[y_bot * WIDTH + col]
+            for col = 0, self.width - 1 do
+                local c_top = g.cells[y_top * self.width + col]
+                local c_bot = g.cells[y_bot * self.width + col]
 
                 local p_top = PALETTES[c_top.type] or PALETTES[ELEM_EMPTY]
                 local p_bot = PALETTES[c_bot.type] or PALETTES[ELEM_EMPTY]
@@ -840,46 +1033,47 @@ function SandSim:render_frame()
                 local is_cursor = (col == self.cursor_x and (y_top == self.cursor_y or y_bot == self.cursor_y))
 
                 if is_cursor then
-                    line_parts[#line_parts + 1] = string.format("\27[38;2;255;255;255m\27[48;2;255;0;100m▀")
+                    line_parts[#line_parts + 1] = "\27[38;2;255;255;255m\27[48;2;255;0;100m▀"
                 else
                     line_parts[#line_parts + 1] = string.format("\27[38;2;%d;%d;%dm\27[48;2;%d;%d;%dm▀",
                         rgb_top[1], rgb_top[2], rgb_top[3],
                         rgb_bot[1], rgb_bot[2], rgb_bot[3])
                 end
             end
-            lines[#lines + 1] = string.format(" │ %s%s │ ", table.concat(line_parts), "\27[0m")
+            lines[#lines + 1] = string.format(" │ %s%s │ %s", table.concat(line_parts), "\27[0m", right_pad)
         end
     end
 
-    -- 4. Canvas Bottom Border (80 cols)
+    -- 4. Canvas Bottom Border
     if self.use_ascii then
-        lines[#lines + 1] = " +----------------------------------------------------------------------------+ "
+        lines[#lines + 1] = " +" .. string.rep("-", inner_w) .. "+ "
     else
-        lines[#lines + 1] = " └" .. string.rep("─", 76) .. "┘ "
+        lines[#lines + 1] = " └" .. string.rep("─", inner_w) .. "┘ "
     end
 
-    -- 5. Palette & Status Panels (80 cols)
+    -- 5. Palette & Status Panels
     local elem_name = ELEMENT_NAMES[self.brush_elem] or "Unknown"
     local p_count = g.active_particles
     local state_str = self.paused and "PAUSED" or "RUNNING"
 
+    local content_w = math.max(60, term_cols - 6)
     local stat_line1 = string.format("Brush: %-9s [Sz:%d] | Particles: %-5d | State: %-7s | Frame: %-5d",
         elem_name:upper(), self.brush_size, p_count, state_str, g.frame_count)
     local stat_line2 = "1:Sand 2:Water 3:Fire 4:Oil 5:Acid 6:Powder 7:Wood 8:Stone 9:Plant 0:Erase"
-    local stat_line3 = "Draw:Mouse | Pour:Space | WASD:Move | Clear:C | Scene:P | Size:+/- | Q:Esc"
+    local stat_line3 = "Draw:Mouse | Pour:Space | Pause:R | Scene:P | Clear:C | Size:+/- | Q:Esc"
 
     if self.use_ascii then
-        lines[#lines + 1] = " +-- STATUS & CONTROLS " .. string.rep("-", 55) .. "+ "
-        lines[#lines + 1] = string.format(" | %-74s | ", stat_line1)
-        lines[#lines + 1] = string.format(" | %-74s | ", stat_line2)
-        lines[#lines + 1] = string.format(" | %-74s | ", stat_line3)
-        lines[#lines + 1] = " +" .. string.rep("-", 76) .. "+ "
+        lines[#lines + 1] = " +-- STATUS & CONTROLS " .. string.rep("-", math.max(0, term_cols - 25)) .. "+ "
+        lines[#lines + 1] = " | " .. pad_to(stat_line1, content_w) .. " | "
+        lines[#lines + 1] = " | " .. pad_to(stat_line2, content_w) .. " | "
+        lines[#lines + 1] = " | " .. pad_to(stat_line3, content_w) .. " | "
+        lines[#lines + 1] = " +" .. string.rep("-", inner_w) .. "+ "
     else
-        lines[#lines + 1] = " ┌── STATUS & PALETTE " .. string.rep("─", 56) .. "┐ "
-        lines[#lines + 1] = string.format(" │ %-74s │ ", stat_line1)
-        lines[#lines + 1] = string.format(" │ %-74s │ ", stat_line2)
-        lines[#lines + 1] = string.format(" │ %-74s │ ", stat_line3)
-        lines[#lines + 1] = " └" .. string.rep("─", 76) .. "┘ "
+        lines[#lines + 1] = " ┌── STATUS & PALETTE " .. string.rep("─", math.max(0, term_cols - 24)) .. "┐ "
+        lines[#lines + 1] = " │ " .. pad_to(stat_line1, content_w) .. " │ "
+        lines[#lines + 1] = " │ " .. pad_to(stat_line2, content_w) .. " │ "
+        lines[#lines + 1] = " │ " .. pad_to(stat_line3, content_w) .. " │ "
+        lines[#lines + 1] = " └" .. string.rep("─", inner_w) .. "┘ "
     end
 
     return table.concat(lines, "\n")
@@ -892,8 +1086,6 @@ function SandSim:run_interactive()
     local term = Terminal.new()
     term:enable_raw_mode()
 
-    self:load_preset("hourglass")
-
     local running = true
     local last_time = term:get_time_sec()
     local target_fps = 60
@@ -902,84 +1094,112 @@ function SandSim:run_interactive()
     local presets = { "hourglass", "lake", "fireworks", "acid", "blank" }
     local preset_idx = 1
 
+    local last_term_w, last_term_h = term:get_terminal_size()
+    local chrome_h = 10
+    local canvas_w = math.max(20, last_term_w - 6)
+    local canvas_h = math.max(16, (last_term_h - chrome_h) * 2)
+    self:resize(canvas_w, canvas_h)
+    self:load_preset("hourglass")
+
     io.write("\27[2J\27[H")
     io.flush()
 
-    while running do
-        local now = term:get_time_sec()
+    local function event_loop()
+        while running do
+            local now = term:get_time_sec()
 
-        -- 1. Read input events
-        local ev = term:read_event()
-        if ev then
-            if ev.type == "key" then
-                local k = ev.key
-                if k == "q" or k == "Q" or k == "\27" then
-                    running = false
-                elseif k == " " then
-                    is_pouring = not is_pouring
-                elseif k == "p" or k == "P" then
-                    preset_idx = (preset_idx % #presets) + 1
-                    self:load_preset(presets[preset_idx])
-                elseif k == "c" or k == "C" then
-                    self:clear()
-                elseif k == "\t" then
-                    self.brush_elem = (self.brush_elem % 9) + 1
-                elseif k == "+" or k == "=" then
-                    self.brush_size = math.min(6, self.brush_size + 1)
-                elseif k == "-" or k == "_" then
-                    self.brush_size = math.max(1, self.brush_size - 1)
-                elseif k >= "0" and k <= "9" then
-                    local num = tonumber(k)
-                    self.brush_elem = (num == 0) and ELEM_EMPTY or num
-                -- Arrow & WASD Navigation
-                elseif k == "left" or k == "a" or k == "A" then
-                    self.cursor_x = math.max(1, self.cursor_x - 1)
-                elseif k == "right" or k == "d" or k == "D" then
-                    self.cursor_x = math.min(WIDTH - 2, self.cursor_x + 1)
-                elseif k == "up" or k == "w" or k == "W" then
-                    self.cursor_y = math.max(1, self.cursor_y - 1)
-                elseif k == "down" or k == "s" or k == "S" then
-                    self.cursor_y = math.min(HEIGHT - 2, self.cursor_y + 1)
-                end
+            -- 1. Check window resize
+            local cur_w, cur_h = term:get_terminal_size()
+            if cur_w ~= last_term_w or cur_h ~= last_term_h then
+                last_term_w, last_term_h = cur_w, cur_h
+                local new_cw = math.max(20, cur_w - 6)
+                local new_ch = math.max(16, (cur_h - chrome_h) * 2)
+                self:resize(new_cw, new_ch)
+                io.write("\27[2J") -- Clear buffer on terminal resize
+                io.flush()
+            end
 
-            elseif ev.type == "mouse" then
-                -- Map terminal column/row to canvas coordinates
-                -- Canvas begins at terminal column 3, row 4
-                local cx = ev.x - 3
-                local cy = (ev.y - 4) * 2
-                if cx >= 0 and cx < WIDTH and cy >= 0 and cy < HEIGHT then
-                    self.cursor_x = cx
-                    self.cursor_y = cy
-                    if ev.down then
-                        self:paint(cx, cy, self.brush_elem, self.brush_size)
+            -- 2. Read input events
+            local ev = term:read_event()
+            if ev then
+                if ev.type == "key" then
+                    local k = ev.key
+                    if k == "q" or k == "Q" or k == "\27" then
+                        running = false
+                    elseif k == " " then
+                        is_pouring = not is_pouring
+                    elseif k == "r" or k == "R" then
+                        self.paused = not self.paused
+                    elseif k == "p" or k == "P" then
+                        preset_idx = (preset_idx % #presets) + 1
+                        self:load_preset(presets[preset_idx])
+                    elseif k == "c" or k == "C" then
+                        self:clear()
+                    elseif k == "\t" then
+                        self.brush_elem = (self.brush_elem % 9) + 1
+                    elseif k == "+" or k == "=" then
+                        self.brush_size = math.min(6, self.brush_size + 1)
+                    elseif k == "-" or k == "_" then
+                        self.brush_size = math.max(1, self.brush_size - 1)
+                    elseif k >= "0" and k <= "9" then
+                        local num = tonumber(k)
+                        self.brush_elem = (num == 0) and ELEM_EMPTY or num
+                    -- Arrow & WASD Navigation
+                    elseif k == "left" or k == "a" or k == "A" then
+                        self.cursor_x = math.max(1, self.cursor_x - 1)
+                    elseif k == "right" or k == "d" or k == "D" then
+                        self.cursor_x = math.min(self.width - 2, self.cursor_x + 1)
+                    elseif k == "up" or k == "w" or k == "W" then
+                        self.cursor_y = math.max(1, self.cursor_y - 1)
+                    elseif k == "down" or k == "s" or k == "S" then
+                        self.cursor_y = math.min(self.height - 2, self.cursor_y + 1)
+                    end
+
+                elseif ev.type == "mouse" then
+                    -- Canvas column begins after ' │ ' (3 chars) -> column 4 is pixel x=0
+                    -- Canvas row begins after 3 header lines + 1 canvas top border -> line 5 is pixel y=0
+                    local cx = ev.x - 4
+                    local cy = (ev.y - 5) * 2
+                    if cx >= 0 and cx < self.width and cy >= 0 and cy < self.height then
+                        self.cursor_x = cx
+                        self.cursor_y = cy
+                        if ev.down then
+                            self:paint(cx, cy, self.brush_elem, self.brush_size)
+                        end
                     end
                 end
             end
-        end
 
-        -- Continuous pour when space is active
-        if is_pouring then
-            self:paint(self.cursor_x, self.cursor_y, self.brush_elem, self.brush_size)
-        end
+            -- Continuous pour when space is active
+            if is_pouring then
+                self:paint(self.cursor_x, self.cursor_y, self.brush_elem, self.brush_size)
+            end
 
-        -- 2. Step physics simulation
-        if not self.paused then
-            self:step()
-        end
+            -- 3. Step physics simulation
+            if not self.paused then
+                self:step()
+            end
 
-        -- 3. Render at target frame rate
-        if (now - last_time) >= frame_interval then
-            local frame = self:render_frame()
-            io.write("\27[H" .. frame .. "\n")
-            io.flush()
-            last_time = now
-        end
+            -- 4. Render at target frame rate with synchronized update escapes
+            if (now - last_time) >= frame_interval then
+                local frame = self:render_frame(last_term_w, last_term_h)
+                local clear_frame = frame:gsub("\n", "\27[K\n") .. "\27[K"
+                io.write("\27[?2026h\27[H" .. clear_frame .. "\n\27[?2026l")
+                io.flush()
+                last_time = now
+            end
 
-        term:sleep_ms(10)
+            term:sleep_ms(10)
+        end
     end
 
+    local ok, err = pcall(event_loop)
     term:disable_raw_mode()
-    print("\n[Falling Sand simulation closed gracefully.]\n")
+    if not ok and err then
+        io.stderr:write("[Falling Sand error]: " .. tostring(err) .. "\n")
+    else
+        print("\n[Falling Sand simulation closed gracefully.]\n")
+    end
 end
 
 -- ============================================================================
