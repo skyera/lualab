@@ -359,6 +359,9 @@ run_test("Test 11: RGB Passthrough, 2-Pt ROI, Zoom & Export", function()
     assert_eq(rgb_app.zoom, 1.0, "0 resets zoom to 1.0x")
 
     -- 4. Bidirectional Window/Level
+    rgb_app.win_low = 40
+    rgb_app.win_high = 200
+    rgb_app:sync_wl()
     local w0 = rgb_app.win_width
     rgb_app:handle_key("w")
     assert(rgb_app.win_width < w0, "w narrows contrast window")
@@ -367,9 +370,9 @@ run_test("Test 11: RGB Passthrough, 2-Pt ROI, Zoom & Export", function()
 
     local b0 = rgb_app.win_level
     rgb_app:handle_key("b")
-    assert(rgb_app.win_level > b0, "b raises brightness level")
+    assert(rgb_app.win_level < b0, "b shifts window level down to brighten image")
     rgb_app:handle_key("B")
-    assert_eq(rgb_app.win_level, b0, "B lowers brightness level back")
+    assert_eq(rgb_app.win_level, b0, "B shifts window level back")
 
     -- 5. Verified CSV + PPM Export
     local tmp_csv = "test_tmp_measurements.csv"
@@ -380,6 +383,126 @@ run_test("Test 11: RGB Passthrough, 2-Pt ROI, Zoom & Export", function()
     os.remove(tmp_ppm)
 end)
 
+-- Test 12: RGB Channel Splitting ([c] / extract_channel)
+run_test("Test 12: RGB Channel Splitting (Red, Green, Blue, Gray)", function()
+    local rgb_img = imagej.ImageBuffer.new(16, 16, true)
+    for y = 0, 15 do
+        for x = 0, 15 do
+            rgb_img:set_pixel(x, y, 220, 110, 40)
+        end
+    end
+
+    local app = imagej.build_tui_app(rgb_img, "channels.ppm")
+    assert_eq(imagej.CHANNEL_MODES[app.channel_idx], "composite", "initial channel composite")
+
+    -- Cycle to Red ('c')
+    app:handle_key("c")
+    assert_eq(imagej.CHANNEL_MODES[app.channel_idx], "red", "channel red")
+    assert_eq(app.img:get_gray(8, 8), 220, "red channel value 220")
+
+    -- Cycle to Green ('c')
+    app:handle_key("c")
+    assert_eq(imagej.CHANNEL_MODES[app.channel_idx], "green", "channel green")
+    assert_eq(app.img:get_gray(8, 8), 110, "green channel value 110")
+
+    -- Cycle to Blue ('c')
+    app:handle_key("c")
+    assert_eq(imagej.CHANNEL_MODES[app.channel_idx], "blue", "channel blue")
+    assert_eq(app.img:get_gray(8, 8), 40, "blue channel value 40")
+end)
+
+-- Test 13: Point-to-Point Distance & Angle Ruler ([d] / compute_ruler)
+run_test("Test 13: Point-to-Point Euclidean Ruler & Angle Math", function()
+    local img = imagej.ImageBuffer.new(64, 64, false)
+    img:set_pixel(10, 10, 50)
+    img:set_pixel(40, 50, 200)
+
+    -- 3-4-5 right triangle: dx=30, dy=40 -> D = 50.0 px
+    local rm = imagej.compute_ruler(img, 10, 10, 40, 50)
+    assert_near(rm.dist, 50.0, 0.001, "30-40-50 triangle distance")
+    assert_eq(rm.dv, 150, "intensity delta 200 - 50")
+
+    -- Interactive 'd' state machine
+    local app = imagej.build_tui_app(img, "ruler.pgm")
+    app.probe_x = 10
+    app.probe_y = 10
+    app:handle_key("d")
+    assert_eq(app.ruler.state, "measuring", "first d starts measuring")
+    app:move_probe(30, 40)
+    assert_eq(app.ruler.x2, 40, "ruler x2 follows probe")
+    assert_eq(app.ruler.y2, 50, "ruler y2 follows probe")
+    app:handle_key("d")
+    assert_eq(app.ruler.state, "locked", "second d locks ruler")
+    local frame = app:render(100, 30)
+    assert(frame:find("50.0 px"), "rendered frame shows ruler distance")
+    app:handle_key("d")
+    assert_eq(app.ruler.state, "none", "third d clears ruler")
+end)
+
+-- Test 14: Morphological Operations (Erode, Dilate, Open, Close) & Equalization
+run_test("Test 14: Morphological Ops (Erode/Dilate/Open/Close) & EQ", function()
+    local img = imagej.ImageBuffer.new(20, 20, false)
+    -- Draw a 3x3 bright block at (9..11, 9..11) and 1x1 salt noise at (3, 3)
+    for y = 9, 11 do
+        for x = 9, 11 do
+            img:set_pixel(x, y, 250)
+        end
+    end
+    img:set_pixel(3, 3, 250)
+
+    -- Erode shrinks 3x3 block to single center pixel (10, 10) and removes (3, 3)
+    local eroded = imagej.apply_filter(img, "erode")
+    assert_eq(eroded:get_gray(10, 10), 250, "erode center survives")
+    assert_eq(eroded:get_gray(9, 9), 0, "erode corner removed")
+    assert_eq(eroded:get_gray(3, 3), 0, "erode isolated pixel removed")
+
+    -- Open (Erode -> Dilate) removes 1x1 noise at (3, 3) but restores 3x3 block at (9..11, 9..11)
+    local opened = imagej.apply_filter(img, "open")
+    assert_eq(opened:get_gray(3, 3), 0, "open removed 1x1 noise")
+    assert_eq(opened:get_gray(10, 10), 250, "open preserved 3x3 center")
+    assert_eq(opened:get_gray(9, 9), 250, "open restored 3x3 corner")
+
+    -- Histogram Equalization spreads compressed range [100..110] across [0..255]
+    local low_c = imagej.ImageBuffer.new(16, 16, false)
+    for y = 0, 15 do
+        for x = 0, 15 do
+            low_c:set_pixel(x, y, 100 + (x % 10))
+        end
+    end
+    local eq_img = imagej.apply_filter(low_c, "equalize")
+    local stats = imagej.compute_roi_stats(eq_img, { x1 = 0, y1 = 0, x2 = 15, y2 = 15 })
+    assert_eq(stats.min, 0, "equalized min stretched to 0")
+    assert_eq(stats.max, 255, "equalized max stretched to 255")
+end)
+
+-- Test 15: Gamma Curve, Multi-ROI Results Log ([m]), and 3D Surface Plot ([3])
+run_test("Test 15: Gamma Curve, Multi-ROI Log & 3D Surface Plot", function()
+    local img = imagej.ImageBuffer.generate_cells(48, 48)
+    local app = imagej.build_tui_app(img, "cells.pgm")
+
+    -- Gamma adjustment ('g' and 'G')
+    assert_near(app.gamma, 1.0, 0.001, "initial gamma 1.0")
+    app:handle_key("g")
+    assert_near(app.gamma, 0.9, 0.001, "g decreases gamma to 0.9")
+    app:handle_key("G")
+    assert_near(app.gamma, 1.0, 0.001, "G restores gamma to 1.0")
+
+    -- Multi-ROI Measurement Log ('m')
+    assert_eq(#app.measurement_log, 0, "initial log empty")
+    app:handle_key("m")
+    app:handle_key("m")
+    assert_eq(#app.measurement_log, 2, "two measurements logged")
+
+    -- 3D Isometric Surface Plot ('3')
+    app:handle_key("3")
+    assert_eq(app.mode, "surface3d", "switched to surface3d mode")
+    local surf_frame = app:render(100, 30)
+    assert(#surf_frame > 200, "3D surface plot rendered")
+    assert(surf_frame:find("3D Isometric Surface Plot"), "3D surface plot title present")
+    app:handle_key("3")
+    assert_eq(app.mode, "normal", "3 returns to normal mode")
+end)
+
 print("================================================================================")
-print("\27[32mALL 11 TEST SUITES PASSED! Mathematical & UI invariants verified.\27[0m")
+print("\27[32mALL 15 TEST SUITES PASSED! Mathematical & UI invariants verified.\27[0m")
 print("================================================================================")

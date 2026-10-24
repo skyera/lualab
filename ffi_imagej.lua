@@ -352,6 +352,8 @@ end
 
 local LUT_NAMES = { "Grayscale", "Fire", "Viridis", "Cool", "Turbo", "Green", "Invert" }
 local FILTER_NAMES = { "none", "median", "blur", "sobel", "sharpen" }
+local MORPH_NAMES = { "none", "erode", "dilate", "open", "close" }
+local CHANNEL_MODES = { "composite", "red", "green", "blue", "gray" }
 
 -- =============================================================================
 -- 3. Image Buffer Class & Procedural Target Generators
@@ -418,6 +420,30 @@ function ImageBuffer:clone()
     local copy = ImageBuffer.new(self.width, self.height, self.is_rgb)
     ffi.copy(copy.data, self.data, self.size)
     return copy
+end
+
+function ImageBuffer:extract_channel(mode)
+    if not mode or mode == "composite" then
+        return self:clone()
+    end
+    local out = ImageBuffer.new(self.width, self.height, false)
+    for y = 0, self.height - 1 do
+        for x = 0, self.width - 1 do
+            if mode == "red" then
+                local r = self:get_pixel(x, y)
+                out:set_pixel(x, y, r)
+            elseif mode == "green" then
+                local _, g = self:get_pixel(x, y)
+                out:set_pixel(x, y, g)
+            elseif mode == "blue" then
+                local _, _, b = self:get_pixel(x, y)
+                out:set_pixel(x, y, b)
+            else
+                out:set_pixel(x, y, self:get_gray(x, y))
+            end
+        end
+    end
+    return out
 end
 
 -- Procedural Generator: Fluorescent Cell Colony Blobs (ideal for ImageJ analysis)
@@ -920,7 +946,30 @@ local function analyze_particles(img, threshold)
     }
 end
 
--- 3x3 Spatial Convolution Filters & Invert
+-- Point-to-Point Euclidean Ruler & Angle Measurement
+local function compute_ruler(img, x1, y1, x2, y2)
+    local dx = x2 - x1
+    local dy = y2 - y1
+    local dist = math.sqrt(dx * dx + dy * dy)
+    local angle_deg = math.deg(math.atan2(-dy, dx))
+    local v1 = img:get_gray(x1, y1)
+    local v2 = img:get_gray(x2, y2)
+    return {
+        x1 = x1,
+        y1 = y1,
+        x2 = x2,
+        y2 = y2,
+        dx = dx,
+        dy = dy,
+        dist = dist,
+        angle_deg = angle_deg,
+        v1 = v1,
+        v2 = v2,
+        dv = v2 - v1
+    }
+end
+
+-- 3x3 Spatial Convolution Filters, Morphological Ops, Equalization & Invert
 local function apply_filter(img, filter_name)
     if filter_name == "none" or not filter_name then
         return img:clone()
@@ -1008,6 +1057,51 @@ local function apply_filter(img, filter_name)
                 out:set_pixel(x, y, val)
             end
         end
+    elseif filter_name == "erode" or filter_name == "dilate" then
+        local is_erode = (filter_name == "erode")
+        for y = 0, h - 1 do
+            for x = 0, w - 1 do
+                local best = is_erode and 255 or 0
+                for dy = -1, 1 do
+                    for dx = -1, 1 do
+                        local px = math.max(0, math.min(w - 1, x + dx))
+                        local py = math.max(0, math.min(h - 1, y + dy))
+                        local v = img:get_gray(px, py)
+                        if is_erode then
+                            if v < best then best = v end
+                        else
+                            if v > best then best = v end
+                        end
+                    end
+                end
+                out:set_pixel(x, y, best)
+            end
+        end
+    elseif filter_name == "open" then
+        return apply_filter(apply_filter(img, "erode"), "dilate")
+    elseif filter_name == "close" then
+        return apply_filter(apply_filter(img, "dilate"), "erode")
+    elseif filter_name == "equalize" then
+        local hist, total = compute_histogram(img)
+        local cdf = {}
+        local acc = 0
+        local cdf_min = nil
+        for i = 0, 255 do
+            acc = acc + hist[i]
+            cdf[i] = acc
+            if acc > 0 and not cdf_min then
+                cdf_min = acc
+            end
+        end
+        cdf_min = cdf_min or 0
+        local denom = math.max(1, total - cdf_min)
+        for y = 0, h - 1 do
+            for x = 0, w - 1 do
+                local v = img:get_gray(x, y)
+                local eq = math.floor(((cdf[v] - cdf_min) / denom) * 255 + 0.5)
+                out:set_pixel(x, y, math.max(0, math.min(255, eq)))
+            end
+        end
     end
 
     return out
@@ -1031,31 +1125,57 @@ local function build_tui_app(initial_img, filename)
             active = false,
             state = "none" -- "none", "sizing", "locked"
         },
+        roi_state = "none",
+        ruler = {
+            x1 = 0,
+            y1 = 0,
+            x2 = 0,
+            y2 = 0,
+            active = false,
+            state = "none" -- "none", "measuring", "locked"
+        },
+        measurement_log = {},
+        channel_idx = 1, -- 1: composite, 2: red, 3: green, 4: blue, 5: gray
         lut_idx = 1, -- 1: Grayscale, 2: Fire, 3: Viridis, etc.
         rgb_passthrough = initial_img.is_rgb, -- Truecolor RGB display when lut_idx == 1
         filter_idx = 1, -- 1: none, 2: median, 3: blur, 4: sobel, 5: sharpen
+        morph_idx = 1, -- 1: none, 2: erode, 3: dilate, 4: open, 5: close
+        equalized = false,
         inverted = false,
+        gamma = 1.0,
         win_low = 0,
         win_high = 255,
+        win_width = 255,
+        win_level = 127,
         zoom = 1.0,
         pan_x = 0,
         pan_y = 0,
-        mode = "normal", -- "normal", "profile", "threshold"
+        mode = "normal", -- "normal", "profile", "threshold", "threshold_table", "surface3d"
         profile_horizontal = true,
         threshold_val = 128,
         show_help = false,
-        status_msg = "Ready. Arrows: Probe | [+/-] Zoom | [r] ROI | [l] LUT | [?] Help"
+        status_msg = "Ready. Arrows: Probe | [+/-] Zoom | [r] ROI | [d] Ruler | [l] LUT | [?] Help"
     }
+
+    function app:sync_wl()
+        self.win_width = math.max(1, self.win_high - self.win_low)
+        self.win_level = math.floor((self.win_high + self.win_low) / 2)
+    end
 
     -- Auto W/L on startup
     app.win_low, app.win_high = compute_auto_window_level(app.img)
+    app:sync_wl()
 
     function app:stretch_channel(v)
+        local norm = v / 255.0
         if self.win_high > self.win_low then
-            local norm = (v - self.win_low) / (self.win_high - self.win_low)
-            return math.max(0, math.min(255, math.floor(norm * 255)))
+            norm = (v - self.win_low) / (self.win_high - self.win_low)
         end
-        return v
+        norm = math.max(0.0, math.min(1.0, norm))
+        if math.abs(self.gamma - 1.0) > 0.001 then
+            norm = math.pow(norm, self.gamma)
+        end
+        return math.max(0, math.min(255, math.floor(norm * 255 + 0.5)))
     end
 
     function app:map_display_color(gray_val)
@@ -1065,21 +1185,66 @@ local function build_tui_app(initial_img, filename)
     end
 
     function app:get_display_rgb(x, y)
-        if self.img.is_rgb and self.rgb_passthrough and self.lut_idx == 1 then
+        local ch_mode = CHANNEL_MODES[self.channel_idx] or "composite"
+        if self.img.is_rgb and self.rgb_passthrough and self.lut_idx == 1 and ch_mode == "composite" then
             local r, g, b = self.img:get_pixel(x, y)
             return self:stretch_channel(r), self:stretch_channel(g), self:stretch_channel(b)
         end
         local gray_val = self.img:get_gray(x, y)
+        if self.lut_idx == 1 then
+            local s = self:stretch_channel(gray_val)
+            if ch_mode == "red" then
+                return s, 0, 0
+            elseif ch_mode == "green" then
+                return 0, s, 0
+            elseif ch_mode == "blue" then
+                return 0, 0, s
+            end
+        end
         return self:map_display_color(gray_val)
     end
 
     function app:rebuild_filtered_image()
+        local ch_mode = CHANNEL_MODES[self.channel_idx] or "composite"
+        local processed = self.raw_img:extract_channel(ch_mode)
         local fname = FILTER_NAMES[self.filter_idx] or "none"
-        local processed = apply_filter(self.raw_img, fname)
+        if fname ~= "none" then
+            processed = apply_filter(processed, fname)
+        end
+        local mname = MORPH_NAMES[self.morph_idx] or "none"
+        if mname ~= "none" then
+            processed = apply_filter(processed, mname)
+        end
+        if self.equalized then
+            processed = apply_filter(processed, "equalize")
+        end
         if self.inverted then
             processed = apply_filter(processed, "invert")
         end
         self.img = processed
+    end
+
+    function app:record_measurement()
+        local full_roi = { x1 = 0, y1 = 0, x2 = self.img.width - 1, y2 = self.img.height - 1 }
+        local active_roi = self.roi.active and self.roi or full_roi
+        local stats = compute_roi_stats(self.img, active_roi)
+        local entry = {
+            id = #self.measurement_log + 1,
+            channel = CHANNEL_MODES[self.channel_idx] or "composite",
+            x1 = stats.x1,
+            y1 = stats.y1,
+            x2 = stats.x2,
+            y2 = stats.y2,
+            area = stats.area,
+            mean = stats.mean,
+            std_dev = stats.std_dev,
+            min = stats.min,
+            max = stats.max,
+            median = stats.median,
+            int_den = stats.int_den
+        }
+        table.insert(self.measurement_log, entry)
+        return entry
     end
 
     function app:export_data(csv_path, ppm_path)
@@ -1100,6 +1265,8 @@ local function build_tui_app(initial_img, filename)
         end
         cf:write("Metric,Value,Units_or_Notes\n")
         cf:write(string.format("Filename,%s,%dx%d\n", self.filename, self.img.width, self.img.height))
+        cf:write(string.format("Channel,%s,active_channel\n", CHANNEL_MODES[self.channel_idx] or "composite"))
+        cf:write(string.format("Gamma,%.2f,nonlinear\n", self.gamma))
         cf:write(string.format("Probe_X,%d,px\n", self.probe_x))
         cf:write(string.format("Probe_Y,%d,px\n", self.probe_y))
         cf:write(string.format("ROI_Active,%s,[%d;%d to %d;%d]\n",
@@ -1116,6 +1283,15 @@ local function build_tui_app(initial_img, filename)
         cf:write(string.format("Threshold_Cutoff,%d,0-255\n", self.threshold_val))
         cf:write(string.format("Particle_Count,%d,blobs\n", parts.count))
         cf:write(string.format("Particle_Total_Area,%d,px^2\n", parts.total_area))
+
+        if #self.measurement_log > 0 then
+            cf:write("\nLog_ID,Channel,X1,Y1,X2,Y2,Area,Mean,StdDev,Min,Max,Median,IntDen\n")
+            for _, m in ipairs(self.measurement_log) do
+                cf:write(string.format("%d,%s,%d,%d,%d,%d,%d,%.4f,%.4f,%d,%d,%d,%d\n",
+                    m.id, m.channel, m.x1, m.y1, m.x2, m.y2,
+                    m.area, m.mean, m.std_dev, m.min, m.max, m.median, m.int_den))
+            end
+        end
         cf:close()
 
         -- 2. Write Binary P6 PPM Image
@@ -1177,10 +1353,22 @@ local function build_tui_app(initial_img, filename)
         local view_h = rows - 4
 
         -- 1. Top Header
-        local lut_label = (self.img.is_rgb and self.rgb_passthrough and self.lut_idx == 1)
+        local ch_mode = CHANNEL_MODES[self.channel_idx] or "composite"
+        local lut_label = (self.img.is_rgb and self.rgb_passthrough and self.lut_idx == 1 and ch_mode == "composite")
             and "RGB" or LUT_NAMES[self.lut_idx]
+        if ch_mode ~= "composite" then
+            lut_label = lut_label .. "/" .. ch_mode:upper()
+        end
         local filter_name = FILTER_NAMES[self.filter_idx]
-        local filter_tag = (filter_name ~= "none") and (" | Flt:" .. filter_name) or ""
+        local morph_name = MORPH_NAMES[self.morph_idx]
+        local filter_tag = ""
+        if filter_name ~= "none" then filter_tag = filter_tag .. " | Flt:" .. filter_name end
+        if morph_name ~= "none" then filter_tag = filter_tag .. " | Mrp:" .. morph_name end
+        if self.equalized then filter_tag = filter_tag .. " | EQ" end
+        if math.abs(self.gamma - 1.0) > 0.001 then
+            filter_tag = filter_tag .. string.format(" | y:%.1f", self.gamma)
+        end
+
         local title = string.format(" ffi_imagej: %s [%dx%d] ", self.filename, self.img.width, self.img.height)
         local mode_tag = string.format(" [%.1fx | %s | LUT:%s%s | W/L:%d-%d] ",
             self.zoom, self.mode:upper(), lut_label, filter_tag, self.win_low, self.win_high)
@@ -1191,7 +1379,7 @@ local function build_tui_app(initial_img, filename)
 
         -- 2. Gather Inspector Data
         local probe_val = self.img:get_gray(self.probe_x, self.probe_y)
-        local raw_r, raw_g, raw_b = self.img:get_pixel(self.probe_x, self.probe_y)
+        local raw_r, raw_g, raw_b = self.raw_img:get_pixel(self.probe_x, self.probe_y)
         local pr_r, pr_g, pr_b = self:get_display_rgb(self.probe_x, self.probe_y)
 
         local full_roi = { x1 = 0, y1 = 0, x2 = self.img.width - 1, y2 = self.img.height - 1 }
@@ -1208,13 +1396,13 @@ local function build_tui_app(initial_img, filename)
             table.insert(right_lines, str)
         end
 
-        add_right(string.format("\27[1;36m── 1. Pixel Probe (Zoom: %.1fx) ────────────\27[0m", self.zoom))
+        add_right(string.format("\27[1;36m── 1. Pixel Probe & Ruler ([d] | %.1fx) ─────\27[0m", self.zoom))
         add_right(string.format(" Pos: (X: \27[1m%3d\27[0m, Y: \27[1m%3d\27[0m)  Norm: %2d%%, %2d%%",
             self.probe_x, self.probe_y,
             math.floor(self.probe_x * 100 / math.max(1, self.img.width)),
             math.floor(self.probe_y * 100 / math.max(1, self.img.height))))
-        if self.img.is_rgb then
-            add_right(string.format(" Raw RGB: (%3d, %3d, %3d)  Gray: \27[1;33m%3d\27[0m (%2.0f%%)",
+        if self.raw_img.is_rgb then
+            add_right(string.format(" Raw RGB: (%3d, %3d, %3d)  Val: \27[1;33m%3d\27[0m (%2.0f%%)",
                 raw_r, raw_g, raw_b, probe_val, (probe_val / 255.0) * 100.0))
         else
             add_right(string.format(" Value: \27[1;33m%3d / 255\27[0m  Intensity: \27[1m%2.1f%%\27[0m",
@@ -1222,7 +1410,14 @@ local function build_tui_app(initial_img, filename)
         end
         add_right(string.format(" Display: \27[38;2;%d;%d;%dm██\27[0m RGB(%3d, %3d, %3d) #%02X%02X%02X",
             pr_r, pr_g, pr_b, pr_r, pr_g, pr_b, pr_r, pr_g, pr_b))
-        add_right("")
+
+        if self.ruler.active then
+            local rm = compute_ruler(self.img, self.ruler.x1, self.ruler.y1, self.ruler.x2, self.ruler.y2)
+            add_right(string.format(" \27[1;35mRuler:\27[0m (%d,%d)->(%d,%d) \27[1;33mD=%.1f px\27[0m (%.1f deg, dI=%+d)",
+                rm.x1, rm.y1, rm.x2, rm.y2, rm.dist, rm.angle_deg, rm.dv))
+        else
+            add_right("")
+        end
 
         if self.mode == "threshold" then
             -- Live Split-Pane Threshold & Particle Inspector
@@ -1251,7 +1446,7 @@ local function build_tui_app(initial_img, filename)
             end
         else
             -- Standard Inspector: ROI, Line Profile, Histogram
-            add_right(string.format("\27[1;36m── 2. ROI Statistics (Measure: [r]) ───────\27[0m"))
+            add_right(string.format("\27[1;36m── 2. ROI Statistics ([r] ROI | [m] Log:%d) ─\27[0m", #self.measurement_log))
             if self.roi.active then
                 local r_tag = (self.roi.state == "sizing") and "\27[1;33m[SIZING]\27[0m" or "\27[1;32m[LOCKED]\27[0m"
                 add_right(string.format(" %s [%d,%d to %d,%d] Area: \27[1m%d px\27[0m",
@@ -1264,7 +1459,13 @@ local function build_tui_app(initial_img, filename)
                 roi_stats.mean, roi_stats.std_dev))
             add_right(string.format(" Min: \27[1m%d\27[0m  Max: \27[1m%d\27[0m  Median: \27[1m%d\27[0m",
                 roi_stats.min, roi_stats.max, roi_stats.median))
-            add_right(string.format(" Integrated Density: \27[1;33m%d\27[0m", roi_stats.int_den))
+            if #self.measurement_log > 0 then
+                local last_m = self.measurement_log[#self.measurement_log]
+                add_right(string.format(" IntDen: \27[1;33m%d\27[0m | Last #%d Mean: %.1f",
+                    roi_stats.int_den, last_m.id, last_m.mean))
+            else
+                add_right(string.format(" Integrated Density: \27[1;33m%d\27[0m", roi_stats.int_den))
+            end
             add_right("")
 
             add_right(string.format("\27[1;36m── 3. Line Profile (%s @ %d) ───\27[0m",
@@ -1303,11 +1504,11 @@ local function build_tui_app(initial_img, filename)
                 if #hist_str >= (insp_w - 6) then break end
             end
             add_right(" 100%│\27[33m" .. hist_str .. "\27[0m")
-            add_right(string.format(" Range: [\27[1m%d\27[0m - \27[1m%d\27[0m] Win: %d  Lvl: %d",
-                self.win_low, self.win_high, self.win_high - self.win_low, math.floor((self.win_high + self.win_low) / 2)))
+            add_right(string.format(" Range: [\27[1m%d\27[0m-\27[1m%d\27[0m] Win:%d Lvl:%d y:%.2f",
+                self.win_low, self.win_high, self.win_width, self.win_level, self.gamma))
         end
 
-        -- 4. Render Dual-Pane Viewport (with Zoom & Pan support)
+        -- 4. Render Dual-Pane Viewport (with Zoom, Pan, Ruler & Scale Bar)
         local img_display_w = pane_w - 2
         local img_display_h = view_h * 2 -- Half blocks give 2 vertical px per cell
         local vx0, vy0, vis_w, vis_h = self:get_viewport_bounds()
@@ -1354,6 +1555,41 @@ local function build_tui_app(initial_img, filename)
             dry2 = math.floor((ry2 - vy0) * img_display_h / vis_h)
         end
 
+        -- Pre-map Ruler line to zoomed display coordinates
+        local rlx1, rly1, rlx2, rly2 = -1, -1, -1, -1
+        if self.ruler.active then
+            rlx1 = math.floor((self.ruler.x1 - vx0) * img_display_w / vis_w)
+            rly1 = math.floor((self.ruler.y1 - vy0) * img_display_h / vis_h)
+            rlx2 = math.floor((self.ruler.x2 - vx0) * img_display_w / vis_w)
+            rly2 = math.floor((self.ruler.y2 - vy0) * img_display_h / vis_h)
+        end
+
+        local function is_on_ruler(col, py)
+            if not self.ruler.active then return false end
+            local min_x = math.min(rlx1, rlx2)
+            local max_x = math.max(rlx1, rlx2)
+            local min_y = math.min(rly1, rly2)
+            local max_y = math.max(rly1, rly2)
+            if col < min_x or col > max_x or py < min_y or py > max_y then
+                return false
+            end
+            local ldx = rlx2 - rlx1
+            local ldy = rly2 - rly1
+            local len_sq = ldx * ldx + ldy * ldy
+            if len_sq == 0 then
+                return (col == rlx1 and py == rly1)
+            end
+            local cross = math.abs((col - rlx1) * ldy - (py - rly1) * ldx) / math.sqrt(len_sq)
+            return cross <= 0.75
+        end
+
+        -- Scale bar parameters (bottom-right of viewport)
+        local scale_px = math.max(8, math.floor(vis_w / 5))
+        local scale_cols = math.max(4, math.floor(scale_px * img_display_w / vis_w))
+        local sb_x2 = img_display_w - 3
+        local sb_x1 = math.max(2, sb_x2 - scale_cols)
+        local sb_py = img_display_h - 3
+
         for row = 0, view_h - 1 do
             local row_str = "\27[1;37;44m│\27[0m"
             local top_py = row * 2
@@ -1396,6 +1632,18 @@ local function build_tui_app(initial_img, filename)
                     if in_bot_border then br, bg, bb = 0, 255, 255 end
                 end
 
+                -- Screen-space Ruler Line Overlay
+                if is_on_ruler(col, top_py) then tr, tg, tb = 255, 80, 255 end
+                if is_on_ruler(col, bot_py) then br, bg, bb = 255, 80, 255 end
+
+                -- Calibrated Scale Bar Overlay (bottom-right)
+                if top_py == sb_py and col >= sb_x1 and col <= sb_x2 then
+                    tr, tg, tb = 255, 255, 255
+                end
+                if bot_py == sb_py and col >= sb_x1 and col <= sb_x2 then
+                    br, bg, bb = 255, 255, 255
+                end
+
                 -- Screen-space Compact Crosshair Reticle
                 tr, tg, tb = apply_crosshair(tr, tg, tb, col, top_py)
                 br, bg, bb = apply_crosshair(br, bg, bb, col, bot_py)
@@ -1421,14 +1669,14 @@ local function build_tui_app(initial_img, filename)
 
         -- 5. Bottom Status Bar & Hotkeys
         emit("\27[1;37;44m├" .. string.rep("─", cols - 2) .. "┤\27[0m\27[K\n")
-        local hotkeys = " [Arrows] Probe [+/-] Zoom [r] ROI [p] Prof [l] LUT [w/b] W/L [t] Thresh [f] Flt [i] Inv [s] Save [q] Quit"
+        local hotkeys = " [Arrows]Probe [+/-]Zoom [r]ROI [d]Ruler [m]Log [c]Ch [l]LUT [g/e]Gam/EQ [o]Morph [3]3D [s]Save"
         if #hotkeys > cols - 2 then
             hotkeys = hotkeys:sub(1, cols - 2)
         elseif #hotkeys < cols - 2 then
             hotkeys = hotkeys .. string.rep(" ", cols - 2 - #hotkeys)
         end
         emit("\27[1;30;47m" .. hotkeys .. "\27[0m\27[K\n")
-        local status_line = " " .. self.status_msg
+        local status_line = string.format(" [Scalebar: %dpx] %s", scale_px, self.status_msg)
         if #status_line > cols - 2 then
             status_line = status_line:sub(1, cols - 2)
         elseif #status_line < cols - 2 then
@@ -1504,34 +1752,118 @@ local function build_tui_app(initial_img, filename)
         return table.concat(lines)
     end
 
+    function app:render_surface3d_modal(cols, rows)
+        local lines = {}
+        local emit = function(s) table.insert(lines, s) end
+        cols = math.max(80, cols)
+        rows = math.max(24, rows)
+
+        local plot_w = cols - 4
+        local plot_h = rows - 5
+
+        -- Allocate 2D character & color canvas
+        local canvas_ch = {}
+        local canvas_fg = {}
+        for r = 1, plot_h do
+            canvas_ch[r] = {}
+            canvas_fg[r] = {}
+            for c = 1, plot_w do
+                canvas_ch[r][c] = " "
+                canvas_fg[r][c] = ""
+            end
+        end
+
+        local full_roi = { x1 = 0, y1 = 0, x2 = self.img.width - 1, y2 = self.img.height - 1 }
+        local active_roi = self.roi.active and self.roi or full_roi
+        local rx1 = math.min(active_roi.x1, active_roi.x2)
+        local rx2 = math.max(active_roi.x1, active_roi.x2)
+        local ry1 = math.min(active_roi.y1, active_roi.y2)
+        local ry2 = math.max(active_roi.y1, active_roi.y2)
+        local rw = math.max(4, rx2 - rx1 + 1)
+        local rh = math.max(4, ry2 - ry1 + 1)
+
+        local grid_nx = math.min(60, math.floor(plot_w * 0.62))
+        local grid_ny = math.min(28, math.floor(plot_h * 0.65))
+        local max_z_rows = math.max(4, math.floor(plot_h * 0.45))
+
+        -- Back-to-front painter's algorithm for isometric 3D surface plot
+        for gy = 0, grid_ny - 1 do
+            local iy = ry1 + math.floor(gy * (rh - 1) / math.max(1, grid_ny - 1))
+            for gx = 0, grid_nx - 1 do
+                local ix = rx1 + math.floor(gx * (rw - 1) / math.max(1, grid_nx - 1))
+                local val = self.img:get_gray(ix, iy)
+                local cr, cg, cb = self:map_display_color(val)
+                local z_h = math.floor((val / 255.0) * max_z_rows)
+
+                local screen_x = math.floor(4 + gx + (grid_ny - 1 - gy) * 0.45)
+                local base_y = math.floor(plot_h - 2 - (grid_ny - 1 - gy) * 0.45)
+                local top_y = math.max(1, base_y - z_h)
+
+                if screen_x >= 1 and screen_x <= plot_w then
+                    for sy = base_y, top_y, -1 do
+                        if sy >= 1 and sy <= plot_h then
+                            if sy == top_y then
+                                canvas_ch[sy][screen_x] = "▄"
+                                canvas_fg[sy][screen_x] = string.format("\27[38;2;%d;%d;%dm", cr, cg, cb)
+                            else
+                                canvas_ch[sy][screen_x] = "│"
+                                canvas_fg[sy][screen_x] = string.format("\27[38;2;%d;%d;%dm",
+                                    math.floor(cr * 0.55), math.floor(cg * 0.55), math.floor(cb * 0.55))
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        local lut_name = LUT_NAMES[self.lut_idx] or "Fire"
+        emit(string.format("\27[1;37;44m┌─ 3D Isometric Surface Plot (Z = Luminance, LUT = %s) ──── [l] LUT  [3/Esc] Return ─┐\27[0m\27[K\n", lut_name))
+        for r = 1, plot_h do
+            local row_t = { "  " }
+            for c = 1, plot_w do
+                if canvas_fg[r][c] ~= "" then
+                    row_t[#row_t + 1] = canvas_fg[r][c] .. canvas_ch[r][c] .. "\27[0m"
+                else
+                    row_t[#row_t + 1] = " "
+                end
+            end
+            emit(table.concat(row_t) .. "\27[K\n")
+        end
+
+        local stats = compute_roi_stats(self.img, active_roi)
+        emit("\27[1;37;44m├" .. string.rep("─", cols - 2) .. "┤\27[0m\27[K\n")
+        emit(string.format(" Region [%d,%d to %d,%d] | Peak Z: \27[1;33m%d\27[0m | Min Z: %d | Mean Z: \27[1;32m%.2f\27[0m | [l] Cycle LUT  [3/Esc] Back\27[K",
+            rx1, ry1, rx2, ry2, stats.max, stats.min, stats.mean))
+
+        return table.concat(lines)
+    end
+
     function app:render_help_modal(cols, rows)
         local lines = {}
         local emit = function(s) table.insert(lines, s) end
 
         emit("\27[1;37;44m┌───────────────────────── ffi_imagej Keyboard Controls ─────────────────────────┐\27[0m\27[K\n")
-        emit("│                                                                                │\27[K\n")
         emit("│  NAVIGATION, ZOOM & PROBE                                                      │\27[K\n")
-        emit("│    Arrow keys                 Move pixel probe crosshair (1 px)                │\27[K\n")
-        emit("│    Shift + H / J / K          Fast jump probe (8 px)                           │\27[K\n")
+        emit("│    Arrow keys / Shift+H,J,K   Move pixel probe crosshair (1 px / 8 px)         │\27[K\n")
         emit("│    + / - / 0                  Zoom In / Zoom Out / Reset Zoom (1.0x - 8.0x)    │\27[K\n")
         emit("│                                                                                │\27[K\n")
-        emit("│  SCIENTIFIC IMAGEJ ANALYSIS                                                    │\27[K\n")
+        emit("│  SCIENTIFIC IMAGEJ ANALYSIS & TOOLS                                            │\27[K\n")
         emit("│    r                          2-Point ROI: Anchor -> Lock -> Clear             │\27[K\n")
+        emit("│    d                          Point-to-Point Distance & Angle Ruler            │\27[K\n")
+        emit("│    m                          Record ROI Measurement to Results Log            │\27[K\n")
         emit("│    p                          1D Intensity Line Profile (with FWHM analysis)   │\27[K\n")
-        emit("│    l / L (or c)               Cycle Lookup Tables forward / backward           │\27[K\n")
-        emit("│    w / W                      Narrow / Widen Contrast Window                   │\27[K\n")
-        emit("│    b / B                      Raise / Lower Brightness Level                   │\27[K\n")
+        emit("│    3                          3D Isometric Topographic Surface Plot            │\27[K\n")
+        emit("│    c                          Split RGB Channels (Comp/Red/Green/Blue/Gray)    │\27[K\n")
+        emit("│    l / L                      Cycle Lookup Tables forward / backward           │\27[K\n")
+        emit("│    w / W, b / B               Adjust Contrast Window & Brightness Level        │\27[K\n")
+        emit("│    g / G, e                   Adjust Gamma Curve (0.2-3.0) / Equalize Hist     │\27[K\n")
         emit("│    a                          Auto-Contrast (0.35% ImageJ saturation clip)     │\27[K\n")
         emit("│    t                          Live Split-Pane Threshold & Particle Counter     │\27[K\n")
-        emit("│    f                          Cycle Filter (None/Median/Blur/Sobel/Sharpen)    │\27[K\n")
+        emit("│    f / o                      Cycle Filter (Med/Blur/Sobel/Sharp) / Morph Ops  │\27[K\n")
         emit("│    i                          Invert image values (255 - v)                    │\27[K\n")
         emit("│    s                          Save CSV Measurements & Export PPM Image         │\27[K\n")
         emit("│    1                          Reset image, zoom, and contrast to original      │\27[K\n")
-        emit("│                                                                                │\27[K\n")
-        emit("│  SYSTEM                                                                        │\27[K\n")
-        emit("│    ?                          Toggle this Help dialog                          │\27[K\n")
-        emit("│    q / Esc                    Exit application                                 │\27[K\n")
-        emit("│                                                                                │\27[K\n")
+        emit("│    ? / q / Esc                Toggle Help / Exit application                   │\27[K\n")
         emit("└──────────────────────────── Press [Enter] or [Esc] to Close ───────────────────┘\27[K")
 
         return table.concat(lines)
@@ -1544,6 +1876,8 @@ local function build_tui_app(initial_img, filename)
             return self:render_profile_modal(cols, rows)
         elseif self.mode == "threshold_table" then
             return self:render_threshold_modal(cols, rows)
+        elseif self.mode == "surface3d" then
+            return self:render_surface3d_modal(cols, rows)
         else
             return self:render_frame(cols, rows)
         end
@@ -1555,6 +1889,10 @@ local function build_tui_app(initial_img, filename)
         if self.roi.state == "sizing" then
             self.roi.x2 = self.probe_x
             self.roi.y2 = self.probe_y
+        end
+        if self.ruler.state == "measuring" then
+            self.ruler.x2 = self.probe_x
+            self.ruler.y2 = self.probe_y
         end
     end
 
@@ -1576,6 +1914,14 @@ local function build_tui_app(initial_img, filename)
             self.show_help = not self.show_help
         elseif self.show_help then
             if key == "ENTER" or key == "SPACE" then self.show_help = false end
+        elseif self.mode == "surface3d" then
+            if key == "3" then
+                self.mode = "normal"
+            elseif key == "l" then
+                self.lut_idx = (self.lut_idx % #LUT_NAMES) + 1
+            elseif key == "L" then
+                self.lut_idx = ((self.lut_idx - 2) % #LUT_NAMES) + 1
+            end
         elseif self.mode == "profile" then
             if key == "v" then
                 self.profile_horizontal = not self.profile_horizontal
@@ -1637,20 +1983,20 @@ local function build_tui_app(initial_img, filename)
             elseif key == "H" then
                 self:move_probe(-8, 0)
             elseif key == "+" or key == "=" then
-                self.zoom = math.min(8.0, self.zoom + 0.5)
+                self.zoom = math.min(8.0, self.zoom * 2.0)
                 self.status_msg = string.format("Zoom: %.1fx (centered on probe)", self.zoom)
             elseif key == "-" or key == "_" then
-                self.zoom = math.max(1.0, self.zoom - 0.5)
+                self.zoom = math.max(1.0, self.zoom / 2.0)
                 self.status_msg = string.format("Zoom: %.1fx", self.zoom)
             elseif key == "0" then
                 self.zoom = 1.0
                 self.status_msg = "Zoom reset to 1.0x."
-            elseif key == "l" or key == "c" or key == "C" then
-                if self.img.is_rgb and self.rgb_passthrough and self.lut_idx == 1 then
+            elseif key == "l" then
+                if self.raw_img.is_rgb and self.rgb_passthrough and self.lut_idx == 1 then
                     self.rgb_passthrough = false
                     self.lut_idx = 2
                     self.status_msg = "LUT changed to: " .. LUT_NAMES[self.lut_idx]
-                elseif self.img.is_rgb and self.lut_idx == #LUT_NAMES then
+                elseif self.raw_img.is_rgb and self.lut_idx == #LUT_NAMES then
                     self.lut_idx = 1
                     self.rgb_passthrough = true
                     self.status_msg = "LUT changed to: Original RGB"
@@ -1659,30 +2005,72 @@ local function build_tui_app(initial_img, filename)
                     self.status_msg = "LUT changed to: " .. LUT_NAMES[self.lut_idx]
                 end
             elseif key == "L" then
-                self.rgb_passthrough = false
-                self.lut_idx = ((self.lut_idx - 2) % #LUT_NAMES) + 1
-                self.status_msg = "LUT changed to: " .. LUT_NAMES[self.lut_idx]
+                if self.raw_img.is_rgb and not self.rgb_passthrough and self.lut_idx == 1 then
+                    self.rgb_passthrough = true
+                    self.status_msg = "LUT changed to: Original RGB"
+                elseif self.raw_img.is_rgb and self.rgb_passthrough and self.lut_idx == 1 then
+                    self.rgb_passthrough = false
+                    self.lut_idx = #LUT_NAMES
+                    self.status_msg = "LUT changed to: " .. LUT_NAMES[self.lut_idx]
+                else
+                    self.rgb_passthrough = false
+                    self.lut_idx = ((self.lut_idx - 2) % #LUT_NAMES) + 1
+                    self.status_msg = "LUT changed to: " .. LUT_NAMES[self.lut_idx]
+                end
+            elseif key == "c" or key == "C" then
+                self.channel_idx = (self.channel_idx % #CHANNEL_MODES) + 1
+                self:rebuild_filtered_image()
+                self.status_msg = "Channel Split: " .. CHANNEL_MODES[self.channel_idx]:upper()
             elseif key == "r" then
                 if self.roi.state == "none" then
                     self.roi.state = "sizing"
+                    self.roi_state = "sizing"
                     self.roi.active = true
                     self.roi.x1 = self.probe_x
                     self.roi.y1 = self.probe_y
-                    self.roi.x2 = math.min(self.img.width - 1, self.probe_x + 24)
-                    self.roi.y2 = math.min(self.img.height - 1, self.probe_y + 16)
+                    self.roi.x2 = self.probe_x
+                    self.roi.y2 = self.probe_y
                     self.status_msg = "ROI Sizing: Move cursor to resize box, press 'r' again to lock."
                 elseif self.roi.state == "sizing" then
                     self.roi.state = "locked"
+                    self.roi_state = "locked"
                     self.roi.active = true
                     self.status_msg = string.format("ROI Locked [%d,%d to %d,%d]. Press 'r' to clear.",
                         self.roi.x1, self.roi.y1, self.roi.x2, self.roi.y2)
                 else
                     self.roi.state = "none"
+                    self.roi_state = "none"
                     self.roi.active = false
                     self.status_msg = "ROI cleared (showing full-image statistics)."
                 end
+            elseif key == "d" then
+                if self.ruler.state == "none" then
+                    self.ruler.state = "measuring"
+                    self.ruler.active = true
+                    self.ruler.x1 = self.probe_x
+                    self.ruler.y1 = self.probe_y
+                    self.ruler.x2 = self.probe_x
+                    self.ruler.y2 = self.probe_y
+                    self.status_msg = "Ruler: Move cursor to end point, press 'd' to lock."
+                elseif self.ruler.state == "measuring" then
+                    self.ruler.state = "locked"
+                    self.ruler.active = true
+                    local rm = compute_ruler(self.img, self.ruler.x1, self.ruler.y1, self.ruler.x2, self.ruler.y2)
+                    self.status_msg = string.format("Ruler Locked: D = %.2f px, Angle = %.1f deg", rm.dist, rm.angle_deg)
+                else
+                    self.ruler.state = "none"
+                    self.ruler.active = false
+                    self.status_msg = "Ruler cleared."
+                end
+            elseif key == "m" then
+                local entry = self:record_measurement()
+                self.status_msg = string.format("Logged Measurement #%d: Area=%d, Mean=%.2f, StdDev=%.2f",
+                    entry.id, entry.area, entry.mean, entry.std_dev)
             elseif key == "p" then
                 self.mode = "profile"
+            elseif key == "3" then
+                self.mode = "surface3d"
+                self.status_msg = "3D Surface Plot view. Press [3] or [Esc] to return."
             elseif key == "t" then
                 if self.mode == "threshold" then
                     self.mode = "normal"
@@ -1695,33 +2083,52 @@ local function build_tui_app(initial_img, filename)
             elseif key == "w" then
                 self.win_low = math.min(self.win_high - 5, self.win_low + 4)
                 self.win_high = math.max(self.win_low + 5, self.win_high - 4)
-                self.status_msg = string.format("Window narrowed: [%d - %d]", self.win_low, self.win_high)
+                self:sync_wl()
+                self.status_msg = string.format("Window narrowed: [%d - %d] (Win: %d)", self.win_low, self.win_high, self.win_width)
             elseif key == "W" then
                 self.win_low = math.max(0, self.win_low - 4)
                 self.win_high = math.min(255, self.win_high + 4)
-                self.status_msg = string.format("Window widened: [%d - %d]", self.win_low, self.win_high)
+                self:sync_wl()
+                self.status_msg = string.format("Window widened: [%d - %d] (Win: %d)", self.win_low, self.win_high, self.win_width)
             elseif key == "b" then
                 local shift = 6
                 self.win_low = math.max(0, self.win_low - shift)
                 self.win_high = math.max(self.win_low + 5, self.win_high - shift)
-                self.status_msg = string.format("Brightness raised (Level down): [%d - %d]", self.win_low, self.win_high)
+                self:sync_wl()
+                self.status_msg = string.format("Brightness raised: [%d - %d] (Lvl: %d)", self.win_low, self.win_high, self.win_level)
             elseif key == "B" then
                 local shift = 6
                 self.win_high = math.min(255, self.win_high + shift)
                 self.win_low = math.min(self.win_high - 5, self.win_low + shift)
-                self.status_msg = string.format("Brightness lowered (Level up): [%d - %d]", self.win_low, self.win_high)
+                self:sync_wl()
+                self.status_msg = string.format("Brightness lowered: [%d - %d] (Lvl: %d)", self.win_low, self.win_high, self.win_level)
+            elseif key == "g" then
+                self.gamma = math.max(0.20, self.gamma - 0.10)
+                self.status_msg = string.format("Gamma adjusted: y = %.2f (brighter midtones)", self.gamma)
+            elseif key == "G" then
+                self.gamma = math.min(3.00, self.gamma + 0.10)
+                self.status_msg = string.format("Gamma adjusted: y = %.2f (darker midtones)", self.gamma)
+            elseif key == "e" then
+                self.equalized = not self.equalized
+                self:rebuild_filtered_image()
+                self.status_msg = self.equalized and "Histogram Equalization ON." or "Histogram Equalization OFF."
             elseif key == "a" then
                 if self.mode == "threshold" then
                     self.threshold_val = compute_otsu_threshold(self.img)
                     self.status_msg = string.format("Otsu Auto-Threshold recomputed: T = %d", self.threshold_val)
                 else
                     self.win_low, self.win_high = compute_auto_window_level(self.img)
+                    self:sync_wl()
                     self.status_msg = string.format("Auto W/L applied (0.35%% clip): %d - %d", self.win_low, self.win_high)
                 end
             elseif key == "f" then
                 self.filter_idx = (self.filter_idx % #FILTER_NAMES) + 1
                 self:rebuild_filtered_image()
                 self.status_msg = "Spatial Filter: " .. FILTER_NAMES[self.filter_idx]:upper()
+            elseif key == "o" then
+                self.morph_idx = (self.morph_idx % #MORPH_NAMES) + 1
+                self:rebuild_filtered_image()
+                self.status_msg = "Morphological Op: " .. MORPH_NAMES[self.morph_idx]:upper()
             elseif key == "i" then
                 self.inverted = not self.inverted
                 self:rebuild_filtered_image()
@@ -1733,13 +2140,18 @@ local function build_tui_app(initial_img, filename)
                     io.stderr:write(msg .. "\n")
                 end
             elseif key == "1" then
+                self.channel_idx = 1
                 self.filter_idx = 1
+                self.morph_idx = 1
+                self.equalized = false
                 self.inverted = false
+                self.gamma = 1.0
                 self.zoom = 1.0
                 self.lut_idx = 1
                 self.rgb_passthrough = self.raw_img.is_rgb
                 self.img = self.raw_img:clone()
                 self.win_low, self.win_high = compute_auto_window_level(self.img)
+                self:sync_wl()
                 self.status_msg = "Reset to original raw image, 1.0x zoom, and Auto W/L."
             end
         end
@@ -1773,12 +2185,17 @@ local CLI_HELP = table.concat({
     "  Arrow keys             Move pixel probe crosshair (+)",
     "  + / - / 0              Zoom In / Zoom Out / Reset Zoom (1.0x to 8.0x)",
     "  r                      2-Point ROI: Anchor -> Resize -> Lock -> Clear",
+    "  d                      Point-to-Point Euclidean Distance & Angle Ruler",
+    "  m                      Record ROI Measurement into Results Log",
     "  p                      1D Intensity Profile (Horiz/Vert slice with FWHM)",
-    "  l / L (or c)           Cycle scientific Lookup Tables (LUTs) forward/backward",
+    "  3                      3D Isometric Surface Plot (Topographic Z=Luminance)",
+    "  c                      Split RGB Channels (Composite, Red, Green, Blue, Gray)",
+    "  l / L                  Cycle scientific Lookup Tables (LUTs) forward/backward",
     "  w / W, b / B           Adjust Window (Contrast) and Level (Brightness)",
+    "  g / G, e               Adjust Gamma (0.2-3.0) / Toggle Histogram Equalization",
     "  a                      Auto-Contrast (0.35% ImageJ saturation clip)",
     "  t                      Live Split-Pane Threshold & Particle analysis (Otsu)",
-    "  f                      Cycle Spatial Filter (None, Median, Blur, Sobel, Sharpen)",
+    "  f / o                  Cycle Spatial Filter / Binary Morphological Ops",
     "  i                      Invert image values (255 - v)",
     "  s                      Save CSV Measurements & Export Processed PPM Image",
     "  1                      Reset to raw original image",
@@ -1916,10 +2333,13 @@ local M = {
     compute_auto_window_level = compute_auto_window_level,
     compute_otsu_threshold = compute_otsu_threshold,
     analyze_particles = analyze_particles,
+    compute_ruler = compute_ruler,
     apply_filter = apply_filter,
     LUTS = LUTS,
     LUT_NAMES = LUT_NAMES,
     FILTER_NAMES = FILTER_NAMES,
+    MORPH_NAMES = MORPH_NAMES,
+    CHANNEL_MODES = CHANNEL_MODES,
     build_tui_app = build_tui_app,
     main = main
 }
