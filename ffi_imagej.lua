@@ -1114,16 +1114,63 @@ local function build_tui_app(initial_img, filename)
         local img_display_w = pane_w - 2
         local img_display_h = view_h * 2 -- Half blocks give 2 vertical px per cell
 
+        local cur_col = math.max(0, math.min(img_display_w - 1, math.floor(self.probe_x * img_display_w / self.img.width)))
+        local cur_row_px = math.max(0, math.min(img_display_h - 1, math.floor(self.probe_y * img_display_h / self.img.height)))
+
+        -- High-visibility crosshair styler
+        local function apply_crosshair(r, g, b, col, py)
+            local dx = math.abs(col - cur_col)
+            local dy = math.abs(py - cur_row_px)
+
+            if dx == 0 and dy == 0 then
+                -- Center target point: high-contrast inverted neon
+                local lum = (r * 0.299 + g * 0.587 + b * 0.114)
+                if lum > 140 then
+                    return 255, 0, 80 -- Neon Crimson on bright background
+                else
+                    return 255, 255, 0 -- Electric Yellow on dark background
+                end
+            elseif (dx <= 2 and dy == 0) or (dx == 0 and dy <= 2) then
+                -- Prominent reticle arms (+)
+                local lum = (r * 0.299 + g * 0.587 + b * 0.114)
+                if lum > 140 then
+                    return 0, 220, 255 -- Electric Cyan
+                else
+                    return 255, 220, 0 -- Vivid Amber
+                end
+            elseif (dx == 0 and (py % 2 == 0)) or (dy == 0 and (col % 2 == 0)) then
+                -- Dashed hairline guides across entire viewport
+                return math.min(255, r + 50), math.min(255, g + 50), math.max(0, b - 30)
+            end
+
+            return r, g, b
+        end
+
+        -- Pre-map ROI box to display coordinates
+        local drx1, drx2, dry1, dry2 = -1, -1, -1, -1
+        if self.roi.active then
+            local rx1 = math.min(self.roi.x1, self.roi.x2)
+            local rx2 = math.max(self.roi.x1, self.roi.x2)
+            local ry1 = math.min(self.roi.y1, self.roi.y2)
+            local ry2 = math.max(self.roi.y1, self.roi.y2)
+            drx1 = math.floor(rx1 * img_display_w / self.img.width)
+            drx2 = math.floor(rx2 * img_display_w / self.img.width)
+            dry1 = math.floor(ry1 * img_display_h / self.img.height)
+            dry2 = math.floor(ry2 * img_display_h / self.img.height)
+        end
+
         for row = 0, view_h - 1 do
             local row_str = "\27[1;37;44m│\27[0m"
+            local top_py = row * 2
+            local bot_py = row * 2 + 1
 
             -- Left: Image Half-Block Rendering
             for col = 0, img_display_w - 1 do
                 -- Map cell (col, row) to image coordinates
                 local top_img_x = math.floor(col * self.img.width / img_display_w)
-                local top_img_y = math.floor((row * 2) * self.img.height / img_display_h)
+                local top_img_y = math.floor(top_py * self.img.height / img_display_h)
                 local bot_img_x = top_img_x
-                local bot_img_y = math.floor((row * 2 + 1) * self.img.height / img_display_h)
+                local bot_img_y = math.floor(bot_py * self.img.height / img_display_h)
 
                 local top_val = self.img:get_gray(top_img_x, top_img_y)
                 local bot_val = self.img:get_gray(bot_img_x, bot_img_y)
@@ -1147,27 +1194,19 @@ local function build_tui_app(initial_img, filename)
                     br, bg, bb = self:map_display_color(bot_val)
                 end
 
-                -- Cursor / Crosshair Overlay
-                if (top_img_x == self.probe_x and top_img_y == self.probe_y) or
-                   (bot_img_x == self.probe_x and bot_img_y == self.probe_y) then
-                    tr, tg, tb = 255, 255, 0 -- Bright yellow crosshair
-                    br, bg, bb = 255, 255, 0
-                end
-
-                -- ROI Box Overlay
+                -- Screen-space ROI Box Overlay
                 if self.roi.active then
-                    local rx1 = math.min(self.roi.x1, self.roi.x2)
-                    local rx2 = math.max(self.roi.x1, self.roi.x2)
-                    local ry1 = math.min(self.roi.y1, self.roi.y2)
-                    local ry2 = math.max(self.roi.y1, self.roi.y2)
-
-                    local in_top_border = (top_img_x >= rx1 and top_img_x <= rx2 and (top_img_y == ry1 or top_img_y == ry2)) or
-                                          (top_img_y >= ry1 and top_img_y <= ry2 and (top_img_x == rx1 or top_img_x == rx2))
-                    local in_bot_border = (bot_img_x >= rx1 and bot_img_x <= rx2 and (bot_img_y == ry1 or bot_img_y == ry2)) or
-                                          (bot_img_y >= ry1 and bot_img_y <= ry2 and (bot_img_x == rx1 or bot_img_x == rx2))
+                    local in_top_border = (col >= drx1 and col <= drx2 and (top_py == dry1 or top_py == dry2)) or
+                                          (top_py >= dry1 and top_py <= dry2 and (col == drx1 or col == drx2))
+                    local in_bot_border = (col >= drx1 and col <= drx2 and (bot_py == dry1 or bot_py == dry2)) or
+                                          (bot_py >= dry1 and bot_py <= dry2 and (col == drx1 or col == drx2))
                     if in_top_border then tr, tg, tb = 0, 255, 255 end
                     if in_bot_border then br, bg, bb = 0, 255, 255 end
                 end
+
+                -- Screen-space High-Visibility Crosshair & Reticle
+                tr, tg, tb = apply_crosshair(tr, tg, tb, col, top_py)
+                br, bg, bb = apply_crosshair(br, bg, bb, col, bot_py)
 
                 -- UTF-8 '▄' (bottom half block): foreground = bottom px, background = top px
                 row_str = row_str .. string.format("\27[38;2;%d;%d;%dm\27[48;2;%d;%d;%dm▄\27[0m",
@@ -1360,6 +1399,14 @@ local function build_tui_app(initial_img, filename)
                 self.probe_x = math.max(0, self.probe_x - 1)
             elseif key == "RIGHT" or key == "l" then
                 self.probe_x = math.min(self.img.width - 1, self.probe_x + 1)
+            elseif key == "K" then
+                self.probe_y = math.max(0, self.probe_y - 8)
+            elseif key == "J" then
+                self.probe_y = math.min(self.img.height - 1, self.probe_y + 8)
+            elseif key == "H" then
+                self.probe_x = math.max(0, self.probe_x - 8)
+            elseif key == "L" then
+                self.probe_x = math.min(self.img.width - 1, self.probe_x + 8)
             elseif key == "r" then
                 self.roi.active = not self.roi.active
                 if self.roi.active then
