@@ -1117,13 +1117,13 @@ local function build_tui_app(initial_img, filename)
         local cur_col = math.max(0, math.min(img_display_w - 1, math.floor(self.probe_x * img_display_w / self.img.width)))
         local cur_row_px = math.max(0, math.min(img_display_h - 1, math.floor(self.probe_y * img_display_h / self.img.height)))
 
-        -- High-visibility crosshair styler
+        -- High-visibility compact crosshair reticle (clean, no long lines)
         local function apply_crosshair(r, g, b, col, py)
             local dx = math.abs(col - cur_col)
             local dy = math.abs(py - cur_row_px)
 
             if dx == 0 and dy == 0 then
-                -- Center target point: high-contrast inverted neon
+                -- Center target point: high-contrast neon
                 local lum = (r * 0.299 + g * 0.587 + b * 0.114)
                 if lum > 140 then
                     return 255, 0, 80 -- Neon Crimson on bright background
@@ -1131,16 +1131,13 @@ local function build_tui_app(initial_img, filename)
                     return 255, 255, 0 -- Electric Yellow on dark background
                 end
             elseif (dx <= 2 and dy == 0) or (dx == 0 and dy <= 2) then
-                -- Prominent reticle arms (+)
+                -- Compact local crosshair arms (+)
                 local lum = (r * 0.299 + g * 0.587 + b * 0.114)
                 if lum > 140 then
                     return 0, 220, 255 -- Electric Cyan
                 else
                     return 255, 220, 0 -- Vivid Amber
                 end
-            elseif (dx == 0 and (py % 2 == 0)) or (dy == 0 and (col % 2 == 0)) then
-                -- Dashed hairline guides across entire viewport
-                return math.min(255, r + 50), math.min(255, g + 50), math.max(0, b - 30)
             end
 
             return r, g, b
