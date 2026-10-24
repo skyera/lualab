@@ -249,10 +249,24 @@ run_test("Test 8: Headless TUI Rendering (All Modes & Views)", function()
     local table_frame = app:render(100, 30)
     assert(#table_frame > 200, "threshold full table modal rendered")
 
-    -- 4. Help Modal
+    -- 4. Multi-Page Help & Scientific Reference Modal (Pages 1, 2, 3)
     app.show_help = true
-    local help_frame = app:render(100, 30)
-    assert(#help_frame > 200, "help frame rendered")
+    assert_eq(app.help_page, 1, "initial help page 1")
+    local help_p1 = app:render(100, 30)
+    assert(help_p1:find("Page 1/3: Keyboard Controls"), "help page 1 header")
+
+    app:handle_key("TAB")
+    assert_eq(app.help_page, 2, "TAB advances to help page 2")
+    local help_p2 = app:render(100, 30)
+    assert(help_p2:find("Page 2/3: Scientific Analysis"), "help page 2 header")
+
+    app:handle_key("RIGHT")
+    assert_eq(app.help_page, 3, "RIGHT advances to help page 3")
+    local help_p3 = app:render(100, 30)
+    assert(help_p3:find("Page 3/3: Filters & Contrast"), "help page 3 header")
+
+    app:handle_key("ESC")
+    assert_eq(app.show_help, false, "ESC closes help modal")
 end)
 
 -- Test 9: Scoping & Undeclared Global Check (LuaJIT Bytecode)

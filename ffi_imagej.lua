@@ -355,6 +355,40 @@ local FILTER_NAMES = { "none", "median", "blur", "sobel", "sharpen" }
 local MORPH_NAMES = { "none", "erode", "dilate", "open", "close" }
 local CHANNEL_MODES = { "composite", "red", "green", "blue", "gray" }
 
+local FILTER_DESCRIPTIONS = {
+    none    = "No spatial filter (raw pixel intensities)",
+    median  = "3x3 non-linear rank filter — removes salt-and-pepper noise while keeping sharp edges",
+    blur    = "3x3 Gaussian smoothing kernel — reduces high-frequency sensor grain",
+    sobel   = "3x3 Sobel gradient operator — highlights horizontal & vertical boundary edges",
+    sharpen = "3x3 Laplacian unsharp kernel — enhances local edge contrast"
+}
+
+local MORPH_DESCRIPTIONS = {
+    none   = "No morphological operation",
+    erode  = "3x3 local minimum — shrinks bright spots & removes isolated speckles",
+    dilate = "3x3 local maximum — expands bright regions & bridges narrow gaps",
+    open   = "Erode then Dilate — removes small bright speckles while preserving object size",
+    close  = "Dilate then Erode — fills small dark holes inside bright objects"
+}
+
+local LUT_DESCRIPTIONS = {
+    Grayscale = "1:1 linear luminance mapping (0=Black to 255=White)",
+    Fire      = "NIH ImageJ thermal colormap (Black -> Red -> Orange -> Yellow -> White)",
+    Viridis   = "Perceptually uniform scientific colormap (Dark Purple -> Teal -> Yellow)",
+    Cool      = "Dual-tone cyan-to-magenta gradient",
+    Turbo     = "Smooth high-contrast rainbow colormap",
+    Green     = "GFP fluorescence microscopy channel (0, G, 0)",
+    Invert    = "Photographic negative grayscale (255 - v)"
+}
+
+local CHANNEL_DESCRIPTIONS = {
+    composite = "Full 24-bit RGB composite color",
+    red       = "Isolated Red channel (R) — all stats & histograms measure Red intensity",
+    green     = "Isolated Green channel (G) — all stats & histograms measure Green intensity",
+    blue      = "Isolated Blue channel (B) — all stats & histograms measure Blue intensity",
+    gray      = "Weighted Rec.601 luminance (Y = 0.299R + 0.587G + 0.114B)"
+}
+
 -- =============================================================================
 -- 3. Image Buffer Class & Procedural Target Generators
 -- =============================================================================
@@ -1154,7 +1188,8 @@ local function build_tui_app(initial_img, filename)
         profile_horizontal = true,
         threshold_val = 128,
         show_help = false,
-        status_msg = "Ready. Arrows: Probe | [+/-] Zoom | [r] ROI | [d] Ruler | [l] LUT | [?] Help"
+        help_page = 1,
+        status_msg = "Ready. Arrows: Probe | [+/-] Zoom | [r] ROI | [d] Ruler | [l] LUT | [1] Reset | [?] Help"
     }
 
     function app:sync_wl()
@@ -1669,7 +1704,7 @@ local function build_tui_app(initial_img, filename)
 
         -- 5. Bottom Status Bar & Hotkeys
         emit("\27[1;37;44m├" .. string.rep("─", cols - 2) .. "┤\27[0m\27[K\n")
-        local hotkeys = " [Arrows]Probe [+/-]Zoom [r]ROI [d]Ruler [m]Log [c]Ch [l]LUT [g/e]Gam/EQ [o]Morph [3]3D [s]Save"
+        local hotkeys = " [Arrows]Move [+-]Zoom [r]ROI [d]Rule [m]Log [c]Ch [l]LUT [g/e]Gam [f/o]Flt [3]3D [1]Rst [?]Help"
         if #hotkeys > cols - 2 then
             hotkeys = hotkeys:sub(1, cols - 2)
         elseif #hotkeys < cols - 2 then
@@ -1841,30 +1876,75 @@ local function build_tui_app(initial_img, filename)
     function app:render_help_modal(cols, rows)
         local lines = {}
         local emit = function(s) table.insert(lines, s) end
+        local p = self.help_page or 1
 
-        emit("\27[1;37;44m┌───────────────────────── ffi_imagej Keyboard Controls ─────────────────────────┐\27[0m\27[K\n")
-        emit("│  NAVIGATION, ZOOM & PROBE                                                      │\27[K\n")
-        emit("│    Arrow keys / Shift+H,J,K   Move pixel probe crosshair (1 px / 8 px)         │\27[K\n")
-        emit("│    + / - / 0                  Zoom In / Zoom Out / Reset Zoom (1.0x - 8.0x)    │\27[K\n")
-        emit("│                                                                                │\27[K\n")
-        emit("│  SCIENTIFIC IMAGEJ ANALYSIS & TOOLS                                            │\27[K\n")
-        emit("│    r                          2-Point ROI: Anchor -> Lock -> Clear             │\27[K\n")
-        emit("│    d                          Point-to-Point Distance & Angle Ruler            │\27[K\n")
-        emit("│    m                          Record ROI Measurement to Results Log            │\27[K\n")
-        emit("│    p                          1D Intensity Line Profile (with FWHM analysis)   │\27[K\n")
-        emit("│    3                          3D Isometric Topographic Surface Plot            │\27[K\n")
-        emit("│    c                          Split RGB Channels (Comp/Red/Green/Blue/Gray)    │\27[K\n")
-        emit("│    l / L                      Cycle Lookup Tables forward / backward           │\27[K\n")
-        emit("│    w / W, b / B               Adjust Contrast Window & Brightness Level        │\27[K\n")
-        emit("│    g / G, e                   Adjust Gamma Curve (0.2-3.0) / Equalize Hist     │\27[K\n")
-        emit("│    a                          Auto-Contrast (0.35% ImageJ saturation clip)     │\27[K\n")
-        emit("│    t                          Live Split-Pane Threshold & Particle Counter     │\27[K\n")
-        emit("│    f / o                      Cycle Filter (Med/Blur/Sobel/Sharp) / Morph Ops  │\27[K\n")
-        emit("│    i                          Invert image values (255 - v)                    │\27[K\n")
-        emit("│    s                          Save CSV Measurements & Export PPM Image         │\27[K\n")
-        emit("│    1                          Reset image, zoom, and contrast to original      │\27[K\n")
-        emit("│    ? / q / Esc                Toggle Help / Exit application                   │\27[K\n")
-        emit("└──────────────────────────── Press [Enter] or [Esc] to Close ───────────────────┘\27[K")
+        if p == 1 then
+            emit("\27[1;37;44m┌─ ffi_imagej Help & Reference ─── [Page 1/3: Keyboard Controls] ─── [Tab/Arrows] Page ─┐\27[0m\27[K\n")
+            emit("│  NAVIGATION, ZOOM & RESET                                                             │\27[K\n")
+            emit("│    Arrow keys / Shift+H,J,K   Move pixel probe crosshair (1 px / 8 px fast jump)      │\27[K\n")
+            emit("│    + / - / 0                  Zoom In (up to 8x) / Zoom Out / [0] Reset Zoom to 1.0x  │\27[K\n")
+            emit("│    1  (or Shift+R)            FULL RESET: Restore raw image, 1.0x zoom, Auto W/L      │\27[K\n")
+            emit("│                                                                                       │\27[K\n")
+            emit("│  SCIENTIFIC IMAGEJ ANALYSIS & TOOLS                                                   │\27[K\n")
+            emit("│    r                          2-Point ROI Box: Anchor -> Resize -> Lock -> Clear      │\27[K\n")
+            emit("│    d                          Straight-Line Ruler: Measure Distance (px), Angle & dI  │\27[K\n")
+            emit("│    m                          Record current ROI stats into persistent Results Log    │\27[K\n")
+            emit("│    p                          1D Intensity Line Profile modal (with FWHM width math)  │\27[K\n")
+            emit("│    3                          3D Isometric Surface Plot (Topographic Z = Luminance)   │\27[K\n")
+            emit("│    c                          Split RGB Channels (Composite / Red / Green / Blue)     │\27[K\n")
+            emit("│    l / L                      Cycle Lookup Tables (RGB/Gray/Fire/Viridis/Cool/Turbo)  │\27[K\n")
+            emit("│    w / W, b / B               Narrow/Widen Contrast Window & Raise/Lower Brightness   │\27[K\n")
+            emit("│    g / G, e                   Adjust Gamma Curve (0.2-3.0) / Toggle Histogram Equal.  │\27[K\n")
+            emit("│    a                          Auto-Contrast (0.35% ImageJ histogram tail clip)        │\27[K\n")
+            emit("│    t                          Live Split-Pane Threshold & 8-Connected Blob Counter    │\27[K\n")
+            emit("│    f / o                      Cycle 3x3 Spatial Filter / Binary Morphological Ops     │\27[K\n")
+            emit("│    i / s                      Invert Image (255-v) / Save CSV Report & PPM Image      │\27[K\n")
+            emit("└─ [Tab or Left/Right or 1/2/3] Page: (1) Controls  (2) Analysis Guide  (3) Filters ────┘\27[K")
+        elseif p == 2 then
+            emit("\27[1;37;44m┌─ ffi_imagej Help & Reference ─── [Page 2/3: Scientific Analysis] ─ [Tab/Arrows] Page ─┐\27[0m\27[K\n")
+            emit("│  1. PIXEL PROBE & STRAIGHT-LINE RULER ([Arrows], [d])                                 │\27[K\n")
+            emit("│     • Displays (X, Y) position, raw 24-bit (R, G, B), and luminance Y=0.299R+0.587G+… │\27[K\n")
+            emit("│     • [d] Ruler measures Euclidean distance D = sqrt(dx^2+dy^2), angle (deg), and dI. │\27[K\n")
+            emit("│                                                                                       │\27[K\n")
+            emit("│  2. 2-POINT ROI STATISTICS & MEASUREMENT LOG ([r], [m], [s])                          │\27[K\n")
+            emit("│     • Mean & StdDev: Average intensity and pixel-to-pixel contrast spread in box.     │\27[K\n")
+            emit("│     • Integrated Density (IntDen): Area * Mean — measures total signal/fluorescence.  │\27[K\n")
+            emit("│     • [m] snapshots ROI metrics to the Results Log; [s] exports all rows to CSV.      │\27[K\n")
+            emit("│                                                                                       │\27[K\n")
+            emit("│  3. 1D INTENSITY LINE PROFILE & FWHM ([p], [v])                                       │\27[K\n")
+            emit("│     • Plots intensity along horizontal (Y) or vertical (X) slice through cursor.      │\27[K\n")
+            emit("│     • FWHM (Full Width at Half Maximum): Peak width at 50% height (optical sharpness).│\27[K\n")
+            emit("│                                                                                       │\27[K\n")
+            emit("│  4. OTSU AUTO-THRESHOLDING & PARTICLE COUNTER ([t], [a], [Tab])                       │\27[K\n")
+            emit("│     • Otsu's Method automatically finds cutoff T (0-255) maximizing class variance.   │\27[K\n")
+            emit("│     • 8-Connected Blob Labeling counts segmented particles, centroids, and areas.     │\27[K\n")
+            emit("│                                                                                       │\27[K\n")
+            emit("│  5. RGB CHANNEL SPLITTING ([c])                                                       │\27[K\n")
+            emit("│     • Isolates Red, Green, or Blue channels so all stats & histograms measure that ch.│\27[K\n")
+            emit("└─ [Tab or Left/Right or 1/2/3] Page: (1) Controls  (2) Analysis Guide  (3) Filters ────┘\27[K")
+        else
+            emit("\27[1;37;44m┌─ ffi_imagej Help & Reference ─── [Page 3/3: Filters & Contrast] ── [Tab/Arrows] Page ─┐\27[0m\27[K\n")
+            emit("│  6. CONTRAST, WINDOW/LEVEL, GAMMA & EQUALIZATION ([w/W], [b/B], [a], [g/G], [e])      │\27[K\n")
+            emit("│     • Window/Level: Maps [Low..High] intensity to [0..255]. Narrow window = high ctr. │\27[K\n")
+            emit("│     • Auto W/L ([a]): Clips extreme 0.35% histogram tails (NIH ImageJ standard).      │\27[K\n")
+            emit("│     • Gamma ([g/G]): Non-linear power curve V_out = V_in^y (<1 brightens shadows).    │\27[K\n")
+            emit("│     • Equalize ([e]): Flattens histogram via Cumulative Distribution Function (CDF).  │\27[K\n")
+            emit("│                                                                                       │\27[K\n")
+            emit("│  7. 3x3 SPATIAL CONVOLUTION FILTERS ([f]) & INVERT ([i])                              │\27[K\n")
+            emit("│     • Median:  Replaces pixel with 3x3 median; removes salt noise while keeping edges.│\27[K\n")
+            emit("│     • Blur:    3x3 Gaussian smoothing ([1 2 1; 2 4 2; 1 2 1]/16) reduces sensor grain.│\27[K\n")
+            emit("│     • Sobel:   Gradient magnitude sqrt(Gx^2 + Gy^2) highlights object boundaries.     │\27[K\n")
+            emit("│     • Sharpen: 3x3 Laplacian unsharp mask ([0 -1 0; -1 5 -1; 0 -1 0]) crisps edges.   │\27[K\n")
+            emit("│                                                                                       │\27[K\n")
+            emit("│  8. MORPHOLOGICAL BINARY OPERATIONS ([o]) & 3D SURFACE PLOT ([3])                     │\27[K\n")
+            emit("│     • Erode / Dilate: 3x3 local minimum (shrinks spots) / maximum (expands spots).    │\27[K\n")
+            emit("│     • Open / Close:   Erode->Dilate (removes speckles) / Dilate->Erode (fills holes). │\27[K\n")
+            emit("│     • 3D Surface ([3]): Isometric heightmap where Z = pixel luminance colored by LUT. │\27[K\n")
+            emit("│                                                                                       │\27[K\n")
+            emit("│  9. FULL RESET ([1] or [Shift+R])                                                     │\27[K\n")
+            emit("│     • Restores raw image, clears filters/ROI/ruler, resets zoom=1.0x & Auto W/L.      │\27[K\n")
+            emit("└─ [Tab or Left/Right or 1/2/3] Page: (1) Controls  (2) Analysis Guide  (3) Filters ────┘\27[K")
+        end
 
         return table.concat(lines)
     end
@@ -1913,7 +1993,19 @@ local function build_tui_app(initial_img, filename)
         elseif key == "?" then
             self.show_help = not self.show_help
         elseif self.show_help then
-            if key == "ENTER" or key == "SPACE" then self.show_help = false end
+            if key == "ENTER" or key == "SPACE" then
+                self.show_help = false
+            elseif key == "TAB" or key == "RIGHT" or key == "l" then
+                self.help_page = (self.help_page % 3) + 1
+            elseif key == "LEFT" or key == "h" then
+                self.help_page = ((self.help_page - 2) % 3) + 1
+            elseif key == "1" then
+                self.help_page = 1
+            elseif key == "2" then
+                self.help_page = 2
+            elseif key == "3" then
+                self.help_page = 3
+            end
         elseif self.mode == "surface3d" then
             if key == "3" then
                 self.mode = "normal"
@@ -1957,23 +2049,23 @@ local function build_tui_app(initial_img, filename)
             elseif key == "LEFT" then
                 if self.mode == "threshold" then
                     self.threshold_val = math.max(0, self.threshold_val - 4)
-                    self.status_msg = string.format("Threshold T = %d", self.threshold_val)
+                    self.status_msg = string.format("Threshold T = %d (segments pixels >= T in red)", self.threshold_val)
                 else
                     self:move_probe(-1, 0)
                 end
             elseif key == "RIGHT" then
                 if self.mode == "threshold" then
                     self.threshold_val = math.min(255, self.threshold_val + 4)
-                    self.status_msg = string.format("Threshold T = %d", self.threshold_val)
+                    self.status_msg = string.format("Threshold T = %d (segments pixels >= T in red)", self.threshold_val)
                 else
                     self:move_probe(1, 0)
                 end
             elseif key == "<" or key == "," then
                 self.threshold_val = math.max(0, self.threshold_val - 1)
-                self.status_msg = string.format("Threshold T = %d", self.threshold_val)
+                self.status_msg = string.format("Threshold T = %d (fine step -1)", self.threshold_val)
             elseif key == ">" or key == "." then
                 self.threshold_val = math.min(255, self.threshold_val + 1)
-                self.status_msg = string.format("Threshold T = %d", self.threshold_val)
+                self.status_msg = string.format("Threshold T = %d (fine step +1)", self.threshold_val)
             elseif key == "TAB" and self.mode == "threshold" then
                 self.mode = "threshold_table"
             elseif key == "K" then
@@ -1984,43 +2076,48 @@ local function build_tui_app(initial_img, filename)
                 self:move_probe(-8, 0)
             elseif key == "+" or key == "=" then
                 self.zoom = math.min(8.0, self.zoom * 2.0)
-                self.status_msg = string.format("Zoom: %.1fx (centered on probe)", self.zoom)
+                self.status_msg = string.format("Zoom In: %.1fx (centered on probe; press '0' to reset zoom)", self.zoom)
             elseif key == "-" or key == "_" then
                 self.zoom = math.max(1.0, self.zoom / 2.0)
-                self.status_msg = string.format("Zoom: %.1fx", self.zoom)
+                self.status_msg = string.format("Zoom Out: %.1fx", self.zoom)
             elseif key == "0" then
                 self.zoom = 1.0
-                self.status_msg = "Zoom reset to 1.0x."
+                self.status_msg = "Zoom reset to 1.0x (press '1' or 'R' for full image reset)."
             elseif key == "l" then
                 if self.raw_img.is_rgb and self.rgb_passthrough and self.lut_idx == 1 then
                     self.rgb_passthrough = false
                     self.lut_idx = 2
-                    self.status_msg = "LUT changed to: " .. LUT_NAMES[self.lut_idx]
+                    local lname = LUT_NAMES[self.lut_idx]
+                    self.status_msg = string.format("LUT: %s — %s", lname, LUT_DESCRIPTIONS[lname] or "")
                 elseif self.raw_img.is_rgb and self.lut_idx == #LUT_NAMES then
                     self.lut_idx = 1
                     self.rgb_passthrough = true
-                    self.status_msg = "LUT changed to: Original RGB"
+                    self.status_msg = "LUT: Original RGB — Truecolor 24-bit display"
                 else
                     self.lut_idx = (self.lut_idx % #LUT_NAMES) + 1
-                    self.status_msg = "LUT changed to: " .. LUT_NAMES[self.lut_idx]
+                    local lname = LUT_NAMES[self.lut_idx]
+                    self.status_msg = string.format("LUT: %s — %s", lname, LUT_DESCRIPTIONS[lname] or "")
                 end
             elseif key == "L" then
                 if self.raw_img.is_rgb and not self.rgb_passthrough and self.lut_idx == 1 then
                     self.rgb_passthrough = true
-                    self.status_msg = "LUT changed to: Original RGB"
+                    self.status_msg = "LUT: Original RGB — Truecolor 24-bit display"
                 elseif self.raw_img.is_rgb and self.rgb_passthrough and self.lut_idx == 1 then
                     self.rgb_passthrough = false
                     self.lut_idx = #LUT_NAMES
-                    self.status_msg = "LUT changed to: " .. LUT_NAMES[self.lut_idx]
+                    local lname = LUT_NAMES[self.lut_idx]
+                    self.status_msg = string.format("LUT: %s — %s", lname, LUT_DESCRIPTIONS[lname] or "")
                 else
                     self.rgb_passthrough = false
                     self.lut_idx = ((self.lut_idx - 2) % #LUT_NAMES) + 1
-                    self.status_msg = "LUT changed to: " .. LUT_NAMES[self.lut_idx]
+                    local lname = LUT_NAMES[self.lut_idx]
+                    self.status_msg = string.format("LUT: %s — %s", lname, LUT_DESCRIPTIONS[lname] or "")
                 end
             elseif key == "c" or key == "C" then
                 self.channel_idx = (self.channel_idx % #CHANNEL_MODES) + 1
                 self:rebuild_filtered_image()
-                self.status_msg = "Channel Split: " .. CHANNEL_MODES[self.channel_idx]:upper()
+                local cname = CHANNEL_MODES[self.channel_idx]
+                self.status_msg = string.format("Channel: %s (%s)", cname:upper(), CHANNEL_DESCRIPTIONS[cname] or "")
             elseif key == "r" then
                 if self.roi.state == "none" then
                     self.roi.state = "sizing"
@@ -2030,18 +2127,18 @@ local function build_tui_app(initial_img, filename)
                     self.roi.y1 = self.probe_y
                     self.roi.x2 = self.probe_x
                     self.roi.y2 = self.probe_y
-                    self.status_msg = "ROI Sizing: Move cursor to resize box, press 'r' again to lock."
+                    self.status_msg = "ROI Sizing: Move cursor to resize box, press 'r' to lock, 'm' to log stats."
                 elseif self.roi.state == "sizing" then
                     self.roi.state = "locked"
                     self.roi_state = "locked"
                     self.roi.active = true
-                    self.status_msg = string.format("ROI Locked [%d,%d to %d,%d]. Press 'r' to clear.",
+                    self.status_msg = string.format("ROI Locked [%d,%d to %d,%d]. Press 'm' to log or 'r' to clear.",
                         self.roi.x1, self.roi.y1, self.roi.x2, self.roi.y2)
                 else
                     self.roi.state = "none"
                     self.roi_state = "none"
                     self.roi.active = false
-                    self.status_msg = "ROI cleared (showing full-image statistics)."
+                    self.status_msg = "ROI cleared (Section 2 now measures full-image statistics)."
                 end
             elseif key == "d" then
                 if self.ruler.state == "none" then
@@ -2051,12 +2148,13 @@ local function build_tui_app(initial_img, filename)
                     self.ruler.y1 = self.probe_y
                     self.ruler.x2 = self.probe_x
                     self.ruler.y2 = self.probe_y
-                    self.status_msg = "Ruler: Move cursor to end point, press 'd' to lock."
+                    self.status_msg = "Ruler Measuring: Move cursor to target point, press 'd' to lock distance & angle."
                 elseif self.ruler.state == "measuring" then
                     self.ruler.state = "locked"
                     self.ruler.active = true
                     local rm = compute_ruler(self.img, self.ruler.x1, self.ruler.y1, self.ruler.x2, self.ruler.y2)
-                    self.status_msg = string.format("Ruler Locked: D = %.2f px, Angle = %.1f deg", rm.dist, rm.angle_deg)
+                    self.status_msg = string.format("Ruler Locked: D = %.2f px, Angle = %.1f deg, dI = %+d",
+                        rm.dist, rm.angle_deg, rm.dv)
                 else
                     self.ruler.state = "none"
                     self.ruler.active = false
@@ -2064,13 +2162,14 @@ local function build_tui_app(initial_img, filename)
                 end
             elseif key == "m" then
                 local entry = self:record_measurement()
-                self.status_msg = string.format("Logged Measurement #%d: Area=%d, Mean=%.2f, StdDev=%.2f",
-                    entry.id, entry.area, entry.mean, entry.std_dev)
+                self.status_msg = string.format("Logged Measurement #%d (Area=%d, Mean=%.2f, IntDen=%d) — press 's' to export CSV",
+                    entry.id, entry.area, entry.mean, entry.int_den)
             elseif key == "p" then
                 self.mode = "profile"
+                self.status_msg = "1D Intensity Profile: Inspects cross-section & Full Width at Half Maximum (FWHM)."
             elseif key == "3" then
                 self.mode = "surface3d"
-                self.status_msg = "3D Surface Plot view. Press [3] or [Esc] to return."
+                self.status_msg = "3D Surface Plot: Isometric terrain where height Z = pixel luminance."
             elseif key == "t" then
                 if self.mode == "threshold" then
                     self.mode = "normal"
@@ -2078,68 +2177,78 @@ local function build_tui_app(initial_img, filename)
                 else
                     self.mode = "threshold"
                     self.threshold_val = compute_otsu_threshold(self.img)
-                    self.status_msg = string.format("Threshold Mode (Otsu T=%d). [Left/Right] or [</>] to adjust.", self.threshold_val)
+                    self.status_msg = string.format("Otsu Auto-Threshold (T=%d): Red overlay = segmented blobs >= T.", self.threshold_val)
                 end
             elseif key == "w" then
                 self.win_low = math.min(self.win_high - 5, self.win_low + 4)
                 self.win_high = math.max(self.win_low + 5, self.win_high - 4)
                 self:sync_wl()
-                self.status_msg = string.format("Window narrowed: [%d - %d] (Win: %d)", self.win_low, self.win_high, self.win_width)
+                self.status_msg = string.format("Contrast Window narrowed: [%d - %d] (Win:%d — steeper contrast slope)",
+                    self.win_low, self.win_high, self.win_width)
             elseif key == "W" then
                 self.win_low = math.max(0, self.win_low - 4)
                 self.win_high = math.min(255, self.win_high + 4)
                 self:sync_wl()
-                self.status_msg = string.format("Window widened: [%d - %d] (Win: %d)", self.win_low, self.win_high, self.win_width)
+                self.status_msg = string.format("Contrast Window widened: [%d - %d] (Win:%d — softer dynamic range)",
+                    self.win_low, self.win_high, self.win_width)
             elseif key == "b" then
                 local shift = 6
                 self.win_low = math.max(0, self.win_low - shift)
                 self.win_high = math.max(self.win_low + 5, self.win_high - shift)
                 self:sync_wl()
-                self.status_msg = string.format("Brightness raised: [%d - %d] (Lvl: %d)", self.win_low, self.win_high, self.win_level)
+                self.status_msg = string.format("Brightness raised (Window Level shifted down to %d): [%d - %d]",
+                    self.win_level, self.win_low, self.win_high)
             elseif key == "B" then
                 local shift = 6
                 self.win_high = math.min(255, self.win_high + shift)
                 self.win_low = math.min(self.win_high - 5, self.win_low + shift)
                 self:sync_wl()
-                self.status_msg = string.format("Brightness lowered: [%d - %d] (Lvl: %d)", self.win_low, self.win_high, self.win_level)
+                self.status_msg = string.format("Brightness lowered (Window Level shifted up to %d): [%d - %d]",
+                    self.win_level, self.win_low, self.win_high)
             elseif key == "g" then
                 self.gamma = math.max(0.20, self.gamma - 0.10)
-                self.status_msg = string.format("Gamma adjusted: y = %.2f (brighter midtones)", self.gamma)
+                self.status_msg = string.format("Gamma y = %.2f (non-linear power curve V^y — brightens dark shadows)", self.gamma)
             elseif key == "G" then
                 self.gamma = math.min(3.00, self.gamma + 0.10)
-                self.status_msg = string.format("Gamma adjusted: y = %.2f (darker midtones)", self.gamma)
+                self.status_msg = string.format("Gamma y = %.2f (non-linear power curve V^y — deepens midtones/shadows)", self.gamma)
             elseif key == "e" then
                 self.equalized = not self.equalized
                 self:rebuild_filtered_image()
-                self.status_msg = self.equalized and "Histogram Equalization ON." or "Histogram Equalization OFF."
+                self.status_msg = self.equalized
+                    and "Histogram Equalization ON (stretches cumulative distribution CDF across 0-255)."
+                    or "Histogram Equalization OFF."
             elseif key == "a" then
                 if self.mode == "threshold" then
                     self.threshold_val = compute_otsu_threshold(self.img)
-                    self.status_msg = string.format("Otsu Auto-Threshold recomputed: T = %d", self.threshold_val)
+                    self.status_msg = string.format("Otsu Auto-Threshold recomputed: T = %d (maximizes bimodal variance)", self.threshold_val)
                 else
                     self.win_low, self.win_high = compute_auto_window_level(self.img)
                     self:sync_wl()
-                    self.status_msg = string.format("Auto W/L applied (0.35%% clip): %d - %d", self.win_low, self.win_high)
+                    self.status_msg = string.format("Auto W/L applied (0.35%% histogram tail clip): [%d - %d]", self.win_low, self.win_high)
                 end
             elseif key == "f" then
                 self.filter_idx = (self.filter_idx % #FILTER_NAMES) + 1
                 self:rebuild_filtered_image()
-                self.status_msg = "Spatial Filter: " .. FILTER_NAMES[self.filter_idx]:upper()
+                local fname = FILTER_NAMES[self.filter_idx]
+                self.status_msg = string.format("Filter: %s (%s)", fname:upper(), FILTER_DESCRIPTIONS[fname] or "")
             elseif key == "o" then
                 self.morph_idx = (self.morph_idx % #MORPH_NAMES) + 1
                 self:rebuild_filtered_image()
-                self.status_msg = "Morphological Op: " .. MORPH_NAMES[self.morph_idx]:upper()
+                local mname = MORPH_NAMES[self.morph_idx]
+                self.status_msg = string.format("Morphology: %s (%s)", mname:upper(), MORPH_DESCRIPTIONS[mname] or "")
             elseif key == "i" then
                 self.inverted = not self.inverted
                 self:rebuild_filtered_image()
-                self.status_msg = self.inverted and "Image Inverted (255 - v)." or "Image Inversion off."
+                self.status_msg = self.inverted
+                    and "Image Inverted: I_out = 255 - I_in (photographic negative)."
+                    or "Image Inversion OFF."
             elseif key == "s" then
                 local ok, msg = self:export_data()
                 self.status_msg = msg
                 if not ok then
                     io.stderr:write(msg .. "\n")
                 end
-            elseif key == "1" then
+            elseif key == "1" or key == "R" then
                 self.channel_idx = 1
                 self.filter_idx = 1
                 self.morph_idx = 1
@@ -2149,10 +2258,16 @@ local function build_tui_app(initial_img, filename)
                 self.zoom = 1.0
                 self.lut_idx = 1
                 self.rgb_passthrough = self.raw_img.is_rgb
+                self.roi.state = "none"
+                self.roi_state = "none"
+                self.roi.active = false
+                self.ruler.state = "none"
+                self.ruler.active = false
+                self.mode = "normal"
                 self.img = self.raw_img:clone()
                 self.win_low, self.win_high = compute_auto_window_level(self.img)
                 self:sync_wl()
-                self.status_msg = "Reset to original raw image, 1.0x zoom, and Auto W/L."
+                self.status_msg = "FULL RESET: Restored raw image, 1.0x zoom, cleared filters/ROI/ruler, Auto W/L."
             end
         end
         return true
@@ -2183,7 +2298,8 @@ local CLI_HELP = table.concat({
     "",
     "Interactive Keybindings:",
     "  Arrow keys             Move pixel probe crosshair (+)",
-    "  + / - / 0              Zoom In / Zoom Out / Reset Zoom (1.0x to 8.0x)",
+    "  + / - / 0              Zoom In / Zoom Out / [0] Reset Zoom (1.0x to 8.0x)",
+    "  1 / Shift+R            FULL RESET: Restore original image, 1.0x zoom, Auto W/L, clear ROI/Ruler",
     "  r                      2-Point ROI: Anchor -> Resize -> Lock -> Clear",
     "  d                      Point-to-Point Euclidean Distance & Angle Ruler",
     "  m                      Record ROI Measurement into Results Log",
@@ -2198,9 +2314,20 @@ local CLI_HELP = table.concat({
     "  f / o                  Cycle Spatial Filter / Binary Morphological Ops",
     "  i                      Invert image values (255 - v)",
     "  s                      Save CSV Measurements & Export Processed PPM Image",
-    "  1                      Reset to raw original image",
-    "  ?                      Toggle in-app Help dialog",
+    "  ?                      Toggle 3-Page Interactive Help & Scientific Reference",
     "  q / Esc                Exit viewer",
+    "",
+    "Scientific Functions & Algorithms Guide:",
+    "  * ROI Statistics (r/m) : Computes Area, Mean, StdDev, Min, Max, Median, and Integrated Density",
+    "                           (IntDen = Area * Mean, measuring total fluorescence/signal energy).",
+    "  * Line Profile (p)     : Extracts 1D intensity cross-section and Full Width at Half Maximum",
+    "                           (FWHM), measuring optical feature width at 50% peak height above baseline.",
+    "  * Otsu Threshold (t/a) : Automatically finds threshold T (0-255) maximizing inter-class variance,",
+    "                           followed by 8-connected flood-fill blob labeling & centroid measurement.",
+    "  * Spatial Filters (f)  : 3x3 Median (impulse noise removal), Gaussian Blur (grain smoothing),",
+    "                           Sobel (gradient edge magnitude), and Laplacian Sharpen (edge enhancement).",
+    "  * Morphology Ops (o)   : 3x3 Erode (min), Dilate (max), Open (removes speckles), Close (fills holes).",
+    "  * Contrast & Gamma     : Linear Window/Level [Low..High], non-linear Gamma (V^y), and CDF Equalization.",
     "",
     "Examples:",
     "  luajit ffi_imagej.lua                           # Open with procedural cell colonies",
