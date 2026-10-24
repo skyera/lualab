@@ -194,6 +194,17 @@ run_test("Test 6: Spatial Convolutions (Median & Sobel Edge)", function()
     if edge_val < 150 then
         error("Expected strong Sobel edge at boundary, got " .. tostring(edge_val))
     end
+
+    -- Sharpen filter preserves uniform region and enhances contrast at step
+    local sharp = imagej.apply_filter(step_img, "sharpen")
+    assert_eq(sharp:get_gray(2, 2), 0, "sharpen flat dark")
+    assert_eq(sharp:get_gray(15, 15), 200, "sharpen flat bright")
+    assert(sharp:get_gray(10, 10) >= 200, "sharpen boosts bright edge")
+
+    -- Invert filter
+    local inv = imagej.apply_filter(step_img, "invert")
+    assert_eq(inv:get_gray(2, 2), 255, "invert 0 -> 255")
+    assert_eq(inv:get_gray(15, 15), 55, "invert 200 -> 55")
 end)
 
 -- Test 7: Lookup Tables (LUTs) Mapping
@@ -229,10 +240,14 @@ run_test("Test 8: Headless TUI Rendering (All Modes & Views)", function()
     local prof_frame = app:render(100, 30)
     assert(#prof_frame > 200, "profile frame rendered")
 
-    -- 3. Threshold Modal
+    -- 3. Threshold Split-Pane & Full Table Modal
     app.mode = "threshold"
     local thresh_frame = app:render(100, 30)
-    assert(#thresh_frame > 200, "threshold frame rendered")
+    assert(#thresh_frame > 200, "threshold split-pane frame rendered")
+
+    app.mode = "threshold_table"
+    local table_frame = app:render(100, 30)
+    assert(#table_frame > 200, "threshold full table modal rendered")
 
     -- 4. Help Modal
     app.show_help = true
@@ -282,10 +297,11 @@ run_test("Test 10: CLI Help & Argument Options", function()
     local ret_target = imagej.main({ "--target=usaf", "--test" })
     assert_eq(ret_target, 0, "--target=usaf return code")
 
-    -- Test interactive 'l' and 'L' LUT cycling
+    -- Test interactive 'l' and 'L' LUT cycling on Grayscale
     local buf = imagej.ImageBuffer.generate_cells(32, 32)
     local app = imagej.build_tui_app(buf, "test.pgm")
     assert_eq(app.lut_idx, 1, "initial lut is grayscale")
+    assert_eq(app.rgb_passthrough, false, "grayscale not rgb passthrough")
     app:handle_key("l")
     assert_eq(app.lut_idx, 2, "l key cycles to Fire")
     app:handle_key("l")
@@ -294,6 +310,76 @@ run_test("Test 10: CLI Help & Argument Options", function()
     assert_eq(app.lut_idx, 2, "L key cycles backward to Fire")
 end)
 
+-- Test 11: RGB Passthrough, 2-Point ROI, Zoom, Window/Level & Verified Export
+run_test("Test 11: RGB Passthrough, 2-Pt ROI, Zoom & Export", function()
+    -- 1. RGB Truecolor Passthrough
+    local rgb_buf = imagej.ImageBuffer.new(32, 32, true)
+    rgb_buf:set_pixel(5, 5, 250, 120, 40)
+    local rgb_app = imagej.build_tui_app(rgb_buf, "rgb_test.ppm")
+    assert_eq(rgb_app.rgb_passthrough, true, "RGB image starts in Truecolor passthrough")
+    rgb_app:handle_key("l")
+    assert_eq(rgb_app.rgb_passthrough, false, "l key switches RGB image to LUT mode")
+    assert_eq(rgb_app.lut_idx, 2, "switches to Fire LUT")
+    rgb_app:handle_key("L")
+    assert_eq(rgb_app.lut_idx, 1, "switches back to Grayscale")
+    rgb_app:handle_key("L")
+    assert_eq(rgb_app.rgb_passthrough, true, "cycles back to Original RGB")
+
+    -- 2. 2-Point Interactive ROI State Machine
+    assert_eq(rgb_app.roi_state, "none", "initial ROI state is none")
+    rgb_app.probe_x = 4
+    rgb_app.probe_y = 6
+    rgb_app:handle_key("r")
+    assert_eq(rgb_app.roi_state, "sizing", "first r starts sizing")
+    assert_eq(rgb_app.roi.x1, 4, "roi x1 anchored at probe_x")
+    assert_eq(rgb_app.roi.y1, 6, "roi y1 anchored at probe_y")
+
+    -- Move cursor to resize ROI
+    rgb_app:handle_key("RIGHT")
+    rgb_app:handle_key("DOWN")
+    assert_eq(rgb_app.roi.x2, 5, "roi x2 follows cursor")
+    assert_eq(rgb_app.roi.y2, 7, "roi y2 follows cursor")
+
+    rgb_app:handle_key("r")
+    assert_eq(rgb_app.roi_state, "locked", "second r locks ROI")
+    rgb_app:handle_key("RIGHT")
+    assert_eq(rgb_app.roi.x2, 5, "locked ROI does not change when cursor moves")
+
+    rgb_app:handle_key("r")
+    assert_eq(rgb_app.roi_state, "none", "third r clears ROI")
+
+    -- 3. Interactive Zoom & Pan
+    assert_eq(rgb_app.zoom, 1.0, "initial zoom 1.0x")
+    rgb_app:handle_key("+")
+    assert_eq(rgb_app.zoom, 2.0, "zoom in to 2.0x")
+    local vx0, vy0, vw, vh = rgb_app:get_viewport_bounds()
+    assert_eq(vw, 16, "2.0x zoom halves viewport width")
+    assert_eq(vh, 16, "2.0x zoom halves viewport height")
+    rgb_app:handle_key("0")
+    assert_eq(rgb_app.zoom, 1.0, "0 resets zoom to 1.0x")
+
+    -- 4. Bidirectional Window/Level
+    local w0 = rgb_app.win_width
+    rgb_app:handle_key("w")
+    assert(rgb_app.win_width < w0, "w narrows contrast window")
+    rgb_app:handle_key("W")
+    assert_eq(rgb_app.win_width, w0, "W widens contrast window back")
+
+    local b0 = rgb_app.win_level
+    rgb_app:handle_key("b")
+    assert(rgb_app.win_level > b0, "b raises brightness level")
+    rgb_app:handle_key("B")
+    assert_eq(rgb_app.win_level, b0, "B lowers brightness level back")
+
+    -- 5. Verified CSV + PPM Export
+    local tmp_csv = "test_tmp_measurements.csv"
+    local tmp_ppm = "test_tmp_export.ppm"
+    local ok, msg = rgb_app:export_data(tmp_csv, tmp_ppm)
+    assert_eq(ok, true, "export_data succeeded: " .. tostring(msg))
+    os.remove(tmp_csv)
+    os.remove(tmp_ppm)
+end)
+
 print("================================================================================")
-print("\27[32mALL 9 TEST SUITES PASSED! Mathematical & UI invariants verified.\27[0m")
+print("\27[32mALL 11 TEST SUITES PASSED! Mathematical & UI invariants verified.\27[0m")
 print("================================================================================")
