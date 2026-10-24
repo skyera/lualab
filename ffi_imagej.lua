@@ -472,11 +472,8 @@ function ImageBuffer.generate_target(width, height)
     return img
 end
 
--- Load PPM / PGM format (P2, P3, P5, P6)
-function ImageBuffer.load_pnm(filepath)
-    local f = io.open(filepath, "rb")
-    if not f then return nil, "Cannot open file: " .. tostring(filepath) end
-
+-- Parse PNM stream from an open file handle or pipe
+function ImageBuffer.parse_pnm_handle(f)
     local function read_token()
         local tok = ""
         while true do
@@ -495,12 +492,14 @@ function ImageBuffer.load_pnm(filepath)
 
     local magic = read_token()
     if not magic or magic == "" then
-        f:close()
         return nil, "Invalid or empty PNM header"
     end
 
     local is_rgb = (magic == "P3" or magic == "P6")
     local is_binary = (magic == "P5" or magic == "P6")
+    if not (magic == "P2" or magic == "P3" or magic == "P5" or magic == "P6") then
+        return nil, "Unsupported magic format: " .. tostring(magic)
+    end
 
     local width_str = read_token()
     local height_str = read_token()
@@ -511,7 +510,6 @@ function ImageBuffer.load_pnm(filepath)
     local max_val = tonumber(max_val_str) or 255
 
     if not w or not h or w <= 0 or h <= 0 then
-        f:close()
         return nil, "Invalid dimensions: " .. tostring(width_str) .. "x" .. tostring(height_str)
     end
 
@@ -521,7 +519,6 @@ function ImageBuffer.load_pnm(filepath)
         local bytes_per_px = is_rgb and 3 or 1
         local total_bytes = w * h * bytes_per_px
         local raw_data = f:read(total_bytes)
-        f:close()
         if not raw_data or #raw_data < total_bytes then
             return nil, "Premature end of file in binary PNM stream"
         end
@@ -541,10 +538,50 @@ function ImageBuffer.load_pnm(filepath)
                 end
             end
         end
-        f:close()
     end
 
     return img
+end
+
+-- Load PPM / PGM format (P2, P3, P5, P6)
+function ImageBuffer.load_pnm(filepath)
+    local f = io.open(filepath, "rb")
+    if not f then return nil, "Cannot open file: " .. tostring(filepath) end
+    local img, err = ImageBuffer.parse_pnm_handle(f)
+    f:close()
+    return img, err
+end
+
+-- Universal Image Loader: Native PNM with FFmpeg & ImageMagick fallback (PNG, JPG, TIFF, BMP)
+function ImageBuffer.load_image(filepath)
+    local test_f = io.open(filepath, "rb")
+    if not test_f then
+        return nil, "Cannot open file: " .. tostring(filepath)
+    end
+    local header = test_f:read(3) or ""
+    test_f:close()
+
+    -- 1. Native PNM format
+    if header:match("^P[2356]") then
+        local img, err = ImageBuffer.load_pnm(filepath)
+        if img then return img end
+    end
+
+    -- 2. Pipe fallback via FFmpeg or ImageMagick
+    local devnull = is_windows and "nul" or "/dev/null"
+    local popen_mode = is_windows and "rb" or "r"
+    local cmd = string.format('ffmpeg -nostdin -loglevel quiet -i %q -f image2pipe -vcodec ppm - 2>%s || magick %q ppm:- 2>%s',
+        filepath, devnull, filepath, devnull)
+    local pipe = io.popen(cmd, popen_mode)
+    if pipe then
+        local img, err = ImageBuffer.parse_pnm_handle(pipe)
+        pipe:close()
+        if img then
+            return img
+        end
+    end
+
+    return nil, "Unsupported image format or missing decoder (requires PNM, ffmpeg, or magick)"
 end
 
 -- =============================================================================
@@ -1446,7 +1483,7 @@ local function main(args)
         filename = "gradient_wedge.pgm"
     elseif filepath then
         local err
-        img, err = ImageBuffer.load_pnm(filepath)
+        img, err = ImageBuffer.load_image(filepath)
         if not img then
             io.stderr:write(string.format("Error loading '%s': %s\nFalling back to procedural target.\n", filepath, tostring(err)))
             img = ImageBuffer.generate_cells(128, 128)
