@@ -271,6 +271,18 @@ run_test("Test 9: Scoping & Undeclared Global Check (GGET)", function()
     end
 end)
 
+-- Test 10: CLI Help & Argument Options (--help, -h, /?, --target)
+run_test("Test 10: CLI Help & Argument Options", function()
+    local ret_help = imagej.main({ "--help" })
+    assert_eq(ret_help, 0, "--help return code")
+
+    local ret_h = imagej.main({ "-h" })
+    assert_eq(ret_h, 0, "-h return code")
+
+    local ret_target = imagej.main({ "--target=usaf", "--test" })
+    assert_eq(ret_target, 0, "--target=usaf return code")
+end)
+
 print("================================================================================")
 print("\27[32mALL 9 TEST SUITES PASSED! Mathematical & UI invariants verified.\27[0m")
 print("================================================================================")

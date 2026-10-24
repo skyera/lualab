@@ -1369,12 +1369,82 @@ end
 -- =============================================================================
 -- 6. CLI Entry Point & Interactive Event Loop
 -- =============================================================================
+-- =============================================================================
+-- 6. CLI Help & Argument Options
+-- =============================================================================
+local CLI_HELP = table.concat({
+    "ffi_imagej - Scientific Image Viewer & Analysis TUI in LuaJIT FFI",
+    "Inspired by ImageJ (National Institutes of Health)",
+    "",
+    "Usage: luajit ffi_imagej.lua [OPTIONS] [IMAGE_FILE]",
+    "",
+    "Arguments:",
+    "  IMAGE_FILE             Path to image file (PGM, PPM, or PNG/JPG/TIFF).",
+    "                         If omitted, loads procedural cell colonies.",
+    "",
+    "Options:",
+    "  -h, --help, /?         Show this help message and exit.",
+    "  -t, --test             Headless render test (outputs single frame and exits).",
+    "  --target=TARGET        Generate synthetic target: 'cells' (default), 'usaf', or 'gradient'.",
+    "  --lut=LUT_NAME         Set initial colormap: Grayscale, Fire, Viridis, Cool, Turbo, Green.",
+    "  --threshold=N          Set initial segmentation threshold (0-255).",
+    "",
+    "Interactive Keybindings:",
+    "  Arrow keys / h j k l   Move pixel probe crosshair (+)",
+    "  r                      Toggle Region of Interest (ROI) box",
+    "  p                      1D Intensity Profile (Horiz/Vert slice with FWHM)",
+    "  l                      Cycle scientific Lookup Tables (LUTs)",
+    "  w / b                  Adjust Window / Level (Contrast / Brightness)",
+    "  a                      Auto-Contrast (0.35% ImageJ saturation clip)",
+    "  t                      Threshold & Particle / Connected Component analysis",
+    "  f                      Apply 3x3 Median noise reduction filter",
+    "  1                      Reset to raw original image",
+    "  ?                      Toggle in-app Help dialog",
+    "  q / Esc                Exit viewer",
+    "",
+    "Examples:",
+    "  luajit ffi_imagej.lua                           # Open with procedural cell colonies",
+    "  luajit ffi_imagej.lua --target=usaf             # View USAF-1951 resolution target",
+    "  luajit ffi_imagej.lua sample.pgm                # Open local scientific PGM image",
+    "  luajit ffi_imagej.lua --lut=Fire cells.pgm      # Open with Fire false-color palette",
+    "  luajit ffi_imagej.lua --help                    # Show this help text"
+}, "\n")
+
 local function main(args)
-    local filepath = args[1]
+    args = args or {}
+    local filepath = nil
+    local target_type = nil
+    local initial_lut = nil
+    local initial_thresh = nil
+    local is_test = false
+
+    for _, a in ipairs(args) do
+        if a == "-h" or a == "--help" or a == "/?" then
+            io.write(CLI_HELP, "\n")
+            return 0
+        elseif a == "-t" or a == "--test" then
+            is_test = true
+        elseif a:match("^%-%-target=") then
+            target_type = a:match("^%-%-target=(%w+)$")
+        elseif a:match("^%-%-lut=") then
+            initial_lut = a:match("^%-%-lut=(.+)$")
+        elseif a:match("^%-%-threshold=") then
+            initial_thresh = tonumber(a:match("^%-%-threshold=(%d+)$"))
+        elseif not a:match("^%-") and not filepath then
+            filepath = a
+        end
+    end
+
     local img
     local filename = "cell_colony_procedural.pgm"
 
-    if filepath and filepath ~= "--test" and filepath ~= "-t" then
+    if target_type == "usaf" then
+        img = ImageBuffer.generate_target(128, 128)
+        filename = "usaf_target.pgm"
+    elseif target_type == "gradient" then
+        img = ImageBuffer.generate_target(128, 128)
+        filename = "gradient_wedge.pgm"
+    elseif filepath then
         local err
         img, err = ImageBuffer.load_pnm(filepath)
         if not img then
@@ -1384,14 +1454,26 @@ local function main(args)
             filename = filepath:match("[^/\\]+$") or filepath
         end
     else
-        -- Generate built-in synthetic cells
         img = ImageBuffer.generate_cells(128, 128)
     end
 
     local app = build_tui_app(img, filename)
 
+    if initial_lut then
+        for idx, name in ipairs(LUT_NAMES) do
+            if name:lower() == initial_lut:lower() then
+                app.lut_idx = idx
+                break
+            end
+        end
+    end
+
+    if initial_thresh then
+        app.threshold_val = math.max(0, math.min(255, initial_thresh))
+    end
+
     -- Headless test mode
-    if args[1] == "--test" or args[1] == "-t" or not is_stdin_tty() then
+    if is_test or not is_stdin_tty() then
         local cols, rows = 100, 30
         local frame = app:render(cols, rows)
         if #frame > 100 then
