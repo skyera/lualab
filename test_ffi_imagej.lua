@@ -256,6 +256,7 @@ run_test("Test 9: Scoping & Undeclared Global Check (GGET)", function()
             local allowed = {
                 require = true, ffi = true, bit = true, math = true,
                 string = true, table = true, io = true, os = true,
+                debug = true, arg = true,
                 pcall = true, setmetatable = true, tonumber = true,
                 tostring = true, ipairs = true, type = true, assert = true
             }

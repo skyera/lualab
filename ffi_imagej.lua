@@ -1451,8 +1451,12 @@ local M = {
     main = main
 }
 
-if ... == nil or ... == "ffi_imagej" then
+local caller = debug.getinfo(2, "f")
+if caller and caller.func == require then
     return M
-else
-    return main({ ... })
 end
+if ... and (...) == "ffi_imagej" then
+    return M
+end
+
+return main(arg or { ... })
