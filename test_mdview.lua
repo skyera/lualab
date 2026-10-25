@@ -536,6 +536,91 @@ test("line numbers track source lines and leave wrapped rows blank", function()
     eq(lines[paragraph_index + 1].number, nil, "wrapped continuation has no number")
 end)
 
+test("footnote references become numbered links and append notes", function()
+    local lines = render_lines("Text[^a] and again[^a].\n\n[^a]: Note **body**.\n", 60)
+    local paragraph
+    for _, line in ipairs(lines) do
+        if line.text:find("Text", 1, true) then
+            paragraph = line
+        end
+    end
+    truthy(paragraph, "paragraph rendered")
+    truthy(paragraph.text:find("[1] and again[1]", 1, true), "both refs share a number")
+
+    local marker
+    for _, span in ipairs(paragraph.spans) do
+        if span.text == "[1]" then
+            marker = span
+        end
+    end
+    truthy(marker, "marker span present")
+    eq(marker.style.href, "#fn-a", "marker href")
+    truthy(contains(lines, "Notes"), "notes heading appended")
+    truthy(contains(lines, "[1] Note body."), "note body rendered")
+
+    local note
+    for _, line in ipairs(lines) do
+        if line.text:find("[1] Note", 1, true) then
+            note = line
+        end
+    end
+    eq(note.number, 3, "note keeps its source line")
+    truthy(not contains(lines, "[^a]:"), "definition line not rendered in place")
+end)
+
+test("footnotes number by first reference and append in order", function()
+    local lines = render_lines("B[^b] A[^a].\n\n[^a]: Note A.\n[^b]: Note B.\n", 60)
+    truthy(lines[1].text:find("B[1] A[2]", 1, true), "reference order numbering")
+
+    local notes = {}
+    for _, line in ipairs(lines) do
+        local number, text = line.text:match("^%[(%d+)%] (.*)$")
+        if number then
+            notes[#notes + 1] = { number = tonumber(number), text = text }
+        end
+    end
+    eq(#notes, 2, "two notes")
+    eq(notes[1].number, 1, "first note number")
+    eq(notes[1].text, "Note B.", "first note is the first referenced")
+    eq(notes[2].text, "Note A.", "second note follows")
+end)
+
+test("reference links resolve and definitions stay hidden", function()
+    local lines = render_lines("See [the docs][docs] and [docs][].\n\n"
+        .. "[docs]: https://example.com/docs\n", 60)
+    local links = {}
+    for _, span in ipairs(lines[1].spans) do
+        if span.style and span.style.href then
+            links[#links + 1] = span
+        end
+    end
+    eq(#links, 2, "both reference links resolved")
+    eq(links[1].style.href, "https://example.com/docs", "full reference href")
+    eq(links[2].style.href, "https://example.com/docs", "collapsed reference href")
+    truthy(not contains(lines, "[docs]:"), "definition line hidden")
+end)
+
+test("undefined footnotes and reference links stay literal", function()
+    local lines = render_lines("Undefined[^missing] and [text][nope].\n", 60)
+    truthy(contains(lines, "[^missing]"), "undefined footnote literal")
+    truthy(contains(lines, "[text][nope]"), "undefined reference literal")
+end)
+
+test("code spans and code fences do not define or resolve notes", function()
+    local markdown = "Use `[^a]` literally, but real[^a].\n\n```text\n[docs]: https://example.com\n```\n\n"
+        .. "[^a]: Note.\n"
+    local lines = render_lines(markdown, 60)
+    local literal
+    for _, span in ipairs(lines[1].spans) do
+        if span.style and span.style.code and span.text == "[^a]" then
+            literal = true
+        end
+    end
+    truthy(literal, "footnote syntax inside a code span stays literal")
+    truthy(contains(lines, "[docs]: https://example.com"), "fenced definition stays code")
+    truthy(contains(lines, "Notes"), "real note still appended")
+end)
+
 test("themes switch the palette colors", function()
     local function ansi_for(theme)
         mdview.set_theme(theme)

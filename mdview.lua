@@ -467,7 +467,7 @@ end
 -- =========================================================================
 local PUNCTUATION = "!\"#$%%&'()*+,-./:;<=>?@[\\]^_`{|}~"
 
-local function parse_inline(text, base)
+local function parse_inline(text, base, defs, footnote_state)
     local spans = {}
     local buffer = {}
     local index = 1
@@ -521,7 +521,7 @@ local function parse_inline(text, base)
                 flush()
                 local inner = text:sub(index + #marker, close - 1)
                 local child = merge_style(base, double and { bold = true } or { italic = true })
-                append_children(parse_inline(inner, child))
+                append_children(parse_inline(inner, child, defs, footnote_state))
                 index = close + #marker
             else
                 buffer[#buffer + 1] = char
@@ -532,7 +532,8 @@ local function parse_inline(text, base)
             if close then
                 flush()
                 local inner = text:sub(index + 2, close - 1)
-                append_children(parse_inline(inner, merge_style(base, { strike = true })))
+                append_children(parse_inline(inner, merge_style(base, { strike = true }),
+                    defs, footnote_state))
                 index = close + 2
             else
                 buffer[#buffer + 1] = char
@@ -554,6 +555,27 @@ local function parse_inline(text, base)
                 buffer[#buffer + 1] = char
                 index = index + 1
             end
+        elseif char == "[" and text:sub(index + 1, index + 1) == "^" then
+            local id, stop = text:match("^%[%^([^%]]+)%]()", index)
+            local key = id and id:lower()
+            if key and footnote_state and footnote_state.definitions[key] then
+                local number = footnote_state.order[key]
+                if not number then
+                    footnote_state.count = footnote_state.count + 1
+                    number = footnote_state.count
+                    footnote_state.order[key] = number
+                    footnote_state.used[number] = key
+                end
+                flush()
+                add_span(spans, string.format("[%d]", number), merge_style(base, {
+                    underline = true,
+                    href = "#fn-" .. key,
+                }))
+                index = stop
+            else
+                buffer[#buffer + 1] = char
+                index = index + 1
+            end
         elseif char == "[" then
             local label, url, stop = text:match("^%[([^%]]*)%]%(([^%)]*)%)()", index)
             if label then
@@ -563,14 +585,27 @@ local function parse_inline(text, base)
                     append_children(parse_inline(label, merge_style(base, {
                         underline = true,
                         href = safe_url,
-                    })))
+                    }), defs, footnote_state))
                 else
-                    append_children(parse_inline(label, base))
+                    append_children(parse_inline(label, base, defs, footnote_state))
                 end
                 index = stop
             else
-                buffer[#buffer + 1] = char
-                index = index + 1
+                local ref_label, reference, ref_stop = text:match(
+                    "^%[([^%]]*)%]%[([^%]]*)%]()", index)
+                local key = ref_label and (reference == "" and ref_label or reference):lower()
+                local definition = key and defs and defs[key]
+                if definition then
+                    flush()
+                    append_children(parse_inline(ref_label, merge_style(base, {
+                        underline = true,
+                        href = definition.url,
+                    }), defs, footnote_state))
+                    index = ref_stop
+                else
+                    buffer[#buffer + 1] = char
+                    index = index + 1
+                end
             end
         elseif char == "<" and text:match("^<([%w%+%-%.]+@[%w%.%-]+)>", index) then
             local address = text:match("^<([%w%+%-%.]+@[%w%.%-]+)>", index)
@@ -642,7 +677,7 @@ local function wrap_flow(spans, width, first_indent, next_indent)
                     end
                     stop = stop + #c
                 end
-                tokens[#tokens + 1] = { space = true }
+                tokens[#tokens + 1] = { space = true, style = span.style }
                 pos = stop
             else
                 local stop = pos
@@ -660,9 +695,11 @@ local function wrap_flow(spans, width, first_indent, next_indent)
     end
 
     local pending_space = false
+    local pending_space_style = nil
     for _, token in ipairs(tokens) do
         if token.space then
             pending_space = has_content
+            pending_space_style = token.style
         else
             local word = token.text
             local word_width = display_width(word)
@@ -673,7 +710,7 @@ local function wrap_flow(spans, width, first_indent, next_indent)
                 need_space = false
             end
             if need_space then
-                add_span(current, " ", nil)
+                add_span(current, " ", pending_space_style)
                 current_width = current_width + 1
             end
 
@@ -707,6 +744,7 @@ local function wrap_flow(spans, width, first_indent, next_indent)
                 end
             end
             pending_space = false
+            pending_space_style = nil
         end
     end
 
@@ -857,6 +895,61 @@ local function starts_block(line)
         or line:match("^%s*>") ~= nil
         or is_hr(line)
         or match_list_item(line) ~= nil
+end
+
+local function collect_definitions(text)
+    local lines = {}
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+        lines[#lines + 1] = line:gsub("\r$", "")
+    end
+    if lines[#lines] == "" then
+        lines[#lines] = nil
+    end
+
+    local defs = {}
+    local footnotes = {}
+    local fence_char
+    local fence_length = 0
+
+    for index, raw in ipairs(lines) do
+        local opening = raw:match("^%s*(`+)%s*.*$") or raw:match("^%s*(~+)%s*.*$")
+        if opening and #opening < 3 then
+            opening = nil
+        end
+        if fence_char then
+            local closing = raw:match("^%s*(" .. fence_char .. "+)%s*$")
+            if closing and #closing >= fence_length then
+                fence_char = nil
+                fence_length = 0
+            end
+        elseif opening then
+            fence_char = opening:sub(1, 1)
+            fence_length = #opening
+        else
+            local id, rest = raw:match("^%s*%[([^%]]+)%]:%s*(.-)%s*$")
+            if id and #rest > 0 then
+                if id:sub(1, 1) == "^" then
+                    local key = id:sub(2):lower()
+                    if #key > 0 and not footnotes[key] then
+                        footnotes[key] = { text = rest, line = index }
+                    end
+                    lines[index] = ""
+                else
+                    local url = rest:match("^<([^>]*)>") or rest:match("^(%S+)")
+                    local is_url = url and (url:match("^%a[%w%+%.%-]*://")
+                        or url:sub(1, 1) == "/" or url:sub(1, 1) == "#"
+                        or url:sub(1, 2) == "./" or url:sub(1, 3) == "../"
+                        or url:match("^mailto:"))
+                    if is_url then
+                        defs[id:lower()] = { url = url, line = index, label = id }
+                        lines[index] = ""
+                    end
+                end
+            end
+        end
+    end
+
+    return table.concat(lines, "\n"), defs, footnotes
 end
 
 local function parse_blocks(text, line_offset)
@@ -1126,10 +1219,11 @@ end
 
 local render_blocks
 
-local function render_heading(block, width, out)
+local function render_heading(block, width, out, context)
     local level = math.max(1, math.min(6, block.level))
     local style = STYLE.heading[level]
-    for position, line in ipairs(wrap_flow(parse_inline(block.text, style), width)) do
+    local spans = parse_inline(block.text, style, context.defs, context.footnote_state)
+    for position, line in ipairs(wrap_flow(spans, width)) do
         if position == 1 then
             line.number = block.line
         end
@@ -1194,7 +1288,7 @@ local function render_quote(block, width, out, context)
     end
 end
 
-local function render_list(block, width, out)
+local function render_list(block, width, out, context)
     local counters = {}
     for _, item in ipairs(block.items) do
         local depth = math.max(1, item.depth or 1)
@@ -1231,7 +1325,8 @@ local function render_list(block, width, out)
 
         local prefix_width = display_width(indent) + display_width(marker) + 1
         local content_width = math.max(8, width - prefix_width)
-        local wrapped = wrap_flow(parse_inline(text), content_width)
+        local wrapped = wrap_flow(parse_inline(text, nil, context.defs, context.footnote_state),
+            content_width)
         if #wrapped == 0 then
             wrapped[1] = make_line({})
         end
@@ -1493,7 +1588,7 @@ local function render_image(block, width, out, context)
     end
 end
 
-local function render_table(block, width, out)
+local function render_table(block, width, out, context)
     local columns = math.max(1, #block.headers)
     local parsed = {}
     local widths = {}
@@ -1508,7 +1603,8 @@ local function render_table(block, width, out)
                 local row = block.rows[row_index] or {}
                 source = row[column] or ""
             end
-            parsed[row_index][column] = parse_inline(source)
+            parsed[row_index][column] = parse_inline(source, nil,
+                context.defs, context.footnote_state)
         end
         return parsed[row_index][column]
     end
@@ -1603,9 +1699,10 @@ render_blocks = function(blocks, width, out, base_style, context)
         end
 
         if block.kind == "heading" then
-            render_heading(block, width, out)
+            render_heading(block, width, out, context)
         elseif block.kind == "paragraph" then
-            local spans = parse_inline(block.text, base_style)
+            local spans = parse_inline(block.text, base_style,
+                context.defs, context.footnote_state)
             local lines = wrap_flow(spans, width)
             if #lines == 0 then
                 lines[1] = make_line({})
@@ -1623,13 +1720,53 @@ render_blocks = function(blocks, width, out, base_style, context)
         elseif block.kind == "image" then
             render_image(block, width, out, context)
         elseif block.kind == "list" then
-            render_list(block, width, out)
+            render_list(block, width, out, context)
         elseif block.kind == "table" then
-            render_table(block, width, out)
+            render_table(block, width, out, context)
         elseif block.kind == "hr" then
             local spans = {}
             add_span(spans, string.rep("─", math.max(1, width)), { fg = THEME.rule2 })
             out[#out + 1] = make_line(spans, block.line)
+        end
+    end
+end
+
+local function append_footnotes(out, width, context)
+    local state = context.footnote_state
+    if not state or state.count == 0 then
+        return
+    end
+    if #out > 0 then
+        out[#out + 1] = make_line({})
+    end
+    local heading = {}
+    add_span(heading, "Notes", STYLE.heading[4])
+    out[#out + 1] = make_line(heading)
+
+    for number = 1, state.count do
+        local id = state.used[number]
+        local definition = state.definitions[id]
+        if definition then
+            local marker = string.format("[%d] ", number)
+            local prefix_width = display_width(marker)
+            local body = parse_inline(definition.text, nil, context.defs, state)
+            local wrapped = wrap_flow(body, math.max(8, width - prefix_width))
+            if #wrapped == 0 then
+                wrapped[1] = make_line({})
+            end
+            for position, line in ipairs(wrapped) do
+                local spans = {}
+                if position == 1 then
+                    add_span(spans, marker, STYLE.marker)
+                else
+                    add_span(spans, string.rep(" ", prefix_width), nil)
+                end
+                for _, span in ipairs(line.spans) do
+                    add_span(spans, span.text, span.style)
+                end
+                out[#out + 1] = make_line(spans,
+                    position == 1 and definition.line or nil)
+            end
         end
     end
 end
@@ -1639,11 +1776,20 @@ function M.render(text, width, options)
     if type(options) ~= "table" then
         options = {}
     end
+    local cleaned, defs, footnotes = collect_definitions(text)
+    local footnote_state = {
+        definitions = footnotes,
+        order = {},
+        used = {},
+        count = 0,
+    }
     local context = {
         base_dir = options.base_dir,
         images = options.images ~= false,
         max_image_width = options.max_image_width or 48,
         max_image_height = options.max_image_height or 16,
+        defs = defs,
+        footnote_state = footnote_state,
     }
     local gutter = 0
     if options.numbers == true then
@@ -1656,7 +1802,8 @@ function M.render(text, width, options)
     end
     local content_width = math.max(20, width - gutter)
     local lines = {}
-    render_blocks(parse_blocks(text), content_width, lines, nil, context)
+    render_blocks(parse_blocks(cleaned), content_width, lines, nil, context)
+    append_footnotes(lines, content_width, context)
     while #lines > 0 and lines[#lines].text == "" do
         lines[#lines] = nil
     end
