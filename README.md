@@ -202,6 +202,35 @@ logexplorer app.log         # Follow a log file
 
 The default install location is `~/bin` on Linux and `C:\app\bin` on Windows.
 
+### Deploy the Markdown viewer
+
+With LuaJIT on PATH, run from this repository on Linux or native Windows:
+
+```text
+luajit deploy.lua --app mdview
+mdview README.md
+mdview --no-pager README.md
+```
+
+The installer creates `mdview.lua` and an executable `mdview` launcher in
+`~/bin` on Linux. On Windows it creates `mdview.lua`, `mdview.cmd` for Command
+Prompt/PowerShell, and a shell launcher for Git Bash/MSYS in `C:\app\bin`.
+Add that directory to PATH, or invoke the launcher by its full path. In
+PowerShell, use `& "C:\app\bin\mdview.cmd" README.md`.
+
+Use `--dir "path with spaces"` to choose another installation directory, or
+`--check` to preview without writing. `--app all` also includes `mdview`.
+The launcher uses LuaJIT from PATH; set `MDVIEW_LUAJIT` to choose another
+runtime. Install on each target OS so the fallback runtime path is local.
+`--os windows --dir staging` can generate Windows launchers on Linux for inspection.
+
+The Windows pager requires a Windows 10+ console with VT support, such as
+Windows Terminal. ImageMagick or ffmpeg is optional for PNG/JPEG/GIF/WebP
+images; `--no-images` disables image decoding. Press `t` for the heading
+outline, `/` to search, `h` for help, and `q` to quit.
+
+Deployment checks: `python3 test_deploy_mdview.py` (or `python` on Windows).
+
 ### Duplicate-file finder
 
 `ffi_duplicates.lua` is a standalone script that recursively scans files or
