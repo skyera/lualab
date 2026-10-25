@@ -1,4 +1,5 @@
-# lualab
+# 🧪 lualab
+
 ```
 | |_   _  __ _  | | __ _| |__  
 | | | | |/ _` | | |/ _` | '_ \ 
@@ -6,9 +7,10 @@
 |_|\__,_|\__,_| |_|\__,_|_.__/ 
 ```
 
-A collection of Lua embedding examples using LuaJIT and LuaBridge.
+A LuaJIT playground for terminal tools, local web apps, games, graphics, and
+systems programming through FFI, alongside C++ embedding examples using LuaBridge.
 
-## Leaf Wiki
+## 🍃 Leaf Wiki
 
 A local Markdown notebook with browser editing, wiki links, search, backlinks,
 autosave, and pasted images. Choose a notebook folder, including a locally
@@ -24,15 +26,18 @@ allow TCP port `8020` through the host firewall for LAN access. Leaf Wiki has
 no login, so only enable LAN access on a trusted network. See
 [the Leaf Wiki guide](wiki_web/README.md) for details.
 
-## Prerequisites
+## 🧰 Prerequisites
+
 Ensure you have the following installed on your system:
+
 - `g++` (C++11 or later)
 - `make`
 - `libreadline-dev`
 
-## Getting Started
+## 🚀 Getting Started
 
-### 1. Clone the repository
+### 1. 📥 Clone the repository
+
 This project uses submodules for LuaJIT and LuaBridge. Clone with the `--recurse-submodules` flag:
 ```bash
 git clone --recurse-submodules https://github.com/skyera/lualab.git
@@ -43,13 +48,15 @@ If you have already cloned the repository, initialize submodules with:
 git submodule update --init --recursive
 ```
 
-### 2. Build
+### 2. 🔨 Build
+
 Run `make` to build all binaries. This will automatically build the LuaJIT submodule if it hasn't been built yet.
 ```bash
 make
 ```
 
-### 3. Run
+### 3. ▶️ Run
+
 - **Interactive Shell (with C++ bindings):**
   ```bash
   ./demo_luabridge
@@ -174,25 +181,27 @@ make
   device results are saved to inventory and timeline. Conflicting large probes
   return 409. Parser checks: `luajit test_lan_ports.lua`.
 
-- **Run Unit Tests:**
+- **🧪 Run Unit Tests:**
   ```bash
   make test
   # or directly:
   ./LuaJIT/src/luajit test_ffi_suite.lua
   ```
 
-## Maintenance
+## 🧹 Maintenance
+
 - **Remove binaries:** `make clean`
 - **Remove binaries and clean submodules:** `make clean-all`
 
-## Reference
+## 📚 Reference
+
 * [LuaBridge](https://github.com/vinniefalco/LuaBridge)
 * [LuaJIT](https://github.com/LuaJIT/LuaJIT)
 * [Lua Quick Start Guide](https://github.com/PacktPublishing/Lua-Quick-Start-Guide)
 * [Awesome Lua](https://github.com/LewisJEllis/awesome-lua)
 * [lua-users.org](http://lua-users.org/)
 
-### Deploy the log explorer
+### 📜 Deploy the log explorer
 
 ```bash
 luajit deploy.lua --app logexplorer
@@ -202,7 +211,7 @@ logexplorer app.log         # Follow a log file
 
 The default install location is `~/bin` on Linux and `C:\app\bin` on Windows.
 
-### Deploy the Markdown viewer
+### 📖 Deploy the Markdown viewer
 
 With LuaJIT on PATH, run from this repository on Linux or native Windows:
 
@@ -231,7 +240,7 @@ outline, `/` to search, `h` for help, and `q` to quit.
 
 Deployment checks: `python3 test_deploy_mdview.py` (or `python` on Windows).
 
-### Duplicate-file finder
+### 🔎 Duplicate-file finder
 
 `ffi_duplicates.lua` is a standalone script that recursively scans files or
 directories using Linux libc FFI (`statx`, `opendir`, `read`) or native Windows
