@@ -1350,6 +1350,102 @@ test("help scrolls independently when opened from the document bottom", function
     eq(empty.top, 1, "empty document survives help round trip")
 end)
 
+test("outline indexes real headings and filters using key-reader tokens", function()
+    local source = "# Intro\n\n## **Install** Linux\n\nbody\n\n"
+        .. "## Install Windows\n\n### 中文\n\n"
+        .. "```md\n# not a heading\n```\n\nSetext\n======\n\n"
+        .. string.rep("tail\n\n", 10)
+    local view = mdview.new_view("outline.md", render_lines(source, 60))
+    eq(#view.lines.headings, 5, "fenced headings excluded, setext included")
+    eq(view.lines.headings[2].text, "Install Linux", "heading inline styles removed")
+    mdview.handle_key(view, "G", 10)
+    local original_top = view.top
+    local search = view.search
+    mdview.handle_key(view, "t", 10)
+    eq(view.outline.selected, 1, "first heading selected")
+    local frame = mdview.render_frame(view, 60, 10)
+    truthy(frame.plain[1]:find("Outline", 1, true), "outline heading")
+    for _, key in ipairs({ "/", "I", "n", "s", "t", "a", "l", "l", "SPACE", "W", "BACKSPACE" }) do
+        mdview.handle_key(view, key, 10)
+        mdview.render_frame(view, 60, 10)
+    end
+    eq(view.outline.query, "Install ", "symbolic space and backspace")
+    eq(#view.outline.items, 2, "matching headings only")
+    mdview.handle_key(view, "DOWN", 10)
+    mdview.reflow(view, 24, 10)
+    mdview.render_frame(view, 24, 10)
+    mdview.handle_key(view, "ENTER", 10)
+    eq(view.mode, "normal", "jump returns to document")
+    eq(view.lines[view.top].number, 7, "jump uses source line after resize")
+    mdview.handle_key(view, "t", 10)
+    for _, key in ipairs({ "/", "中", "文", "BACKSPACE" }) do
+        mdview.handle_key(view, key, 10)
+    end
+    eq(view.outline.query, "中", "Unicode backspace removes one code point")
+    eq(#view.outline.items, 1, "Unicode filter")
+    local top = view.top
+    local active_search = view.search
+    mdview.handle_key(view, "ESC", 10)
+    eq(view.top, top, "cancel preserves document position")
+    eq(view.search, active_search, "cancel preserves search object")
+    truthy(original_top > 1 and search ~= nil, "started from populated view")
+end)
+
+test("outline renders empty, long and special headings across viewport boundaries", function()
+    local source = ""
+    for index = 1, 30 do
+        source = source .. string.format("## Heading %d %% 中文 %s\n\n", index, string.rep("long ", 20))
+    end
+    for _, size in ipairs({ { 1, 1 }, { 23, 3 }, { 24, 4 }, { 40, 8 }, { 100, 30 } }) do
+        local width, height = size[1], size[2]
+        local view = mdview.new_view("special % name", render_lines(source, width))
+        mdview.handle_key(view, "t", height)
+        for _, key in ipairs({ "G", "j", "UP", "PAGE_UP", "PAGE_DOWN", "HOME", "k", "END" }) do
+            mdview.handle_key(view, key, height)
+            local frame = mdview.render_frame(view, width, height)
+            eq(#frame.rows, height, "outline frame height")
+            for _, row in ipairs(frame.plain) do
+                eq(mdview.display_width(row), width, "outline row width")
+            end
+            truthy(view.outline.selected >= view.outline.top, "selection above lower bound")
+            truthy(view.outline.selected < view.outline.top + math.max(1, height - 2),
+                "selection below upper bound")
+        end
+        mdview.handle_key(view, "/", height)
+        mdview.handle_key(view, "z", height)
+        local frame = mdview.render_frame(view, width, height)
+        eq(view.outline.selected, 0, "no match has no selection")
+        if width >= 24 and height >= 4 then
+            truthy(frame.plain[2]:find("No headings", 1, true), "visible no-match state")
+            for row = 3, height - 1 do
+                eq(frame.plain[row], string.rep(" ", width), "stale headings cleared")
+            end
+        end
+        mdview.handle_key(view, "ENTER", height)
+        eq(view.mode, "outline", "Enter without a match stays in outline")
+        mdview.handle_key(view, "ESC", height)
+        mdview.render_frame(view, width, height)
+    end
+    local view = mdview.new_view("empty", render_lines("", 60))
+    mdview.handle_key(view, "t", 10)
+    local frame = mdview.render_frame(view, 60, 10)
+    truthy(frame.plain[2]:find("No headings in this document", 1, true), "empty document message")
+    mdview.handle_key(view, "t", 10)
+    eq(view.mode, "normal", "toggle restores empty document")
+    mdview.handle_key(view, "t", 10)
+    mdview.handle_key(view, "q", 10)
+    eq(view.quit, true, "q quits from outline")
+    local long_prompt = mdview.new_view("long prompt", render_lines("# Heading", 24))
+    mdview.handle_key(long_prompt, "t", 4)
+    mdview.handle_key(long_prompt, "/", 4)
+    for _ = 1, 40 do
+        mdview.handle_key(long_prompt, "中", 4)
+    end
+    mdview.handle_key(long_prompt, "X", 4)
+    local prompt_frame = mdview.render_frame(long_prompt, 24, 4)
+    truthy(prompt_frame.plain[4]:find("X▏", 1, true), "long filter keeps typed tail and cursor visible")
+end)
+
 print(string.format("\n%d passed, %d failed", passed, failed))
 if failed > 0 then
     os.exit(1)

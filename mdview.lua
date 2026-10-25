@@ -16,6 +16,7 @@
       (Win32 console + VT sequences): alternate screen, resize handling,
       flicker-free differential row updates and a source line-number gutter.
     - Incremental case-insensitive search with match highlighting.
+    - Filterable heading outline (t), with source-anchored navigation.
     - Pure render/frame functions for headless tests and --snapshot output.
 
     Usage:
@@ -31,7 +32,7 @@
       Space/Ctrl-f  page down               b / Ctrl-b    page up
       g / Home      top                     G / End       bottom
       / and ?       search forward/back     n / N         next / previous
-      h             toggle help
+      h             toggle help             t             heading outline
 
     Options:
       -w, --width N        wrap width for non-interactive output (default 80)
@@ -1277,6 +1278,11 @@ local function render_heading(block, width, out, context)
     local level = math.max(1, math.min(6, block.level))
     local style = STYLE.heading[level]
     local spans = parse_inline(block.text, style, context.defs, context.footnote_state)
+    context.headings[#context.headings + 1] = {
+        text = spans_text(spans),
+        level = level,
+        line = block.line,
+    }
     for position, line in ipairs(wrap_flow(spans, width)) do
         if position == 1 then
             line.number = block.line
@@ -1845,6 +1851,7 @@ function M.render(text, width, options)
         max_image_height = options.max_image_height or 16,
         defs = defs,
         footnote_state = footnote_state,
+        headings = {},
     }
     local gutter = 0
     if options.numbers == true then
@@ -1866,6 +1873,7 @@ function M.render(text, width, options)
     lines.source = text
     lines.render_options = options
     lines.width = width
+    lines.headings = context.headings
     return lines
 end
 
@@ -1958,6 +1966,11 @@ local HELP_TEXT = [[
 | `n` / `N` | Next / previous match |
 | `C` | Toggle case-sensitive search |
 | `h` | Toggle this help |
+| `t` | Open heading outline |
+
+In the outline: j/k or arrows select; / filters; Enter jumps to the selected
+heading; Esc returns to the document; q quits. Search filters accept spaces
+and Unicode text. Help supports the usual scrolling keys.
 
 Search matches are highlighted in yellow. Resize the terminal at any time;
 the pager redraws without clearing the screen.
@@ -1976,6 +1989,7 @@ function M.new_view(title, lines)
         message_kind = "info",
         mode = "normal",
         help_top = 1,
+        outline = { query = "", items = {}, selected = 0, top = 1, editing = false },
         prompt = "",
         prompt_direction = 1,
         prompt_snapshot = nil,
@@ -2158,6 +2172,79 @@ end
 
 local help_lines
 
+local function clamp_outline(view, height)
+    local outline = view.outline
+    local count = #outline.items
+    if count == 0 then
+        outline.selected = 0
+        outline.top = 1
+        return
+    end
+    outline.selected = math.max(1, math.min(outline.selected, count))
+    local rows = page_rows(height)
+    outline.top = math.max(1, math.min(outline.top, count - rows + 1))
+    if outline.selected < outline.top then
+        outline.top = outline.selected
+    elseif outline.selected >= outline.top + rows then
+        outline.top = outline.selected - rows + 1
+    end
+end
+
+local function filter_outline(view, height)
+    local outline = view.outline
+    local needle = outline.query:lower()
+    outline.items = {}
+    for _, heading in ipairs(view.lines.headings or {}) do
+        if heading.text:lower():find(needle, 1, true) then
+            outline.items[#outline.items + 1] = heading
+        end
+    end
+    outline.selected = 1
+    outline.top = 1
+    clamp_outline(view, height)
+end
+
+local function handle_outline_key(view, key, height)
+    local outline = view.outline
+    if key == "ESC" or (key == "t" and not outline.editing) then
+        view.mode = "normal"
+    elseif key == "ENTER" then
+        local heading = outline.items[outline.selected]
+        if heading then
+            view.top = row_for_source(view.lines, heading.line)
+            M.clamp_view(view, height)
+            view.mode = "normal"
+            view.message = "heading: " .. heading.text
+        end
+    elseif key == "UP" or key == "DOWN" then
+        outline.selected = outline.selected + (key == "UP" and -1 or 1)
+    elseif outline.editing then
+        if key == "BACKSPACE" then
+            outline.query = outline.query:gsub("[%z\1-\127\194-\244][\128-\191]*$", "")
+        elseif key == "SPACE" then
+            outline.query = outline.query .. " "
+        elseif is_printable_key(key) then
+            outline.query = outline.query .. key
+        end
+        filter_outline(view, height)
+    elseif key == "q" then
+        view.quit = true
+    elseif key == "/" then
+        outline.editing = true
+    elseif key == "j" or key == "k" then
+        outline.selected = outline.selected + (key == "k" and -1 or 1)
+    elseif key == "g" or key == "HOME" then
+        outline.selected = 1
+    elseif key == "G" or key == "END" then
+        outline.selected = #outline.items
+    elseif key == "SPACE" or key == "PAGE_DOWN" or key == "CTRL_F" then
+        outline.selected = outline.selected + page_rows(height)
+    elseif key == "b" or key == "PAGE_UP" or key == "CTRL_B" then
+        outline.selected = outline.selected - page_rows(height)
+    end
+    clamp_outline(view, height)
+end
+
 local function scroll_position(top, key, count, height)
     local rows = page_rows(height)
     if key == "j" or key == "DOWN" or key == "CTRL_E" then
@@ -2182,6 +2269,14 @@ end
 
 function M.handle_key(view, key, height, width)
     height = height or 24
+    if key == "CTRL_C" then
+        view.quit = true
+        return true
+    end
+    if view.mode == "outline" then
+        handle_outline_key(view, key, height)
+        return true
+    end
     if view.mode == "help" then
         if key == "q" or key == "CTRL_C" then
             view.quit = true
@@ -2302,6 +2397,11 @@ function M.handle_key(view, key, height, width)
     elseif key == "h" then
         view.mode = "help"
         view.help_top = 1
+    elseif key == "t" then
+        view.mode = "outline"
+        view.outline.query = ""
+        view.outline.editing = false
+        filter_outline(view, height)
     end
 
     M.clamp_view(view, height)
@@ -2319,6 +2419,17 @@ local function pad_styled(text, width, style)
     return spans_to_ansi(spans, width, false)
 end
 
+local function prompt_tail(text, width)
+    local pos = 1
+    local remaining = display_width(text)
+    while remaining > width and pos <= #text do
+        local char = next_char(text, pos) or text:sub(pos, pos)
+        remaining = remaining - character_width(char)
+        pos = pos + #char
+    end
+    return text:sub(pos)
+end
+
 help_lines = function(width)
     local cache = M._help_cache
     if not cache then
@@ -2329,6 +2440,44 @@ help_lines = function(width)
         cache[width] = M.render(HELP_TEXT, width)
     end
     return cache[width]
+end
+
+local function render_outline_frame(view, width, height)
+    clamp_outline(view, height)
+    local outline = view.outline
+    local frame = { rows = {}, plain = {} }
+    local function set_row(row, text, style)
+        frame.rows[row] = pad_styled(text, width, style)
+        frame.plain[row] = strip_ansi(frame.rows[row])
+    end
+    set_row(1, string.format(" Outline  %d/%d  %s",
+        outline.selected, #outline.items, view.title), STYLE.bar)
+    for row = 1, page_rows(height) do
+        local index = outline.top + row - 1
+        local heading = outline.items[index]
+        if heading then
+            local selected = index == outline.selected
+            local prefix = (selected and "> " or "  ") .. string.rep("  ", heading.level - 1)
+            local suffix = "  " .. heading.line .. " "
+            local label_width = math.max(0, width - display_width(suffix))
+            local label = clip_to_width(prefix .. heading.text, label_width)
+            local text = label .. string.rep(" ", label_width - display_width(label)) .. suffix
+            set_row(row + 1, text, selected and { reverse = true } or nil)
+        elseif row == 1 then
+            local empty = #(view.lines.headings or {}) == 0 and " No headings in this document"
+                or " No headings match this filter"
+            set_row(row + 1, empty, STYLE.warn)
+        else
+            set_row(row + 1, "", nil)
+        end
+    end
+    local status = " / filter  j/k select  Enter jump  Esc return  q quit"
+    if outline.editing then
+        status = " /" .. prompt_tail(outline.query, math.max(0, width - 3))
+            .. "▏  Enter jump  Esc return"
+    end
+    set_row(height, status, STYLE.bar)
+    return frame
 end
 
 function M.render_frame(view, width, height)
@@ -2347,6 +2496,9 @@ function M.render_frame(view, width, height)
             set_row(row, string.rep(" ", width))
         end
         return frame
+    end
+    if view.mode == "outline" then
+        return render_outline_frame(view, width, height)
     end
 
     local rows = page_rows(height)
@@ -2413,7 +2565,7 @@ function M.render_frame(view, width, height)
         status_style = merge_style(STYLE.bar,
             view.message_kind == "warn" and { fg = THEME.warn } or { fg = THEME.info })
     else
-        status_text = " q quit  j/k scroll  Ctrl-d/u  Space/b page  g/G  / ? search  n/N  h help"
+        status_text = " q quit  j/k scroll  / ? search  n/N  t outline  h help"
     end
 
     if view.mode == "normal" and view.search and #view.search.query > 0 then
@@ -2993,7 +3145,7 @@ OPTIONS:
 
 KEYS:
   q/Esc quit   j/k scroll   d/u half-page   Space/b page
-  g/G ends     / search      n/N next match   h help
+  g/G ends     / search      n/N next match   t outline   h help
 
 NOTES:
   Windows pager support needs Windows 10+ with VT sequences enabled
