@@ -323,6 +323,8 @@ local DARK_PALETTE = {
     search_bg = "43",
     search_current_fg = "30",
     search_current_bg = "48;2;255;150;60",
+    folder_icon = "38;2;240;190;90",
+    file_icon = "38;2;120;200;230",
 }
 
 local LIGHT_PALETTE = {
@@ -352,6 +354,8 @@ local LIGHT_PALETTE = {
     search_bg = "43",
     search_current_fg = "30",
     search_current_bg = "48;2;255;165;70",
+    folder_icon = "38;2;180;120;0",
+    file_icon = "38;2;0;104;180",
 }
 
 local THEME = {}
@@ -390,6 +394,8 @@ local function apply_palette(palette)
     STYLE.bar = { bold = true, fg = THEME.bar_fg, bg = THEME.bar_bg }
     STYLE.info = { fg = THEME.info }
     STYLE.warn = { fg = THEME.warn }
+    STYLE.folder_icon = { fg = THEME.folder_icon, bold = true }
+    STYLE.file_icon = { fg = THEME.file_icon }
 end
 
 apply_palette(DARK_PALETTE)
@@ -3706,10 +3712,23 @@ local function render_tree_frame(browser, width, height)
         if node then
             local selected = index == browser.selected
             local icon = node.directory and (node.expanded and "📂" or "📁") or "📄"
+            local icon_style = node.directory and STYLE.folder_icon or STYLE.file_icon
             local prefix = (selected and "> " or "  ") .. string.rep("  ", math.min(node.depth, 8))
             local name = sanitize_text(node.name)
-            set_row(row + 1, prefix .. icon .. " " .. name,
-                selected and browser.focus == "tree" and { reverse = true } or nil)
+            local row_style = selected and browser.focus == "tree" and { reverse = true } or nil
+            local spans = {}
+            add_span(spans, prefix, row_style)
+            add_span(spans, icon, merge_style(icon_style, row_style))
+            add_span(spans, " " .. name, row_style)
+            local formatted = spans_to_ansi(spans, width, false)
+            local short = width - display_width(strip_ansi(formatted))
+            if short > 0 then
+                local pad_spans = {}
+                add_span(pad_spans, string.rep(" ", short), row_style)
+                formatted = formatted .. spans_to_ansi(pad_spans, short, false)
+            end
+            frame.rows[row + 1] = formatted
+            frame.plain[row + 1] = strip_ansi(formatted)
         elseif row == 1 then
             set_row(row + 1, " No files loaded — r retries", STYLE.warn)
         elseif row == 2 and #browser.entries == 1 and browser.root.expanded then
