@@ -482,6 +482,59 @@ test("help mode round trip restores the previous viewport", function()
 end)
 
 -- =========================================================================
+-- Source line numbers
+-- =========================================================================
+test("line numbers track source lines and leave wrapped rows blank", function()
+    local markdown = table.concat({
+        "# Head",
+        "",
+        "First paragraph that wraps onto another line here.",
+        "",
+        "```lua",
+        "local x = 1",
+        "local y = 2",
+        "```",
+        "",
+        "| A | B |",
+        "| --- | --- |",
+        "| 1 | 2 |",
+    }, "\n") .. "\n"
+    local lines = mdview.render(markdown, 32, { numbers = true })
+    eq(lines.gutter_width, 3, "gutter width for twelve source lines")
+
+    local numbered = {}
+    for _, line in ipairs(lines) do
+        if line.number then
+            numbered[line.number] = line
+        end
+    end
+    truthy(numbered[1], "heading numbered")
+    truthy(numbered[1].text:find("Head", 1, true), "heading text")
+    truthy(numbered[3], "paragraph numbered")
+    truthy(numbered[3].text:find("First", 1, true), "paragraph text")
+    truthy(numbered[6] and numbered[6].text:find("local x", 1, true), "first code line")
+    truthy(numbered[7] and numbered[7].text:find("local y", 1, true), "second code line")
+    truthy(numbered[10], "table header numbered")
+    truthy(numbered[12], "table row numbered")
+
+    local paragraph_index
+    for position, line in ipairs(lines) do
+        if line == numbered[3] then
+            paragraph_index = position
+        end
+    end
+    eq(lines[paragraph_index + 1].number, nil, "wrapped continuation has no number")
+end)
+
+test("search ignores the line-number gutter", function()
+    local markdown = "alpha\n\n" .. string.rep("beta\n\n", 15) .. "alpha\n"
+    local lines = mdview.render(markdown, 40, { numbers = true })
+    local view = mdview.new_view("numbers.md", lines)
+    eq(mdview.search(view, "1", 10), 0, "gutter digits are not searchable")
+    eq(mdview.search(view, "beta", 10), 15, "content search still works")
+end)
+
+-- =========================================================================
 -- Frame rendering
 -- =========================================================================
 test("frame fills every row to the terminal width", function()
@@ -495,6 +548,27 @@ test("frame fills every row to the terminal width", function()
                 string.format("row %d width at %dx%d", row, size[1], size[2]))
         end
     end
+end)
+
+test("frame renders the line-number gutter and help stays unnumbered", function()
+    local lines = mdview.render("# Head\n\nBody text\n", 40, { numbers = true })
+    local view = mdview.new_view("numbers.md", lines)
+    local frame = mdview.render_frame(view, 40, 10)
+    truthy(frame.plain[2]:match("^%s*1 Head") ~= nil, "heading row: " .. frame.plain[2])
+    local paragraph_row
+    for row = 2, 9 do
+        if frame.plain[row]:find("Body text", 1, true) then
+            paragraph_row = row
+        end
+    end
+    truthy(paragraph_row, "paragraph row rendered")
+    truthy(frame.plain[paragraph_row]:match("^%s*3 Body") ~= nil,
+        "paragraph row: " .. frame.plain[paragraph_row])
+    eq(mdview.display_width(frame.plain[2]), 40, "gutter row width")
+
+    mdview.handle_key(view, "h", 10)
+    local help = mdview.render_frame(view, 40, 10)
+    truthy(help.plain[2]:match("^mdview keys") ~= nil, "help ignores the gutter")
 end)
 
 test("frame header, status bar and content are present", function()
@@ -802,6 +876,38 @@ test("CLI snapshot renders images relative to the document", function()
     truthy(output:find("dot", 1, true), "caption in snapshot")
 end)
 
+test("CLI numbers flag adds and removes the gutter", function()
+    local path = os.tmpname()
+    local file = assert(io.open(path, "wb"))
+    file:write("# Heading\n\nbody\n")
+    file:close()
+
+    local function run(command)
+        local handle = assert(io.popen(command, "r"))
+        local output = handle:read("*a")
+        handle:close()
+        return mdview.strip_ansi(output)
+    end
+
+    local snapshot = run(string.format(
+        "%s mdview.lua --snapshot 60x10 %s 2>&1", luajit_bin, path))
+    truthy(snapshot:find("1 Heading", 1, true), "pager numbers on by default")
+
+    local bare = run(string.format(
+        "%s mdview.lua --snapshot 60x10 --no-numbers %s 2>&1", luajit_bin, path))
+    truthy(bare:find("1 Heading", 1, true) == nil, "--no-numbers hides the gutter")
+    truthy(bare:find("Heading", 1, true), "content still rendered")
+
+    local plain = run(string.format(
+        "%s mdview.lua --no-pager --width 40 %s 2>&1", luajit_bin, path))
+    truthy(plain:find("^Heading") ~= nil, "plain output has no gutter by default")
+
+    local numbered = run(string.format(
+        "%s mdview.lua --no-pager -n --width 40 %s 2>&1", luajit_bin, path))
+    truthy(numbered:find("^1 Heading") ~= nil, "-n enables the gutter in plain output")
+    os.remove(path)
+end)
+
 test("CLI reports missing files and bad options on stderr", function()
     local error_path = os.tmpname()
     local status = os.execute(string.format(
@@ -858,7 +964,7 @@ test("bytecode analysis finds no undeclared globals", function()
         table = true, io = true, os = true, debug = true, arg = true,
         pcall = true, xpcall = true, setmetatable = true, tonumber = true,
         tostring = true, type = true, ipairs = true, pairs = true,
-        assert = true, error = true, print = true, next = true,
+        assert = true, error = true, print = true, next = true, select = true,
     }
     local leaked = {}
     for name in output:gmatch('GGET%s+.-;%s*"([%w_]+)"') do

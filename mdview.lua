@@ -9,6 +9,7 @@
     - Styled rendering with truecolor ANSI palettes and OSC 8 hyperlinks.
     - Block images rendered as truecolor half-block art: PPM/PGM natively,
       PNG/JPEG/GIF/WebP through ImageMagick or ffmpeg when installed.
+    - Source line-number gutter (wrapped continuation rows stay blank).
     - Unicode-aware word wrapping (wide characters, combining marks, tabs).
     - POSIX termios raw-mode pager via FFI: poll()-driven keys, alternate
       screen, resize handling, flicker-free differential row updates.
@@ -35,6 +36,8 @@
       --no-pager           render the document and exit
       --color              keep ANSI colors when output is not a tty
       --no-images          show image placeholders instead of block art
+      -n, --numbers        show source line numbers (default in the pager)
+      --no-numbers         hide source line numbers
       --snapshot [WxH]     print one TUI frame and exit (default 80x24)
       --search PATTERN     pre-fill search (useful with --snapshot)
       -h, --help           show this help
@@ -200,8 +203,8 @@ local function spans_text(spans)
     return table.concat(parts)
 end
 
-local function make_line(spans)
-    return { spans = spans, text = spans_text(spans) }
+local function make_line(spans, number)
+    return { spans = spans, text = spans_text(spans), number = number }
 end
 
 local function truncate_spans(spans, max_width)
@@ -277,6 +280,7 @@ local STYLE = {
     table_border = { fg = THEME.table_border },
     table_header = { bold = true, fg = THEME.table_header },
     task_done = { fg = "38;2;120;200;140" },
+    line_number = { fg = "38;2;95;105;125" },
     search = { search = true },
     bar = { bold = true, fg = THEME.bar_fg, bg = THEME.bar_bg },
     info = { fg = THEME.info },
@@ -759,7 +763,8 @@ local function starts_block(line)
         or match_list_item(line) ~= nil
 end
 
-local function parse_blocks(text)
+local function parse_blocks(text, line_offset)
+    line_offset = line_offset or 0
     local raw_lines = {}
     for line in (text .. "\n"):gmatch("([^\n]*)\n") do
         raw_lines[#raw_lines + 1] = expand_tabs(line:gsub("\r$", ""))
@@ -785,7 +790,13 @@ local function parse_blocks(text)
             for probe = 2, close - 1 do
                 content[#content + 1] = raw_lines[probe]
             end
-            blocks[#blocks + 1] = { kind = "code", lang = "front matter", lines = content }
+            blocks[#blocks + 1] = {
+                kind = "code",
+                lang = "front matter",
+                lines = content,
+                line = line_offset + 1,
+                fence_line = line_offset + 1,
+            }
             index = close + 1
         end
     end
@@ -803,6 +814,7 @@ local function parse_blocks(text)
             local fence_char = fence:sub(1, 1)
             local lang = info:match("^([%w_+%-%.]*)") or ""
             local content = {}
+            local fence_line = line_offset + index
             index = index + 1
             while index <= #raw_lines do
                 local closing = raw_lines[index]:match("^%s*(" .. fence_char:rep(#fence) .. fence_char .. "-)%s*$")
@@ -813,12 +825,24 @@ local function parse_blocks(text)
                 content[#content + 1] = raw_lines[index]
                 index = index + 1
             end
-            blocks[#blocks + 1] = { kind = "code", lang = lang, lines = content }
+            blocks[#blocks + 1] = {
+                kind = "code",
+                lang = lang,
+                lines = content,
+                line = fence_line,
+                fence_line = fence_line,
+            }
         elseif line:match("^%s*(#+)%s*(.-)%s*$") then
             local hashes, heading = line:match("^%s*(#+)%s*(.-)%s*$")
+            local block_line = line_offset + index
             if #hashes <= 6 and (#heading > 0 or line:match("#%s*$")) then
                 heading = heading:gsub("%s+#+%s*$", "")
-                blocks[#blocks + 1] = { kind = "heading", level = #hashes, text = heading }
+                blocks[#blocks + 1] = {
+                    kind = "heading",
+                    level = #hashes,
+                    text = heading,
+                    line = block_line,
+                }
                 index = index + 1
             else
                 -- More than six hashes is a paragraph.
@@ -829,25 +853,45 @@ local function parse_blocks(text)
                     paragraph[#paragraph + 1] = trim(raw_lines[index])
                     index = index + 1
                 end
-                blocks[#blocks + 1] = { kind = "paragraph", text = table.concat(paragraph, " ") }
+                blocks[#blocks + 1] = {
+                    kind = "paragraph",
+                    text = table.concat(paragraph, " "),
+                    line = block_line,
+                }
             end
         elseif index < #raw_lines and raw_lines[index + 1]:match("^%s*=+%s*$")
             and not is_blank(line) then
-            blocks[#blocks + 1] = { kind = "heading", level = 1, text = trim(line) }
+            blocks[#blocks + 1] = {
+                kind = "heading",
+                level = 1,
+                text = trim(line),
+                line = line_offset + index,
+            }
             index = index + 2
         elseif index < #raw_lines and raw_lines[index + 1]:match("^%s*%-+%s*$")
             and not is_blank(line) and not match_list_item(line) then
-            blocks[#blocks + 1] = { kind = "heading", level = 2, text = trim(line) }
+            blocks[#blocks + 1] = {
+                kind = "heading",
+                level = 2,
+                text = trim(line),
+                line = line_offset + index,
+            }
             index = index + 2
         elseif is_hr(line) then
-            blocks[#blocks + 1] = { kind = "hr" }
+            blocks[#blocks + 1] = { kind = "hr", line = line_offset + index }
             index = index + 1
         elseif match_standalone_image(line) then
             local alt, source = match_standalone_image(line)
-            blocks[#blocks + 1] = { kind = "image", alt = alt, src = source }
+            blocks[#blocks + 1] = {
+                kind = "image",
+                alt = alt,
+                src = source,
+                line = line_offset + index,
+            }
             index = index + 1
         elseif line:match("^%s*>") then
             local quoted = {}
+            local quote_start = index
             while index <= #raw_lines do
                 local current = raw_lines[index]
                 if current:match("^%s*>") then
@@ -861,7 +905,11 @@ local function parse_blocks(text)
                     break
                 end
             end
-            blocks[#blocks + 1] = { kind = "quote", blocks = parse_blocks(table.concat(quoted, "\n")) }
+            blocks[#blocks + 1] = {
+                kind = "quote",
+                line = line_offset + quote_start,
+                blocks = parse_blocks(table.concat(quoted, "\n"), line_offset + quote_start - 1),
+            }
         elseif line:find("|", 1, true) and index < #raw_lines
             and is_table_delimiter(raw_lines[index + 1]) then
             local headers = split_table_row(line)
@@ -869,11 +917,14 @@ local function parse_blocks(text)
             for cell_index, cell in ipairs(split_table_row(raw_lines[index + 1])) do
                 aligns[cell_index] = table_alignment(cell)
             end
+            local header_line = line_offset + index
             index = index + 2
             local rows = {}
+            local row_lines = {}
             while index <= #raw_lines and not is_blank(raw_lines[index])
                 and raw_lines[index]:find("|", 1, true) do
                 rows[#rows + 1] = split_table_row(raw_lines[index])
+                row_lines[#row_lines + 1] = line_offset + index
                 index = index + 1
             end
             blocks[#blocks + 1] = {
@@ -881,6 +932,8 @@ local function parse_blocks(text)
                 headers = headers,
                 aligns = aligns,
                 rows = rows,
+                row_lines = row_lines,
+                line = header_line,
             }
         elseif match_list_item(line) then
             local items = {}
@@ -896,6 +949,7 @@ local function parse_blocks(text)
                         indent_stack[#indent_stack + 1] = item.indent
                     end
                     item.depth = #indent_stack
+                    item.line = line_offset + index
                     items[#items + 1] = item
                     index = index + 1
                 elseif is_blank(current) then
@@ -917,6 +971,7 @@ local function parse_blocks(text)
             blocks[#blocks + 1] = { kind = "list", items = items }
         else
             local paragraph = { trim(line) }
+            local paragraph_line = line_offset + index
             index = index + 1
             while index <= #raw_lines and not is_blank(raw_lines[index])
                 and not starts_block(raw_lines[index]) do
@@ -932,7 +987,11 @@ local function parse_blocks(text)
                 paragraph[#paragraph + 1] = trim(following)
                 index = index + 1
             end
-            blocks[#blocks + 1] = { kind = "paragraph", text = table.concat(paragraph, " ") }
+            blocks[#blocks + 1] = {
+                kind = "paragraph",
+                text = table.concat(paragraph, " "),
+                line = paragraph_line,
+            }
         end
     end
     return blocks
@@ -974,7 +1033,10 @@ local render_blocks
 local function render_heading(block, width, out)
     local level = math.max(1, math.min(6, block.level))
     local style = STYLE.heading[level]
-    for _, line in ipairs(wrap_flow(parse_inline(block.text, style), width)) do
+    for position, line in ipairs(wrap_flow(parse_inline(block.text, style), width)) do
+        if position == 1 then
+            line.number = block.line
+        end
         out[#out + 1] = line
     end
     if level <= 2 then
@@ -998,20 +1060,21 @@ local function render_code(block, width, out)
         out[#out + 1] = make_line(spans)
         return
     end
-    for _, code_line in ipairs(block.lines) do
+    for code_index, code_line in ipairs(block.lines) do
         local content = {}
         if #code_line > 0 then
             add_span(content, code_line, STYLE.code_block)
         end
         local wrapped = #code_line > 0 and wrap_pre(content, math.max(4, width - 2))
             or { make_line({}) }
-        for _, line in ipairs(wrapped) do
+        for position, line in ipairs(wrapped) do
             local spans = {}
             add_span(spans, "│ ", STYLE.block_bar)
             for _, span in ipairs(line.spans) do
                 add_span(spans, span.text, span.style)
             end
-            out[#out + 1] = make_line(spans)
+            local number = position == 1 and (block.fence_line + code_index) or nil
+            out[#out + 1] = make_line(spans, number)
         end
     end
 end
@@ -1031,7 +1094,7 @@ local function render_quote(block, width, out, context)
                 add_span(spans, span.text, span.style)
             end
         end
-        out[#out + 1] = make_line(spans)
+        out[#out + 1] = make_line(spans, line.number)
     end
 end
 
@@ -1088,7 +1151,8 @@ local function render_list(block, width, out)
             for _, span in ipairs(line.spans) do
                 add_span(spans, span.text, span.style)
             end
-            out[#out + 1] = make_line(spans)
+            local number = line_index == 1 and item.line or nil
+            out[#out + 1] = make_line(spans, number)
         end
     end
 end
@@ -1294,7 +1358,8 @@ local function render_image(block, width, out, context)
                 bg = string.format("48;2;%d;%d;%d", bottom_r, bottom_g, bottom_b),
             })
         end
-        out[#out + 1] = make_line(spans)
+        local number = row == 0 and block.line or nil
+        out[#out + 1] = make_line(spans, number)
     end
 
     if #alt > 0 then
@@ -1387,7 +1452,13 @@ local function render_table(block, width, out)
             add_span(spans, " ", nil)
             add_span(spans, "│", STYLE.table_border)
         end
-        out[#out + 1] = make_line(spans)
+        local number
+        if header then
+            number = block.line
+        else
+            number = block.row_lines[row_index]
+        end
+        out[#out + 1] = make_line(spans, number)
     end
 
     render_row(0, true)
@@ -1415,7 +1486,10 @@ render_blocks = function(blocks, width, out, base_style, context)
             if #lines == 0 then
                 lines[1] = make_line({})
             end
-            for _, line in ipairs(lines) do
+            for position, line in ipairs(lines) do
+                if position == 1 then
+                    line.number = block.line
+                end
                 out[#out + 1] = line
             end
         elseif block.kind == "code" then
@@ -1431,7 +1505,7 @@ render_blocks = function(blocks, width, out, base_style, context)
         elseif block.kind == "hr" then
             local spans = {}
             add_span(spans, string.rep("─", math.max(1, width)), { fg = THEME.rule2 })
-            out[#out + 1] = make_line(spans)
+            out[#out + 1] = make_line(spans, block.line)
         end
     end
 end
@@ -1447,11 +1521,22 @@ function M.render(text, width, options)
         max_image_width = options.max_image_width or 48,
         max_image_height = options.max_image_height or 16,
     }
+    local gutter = 0
+    if options.numbers == true then
+        local newlines = select(2, text:gsub("\n", ""))
+        local source_lines = newlines + 1
+        if text:sub(-1) == "\n" then
+            source_lines = source_lines - 1
+        end
+        gutter = #tostring(math.max(1, source_lines)) + 1
+    end
+    local content_width = math.max(20, width - gutter)
     local lines = {}
-    render_blocks(parse_blocks(text), width, lines, nil, context)
+    render_blocks(parse_blocks(text), content_width, lines, nil, context)
     while #lines > 0 and lines[#lines].text == "" do
         lines[#lines] = nil
     end
+    lines.gutter_width = gutter
     return lines
 end
 
@@ -1548,6 +1633,7 @@ function M.new_view(title, lines)
     return {
         title = title or "untitled",
         lines = lines or {},
+        gutter_width = lines and lines.gutter_width or 0,
         top = 1,
         search = { query = "", matches = {}, index = 0, direction = 1 },
         match_map = {},
@@ -1586,7 +1672,9 @@ local function goto_match(view, index, height)
     if match.line < view.top or match.line >= view.top + rows then
         view.top = math.max(1, match.line - math.floor(rows / 2))
     end
-    view.message = string.format("match %d/%d - line %d", index, total, match.line)
+    local target = view.lines[match.line]
+    local label = (target and target.number) or match.line
+    view.message = string.format("match %d/%d - line %d", index, total, label)
     view.message_kind = "info"
 end
 
@@ -1837,17 +1925,32 @@ function M.render_frame(view, width, height)
     set_row(1, pad_styled(header_text, width, STYLE.bar))
 
     local content = view.lines
+    local gutter = view.gutter_width or 0
     if view.mode == "help" then
         content = help_lines(width)
+        gutter = 0
     end
 
     for row = 1, rows do
         local line = content[view.top + row - 1]
         if line then
-            local spans = line.spans
+            local spans = {}
+            if gutter > 0 then
+                if line.number then
+                    add_span(spans,
+                        string.format("%" .. (gutter - 1) .. "d ", line.number),
+                        STYLE.line_number)
+                else
+                    add_span(spans, string.rep(" ", gutter), nil)
+                end
+            end
+            local content_spans = line.spans
             local ranges = view.match_map[view.top + row - 1]
             if view.mode ~= "help" and ranges then
-                spans = highlight_spans(spans, ranges)
+                content_spans = highlight_spans(content_spans, ranges)
+            end
+            for _, span in ipairs(content_spans) do
+                add_span(spans, span.text, span.style)
             end
             set_row(row + 1, spans_to_ansi(spans, width, true))
         else
@@ -2232,6 +2335,8 @@ OPTIONS:
   --no-pager           Render the document and exit
   --color              Keep ANSI colors when output is not a tty
   --no-images          Show image placeholders instead of block art
+  -n, --numbers        Show source line numbers (default in the pager)
+  --no-numbers         Hide source line numbers
   --snapshot [WxH]     Print one TUI frame and exit (default 80x24)
   --search PATTERN     Pre-fill search (useful with --snapshot)
   -h, --help           Show this help
@@ -2280,6 +2385,7 @@ local function parse_arguments(argv)
         color = false,
         pager = true,
         images = true,
+        numbers = nil,
         snapshot = nil,
         search = nil,
     }
@@ -2294,6 +2400,10 @@ local function parse_arguments(argv)
             options.color = true
         elseif value == "--no-images" then
             options.images = false
+        elseif value == "-n" or value == "--numbers" then
+            options.numbers = true
+        elseif value == "--no-numbers" then
+            options.numbers = false
         elseif value == "--snapshot" then
             local following = argv[index + 1]
             if following and following:match("^%d+x%d+$") then
@@ -2336,12 +2446,31 @@ local function parse_arguments(argv)
     return options
 end
 
+local function gutter_text(line, gutter)
+    if gutter <= 0 then
+        return ""
+    end
+    if line.number then
+        return string.format("%" .. (gutter - 1) .. "d ", line.number)
+    end
+    return string.rep(" ", gutter)
+end
+
 local function print_document(title, lines, options)
+    local gutter = lines.gutter_width or 0
     for _, line in ipairs(lines) do
+        local prefix = gutter_text(line, gutter)
         if options.color then
-            io.write(spans_to_ansi(line.spans, math.huge, false), "\n")
+            local spans = {}
+            if #prefix > 0 then
+                add_span(spans, prefix, line.number and STYLE.line_number or nil)
+            end
+            for _, span in ipairs(line.spans) do
+                add_span(spans, span.text, span.style)
+            end
+            io.write(spans_to_ansi(spans, math.huge, false), "\n")
         else
-            io.write((line.text:gsub("[ \t]+$", "")), "\n")
+            io.write(prefix .. line.text:gsub("[ \t]+$", ""), "\n")
         end
     end
     io.flush()
@@ -2402,7 +2531,15 @@ local function main(argv)
     end
     local show_images = options.images
         and (options.snapshot ~= nil or options.color or interactive)
-    local render_options = { base_dir = base_dir, images = show_images }
+    local show_numbers = options.numbers
+    if show_numbers == nil then
+        show_numbers = interactive or options.snapshot ~= nil
+    end
+    local render_options = {
+        base_dir = base_dir,
+        images = show_images,
+        numbers = show_numbers,
+    }
     local lines = M.render(data, width, render_options)
 
     if options.snapshot then
