@@ -1169,7 +1169,7 @@ test("CLI reports missing files and bad options on stderr", function()
     truthy(bad_status ~= 0, "unknown option fails")
     local no_input = os.execute(string.format(
         "%s mdview.lua > %s 2>&1", luajit_bin, NULL_DEVICE))
-    truthy(no_input ~= 0, "missing input fails")
+    truthy(no_input ~= 0, "directory browser requires a terminal or --snapshot")
 end)
 
 test("CLI renders stdin with '-'", function()
@@ -1236,7 +1236,8 @@ test("terminal layer exposes a platform key reader", function()
     if ffi.os == "Windows" then
         eq(type(mdview.Terminal.is_tty(1)), "boolean", "Windows tty probe")
     else
-        eq(mdview.Terminal.is_tty(0), false, "test stdin is not a tty")
+        eq(type(mdview.Terminal.is_tty(0)), "boolean", "Linux tty probe")
+        eq(mdview.Terminal.is_tty(-1), false, "invalid fd is not a tty")
     end
 end)
 
@@ -1444,6 +1445,205 @@ test("outline renders empty, long and special headings across viewport boundarie
     mdview.handle_key(long_prompt, "X", 4)
     local prompt_frame = mdview.render_frame(long_prompt, 24, 4)
     truthy(prompt_frame.plain[4]:find("X▏", 1, true), "long filter keeps typed tail and cursor visible")
+end)
+
+local function browser_fixture()
+    local scans = {}
+    local files = {
+        ["/docs/alpha.md"] = "# Alpha\n\n" .. string.rep("alpha text\n\n", 40),
+        ["/docs/beta.markdown"] = "# Beta\n\nshort\n",
+        ["/docs/nested/中文.md"] = "# Unicode\n\n![image](image.ppm)\n",
+    }
+    local directories = {
+        ["/docs"] = {
+            { name = "beta.markdown", kind = "file" },
+            { name = "nested", kind = "directory" },
+            { name = "alpha.md", kind = "file" },
+            { name = ".hidden.md", kind = "file" },
+            { name = "secret.md", kind = "file", hidden = true },
+            { name = "loop", kind = "link" },
+            { name = "image.png", kind = "file" },
+        },
+        ["/docs/nested"] = { { name = "中文.md", kind = "file" } },
+    }
+    local fs = {
+        resolve = function(path)
+            return path:gsub("/$", "")
+        end,
+        kind = function(path)
+            if files[path] then
+                return "file"
+            elseif directories[path] then
+                return "directory"
+            end
+            return nil, "file disappeared"
+        end,
+        list = function(path)
+            scans[path] = (scans[path] or 0) + 1
+            return directories[path], "permission denied"
+        end,
+        read_document = function(path)
+            return files[path], "read failed"
+        end,
+    }
+    local view = mdview.new_view("Select a file", render_lines("Choose a file", 80))
+    local browser = mdview.new_browser(view, "/docs", true, { images = false }, fs)
+    return browser, files, directories, scans
+end
+
+local function browser_key(browser, key, width, height)
+    width, height = width or 80, height or 10
+    mdview.handle_browser_key(browser, key, width, height)
+    -- Exercise loading-state rendering before each external operation.
+    mdview.render_browser(browser, width, height)
+    if browser.pending then
+        mdview.process_browser_pending(browser, width, height)
+    end
+    mdview.resize_browser(browser, width, height)
+    return mdview.render_browser(browser, width, height)
+end
+
+test("file tree is lazy, sorted, icon-labelled and navigable with Vim tokens", function()
+    local browser, _, _, scans = browser_fixture()
+    truthy(mdview.process_browser_pending(browser, 80, 10), "root loaded")
+    eq(#browser.entries, 4, "only directory and visible Markdown files")
+    eq(browser.entries[2].name, "nested", "directories first")
+    eq(browser.entries[3].name, "alpha.md", "files alphabetical")
+    eq(scans["/docs/nested"], nil, "collapsed folder not scanned")
+    local frame = browser_key(browser, "j")
+    truthy(frame.plain[2]:find("📂", 1, true), "expanded folder icon")
+    truthy(frame.plain[3]:find("📁", 1, true), "closed folder icon")
+    truthy(frame.plain[4]:find("📄", 1, true), "Markdown file icon")
+    browser_key(browser, "l")
+    eq(scans["/docs/nested"], 1, "expanding scans once")
+    eq(#browser.entries, 5, "child exposed")
+    browser_key(browser, "l")
+    eq(browser.entries[browser.selected].name, "中文.md", "l enters expanded directory")
+    browser_key(browser, "h")
+    eq(browser.selected, 2, "h selects parent")
+    browser_key(browser, "h")
+    eq(#browser.entries, 4, "h collapses directory")
+    browser_key(browser, "RIGHT")
+    eq(scans["/docs/nested"], 1, "reopening cached directory avoids scan")
+    browser_key(browser, "G")
+    eq(browser.selected, #browser.entries, "G selects last")
+    browser_key(browser, "g")
+    eq(browser.selected, #browser.entries, "single g waits for second g")
+    browser_key(browser, "g")
+    eq(browser.selected, 1, "gg selects first")
+    browser_key(browser, "UP")
+    eq(browser.selected, 1, "upper bound clamped")
+    browser_key(browser, "?")
+    eq(browser.view.mode, "help", "tree question mark opens help")
+    browser_key(browser, "ESC")
+    eq(browser.focus, "tree", "closing help restores tree focus")
+end)
+
+test("file switching preserves document search and position and resolves relative images", function()
+    local browser = browser_fixture()
+    mdview.process_browser_pending(browser, 80, 10)
+    browser_key(browser, "j")
+    browser_key(browser, "j")
+    browser_key(browser, "ENTER")
+    eq(browser.focus, "document", "opening focuses document")
+    eq(browser.path, "/docs/alpha.md", "selected file opened")
+    for _, key in ipairs({ "/", "t", "e", "x", "t", "ENTER", "G" }) do
+        browser_key(browser, key)
+    end
+    local alpha = browser.view
+    local top = alpha.top
+    local search = alpha.search
+    browser_key(browser, "TAB")
+    browser_key(browser, "j")
+    browser_key(browser, "ENTER")
+    eq(browser.path, "/docs/beta.markdown", "second file opened")
+    browser_key(browser, "TAB")
+    browser_key(browser, "k")
+    browser_key(browser, "ENTER")
+    eq(browser.view, alpha, "same document view restored")
+    eq(browser.view.top, top, "scroll restored")
+    eq(browser.view.search, search, "search restored")
+    browser_key(browser, "TAB")
+    browser_key(browser, "k")
+    browser_key(browser, "l")
+    browser_key(browser, "j")
+    browser_key(browser, "ENTER")
+    eq(browser.path, "/docs/nested/中文.md", "Unicode file opened")
+    eq(browser.view.lines.render_options.base_dir, "/docs/nested/", "image base is opened file directory")
+end)
+
+test("tree failures preserve the document and can be repaired with refresh", function()
+    local browser, files, directories = browser_fixture()
+    mdview.process_browser_pending(browser, 80, 10)
+    local original = browser.view
+    browser_key(browser, "G")
+    files["/docs/beta.markdown"] = nil
+    local frame = browser_key(browser, "ENTER")
+    eq(browser.view, original, "disappeared file does not replace document")
+    truthy(frame.plain[10]:find("Cannot open", 1, true), "visible file error")
+    browser_key(browser, "g")
+    browser_key(browser, "g")
+    browser_key(browser, "j")
+    directories["/docs/nested"] = nil
+    frame = browser_key(browser, "l")
+    truthy(frame.plain[10]:find("permission denied", 1, true), "visible folder failure")
+    eq(browser.view, original, "directory failure preserves document")
+    directories["/docs/nested"] = {}
+    browser_key(browser, "r")
+    eq(browser.message, "", "refresh clears repaired error")
+    eq(browser.entries[2].expanded, true, "empty folder opens")
+    directories["/docs"] = {}
+    browser_key(browser, "g")
+    browser_key(browser, "g")
+    frame = browser_key(browser, "r")
+    eq(#browser.entries, 1, "refresh removes stale entries")
+    for row = 4, 9 do
+        eq(frame.plain[row]:sub(1, 26), string.rep(" ", 26), "stale tree rows cleared")
+    end
+end)
+
+test("browser frames cover tiny, narrow and wide terminals and long unsafe names", function()
+    local browser, _, directories = browser_fixture()
+    for index = 1, 40 do
+        directories["/docs"][#directories["/docs"] + 1] = {
+            name = string.rep("中", 20) .. "%\27[2J" .. index .. ".md",
+            kind = "file",
+        }
+    end
+    mdview.process_browser_pending(browser, 80, 10)
+    for _, size in ipairs({ { 1, 1 }, { 23, 3 }, { 24, 4 }, { 63, 10 }, { 64, 10 }, { 120, 30 } }) do
+        local width, height = size[1], size[2]
+        for _, key in ipairs({ "G", "j", "CTRL_U", "CTRL_D", "PAGE_UP", "PAGE_DOWN", "HOME" }) do
+            local frame = browser_key(browser, key, width, height)
+            eq(#frame.rows, height, "browser frame height")
+            for _, row in ipairs(frame.plain) do
+                eq(mdview.display_width(row), width, "browser frame width")
+                truthy(not row:find("\27[2J", 1, true), "filename cannot clear terminal")
+            end
+            truthy(browser.selected >= browser.top, "selection above scroll offset")
+            truthy(browser.selected < browser.top + math.max(1, height - 2), "selection visible")
+        end
+        browser_key(browser, "TAB", width, height)
+        eq(browser.focus, "document", "Tab focuses document")
+        browser_key(browser, "f", width, height)
+        eq(browser.tree_visible, false, "f hides tree")
+        browser_key(browser, "f", width, height)
+        eq(browser.focus, "tree", "f reveals and focuses tree")
+    end
+end)
+
+test("direct-file browser loads its tree only when requested", function()
+    local fixture = browser_fixture()
+    local view = mdview.new_view("alpha.md", render_lines("# Alpha", 80))
+    local browser = mdview.new_browser(view, "/docs/alpha.md", false, {}, fixture.fs)
+    eq(browser.tree_visible, false, "file starts full width")
+    eq(browser.pending, nil, "file startup does not scan directories")
+    local frame = mdview.render_browser(browser, 80, 10)
+    truthy(frame.plain[1]:find("alpha.md", 1, true), "direct document header")
+    browser_key(browser, "f")
+    eq(browser.tree_visible, true, "tree opens on demand")
+    eq(browser.root.path, "/docs", "tree root is document parent")
+    eq(browser.entries[browser.selected].name, "alpha.md", "direct file selected when tree opens")
 end)
 
 print(string.format("\n%d passed, %d failed", passed, failed))

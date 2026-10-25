@@ -17,9 +17,12 @@
       flicker-free differential row updates and a source line-number gutter.
     - Incremental case-insensitive search with match highlighting.
     - Filterable heading outline (t), with source-anchored navigation.
+    - Lazy Markdown file tree with folder/file icons and Vim navigation.
     - Pure render/frame functions for headless tests and --snapshot output.
 
     Usage:
+      luajit mdview.lua                         # Browse the current directory
+      luajit mdview.lua docs/                   # Browse a documentation folder
       luajit mdview.lua README.md
       luajit mdview.lua --width 100 --no-pager README.md
       luajit mdview.lua --snapshot 100x30 README.md
@@ -33,6 +36,8 @@
       g / Home      top                     G / End       bottom
       / and ?       search forward/back     n / N         next / previous
       h             toggle help             t             heading outline
+      f             toggle file tree        Tab           switch panes
+      Tree: j/k move, h/l collapse/expand/open, gg/G first/last, ? help
 
     Options:
       -w, --width N        wrap width for non-interactive output (default 80)
@@ -1967,6 +1972,14 @@ local HELP_TEXT = [[
 | `C` | Toggle case-sensitive search |
 | `h` | Toggle this help |
 | `t` | Open heading outline |
+| `f`, `Tab` | Toggle file tree / switch panes |
+
+In the file tree: j/k or arrows move; h/Left collapses a folder or selects
+its parent; l/Right expands a folder or opens a file; Enter opens; gg/G
+jumps to first/last; Ctrl-d/u scrolls half a page; r refreshes the selected
+folder; ? opens help; Esc returns to the document; q quits.
+Folders use 📁/📂 icons and Markdown files use 📄. Hidden files and directory
+links are omitted. Narrow terminals show one pane at a time.
 
 In the outline: j/k or arrows select; / filters; Enter jumps to the selected
 heading; Esc returns to the document; q quits. Search filters accept spaces
@@ -2565,7 +2578,7 @@ function M.render_frame(view, width, height)
         status_style = merge_style(STYLE.bar,
             view.message_kind == "warn" and { fg = THEME.warn } or { fg = THEME.info })
     else
-        status_text = " q quit  j/k scroll  / ? search  n/N  t outline  h help"
+        status_text = " q quit  j/k scroll  / ? search  f files  Tab pane  t outline  h help"
     end
 
     if view.mode == "normal" and view.search and #view.search.query > 0 then
@@ -3047,10 +3060,700 @@ if not IS_WINDOWS then
 end
 
 -- =========================================================================
--- 13. Interactive Pager
+-- 13. Native Directory Browsing (loaded only when needed)
+-- =========================================================================
+local read_document
+local filesystem_cache
+
+local function filesystem()
+    if filesystem_cache then
+        return filesystem_cache
+    end
+    local fs = {}
+    if IS_WINDOWS then
+        ffi.cdef[[
+            typedef struct {
+                uint32_t attributes;
+                uint32_t times[6];
+                uint32_t size_high, size_low, reserved0, reserved1;
+                uint16_t name[260], alternate[14];
+            } mdview_find_data;
+            int __stdcall MultiByteToWideChar(unsigned int, uint32_t, const char *, int, uint16_t *, int);
+            int __stdcall WideCharToMultiByte(unsigned int, uint32_t, const uint16_t *, int,
+                                              char *, int, const char *, int *);
+            uint32_t __stdcall GetFullPathNameW(const uint16_t *, uint32_t, uint16_t *, uint16_t **);
+            uint32_t __stdcall GetFileAttributesW(const uint16_t *);
+            void *__stdcall FindFirstFileW(const uint16_t *, mdview_find_data *);
+            int __stdcall FindNextFileW(void *, mdview_find_data *);
+            int __stdcall FindClose(void *);
+            uint32_t __stdcall GetLastError(void);
+            void *__stdcall CreateFileW(const uint16_t *, uint32_t, uint32_t, void *, uint32_t,
+                                        uint32_t, void *);
+            int __stdcall ReadFile(void *, void *, uint32_t, uint32_t *, void *);
+            int __stdcall CloseHandle(void *);
+            const uint16_t *__stdcall GetCommandLineW(void);
+            uint16_t **__stdcall CommandLineToArgvW(const uint16_t *, int *);
+            void *__stdcall LocalFree(void *);
+        ]]
+        local native = ffi.load("kernel32")
+        local invalid = ffi.cast("void *", -1)
+        local function failure()
+            return "Windows error " .. tonumber(native.GetLastError())
+        end
+        local function wide(text)
+            local count = native.MultiByteToWideChar(65001, 8, text, #text, nil, 0)
+            if count == 0 then
+                return nil, "invalid UTF-8 path: " .. failure()
+            end
+            local buffer = ffi.new("uint16_t[?]", count + 1)
+            if native.MultiByteToWideChar(65001, 8, text, #text, buffer, count) ~= count then
+                return nil, failure()
+            end
+            return buffer
+        end
+        local function utf8(buffer)
+            local count = native.WideCharToMultiByte(65001, 0, buffer, -1, nil, 0, nil, nil)
+            if count == 0 then
+                return nil, failure()
+            end
+            local text = ffi.new("char[?]", count)
+            if native.WideCharToMultiByte(65001, 0, buffer, -1, text, count, nil, nil) ~= count then
+                return nil, failure()
+            end
+            return ffi.string(text, count - 1)
+        end
+        function fs.resolve(path)
+            local input, err = wide(path)
+            if not input then
+                return nil, err
+            end
+            local buffer = ffi.new("uint16_t[32768]")
+            local count = native.GetFullPathNameW(input, 32768, buffer, nil)
+            if count == 0 or count >= 32768 then
+                return nil, "cannot resolve path: " .. failure()
+            end
+            local text, encode_error = utf8(buffer)
+            if not text then
+                return nil, encode_error
+            end
+            return text:gsub("\\", "/")
+        end
+        function fs.arguments(argv)
+            local shell = ffi.load("shell32")
+            local count = ffi.new("int[1]")
+            local arguments = shell.CommandLineToArgvW(native.GetCommandLineW(), count)
+            if arguments == nil then
+                return nil, "cannot read Unicode command line: " .. failure()
+            end
+            local result = {}
+            local decode_error
+            -- LuaJIT has already separated interpreter options and the script.
+            -- Recover the same trailing script arguments from the Unicode argv.
+            local first = tonumber(count[0]) - #argv
+            if first < 1 then
+                decode_error = "cannot locate script arguments in Unicode command line"
+            else
+                for index = 1, #argv do
+                    local value, err = utf8(arguments[first + index - 1])
+                    if not value then
+                        decode_error = err
+                        break
+                    end
+                    result[index] = value
+                end
+            end
+            if native.LocalFree(arguments) ~= nil then
+                decode_error = decode_error or "cannot release Unicode command line: " .. failure()
+            end
+            if decode_error then
+                return nil, decode_error
+            end
+            return result
+        end
+        local function native_path(path)
+            local absolute, err = fs.resolve(path)
+            if not absolute then
+                return nil, err
+            end
+            absolute = absolute:gsub("/", "\\")
+            if absolute:sub(1, 4) ~= "\\\\?\\" then
+                if absolute:sub(1, 2) == "\\\\" then
+                    absolute = "\\\\?\\UNC\\" .. absolute:sub(3)
+                else
+                    absolute = "\\\\?\\" .. absolute
+                end
+            end
+            return wide(absolute)
+        end
+        local function kind(attributes)
+            if bit.band(attributes, 0x400) ~= 0 then
+                return "link"
+            end
+            return bit.band(attributes, 0x10) ~= 0 and "directory" or "file"
+        end
+        function fs.kind(path)
+            local input, err = native_path(path)
+            if not input then
+                return nil, err
+            end
+            local attributes = native.GetFileAttributesW(input)
+            if attributes == 0xffffffff then
+                return nil, failure()
+            end
+            return kind(attributes)
+        end
+        function fs.list(path)
+            local directory, err = fs.kind(path)
+            if directory ~= "directory" then
+                return nil, err or "not a directory (directory links are not expanded)"
+            end
+            local pattern, path_error = native_path(path .. "/*")
+            if not pattern then
+                return nil, path_error
+            end
+            local data = ffi.new("mdview_find_data[1]")
+            local handle = native.FindFirstFileW(pattern, data)
+            if handle == invalid then
+                if native.GetLastError() == 2 then
+                    return {}
+                end
+                return nil, failure()
+            end
+            local entries = {}
+            local scan_error
+            repeat
+                local name, name_error = utf8(data[0].name)
+                if not name then
+                    scan_error = name_error
+                    break
+                end
+                entries[#entries + 1] = {
+                    name = name,
+                    kind = kind(data[0].attributes),
+                    hidden = bit.band(data[0].attributes, 2) ~= 0,
+                }
+                if native.FindNextFileW(handle, data) == 0 then
+                    if native.GetLastError() ~= 18 then
+                        scan_error = failure()
+                    end
+                    break
+                end
+            until false
+            if native.FindClose(handle) == 0 then
+                scan_error = scan_error or failure()
+            end
+            if scan_error then
+                return nil, scan_error
+            end
+            return entries
+        end
+        function fs.read(path)
+            local input, err = native_path(path)
+            if not input then
+                return nil, err
+            end
+            local handle = native.CreateFileW(input, 0x80000000, 7, nil, 3, 0x80, nil)
+            if handle == invalid then
+                return nil, failure()
+            end
+            local chunks = {}
+            local buffer = ffi.new("char[65536]")
+            local count = ffi.new("uint32_t[1]")
+            local read_error
+            while true do
+                if native.ReadFile(handle, buffer, 65536, count, nil) == 0 then
+                    read_error = failure()
+                    break
+                end
+                if count[0] == 0 then
+                    break
+                end
+                chunks[#chunks + 1] = ffi.string(buffer, count[0])
+            end
+            if native.CloseHandle(handle) == 0 then
+                read_error = read_error or failure()
+            end
+            if read_error then
+                return nil, read_error
+            end
+            return table.concat(chunks)
+        end
+    elseif ffi.os == "Linux" then
+        ffi.cdef[[
+            typedef struct {
+                uint64_t ino;
+                int64_t offset;
+                uint16_t length;
+                uint8_t kind;
+                char name[256];
+            } mdview_dirent;
+            typedef struct { int64_t sec; uint32_t nsec; int32_t reserved; } mdview_timestamp;
+            typedef struct {
+                uint32_t mask, blksize;
+                uint64_t attributes;
+                uint32_t nlink, uid, gid;
+                uint16_t mode, spare0;
+                uint64_t ino, size, blocks, attributes_mask;
+                mdview_timestamp times[4];
+                uint32_t rdev_major, rdev_minor, dev_major, dev_minor;
+                uint64_t spare[14];
+            } mdview_statx;
+            int statx(int, const char *, int, unsigned int, mdview_statx *);
+            int open(const char *, int, ...);
+            void *fdopendir(int);
+            mdview_dirent *readdir64(void *);
+            int closedir(void *);
+            int close(int);
+            char *realpath(const char *, char *);
+            char *strerror(int);
+        ]]
+        local function failure()
+            return ffi.string(ffi.C.strerror(ffi.errno()))
+        end
+        function fs.resolve(path)
+            local buffer = ffi.new("char[4096]")
+            if ffi.C.realpath(path, buffer) == nil then
+                return nil, failure()
+            end
+            return ffi.string(buffer)
+        end
+        function fs.kind(path)
+            local info = ffi.new("mdview_statx[1]")
+            if ffi.C.statx(-100, path, 256, 1, info) ~= 0 then
+                return nil, failure()
+            end
+            local mode = bit.band(info[0].mode, 0xf000)
+            if mode == 0x4000 then
+                return "directory"
+            elseif mode == 0x8000 then
+                return "file"
+            elseif mode == 0xa000 then
+                return "link"
+            end
+            return "other"
+        end
+        function fs.list(path)
+            -- O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC: never descend through links.
+            local fd = ffi.C.open(path, 65536 + 131072 + 524288)
+            if fd < 0 then
+                return nil, failure()
+            end
+            local directory = ffi.C.fdopendir(fd)
+            if directory == nil then
+                local err = failure()
+                ffi.C.close(fd)
+                return nil, err
+            end
+            local entries = {}
+            local scan_error
+            while true do
+                ffi.errno(0)
+                local entry = ffi.C.readdir64(directory)
+                if entry == nil then
+                    if ffi.errno() ~= 0 then
+                        scan_error = failure()
+                    end
+                    break
+                end
+                local name = ffi.string(entry.name)
+                local kind
+                if entry.kind == 4 then
+                    kind = "directory"
+                elseif entry.kind == 8 then
+                    kind = "file"
+                elseif entry.kind == 0 then
+                    kind, scan_error = fs.kind(path .. "/" .. name)
+                    if not kind then
+                        scan_error = name .. ": " .. scan_error
+                        break
+                    end
+                end
+                entries[#entries + 1] = { name = name, kind = kind or "other" }
+            end
+            if ffi.C.closedir(directory) ~= 0 then
+                scan_error = scan_error or failure()
+            end
+            if scan_error then
+                return nil, scan_error
+            end
+            return entries
+        end
+    else
+        return nil, "file browsing supports Linux and Windows on this build"
+    end
+    filesystem_cache = fs
+    return fs
+end
+
+-- =========================================================================
+-- 14. Browser State and Frames
+-- =========================================================================
+local function path_parent(path)
+    if IS_WINDOWS then
+        path = path:gsub("\\", "/")
+    end
+    return path:match("^(.*[/])[^/]+/?$") or "."
+end
+
+local function markdown_name(name)
+    local lower = name:lower()
+    return lower:match("%.md$") ~= nil or lower:match("%.markdown$") ~= nil
+end
+
+function M.new_browser(view, path, is_directory, settings, fs)
+    return {
+        view = view,
+        path = not is_directory and path or nil,
+        root_path = is_directory and path or path_parent(path or "."),
+        settings = settings or {},
+        fs = fs,
+        root = nil,
+        entries = {},
+        selected = 1,
+        top = 1,
+        tree_visible = is_directory,
+        focus = is_directory and "tree" or "document",
+        pending = is_directory and { kind = "root" } or nil,
+        message = is_directory and ("Loading " .. path .. " ...") or "",
+        cache = {},
+        pending_g = false,
+    }
+end
+
+local function browser_layout(browser, width)
+    if not browser.tree_visible then
+        return 0, width
+    end
+    if width < 64 then
+        return browser.focus == "tree" and width or 0, width
+    end
+    local tree_width = math.max(24, math.min(32, math.floor(width / 3)))
+    return tree_width, width - tree_width - 1
+end
+
+function M.resize_browser(browser, width, height)
+    local _, document_width = browser_layout(browser, width)
+    M.reflow(browser.view, document_width, height)
+end
+
+local function clamp_tree(browser, height)
+    local count = #browser.entries
+    if count == 0 then
+        browser.selected = 1
+        browser.top = 1
+        return
+    end
+    browser.selected = math.max(1, math.min(browser.selected, count))
+    local rows = page_rows(height)
+    browser.top = math.max(1, math.min(browser.top, count - rows + 1))
+    if browser.selected < browser.top then
+        browser.top = browser.selected
+    elseif browser.selected >= browser.top + rows then
+        browser.top = browser.selected - rows + 1
+    end
+end
+
+local function rebuild_tree(browser, height, selected_path)
+    browser.entries = {}
+    local function append(node, depth)
+        node.depth = depth
+        browser.entries[#browser.entries + 1] = node
+        if selected_path and node.path == selected_path then
+            browser.selected = #browser.entries
+        end
+        if node.expanded then
+            for _, child in ipairs(node.children or {}) do
+                append(child, depth + 1)
+            end
+        end
+    end
+    if browser.root then
+        append(browser.root, 0)
+    end
+    clamp_tree(browser, height)
+end
+
+local function load_tree_node(browser, node)
+    local entries, err = browser.fs.list(node.path)
+    if not entries then
+        return nil, "Cannot list " .. node.path .. ": " .. tostring(err)
+    end
+    local children = {}
+    for _, entry in ipairs(entries) do
+        if entry.name:sub(1, 1) ~= "." and not entry.hidden
+            and (entry.kind == "directory" or (entry.kind == "file" and markdown_name(entry.name))) then
+            children[#children + 1] = {
+                name = entry.name,
+                path = node.path:gsub("/$", "") .. "/" .. entry.name,
+                directory = entry.kind == "directory",
+                parent = node,
+            }
+        end
+    end
+    table.sort(children, function(a, b)
+        if a.directory ~= b.directory then
+            return a.directory
+        end
+        if a.name:lower() == b.name:lower() then
+            return a.name < b.name
+        end
+        return a.name:lower() < b.name:lower()
+    end)
+    node.children = children
+    node.expanded = true
+    return true
+end
+
+function M.process_browser_pending(browser, width, height)
+    local action = browser.pending
+    if not action then
+        return true
+    end
+    browser.pending = nil
+    local fs, fs_error = browser.fs, nil
+    if not fs then
+        fs, fs_error = filesystem()
+        browser.fs = fs
+    end
+    local function fail(message)
+        browser.message = sanitize_text(message)
+        return nil, browser.message
+    end
+    if not fs then
+        return fail(tostring(fs_error))
+    end
+    if action.kind == "root" then
+        local path, err = fs.resolve(browser.root_path)
+        if not path then
+            return fail("Cannot open " .. browser.root_path .. ": " .. tostring(err))
+        end
+        local root = {
+            path = path,
+            name = path:match("([^/]+)/*$") or path,
+            directory = true,
+        }
+        local ok, list_error = load_tree_node(browser, root)
+        if not ok then
+            return fail(list_error)
+        end
+        browser.root = root
+        browser.root_path = path
+        rebuild_tree(browser, height, browser.path)
+    elseif action.kind == "expand" then
+        local ok, err = load_tree_node(browser, action.node)
+        if not ok then
+            return fail(err)
+        end
+        rebuild_tree(browser, height, action.node.path)
+    elseif action.kind == "open" then
+        local path = action.node.path
+        local kind, kind_error = fs.kind(path)
+        if kind ~= "file" then
+            return fail("Cannot open " .. path .. ": " .. (kind_error or "not a regular Markdown file"))
+        end
+        local data, err = (fs.read_document or read_document)(path)
+        if not data then
+            return fail("Cannot open " .. path .. ": " .. tostring(err))
+        end
+        if browser.path then
+            browser.cache[browser.path] = browser.view
+        end
+        local view = browser.cache[path]
+        if not view or view.document_source ~= data then
+            local _, document_width = browser_layout(browser, width)
+            local options = {
+                base_dir = path_parent(path),
+                images = browser.settings.images ~= false,
+                numbers = browser.settings.numbers ~= false,
+            }
+            local ok, lines = pcall(M.render, data, document_width, options)
+            if not ok then
+                return fail("Cannot render " .. path .. ": " .. tostring(lines))
+            end
+            view = M.new_view(path, lines)
+            view.document_source = data
+            view.case_sensitive = browser.settings.case_sensitive or false
+        end
+        browser.view = view
+        browser.path = path
+        browser.cache[path] = view
+        browser.focus = "document"
+        M.resize_browser(browser, width, height)
+    end
+    browser.message = ""
+    return true
+end
+
+local function queue_browser_action(browser, kind, node)
+    browser.pending = { kind = kind, node = node }
+    browser.message = "Loading " .. (node and node.path or browser.root_path) .. " ..."
+end
+
+function M.handle_browser_key(browser, key, width, height)
+    local view = browser.view
+    if key == "CTRL_C" then
+        view.quit = true
+        return
+    end
+    if view.mode ~= "normal" then
+        local _, document_width = browser_layout(browser, width)
+        M.handle_key(view, key, height, document_width)
+        if view.mode == "normal" and browser.modal_focus then
+            browser.focus = browser.modal_focus
+            browser.modal_focus = nil
+        end
+        return
+    end
+    if key == "f" then
+        browser.tree_visible = not browser.tree_visible
+        browser.focus = browser.tree_visible and "tree" or "document"
+        browser.pending_g = false
+        if browser.tree_visible and not browser.root then
+            queue_browser_action(browser, "root")
+        end
+        M.resize_browser(browser, width, height)
+        return
+    elseif key == "TAB" and browser.tree_visible then
+        browser.focus = browser.focus == "tree" and "document" or "tree"
+        browser.pending_g = false
+        M.resize_browser(browser, width, height)
+        return
+    end
+    if browser.focus == "document" then
+        local _, document_width = browser_layout(browser, width)
+        M.handle_key(view, key, height, document_width)
+        return
+    end
+    local node = browser.entries[browser.selected]
+    local rows = page_rows(height)
+    if key == "g" then
+        if browser.pending_g then
+            browser.selected = 1
+        end
+        browser.pending_g = not browser.pending_g
+    else
+        browser.pending_g = false
+    end
+    if key == "q" then
+        view.quit = true
+    elseif key == "ESC" then
+        browser.focus = "document"
+    elseif key == "j" or key == "DOWN" then
+        browser.selected = browser.selected + 1
+    elseif key == "k" or key == "UP" then
+        browser.selected = browser.selected - 1
+    elseif key == "G" or key == "END" then
+        browser.selected = #browser.entries
+    elseif key == "HOME" then
+        browser.selected = 1
+    elseif key == "CTRL_D" or key == "d" then
+        browser.selected = browser.selected + math.max(1, math.floor(rows / 2))
+    elseif key == "CTRL_U" or key == "u" then
+        browser.selected = browser.selected - math.max(1, math.floor(rows / 2))
+    elseif key == "PAGE_DOWN" or key == "CTRL_F" or key == "SPACE" then
+        browser.selected = browser.selected + rows
+    elseif key == "PAGE_UP" or key == "CTRL_B" then
+        browser.selected = browser.selected - rows
+    elseif key == "h" or key == "LEFT" then
+        if node and node.directory and node.expanded then
+            node.expanded = false
+            rebuild_tree(browser, height, node.path)
+        elseif node and node.parent then
+            rebuild_tree(browser, height, node.parent.path)
+        end
+    elseif key == "l" or key == "RIGHT" or key == "ENTER" then
+        if node and node.directory then
+            if not node.expanded then
+                if node.children then
+                    node.expanded = true
+                    rebuild_tree(browser, height, node.path)
+                else
+                    queue_browser_action(browser, "expand", node)
+                end
+            elseif #(node.children or {}) > 0 then
+                browser.selected = browser.selected + 1
+            end
+        elseif node then
+            queue_browser_action(browser, "open", node)
+        end
+    elseif key == "r" then
+        local directory = node and (node.directory and node or node.parent)
+        if directory then
+            queue_browser_action(browser, "expand", directory)
+        else
+            queue_browser_action(browser, "root")
+        end
+    elseif key == "?" then
+        browser.modal_focus = "tree"
+        browser.focus = "document"
+        M.handle_key(view, "h", height)
+    end
+    clamp_tree(browser, height)
+    M.resize_browser(browser, width, height)
+end
+
+local function render_tree_frame(browser, width, height)
+    clamp_tree(browser, height)
+    local frame = { rows = {}, plain = {} }
+    local function set_row(row, text, style)
+        frame.rows[row] = pad_styled(sanitize_text(text), width, style)
+        frame.plain[row] = strip_ansi(frame.rows[row])
+    end
+    set_row(1, " Files" .. (browser.focus == "tree" and " [active]" or ""), STYLE.bar)
+    for row = 1, page_rows(height) do
+        local index = browser.top + row - 1
+        local node = browser.entries[index]
+        if node then
+            local selected = index == browser.selected
+            local icon = node.directory and (node.expanded and "📂" or "📁") or "📄"
+            local prefix = (selected and "> " or "  ") .. string.rep("  ", math.min(node.depth, 8))
+            local name = sanitize_text(node.name)
+            set_row(row + 1, prefix .. icon .. " " .. name,
+                selected and browser.focus == "tree" and { reverse = true } or nil)
+        elseif row == 1 then
+            set_row(row + 1, " No files loaded — r retries", STYLE.warn)
+        elseif row == 2 and #browser.entries == 1 and browser.root.expanded then
+            set_row(row + 1, " No Markdown files or folders", STYLE.warn)
+        else
+            set_row(row + 1, "", nil)
+        end
+    end
+    local status = browser.message ~= "" and browser.message
+        or " j/k move  h/l fold  gg/G  Enter open  Tab pane  r refresh  ? help"
+    set_row(height, status, browser.message ~= "" and STYLE.warn or STYLE.bar)
+    return frame
+end
+
+function M.render_browser(browser, width, height)
+    if width < 24 or height < 4 then
+        return M.render_frame(browser.view, width, height)
+    end
+    local tree_width, document_width = browser_layout(browser, width)
+    if tree_width == 0 then
+        return M.render_frame(browser.view, width, height)
+    end
+    local tree = render_tree_frame(browser, tree_width, height)
+    if tree_width == width then
+        return tree
+    end
+    local document = M.render_frame(browser.view, document_width, height)
+    local frame = { rows = {}, plain = {} }
+    for row = 1, height do
+        frame.rows[row] = tree.rows[row] .. "│" .. document.rows[row]
+        frame.plain[row] = tree.plain[row] .. "│" .. document.plain[row]
+    end
+    if browser.message ~= "" then
+        frame.rows[height] = pad_styled(sanitize_text(browser.message), width, STYLE.warn)
+        frame.plain[height] = strip_ansi(frame.rows[height])
+    end
+    return frame
+end
+
+-- =========================================================================
+-- 15. Interactive Pager
 -- =========================================================================
 local function draw_frame(view, width, height, previous_rows)
-    local frame = M.render_frame(view, width, height)
+    local frame = M.render_browser(view, width, height)
     local parts = { "\27[?2026h" }
     for row = 1, height do
         local content = frame.rows[row] or ""
@@ -3064,14 +3767,14 @@ local function draw_frame(view, width, height, previous_rows)
     io.flush()
 end
 
-local function run_pager(title, lines, initial_search, settings)
+local function run_pager(browser, initial_search, settings)
     if not Terminal.enable_raw_mode() then
         io.stderr:write("mdview: interactive pager requires a terminal;"
             .. " printing the rendered document instead\n")
         return false
     end
 
-    local view = M.new_view(title, lines)
+    local view = browser.view
     view.case_sensitive = settings and settings.case_sensitive or false
     if initial_search and #initial_search > 0 then
         local width, height = Terminal.get_size()
@@ -3080,16 +3783,16 @@ local function run_pager(title, lines, initial_search, settings)
     end
 
     local width, height = Terminal.get_size()
-    M.reflow(view, math.max(20, width - 1), height)
+    M.resize_browser(browser, math.max(20, width - 1), height)
     local previous_rows = {}
     local redraw = true
 
     local ok, err = xpcall(function()
-        while not view.quit and not Terminal.interrupted do
+        while not browser.view.quit and not Terminal.interrupted do
             local new_width, new_height = Terminal.get_size()
             if new_width ~= width or new_height ~= height then
                 width, height = new_width, new_height
-                M.reflow(view, math.max(20, width - 1), height)
+                M.resize_browser(browser, math.max(20, width - 1), height)
                 previous_rows = {}
                 -- A resize is one of the few cases where a full clear is safe.
                 io.write("\27[H\27[2J")
@@ -3097,15 +3800,19 @@ local function run_pager(title, lines, initial_search, settings)
                 redraw = true
             end
             if redraw then
-                draw_frame(view, math.max(1, width - 1), height, previous_rows)
+                draw_frame(browser, math.max(1, width - 1), height, previous_rows)
                 redraw = false
             end
 
-            local key = Terminal.read_key(200)
-            if key then
-                M.handle_key(view, key, height, math.max(1, width - 1))
-                M.clamp_view(view, height)
+            if browser.pending then
+                M.process_browser_pending(browser, math.max(1, width - 1), height)
                 redraw = true
+            else
+                local key = Terminal.read_key(200)
+                if key then
+                    M.handle_browser_key(browser, key, math.max(1, width - 1), height)
+                    redraw = true
+                end
             end
         end
     end, debug.traceback)
@@ -3120,14 +3827,16 @@ local function run_pager(title, lines, initial_search, settings)
 end
 
 -- =========================================================================
--- 14. CLI
+-- 16. CLI
 -- =========================================================================
 local function usage(stream)
     stream:write([[
 mdview - terminal Markdown viewer (LuaJIT + FFI)
 
 USAGE:
-  luajit mdview.lua [OPTIONS] FILE.md
+  luajit mdview.lua [OPTIONS] [FILE.md | DIRECTORY]
+
+  No path opens the current directory tree. A Markdown file opens directly.
 
 OPTIONS:
   -w, --width N        Wrap width for non-interactive output (default 80)
@@ -3146,6 +3855,9 @@ OPTIONS:
 KEYS:
   q/Esc quit   j/k scroll   d/u half-page   Space/b page
   g/G ends     / search      n/N next match   t outline   h help
+  f files      Tab switch panes
+  Tree: j/k move, h/l collapse/expand/open, gg/G first/last,
+        Enter open, Ctrl-d/u half-page, r refresh, ? help, Esc document
 
 NOTES:
   Windows pager support needs Windows 10+ with VT sequences enabled
@@ -3155,12 +3867,21 @@ NOTES:
     stream:flush()
 end
 
-local function read_document(path)
+read_document = function(path)
     local data
     if path == "-" then
         data = io.read("*a")
         if not data then
             return nil, "cannot read standard input"
+        end
+    elseif IS_WINDOWS then
+        local fs, err = filesystem()
+        if not fs then
+            return nil, err
+        end
+        data, err = fs.read(path)
+        if not data then
+            return nil, err
         end
     else
         local file, err = io.open(path, "rb")
@@ -3309,14 +4030,15 @@ local function snapshot_size(specification)
     return columns, rows
 end
 
-local function run_snapshot(title, lines, specification, search, settings)
+local function run_snapshot(browser, specification, search, settings)
     local columns, rows = snapshot_size(specification)
-    local view = M.new_view(title, lines)
+    local view = browser.view
     view.case_sensitive = settings and settings.case_sensitive or false
     if search and #search > 0 then
         M.search(view, search, rows)
     end
-    local frame = M.render_frame(view, columns, rows)
+    M.resize_browser(browser, columns, rows)
+    local frame = M.render_browser(browser, columns, rows)
     for row = 1, rows do
         io.write(frame.rows[row] or string.rep(" ", columns), "\n")
     end
@@ -3335,13 +4057,30 @@ local function main(argv)
         usage(io.stdout)
         return 0
     end
-    if not options.file then
-        io.stderr:write("mdview: no input file given\n")
-        usage(io.stderr)
+    options.file = options.file or "."
+    local interactive = options.pager and Terminal.is_tty(1) and Terminal.is_tty(0)
+    local is_directory = false
+    local fs
+    if interactive and options.file ~= "-" then
+        io.stderr:write("mdview: inspecting " .. sanitize_text(options.file) .. "\n")
+        io.stderr:flush()
+    end
+    if options.file ~= "-" and (IS_WINDOWS or ffi.os == "Linux") then
+        fs = filesystem()
+        is_directory = fs.kind(options.file) == "directory"
+    end
+    if is_directory and not interactive and not options.snapshot then
+        io.stderr:write("mdview: directory browsing requires a terminal; use --snapshot 80x24 "
+            .. "or provide a Markdown file\n")
         return 1
     end
-
-    local data, read_error = read_document(options.file)
+    local data, read_error
+    if is_directory then
+        data = "# Markdown browser\n\nSelect a Markdown file in the tree and press Enter.\n\n"
+            .. "Tab switches panes. f toggles the tree. Press ? in the tree for help."
+    else
+        data, read_error = read_document(options.file)
+    end
     if not data then
         io.stderr:write("mdview: cannot open '" .. options.file .. "': "
             .. tostring(read_error) .. "\n")
@@ -3357,8 +4096,7 @@ local function main(argv)
         or (not options.no_color and os.getenv("NO_COLOR") == nil)
     M.set_color(color_enabled)
 
-    local title = document_title(options.file)
-    local interactive = options.pager and Terminal.is_tty(1) and Terminal.is_tty(0)
+    local title = is_directory and "Select a Markdown file" or document_title(options.file)
     local width = options.width
     if interactive then
         local columns = Terminal.get_size()
@@ -3384,14 +4122,40 @@ local function main(argv)
         numbers = show_numbers,
     }
     local lines = M.render(data, width, render_options)
+    local view = M.new_view(title, lines)
+    view.document_source = data
+    local path = options.file
+    if fs then
+        path = fs.resolve(path) or path
+    end
+    local browser = M.new_browser(view, path, is_directory, {
+        images = show_images,
+        numbers = show_numbers,
+        case_sensitive = options.case_sensitive,
+    }, fs)
+    if browser.pending then
+        if interactive then
+            io.stderr:write("mdview: loading directory " .. sanitize_text(path) .. "\n")
+            io.stderr:flush()
+        end
+        local columns, rows = width, 24
+        if options.snapshot then
+            columns, rows = snapshot_size(options.snapshot)
+        end
+        local ok, err = M.process_browser_pending(browser, columns, rows)
+        if not ok then
+            io.stderr:write("mdview: " .. err .. "\n")
+            return 1
+        end
+    end
 
     if options.snapshot then
-        run_snapshot(title, lines, options.snapshot, options.search, options)
+        run_snapshot(browser, options.snapshot, options.search, options)
         return 0
     end
 
     if interactive then
-        local ok = run_pager(title, lines, options.search, options)
+        local ok = run_pager(browser, options.search, options)
         if ok then
             return 0
         end
@@ -3402,7 +4166,7 @@ local function main(argv)
 end
 
 -- =========================================================================
--- 15. Entry Point
+-- 17. Entry Point
 -- =========================================================================
 M.Terminal = Terminal
 M.parse_blocks = parse_blocks
@@ -3423,6 +4187,7 @@ M.HELP_TEXT = HELP_TEXT
 M.main = main
 M.usage = usage
 M.read_document = read_document
+M.filesystem = filesystem
 
 local script_name = arg and arg[0] and arg[0]:match("([^/\\]+)$") or ""
 if script_name ~= "mdview.lua" then
@@ -3430,7 +4195,16 @@ if script_name ~= "mdview.lua" then
 end
 
 local ok, result = xpcall(function()
-    return main(arg or {})
+    local arguments = arg or {}
+    if IS_WINDOWS then
+        local fs = filesystem()
+        local decoded, err = fs.arguments(arguments)
+        if not decoded then
+            error(err, 0)
+        end
+        arguments = decoded
+    end
+    return main(arguments)
 end, debug.traceback)
 
 Terminal.disable_raw_mode()

@@ -26,16 +26,17 @@ LUAJIT = os.environ.get("LUALAB_LUAJIT", "luajit")
 
 
 class Session:
-    def __init__(self, path):
+    def __init__(self, path, cwd=None):
         self.master, self.slave = pty.openpty()
         self.original = termios.tcgetattr(self.slave)
         self.output = b""
         self.resize(81, 12)
         self.process = subprocess.Popen(
-            [LUAJIT, str(SCRIPT), "--no-images", str(path)],
+            [LUAJIT, str(SCRIPT), "--no-images"] + ([str(path)] if path is not None else []),
             stdin=self.slave, stdout=self.slave, stderr=self.slave,
             start_new_session=True,
             env=dict(os.environ, NO_COLOR="1", TERM="xterm-256color"),
+            cwd=cwd,
         )
 
     def resize(self, columns, rows):
@@ -156,6 +157,71 @@ class MarkdownPager(unittest.TestCase):
         session = self.session()
         self.assertIn(b"before^[[2Jafter^G", session.output)
         self.assertEqual(session.output.count(b"\x1b[2J"), 1)
+        session.send(b"q")
+        session.finish()
+
+    def browser_session(self, directory_argument=False):
+        root = Path(self.temp.name)
+        (root / "nested").mkdir()
+        (root / "alpha.md").write_text("# Alpha\n\n" + "alpha body\n\n" * 40, encoding="utf-8")
+        (root / "beta.md").write_text("# Beta\n\nshort\n", encoding="utf-8")
+        (root / "nested" / "中文.md").write_text("# Nested Unicode\n", encoding="utf-8")
+        (root / ".hidden.md").write_text("hidden", encoding="utf-8")
+        (root / "loop").symlink_to(root, target_is_directory=True)
+        session = Session(root if directory_argument else None, cwd=root)
+        self.addCleanup(session.close)
+        session.wait_for(b"\x1b[?2026l")
+        return session
+
+    def test_no_argument_tree_vim_keys_and_file_state(self):
+        session = self.browser_session()
+        rows = session.rows()
+        self.assertIn("Files [active]", rows[1])
+        self.assertIn("📂", rows[2])
+        self.assertIn("📁 nested", rows[3])
+        self.assertIn("📄 alpha.md", rows[4])
+        self.assertNotIn(".hidden.md", "".join(rows.values()))
+        self.assertNotIn("loop", "".join(rows.values()))
+        baseline = session.output.count(b"\x1b[2J")
+        session.send(b"jj\r")
+        self.assertIn("Alpha", session.rows()[2])
+        session.send(b"/body\rG")
+        original = session.rows()[2]
+        session.send(b"\tj\r")
+        self.assertIn("Beta", session.rows()[2])
+        session.send(b"\tk\r")
+        self.assertEqual(session.rows()[2], original)
+        session.send(b"\tggjl")
+        self.assertIn("📂 nested", session.rows()[3])
+        self.assertIn("中文.md", session.rows()[4])
+        session.send(b"j\r")
+        self.assertIn("Nested Unicode", session.rows()[2])
+        session.send(b"f")
+        self.assertNotIn("Files", session.rows()[1])
+        session.send(b"f")
+        self.assertIn("Files", session.rows()[1])
+        self.assertEqual(session.output.count(b"\x1b[2J"), baseline)
+        session.send(b"q")
+        session.finish()
+
+    def test_directory_startup_narrow_layout_and_disappearing_file(self):
+        session = self.browser_session(directory_argument=True)
+        session.resize(41, 10)
+        session.read(0.6)
+        self.assertIn("Files", session.rows()[1])
+        self.assertNotIn("│", session.rows()[2])
+        session.send(b"jj\r")
+        self.assertIn("Alpha", session.rows()[2])
+        self.assertNotIn("Files", session.rows()[1])
+        session.send(b"\t")
+        self.assertIn("Files", session.rows()[1])
+        (Path(self.temp.name) / "beta.md").unlink()
+        session.send(b"j\r")
+        self.assertIn("Cannot open", session.rows()[10])
+        session.send(b"\t")
+        self.assertIn("Alpha", session.rows()[2])
+        session.send(b"\tgglr")
+        self.assertIn("Files", session.rows()[1])
         session.send(b"q")
         session.finish()
 

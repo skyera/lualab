@@ -217,6 +217,8 @@ With LuaJIT on PATH, run from this repository on Linux or native Windows:
 
 ```text
 luajit deploy.lua --app mdview
+mdview
+mdview docs/
 mdview README.md
 mdview --no-pager README.md
 ```
@@ -235,10 +237,35 @@ runtime. Install on each target OS so the fallback runtime path is local.
 
 The Windows pager requires a Windows 10+ console with VT support, such as
 Windows Terminal. ImageMagick or ffmpeg is optional for PNG/JPEG/GIF/WebP
-images; `--no-images` disables image decoding. Press `t` for the heading
-outline, `/` to search, `h` for help, and `q` to quit.
+images; `--no-images` disables image decoding.
+
+With no argument, `mdview` opens a file tree in the current directory. A directory
+argument opens that folder's tree; a file argument opens the document directly
+with the tree hidden. Folders use 📁/📂 icons and Markdown files use 📄. The tree
+lists directories and `.md`/`.markdown` files, loads folders when expanded, and
+omits hidden entries and directory links. Press `f` to toggle the tree and `Tab`
+to switch panes. Narrow terminals show one pane at a time.
+
+| Tree key | Action |
+| --- | --- |
+| `j` / `k`, ↓ / ↑ | Move down / up |
+| `h` / ← | Collapse a folder or select its parent |
+| `l` / →, Enter | Expand a folder, enter an expanded folder, or open a file |
+| `gg` / `G` | Select the first / last visible entry |
+| `Ctrl-d` / `Ctrl-u` | Move half a page down / up |
+| `r` | Refresh the selected folder (or the selected file's parent) |
+| `?` | Open help |
+| Esc | Return focus to the document |
+
+Opening another file preserves each unchanged document's reading position and
+search state for the current session. An unreadable file or directory displays
+an error without replacing the current document. In the document pane, press
+`t` for the heading outline, `/` to search, `h` for help, and `q` to quit.
+Use `mdview --snapshot 100x24 docs/` to inspect the tree without an interactive terminal.
 
 Deployment checks: `python3 test_deploy_mdview.py` (or `python` on Windows).
+Browser checks: `luajit test_mdview.lua`, `python3 test_mdview_browser.py`, and
+`python3 test_mdview_pty.py` (Linux terminal integration).
 
 ### 🔎 Duplicate-file finder
 
