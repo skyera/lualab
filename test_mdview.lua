@@ -656,8 +656,66 @@ test("search highlights appear in rendered frames", function()
     local view = mdview.new_view("search.md", lines)
     mdview.search(view, "alpha", 10)
     local frame = mdview.render_frame(view, 60, 10)
-    truthy(frame.rows[2]:find("43m", 1, true) ~= nil, "search background code")
+    truthy(frame.rows[2]:find("255;150;60", 1, true) ~= nil, "current match colour")
+    truthy(frame.rows[4]:find("43m", 1, true) ~= nil, "other match colour")
     truthy(frame.plain[10]:find("match 1/2", 1, true), "match status")
+end)
+
+test("current match is highlighted separately from other matches", function()
+    local lines = render_lines("alpha beta\n\nalpha gamma\n", 40)
+    local view = mdview.new_view("match.md", lines)
+    mdview.search(view, "alpha", 10)
+    local current, other = false, false
+    for _, span in ipairs(mdview.highlight_spans(lines[1].spans, view.match_map[1],
+        view.search.index)) do
+        if span.style and span.style.search_current then
+            current = true
+        end
+        if span.style and span.style.search then
+            other = true
+        end
+    end
+    truthy(current, "current match style")
+    truthy(not other, "first line only carries the current style")
+
+    local second = false
+    for _, span in ipairs(mdview.highlight_spans(lines[3].spans, view.match_map[3],
+        view.search.index)) do
+        if span.style and span.style.search then
+            second = true
+        end
+    end
+    truthy(second, "other matches keep the standard style")
+end)
+
+test("case-sensitive search can be toggled at runtime", function()
+    local lines = render_lines("Alpha alpha\n", 40)
+    eq(#mdview.find_matches(lines, "alpha"), 2, "case-insensitive by default")
+    eq(#mdview.find_matches(lines, "alpha", true), 1, "case-sensitive match count")
+
+    local view = mdview.new_view("case.md", lines)
+    mdview.search(view, "alpha", 10)
+    eq(#view.search.matches, 2, "view search is insensitive")
+    mdview.handle_key(view, "C", 10)
+    truthy(view.case_sensitive, "toggle enables case sensitivity")
+    eq(#view.search.matches, 1, "search re-runs when toggled")
+    truthy(view.message:find("case-sensitive", 1, true), "toggle status message")
+    mdview.handle_key(view, "C", 10)
+    eq(#view.search.matches, 2, "toggle disables case sensitivity")
+end)
+
+test("status bar keeps the query and match count visible", function()
+    local lines = render_lines("alpha beta\n\nalpha gamma\n", 40)
+    local view = mdview.new_view("status.md", lines)
+    mdview.search(view, "alpha", 10)
+    view.message = ""
+    local frame = mdview.render_frame(view, 80, 10)
+    truthy(frame.plain[10]:find("/alpha", 1, true), "query visible")
+    truthy(frame.plain[10]:find("1/2", 1, true), "match count visible")
+
+    view.case_sensitive = true
+    local sensitive = mdview.render_frame(view, 80, 10)
+    truthy(sensitive.plain[10]:find("Aa", 1, true), "case marker visible")
 end)
 
 test("search prompt renders the typed query with a cursor", function()
@@ -903,6 +961,27 @@ test("CLI honors --no-color, --theme and NO_COLOR", function()
         "%s mdview.lua --snapshot 50x8 --color %s", luajit_bin, path))
     truthy(forced:find("\27", 1, true) ~= nil, "--color overrides NO_COLOR")
 
+    os.remove(path)
+end)
+
+test("CLI --case-sensitive narrows snapshot matches", function()
+    local path = os.tmpname()
+    local file = assert(io.open(path, "wb"))
+    file:write("# Case\n\nAlpha alpha\n")
+    file:close()
+
+    local function run(extra)
+        local handle = assert(io.popen(string.format(
+            "%s mdview.lua --snapshot 70x10 --search alpha %s %s 2>&1",
+            luajit_bin, extra, path), "r"))
+        local output = handle:read("*a")
+        handle:close()
+        return mdview.strip_ansi(output)
+    end
+
+    truthy(string.find(run(""), "match 1/2", 1, true), "insensitive finds both")
+    truthy(string.find(run("--case-sensitive"), "match 1/1", 1, true),
+        "case-sensitive finds one")
     os.remove(path)
 end)
 

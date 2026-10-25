@@ -1675,15 +1675,15 @@ end
 -- =========================================================================
 -- 8. Search
 -- =========================================================================
-local function find_matches(lines, query)
+local function find_matches(lines, query, case_sensitive)
     local matches = {}
     if not query or #query == 0 then
         return matches
     end
-    local ascii = query:match("^[%z\1-\127]+$") ~= nil
-    local needle = ascii and query:lower() or query
+    local fold = query:match("^[%z\1-\127]+$") ~= nil and not case_sensitive
+    local needle = fold and query:lower() or query
     for line_index, line in ipairs(lines) do
-        local haystack = ascii and line.text:lower() or line.text
+        local haystack = fold and line.text:lower() or line.text
         local init = 1
         while true do
             local start_pos, end_pos = haystack:find(needle, init, true)
@@ -1697,7 +1697,7 @@ local function find_matches(lines, query)
     return matches
 end
 
-local function highlight_spans(spans, ranges)
+local function highlight_spans(spans, ranges, current_index)
     if not ranges or #ranges == 0 then
         return spans
     end
@@ -1717,8 +1717,12 @@ local function highlight_spans(spans, ranges)
                 if local_from > cursor then
                     add_span(out, text:sub(cursor, local_from - 1), span.style)
                 end
+                local highlight = STYLE.search
+                if range.index and range.index == current_index then
+                    highlight = STYLE.search_current
+                end
                 add_span(out, text:sub(local_from, local_to),
-                    merge_style(span.style, STYLE.search))
+                    merge_style(span.style, highlight))
                 cursor = local_to + 1
             end
         end
@@ -1747,6 +1751,7 @@ local HELP_TEXT = [[
 | `0` / `^`, `$` | Jump to top / bottom |
 | `/`, `?` | Search forward / backward |
 | `n` / `N` | Next / previous match |
+| `C` | Toggle case-sensitive search |
 | `h` | Toggle this help |
 
 Search matches are highlighted in yellow. Resize the terminal at any time;
@@ -1760,6 +1765,7 @@ function M.new_view(title, lines)
         gutter_width = lines and lines.gutter_width or 0,
         top = 1,
         search = { query = "", matches = {}, index = 0, direction = 1 },
+        case_sensitive = false,
         match_map = {},
         message = "",
         message_kind = "info",
@@ -1805,7 +1811,7 @@ end
 function M.search(view, query, height, direction, incremental, anchor)
     direction = direction or 1
     local reference = anchor or view.top
-    local matches = find_matches(view.lines, query)
+    local matches = find_matches(view.lines, query, view.case_sensitive)
     view.search = {
         query = query,
         matches = matches,
@@ -1813,9 +1819,13 @@ function M.search(view, query, height, direction, incremental, anchor)
         direction = direction,
     }
     view.match_map = {}
-    for _, match in ipairs(matches) do
+    for match_index, match in ipairs(matches) do
         local ranges = view.match_map[match.line] or {}
-        ranges[#ranges + 1] = { start = match.start, finish = match.finish }
+        ranges[#ranges + 1] = {
+            start = match.start,
+            finish = match.finish,
+            index = match_index,
+        }
         view.match_map[match.line] = ranges
     end
     if #matches == 0 then
@@ -1985,6 +1995,20 @@ function M.handle_key(view, key, height)
             view.message = "no active search - press / or ? to search"
             view.message_kind = "warn"
         end
+    elseif key == "C" then
+        view.case_sensitive = not view.case_sensitive
+        local query = view.search.query
+        if query and #query > 0 then
+            M.search(view, query, height, view.search.direction)
+            view.message = string.format("%s - %d matches",
+                view.case_sensitive and "case-sensitive" or "case-insensitive",
+                #view.search.matches)
+            view.message_kind = #view.search.matches > 0 and "info" or "warn"
+        else
+            view.message = view.case_sensitive and "search: case-sensitive"
+                or "search: case-insensitive"
+            view.message_kind = "info"
+        end
     elseif key == "h" then
         view.mode = "help"
     end
@@ -2071,7 +2095,7 @@ function M.render_frame(view, width, height)
             local content_spans = line.spans
             local ranges = view.match_map[view.top + row - 1]
             if view.mode ~= "help" and ranges then
-                content_spans = highlight_spans(content_spans, ranges)
+                content_spans = highlight_spans(content_spans, ranges, view.search.index)
             end
             for _, span in ipairs(content_spans) do
                 add_span(spans, span.text, span.style)
@@ -2096,6 +2120,17 @@ function M.render_frame(view, width, height)
             view.message_kind == "warn" and { fg = THEME.warn } or { fg = THEME.info })
     else
         status_text = " q quit  j/k scroll  Ctrl-d/u  Space/b page  g/G  / ? search  n/N  h help"
+    end
+
+    if view.mode == "normal" and view.search and #view.search.query > 0 then
+        local info = string.format(" /%s  %d/%d%s", view.search.query,
+            view.search.index, #view.search.matches,
+            view.case_sensitive and "  Aa" or "")
+        if display_width(info) <= width - 8 then
+            local base_width = width - display_width(info)
+            local base = clip_to_width(status_text, base_width)
+            status_text = base .. string.rep(" ", base_width - display_width(base)) .. info
+        end
     end
     set_row(height, pad_styled(status_text, width, status_style))
 
@@ -2583,7 +2618,7 @@ local function draw_frame(view, width, height, previous_rows)
     io.flush()
 end
 
-local function run_pager(title, lines, initial_search)
+local function run_pager(title, lines, initial_search, settings)
     if not Terminal.enable_raw_mode() then
         io.stderr:write("mdview: interactive pager requires a terminal;"
             .. " printing the rendered document instead\n")
@@ -2591,6 +2626,7 @@ local function run_pager(title, lines, initial_search)
     end
 
     local view = M.new_view(title, lines)
+    view.case_sensitive = settings and settings.case_sensitive or false
     if initial_search and #initial_search > 0 then
         local width, height = Terminal.get_size()
         view.top = 1
@@ -2818,11 +2854,12 @@ local function print_document(title, lines, options)
     io.flush()
 end
 
-local function run_snapshot(title, lines, specification, search)
+local function run_snapshot(title, lines, specification, search, settings)
     local columns, rows = specification:match("^(%d+)x(%d+)$")
     columns = math.max(1, math.min(500, tonumber(columns) or 80))
     rows = math.max(1, math.min(200, tonumber(rows) or 24))
     local view = M.new_view(title, lines)
+    view.case_sensitive = settings and settings.case_sensitive or false
     if search and #search > 0 then
         M.search(view, search, rows)
     end
@@ -2893,12 +2930,12 @@ local function main(argv)
     local lines = M.render(data, width, render_options)
 
     if options.snapshot then
-        run_snapshot(title, lines, options.snapshot, options.search)
+        run_snapshot(title, lines, options.snapshot, options.search, options)
         return 0
     end
 
     if interactive then
-        local ok = run_pager(title, lines, options.search)
+        local ok = run_pager(title, lines, options.search, options)
         if ok then
             return 0
         end
