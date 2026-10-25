@@ -1320,6 +1320,36 @@ test("snapshot wraps at requested width without losing paragraph words", functio
     end
 end)
 
+test("help scrolls independently when opened from the document bottom", function()
+    local source = string.rep("paragraph\n\n", 100)
+    for _, width in ipairs({ 24, 60, 100 }) do
+        local view = mdview.new_view("help.md", render_lines(source, width))
+        mdview.handle_key(view, "G", 12, width)
+        local top = view.top
+        mdview.search(view, "paragraph", 12)
+        local search = view.search
+        mdview.handle_key(view, "h", 12, width)
+        local frame = mdview.render_frame(view, width, 12)
+        truthy(frame.plain[2]:find("mdview keys", 1, true), "help starts at its heading")
+        mdview.handle_key(view, "G", 12, width)
+        mdview.render_frame(view, width, 12)
+        truthy(view.help_top > 1, "help scrolls to bottom")
+        eq(view.top, top, "document position unchanged while scrolling help")
+        mdview.handle_key(view, "ESC", 12, width)
+        mdview.render_frame(view, width, 12)
+        eq(view.top, top, "document position restored")
+        eq(view.search, search, "search state preserved")
+        mdview.handle_key(view, "h", 12, width)
+        mdview.handle_key(view, "q", 12, width)
+        eq(view.quit, true, "q quits as help footer advertises")
+    end
+    local empty = mdview.new_view("empty", render_lines("", 24))
+    mdview.handle_key(empty, "h", 4, 24)
+    mdview.render_frame(empty, 24, 4)
+    mdview.handle_key(empty, "h", 4, 24)
+    eq(empty.top, 1, "empty document survives help round trip")
+end)
+
 print(string.format("\n%d passed, %d failed", passed, failed))
 if failed > 0 then
     os.exit(1)

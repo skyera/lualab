@@ -1975,6 +1975,7 @@ function M.new_view(title, lines)
         message = "",
         message_kind = "info",
         mode = "normal",
+        help_top = 1,
         prompt = "",
         prompt_direction = 1,
         prompt_snapshot = nil,
@@ -2155,11 +2156,40 @@ local function is_printable_key(key)
     return key:match("^[\194-\244][\128-\191]+$") ~= nil
 end
 
-function M.handle_key(view, key, height)
+local help_lines
+
+local function scroll_position(top, key, count, height)
+    local rows = page_rows(height)
+    if key == "j" or key == "DOWN" or key == "CTRL_E" then
+        top = top + 1
+    elseif key == "k" or key == "UP" or key == "CTRL_Y" then
+        top = top - 1
+    elseif key == "d" or key == "CTRL_D" or key == "PAGE_DOWN" then
+        top = top + math.max(1, math.floor(rows / 2))
+    elseif key == "u" or key == "CTRL_U" or key == "PAGE_UP" then
+        top = top - math.max(1, math.floor(rows / 2))
+    elseif key == "SPACE" or key == "CTRL_F" then
+        top = top + rows
+    elseif key == "b" or key == "CTRL_B" then
+        top = top - rows
+    elseif key == "g" or key == "HOME" or key == "0" or key == "^" then
+        top = 1
+    elseif key == "G" or key == "END" or key == "$" then
+        top = count
+    end
+    return math.max(1, math.min(top, count - rows + 1))
+end
+
+function M.handle_key(view, key, height, width)
     height = height or 24
     if view.mode == "help" then
-        if key == "q" or key == "h" or key == "ESC" or key == "ENTER" then
+        if key == "q" or key == "CTRL_C" then
+            view.quit = true
+        elseif key == "h" or key == "ESC" or key == "ENTER" then
             view.mode = "normal"
+        else
+            view.help_top = scroll_position(view.help_top, key,
+                #help_lines(width or view.lines.width or 80), height)
         end
         return true
     end
@@ -2271,6 +2301,7 @@ function M.handle_key(view, key, height)
         end
     elseif key == "h" then
         view.mode = "help"
+        view.help_top = 1
     end
 
     M.clamp_view(view, height)
@@ -2288,7 +2319,7 @@ local function pad_styled(text, width, style)
     return spans_to_ansi(spans, width, false)
 end
 
-local function help_lines(width)
+help_lines = function(width)
     local cache = M._help_cache
     if not cache then
         cache = {}
@@ -2321,26 +2352,29 @@ function M.render_frame(view, width, height)
     local rows = page_rows(height)
     M.clamp_view(view, height)
 
-    local percent = 0
-    if #view.lines > 1 then
-        percent = math.floor((view.top - 1) / (#view.lines - 1) * 100)
+    local content = view.lines
+    local gutter = view.gutter_width or 0
+    local content_top = view.top
+    if view.mode == "help" then
+        content = help_lines(width)
+        gutter = 0
+        view.help_top = math.max(1, math.min(view.help_top, #content - rows + 1))
+        content_top = view.help_top
     end
-    local right = string.format("%3d%%  %d/%d ", percent, view.top, #view.lines)
+
+    local percent = 0
+    if #content > 1 then
+        percent = math.floor((content_top - 1) / (#content - 1) * 100)
+    end
+    local right = string.format("%3d%%  %d/%d ", percent, content_top, #content)
     local available = math.max(0, width - display_width(right))
     local title = " mdview " .. view.title
     local header_text = clip_to_width(title, available) .. string.rep(" ",
         available - display_width(clip_to_width(title, available))) .. right
     set_row(1, pad_styled(header_text, width, STYLE.bar))
 
-    local content = view.lines
-    local gutter = view.gutter_width or 0
-    if view.mode == "help" then
-        content = help_lines(width)
-        gutter = 0
-    end
-
     for row = 1, rows do
-        local line = content[view.top + row - 1]
+        local line = content[content_top + row - 1]
         if line then
             local spans = {}
             if gutter > 0 then
@@ -2917,7 +2951,7 @@ local function run_pager(title, lines, initial_search, settings)
 
             local key = Terminal.read_key(200)
             if key then
-                M.handle_key(view, key, height)
+                M.handle_key(view, key, height, math.max(1, width - 1))
                 M.clamp_view(view, height)
                 redraw = true
             end
