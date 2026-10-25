@@ -10,6 +10,16 @@
 local script_dir = debug.getinfo(1, "S").source:sub(2):match("^(.*[/\\])") or "./"
 package.path = script_dir .. "?.lua;" .. package.path
 local mdview = require("mdview")
+local ffi = require("ffi")
+local IS_WINDOWS = (ffi.os == "Windows")
+local NULL_DEVICE = IS_WINDOWS and "NUL" or "/dev/null"
+
+local function ensure_directory(path)
+    if IS_WINDOWS then
+        return os.execute('mkdir "' .. path .. '"')
+    end
+    return os.execute("mkdir -p '" .. path .. "'")
+end
 
 local passed = 0
 local failed = 0
@@ -687,7 +697,7 @@ end)
 test("relative image paths resolve against the document directory", function()
     local directory = os.tmpname()
     os.remove(directory)
-    eq(os.execute("mkdir -p '" .. directory .. "'"), 0, "temp directory")
+    eq(ensure_directory(directory), 0, "temp directory")
     local path = directory .. "/dot.ppm"
     write_ppm(path, 2, 2, function()
         return 0, 255, 0
@@ -741,7 +751,8 @@ test("PNG images decode through ImageMagick or ffmpeg", function()
     write_ppm(ppm, 4, 4, function()
         return 255, 128, 0
     end)
-    local converted = os.execute("convert '" .. ppm .. "' '" .. png .. "' >/dev/null 2>&1")
+    local converted = os.execute("convert '" .. ppm .. "' '" .. png
+        .. "' > " .. NULL_DEVICE .. " 2>&1")
     if converted ~= 0 then
         os.remove(ppm)
         print("  (skipped PNG decode: no ImageMagick 'convert')")
@@ -832,7 +843,7 @@ end)
 test("CLI can disable inline images", function()
     local directory = os.tmpname()
     os.remove(directory)
-    eq(os.execute("mkdir -p '" .. directory .. "'"), 0, "temp directory")
+    eq(ensure_directory(directory), 0, "temp directory")
     write_ppm(directory .. "/dot.ppm", 2, 2, function()
         return 255, 0, 0
     end)
@@ -856,7 +867,7 @@ end)
 test("CLI snapshot renders images relative to the document", function()
     local directory = os.tmpname()
     os.remove(directory)
-    eq(os.execute("mkdir -p '" .. directory .. "'"), 0, "temp directory")
+    eq(ensure_directory(directory), 0, "temp directory")
     write_ppm(directory .. "/dot.ppm", 2, 2, function()
         return 255, 0, 0
     end)
@@ -909,31 +920,33 @@ test("CLI numbers flag adds and removes the gutter", function()
 end)
 
 test("CLI reports missing files and bad options on stderr", function()
+    local missing = os.tmpname()
+    os.remove(missing)
     local error_path = os.tmpname()
     local status = os.execute(string.format(
-        "%s mdview.lua --no-pager /nonexistent/mdview-test.md > /dev/null 2> %s",
-        luajit_bin, error_path))
+        "%s mdview.lua --no-pager %s > %s 2> %s",
+        luajit_bin, missing, NULL_DEVICE, error_path))
     truthy(status ~= 0, "missing file fails")
     local file = assert(io.open(error_path, "rb"))
     local message = file:read("*a")
     file:close()
     os.remove(error_path)
     truthy(message:find("cannot open", 1, true), "missing file message")
-    truthy(message:find("/nonexistent/mdview-test.md", 1, true), "path in message")
+    truthy(message:find(missing, 1, true), "path in message")
 
     local bad_status = os.execute(string.format(
-        "%s mdview.lua --bogus > /dev/null 2>&1", luajit_bin))
+        "%s mdview.lua --bogus > %s 2>&1", luajit_bin, NULL_DEVICE))
     truthy(bad_status ~= 0, "unknown option fails")
     local no_input = os.execute(string.format(
-        "%s mdview.lua > /dev/null 2>&1", luajit_bin))
+        "%s mdview.lua > %s 2>&1", luajit_bin, NULL_DEVICE))
     truthy(no_input ~= 0, "missing input fails")
 end)
 
 test("CLI renders stdin with '-'", function()
     local path = os.tmpname()
     local status = os.execute(string.format(
-        "printf '# From stdin\\n\\nbody\\n' | %s mdview.lua --no-pager - > %s 2>&1",
-        luajit_bin, path))
+        "%s -e \"io.write('# From stdin\\n\\nbody\\n')\" | %s mdview.lua --no-pager - > %s 2>&1",
+        luajit_bin, luajit_bin, path))
     local file = assert(io.open(path, "rb"))
     local output = file:read("*a")
     file:close()
@@ -981,6 +994,20 @@ test("module can be required without running the CLI", function()
     eq(type(mdview.render), "function", "render exported")
     eq(mdview.VERSION, "1.0.0", "version")
     eq(mdview.Terminal.in_raw_mode, false, "no raw mode after load")
+end)
+
+test("terminal layer exposes a platform key reader", function()
+    eq(type(mdview.Terminal.read_key), "function", "read_key wired")
+    eq(type(mdview.Terminal.enable_raw_mode), "function", "raw mode enable")
+    eq(type(mdview.Terminal.disable_raw_mode), "function", "raw mode disable")
+    eq(type(mdview.Terminal.get_size), "function", "terminal size")
+    eq(mdview.Terminal.in_raw_mode, false, "not in raw mode during tests")
+    local ffi = require("ffi")
+    if ffi.os == "Windows" then
+        eq(type(mdview.Terminal.is_tty(1)), "boolean", "Windows tty probe")
+    else
+        eq(mdview.Terminal.is_tty(0), false, "test stdin is not a tty")
+    end
 end)
 
 print(string.format("\n%d passed, %d failed", passed, failed))

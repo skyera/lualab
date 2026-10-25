@@ -11,8 +11,9 @@
       PNG/JPEG/GIF/WebP through ImageMagick or ffmpeg when installed.
     - Source line-number gutter (wrapped continuation rows stay blank).
     - Unicode-aware word wrapping (wide characters, combining marks, tabs).
-    - POSIX termios raw-mode pager via FFI: poll()-driven keys, alternate
-      screen, resize handling, flicker-free differential row updates.
+    - Raw-mode pager via FFI on both POSIX (termios + poll) and Windows
+      (Win32 console + VT sequences): alternate screen, resize handling,
+      flicker-free differential row updates and a source line-number gutter.
     - Incremental case-insensitive search with match highlighting.
     - Pure render/frame functions for headless tests and --snapshot output.
 
@@ -1163,7 +1164,35 @@ end
 local IMAGE_CACHE = {}
 
 local function shell_quote(value)
+    if IS_WINDOWS then
+        return '"' .. value:gsub('"', '""') .. '"'
+    end
     return "'" .. value:gsub("'", "'\\''") .. "'"
+end
+
+local function read_command_output(command)
+    if IS_WINDOWS then
+        -- Pipes use text mode on Windows, which would corrupt PPM bytes.
+        local temp = os.tmpname()
+        os.execute(command .. " > " .. shell_quote(temp) .. " 2>NUL")
+        local file = io.open(temp, "rb")
+        local data = file and file:read("*a") or nil
+        if file then
+            file:close()
+        end
+        os.remove(temp)
+        if not data or #data == 0 then
+            return nil
+        end
+        return data
+    end
+    local pipe = io.popen(command, "r")
+    if not pipe then
+        return nil
+    end
+    local data = pipe:read("*a")
+    pipe:close()
+    return data
 end
 
 local function read_ppm(data)
@@ -1233,23 +1262,20 @@ end
 
 local function decode_with_tool(path)
     local escaped = shell_quote(path)
+    local resize = IS_WINDOWS and '"-resize" "256x256>"' or "-resize '256x256>'"
     local commands = {
-        "convert " .. escaped .. " -resize '256x256>' -depth 8 ppm:-",
-        "magick " .. escaped .. " -resize '256x256>' -depth 8 ppm:-",
+        "convert " .. escaped .. " " .. resize .. " -depth 8 ppm:-",
+        "magick " .. escaped .. " " .. resize .. " -depth 8 ppm:-",
         "ffmpeg -v error -i " .. escaped
             .. ' -vf "scale=min(256\\,iw):min(256\\,ih):force_original_aspect_ratio=decrease"'
             .. " -frames:v 1 -f image2pipe -vcodec ppm -",
     }
     for _, command in ipairs(commands) do
-        local pipe = io.popen(command, "r")
-        if pipe then
-            local data = pipe:read("*a")
-            pipe:close()
-            if data and #data > 0 then
-                local image = read_ppm(data)
-                if image then
-                    return image
-                end
+        local data = read_command_output(command)
+        if data then
+            local image = read_ppm(data)
+            if image then
+                return image
             end
         end
     end
@@ -1290,6 +1316,9 @@ local function resolve_image_path(source, base_dir)
         return nil, "remote image not loaded"
     end
     local path = source:gsub("^file://", "")
+    if IS_WINDOWS and path:match("^/[A-Za-z]:") then
+        path = path:sub(2)
+    end
     if path:sub(1, 1) ~= "/" and not path:match("^%a:[/\\]") then
         path = (base_dir or ".") .. "/" .. path
     end
@@ -2116,16 +2145,203 @@ if not IS_WINDOWS then
         original_signals = {}
     end
 else
-    Terminal.is_tty = function()
-        return false
+    local kernel32 = ffi.load("kernel32")
+
+    pcall(ffi.cdef, [[
+        typedef struct mdview_console_info {
+            int16_t  size_x;
+            int16_t  size_y;
+            int16_t  cursor_x;
+            int16_t  cursor_y;
+            uint16_t attributes;
+            int16_t  left;
+            int16_t  top;
+            int16_t  right;
+            int16_t  bottom;
+            int16_t  max_x;
+            int16_t  max_y;
+        } mdview_console_info;
+        void *GetStdHandle(uint32_t nStdHandle);
+        int GetConsoleMode(void *handle, uint32_t *mode);
+        int SetConsoleMode(void *handle, uint32_t mode);
+        int GetConsoleScreenBufferInfo(void *handle, mdview_console_info *info);
+        int GetConsoleOutputCP(void);
+        int SetConsoleOutputCP(uint32_t code_page);
+        void __stdcall Sleep(uint32_t milliseconds);
+        int _kbhit(void);
+        int _getwch(void);
+    ]])
+
+    local STD_INPUT = 0xFFFFFFF6
+    local STD_OUTPUT = 0xFFFFFFF5
+    local ENABLE_PROCESSED_INPUT = 0x0001
+    local ENABLE_LINE_INPUT = 0x0002
+    local ENABLE_ECHO_INPUT = 0x0004
+    local ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+
+    local original_input_mode = ffi.new("uint32_t[1]")
+    local original_output_mode = ffi.new("uint32_t[1]")
+    local original_code_page
+
+    local function input_handle()
+        return kernel32.GetStdHandle(STD_INPUT)
     end
+
+    local function output_handle()
+        return kernel32.GetStdHandle(STD_OUTPUT)
+    end
+
+    Terminal.is_tty = function(fd)
+        local handle = (fd == 0) and input_handle() or output_handle()
+        local mode = ffi.new("uint32_t[1]")
+        return kernel32.GetConsoleMode(handle, mode) ~= 0
+    end
+
     Terminal.get_size = function()
+        local info = ffi.new("mdview_console_info")
+        if kernel32.GetConsoleScreenBufferInfo(output_handle(), info) ~= 0 then
+            local width = tonumber(info.right) - tonumber(info.left) + 1
+            local height = tonumber(info.bottom) - tonumber(info.top) + 1
+            if width > 0 and height > 0 then
+                return width, height
+            end
+        end
         return 80, 24
     end
-    Terminal.enable_raw_mode = function()
-        return false
+
+    local function utf8_from_codepoint(code)
+        if code < 0x80 then
+            return string.char(code)
+        elseif code < 0x800 then
+            return string.char(0xC0 + math.floor(code / 64), 0x80 + code % 64)
+        elseif code < 0x10000 then
+            return string.char(0xE0 + math.floor(code / 4096),
+                0x80 + math.floor(code / 64) % 64, 0x80 + code % 64)
+        end
+        return string.char(0xF0 + math.floor(code / 262144),
+            0x80 + math.floor(code / 4096) % 64,
+            0x80 + math.floor(code / 64) % 64, 0x80 + code % 64)
     end
-    Terminal.disable_raw_mode = function() end
+
+    local WINDOWS_SPECIAL = {
+        [72] = "UP",
+        [80] = "DOWN",
+        [75] = "LEFT",
+        [77] = "RIGHT",
+        [71] = "HOME",
+        [79] = "END",
+        [73] = "PAGE_UP",
+        [81] = "PAGE_DOWN",
+        [83] = "DELETE",
+    }
+
+    local WINDOWS_CONTROL = {
+        [3] = "CTRL_C",
+        [8] = "BACKSPACE",
+        [9] = "TAB",
+        [10] = "ENTER",
+        [13] = "ENTER",
+        [32] = "SPACE",
+        [127] = "BACKSPACE",
+    }
+
+    Terminal.read_key = function(timeout_ms)
+        local waited = 0
+        timeout_ms = timeout_ms or 100
+        while waited < timeout_ms do
+            if ffi.C._kbhit() ~= 0 then
+                local code = ffi.C._getwch()
+                if code < 0 or code == 0xFFFF then
+                    return nil
+                end
+                if code == 0 or code == 224 then
+                    local second = ffi.C._getwch()
+                    return WINDOWS_SPECIAL[second] or "UNKNOWN"
+                end
+                local control = WINDOWS_CONTROL[code]
+                if control then
+                    return control
+                end
+                if code >= 1 and code <= 26 then
+                    return "CTRL_" .. string.char(64 + code)
+                end
+                if code >= 0xd800 and code <= 0xdbff then
+                    local low = ffi.C._getwch()
+                    if low < 0xdc00 or low > 0xdfff then
+                        return "\239\191\189"
+                    end
+                    code = 0x10000 + (code - 0xd800) * 1024 + (low - 0xdc00)
+                elseif code >= 0xdc00 and code <= 0xdfff then
+                    return "\239\191\189"
+                end
+                return utf8_from_codepoint(code)
+            end
+            kernel32.Sleep(10)
+            waited = waited + 10
+        end
+        return nil
+    end
+
+    Terminal.enable_raw_mode = function()
+        local input = input_handle()
+        local output = output_handle()
+        if kernel32.GetConsoleMode(input, original_input_mode) == 0 then
+            io.stderr:write("mdview: standard input is not a Windows console\n")
+            return false
+        end
+        if kernel32.GetConsoleMode(output, original_output_mode) == 0 then
+            io.stderr:write("mdview: standard output is not a Windows console\n")
+            return false
+        end
+        if not pcall(function()
+            return ffi.C._kbhit()
+        end) then
+            io.stderr:write("mdview: console input helpers are unavailable in this LuaJIT build\n")
+            return false
+        end
+
+        original_code_page = kernel32.GetConsoleOutputCP()
+        Terminal.in_raw_mode = true
+
+        local vt_ok = kernel32.SetConsoleMode(output,
+            bit.bor(original_output_mode[0], ENABLE_VIRTUAL_TERMINAL_PROCESSING)) ~= 0
+        local raw_mode = bit.band(original_input_mode[0],
+            bit.bnot(bit.bor(ENABLE_PROCESSED_INPUT, ENABLE_LINE_INPUT, ENABLE_ECHO_INPUT)))
+        local input_ok = kernel32.SetConsoleMode(input, raw_mode) ~= 0
+        local page_ok = kernel32.SetConsoleOutputCP(65001) ~= 0
+
+        if not (vt_ok and input_ok and page_ok) then
+            Terminal.disable_raw_mode()
+            io.stderr:write("mdview: this console does not support VT sequences;"
+                .. " use Windows Terminal or Windows 10+" .. "\n")
+            return false
+        end
+
+        io.write("\27[?1049h\27[?25l\27[?7l\27[H\27[2J")
+        io.flush()
+        return true
+    end
+
+    Terminal.disable_raw_mode = function()
+        if not Terminal.in_raw_mode then
+            return
+        end
+        Terminal.in_raw_mode = false
+        io.write("\27[0m\27[?7h\27[?1049l\27[?25h")
+        io.flush()
+
+        local input_ok = kernel32.SetConsoleMode(input_handle(), original_input_mode[0])
+        local output_ok = kernel32.SetConsoleMode(output_handle(), original_output_mode[0])
+        local page_ok = 1
+        if original_code_page then
+            page_ok = kernel32.SetConsoleOutputCP(original_code_page)
+            original_code_page = nil
+        end
+        if input_ok == 0 or output_ok == 0 or page_ok == 0 then
+            io.stderr:write("mdview: failed to restore console settings;"
+                .. " reopen the terminal if needed\n")
+        end
+    end
 end
 
 -- =========================================================================
@@ -2250,6 +2466,10 @@ local function read_key(timeout_ms)
     return nil
 end
 
+if not IS_WINDOWS then
+    Terminal.read_key = read_key
+end
+
 -- =========================================================================
 -- 13. Interactive Pager
 -- =========================================================================
@@ -2270,7 +2490,7 @@ end
 
 local function run_pager(title, lines, initial_search)
     if not Terminal.enable_raw_mode() then
-        io.stderr:write("mdview: interactive pager requires a POSIX terminal;"
+        io.stderr:write("mdview: interactive pager requires a terminal;"
             .. " printing the rendered document instead\n")
         return false
     end
@@ -2302,7 +2522,7 @@ local function run_pager(title, lines, initial_search)
                 redraw = false
             end
 
-            local key = read_key(200)
+            local key = Terminal.read_key(200)
             if key then
                 M.handle_key(view, key, height)
                 M.clamp_view(view, height)
@@ -2343,7 +2563,12 @@ OPTIONS:
 
 KEYS:
   q/Esc quit   j/k scroll   d/u half-page   Space/b page
-  g/G ends     / search      n/N next match   h/? help
+  g/G ends     / search      n/N next match   h help
+
+NOTES:
+  Windows pager support needs Windows 10+ with VT sequences enabled
+  (Windows Terminal or conhost). Image decoding uses ImageMagick
+  (convert or magick) or ffmpeg when installed.
 ]])
     stream:flush()
 end
@@ -2517,8 +2742,7 @@ local function main(argv)
     end
 
     local title = document_title(options.file)
-    local interactive = options.pager and not IS_WINDOWS and Terminal.is_tty(1)
-        and Terminal.is_tty(0)
+    local interactive = options.pager and Terminal.is_tty(1) and Terminal.is_tty(0)
     local width = options.width
     if interactive then
         local columns = Terminal.get_size()
@@ -2552,9 +2776,6 @@ local function main(argv)
         if ok then
             return 0
         end
-    elseif options.pager and IS_WINDOWS and Terminal.is_tty(1) then
-        io.stderr:write("mdview: interactive pager is unavailable on Windows;"
-            .. " showing plain output\n")
     end
 
     print_document(title, M.render(data, options.width, render_options), options)
