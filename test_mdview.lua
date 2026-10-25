@@ -1,0 +1,884 @@
+#!/usr/bin/env luajit
+--[[
+    test_mdview.lua — headless test suite for mdview.lua
+
+    Covers the Markdown parser, inline styles, wrapping, tables, lists,
+    search highlighting, pager navigation, frame rendering (including
+    help/too-small/viewport transitions), CLI behavior and bytecode scoping.
+]]
+
+local script_dir = debug.getinfo(1, "S").source:sub(2):match("^(.*[/\\])") or "./"
+package.path = script_dir .. "?.lua;" .. package.path
+local mdview = require("mdview")
+
+local passed = 0
+local failed = 0
+
+local function test(name, fn)
+    local ok, err = pcall(fn)
+    if ok then
+        passed = passed + 1
+        print("PASS " .. name)
+    else
+        failed = failed + 1
+        io.stderr:write("FAIL " .. name .. ": " .. tostring(err) .. "\n")
+    end
+end
+
+local function eq(actual, expected, label)
+    if actual ~= expected then
+        error((label or "value") .. ": expected " .. tostring(expected)
+            .. ", got " .. tostring(actual), 2)
+    end
+end
+
+local function truthy(value, label)
+    if not value then
+        error(label or "expected truthy value", 2)
+    end
+end
+
+local function render_lines(markdown, width)
+    return mdview.render(markdown, width or 60)
+end
+
+local function render_plain(markdown, width)
+    local parts = {}
+    for _, line in ipairs(render_lines(markdown, width)) do
+        parts[#parts + 1] = line.text
+    end
+    return table.concat(parts, "\n")
+end
+
+local function contains(lines, needle)
+    for _, line in ipairs(lines) do
+        if line.text:find(needle, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+local function spans_of(spans, text)
+    local found = {}
+    for _, span in ipairs(spans) do
+        if span.text:find(text, 1, true) then
+            found[#found + 1] = span
+        end
+    end
+    return found
+end
+
+local function assert_widths(lines, width, label)
+    for index, line in ipairs(lines) do
+        local measured = mdview.display_width(line.text)
+        if measured > width then
+            error(string.format("%s: line %d is %d columns (limit %d): %s",
+                label or "width", index, measured, width, line.text))
+        end
+    end
+end
+
+local function write_ppm(path, width, height, pixel)
+    local file = assert(io.open(path, "wb"))
+    file:write(string.format("P6\n%d %d\n255\n", width, height))
+    for y = 0, height - 1 do
+        for x = 0, width - 1 do
+            local r, g, b = pixel(x, y)
+            file:write(string.char(r, g, b))
+        end
+    end
+    file:close()
+end
+
+local luajit_bin = "luajit"
+if arg and arg[-1] and #arg[-1] > 0 then
+    luajit_bin = arg[-1]
+end
+
+-- =========================================================================
+-- Rendering: headings and paragraphs
+-- =========================================================================
+test("ATX headings parse levels and strip closing hashes", function()
+    local blocks = mdview.parse_blocks("# One\n\n## Two ##\n\n###### Six\n\n####### Seven")
+    eq(blocks[1].kind, "heading", "first block kind")
+    eq(blocks[1].level, 1, "h1 level")
+    eq(blocks[1].text, "One", "h1 text")
+    eq(blocks[2].level, 2, "h2 level")
+    eq(blocks[2].text, "Two", "closing hashes stripped")
+    eq(blocks[3].level, 6, "h6 level")
+    eq(blocks[4].kind, "paragraph", "seven hashes is a paragraph")
+
+    local lines = render_lines("# Alpha\n\n## Beta\n\n### Gamma", 50)
+    truthy(contains(lines, "Alpha"), "h1 rendered")
+    truthy(contains(lines, "━"), "h1 rule rendered")
+    truthy(contains(lines, "Beta"), "h2 rendered")
+    truthy(contains(lines, "Gamma"), "h3 rendered")
+end)
+
+test("setext headings render as levels 1 and 2", function()
+    local lines = render_lines("Title\n=====\n\nSubtitle\n--------", 40)
+    truthy(contains(lines, "Title"), "setext h1")
+    truthy(contains(lines, "Subtitle"), "setext h2")
+    local blocks = mdview.parse_blocks("Title\n=====\n\nSubtitle\n--------")
+    eq(blocks[1].level, 1, "setext level 1")
+    eq(blocks[2].level, 2, "setext level 2")
+end)
+
+test("paragraph wrapping respects width and keeps all words", function()
+    local markdown = "The quick brown fox jumps over the lazy dog and keeps "
+        .. "running through the long green field until it reaches the river bank."
+    local lines = render_lines(markdown, 30)
+    assert_widths(lines, 30, "paragraph")
+    local plain = render_plain(markdown, 30):gsub("%s+", " ")
+    truthy(plain:find("The quick brown fox", 1, true), "start preserved")
+    truthy(plain:find("river bank.", 1, true), "end preserved")
+    truthy(#lines > 1, "wrapped into multiple lines")
+end)
+
+test("long words break instead of overflowing", function()
+    local lines = render_lines(string.rep("x", 120), 24)
+    assert_widths(lines, 24, "long word")
+    eq(#lines, 5, "120 chars at 24 columns")
+end)
+
+test("wide and combining UTF-8 characters respect cell widths", function()
+    local markdown = string.rep("漢字テスト ", 12) .. "\n\n" .. "e\204\129" .. string.rep("界", 40)
+    local lines = render_lines(markdown, 32)
+    assert_widths(lines, 32, "utf8")
+    eq(mdview.display_width("漢字"), 4, "CJK double width")
+    eq(mdview.display_width("e\204\129"), 1, "combining mark zero width")
+end)
+
+-- =========================================================================
+-- Rendering: inline styles, code, lists, quotes, tables, rules
+-- =========================================================================
+test("inline emphasis, code, strike and links produce styles and hrefs", function()
+    local spans = mdview.parse_inline("**bold** *italic* `code` ~~gone~~ [site](https://example.com)")
+
+    local bold = spans_of(spans, "bold")
+    eq(#bold, 1, "bold span count")
+    truthy(bold[1].style and bold[1].style.bold, "bold flag")
+
+    local italic = spans_of(spans, "italic")
+    truthy(italic[1].style and italic[1].style.italic, "italic flag")
+
+    local code = spans_of(spans, "code")
+    truthy(code[1].style and code[1].style.code, "code flag")
+
+    local strike = spans_of(spans, "gone")
+    truthy(strike[1].style and strike[1].style.strike, "strike flag")
+
+    local link = spans_of(spans, "site")
+    truthy(link[1].style and link[1].style.underline, "link underline")
+    eq(link[1].style.href, "https://example.com", "link href")
+end)
+
+test("nested emphasis keeps parent and child styles", function()
+    local spans = mdview.parse_inline("**bold with *italic* inside**")
+    local inner = spans_of(spans, "italic")
+    truthy(inner[1].style and inner[1].style.bold and inner[1].style.italic,
+        "nested bold+italic")
+end)
+
+test("unmatched emphasis and code markers stay literal", function()
+    eq(mdview.parse_inline("*not closed")[1].text, "*not closed", "literal asterisk")
+    eq(mdview.parse_inline("`open")[1].text, "`open", "literal backtick")
+    eq(mdview.parse_inline("a \\* b")[1].text, "a * b", "backslash escape")
+end)
+
+test("fenced code blocks preserve whitespace and language", function()
+    local markdown = "```lua\nlocal x = 1\n    indented()\n```\n"
+    local blocks = mdview.parse_blocks(markdown)
+    eq(blocks[1].kind, "code", "code block kind")
+    eq(blocks[1].lang, "lua", "code language")
+    eq(blocks[1].lines[1], "local x = 1", "first code line")
+    eq(blocks[1].lines[2], "    indented()", "indentation preserved")
+
+    local lines = render_lines(markdown, 40)
+    truthy(contains(lines, "local x = 1"), "code rendered")
+    truthy(contains(lines, "    indented()"), "code indentation rendered")
+end)
+
+test("unterminated fence consumes the rest of the document", function()
+    local blocks = mdview.parse_blocks("```text\none\ntwo\n")
+    eq(#blocks, 1, "single block")
+    eq(#blocks[1].lines, 2, "remaining lines captured")
+end)
+
+test("YAML front matter renders as code, not a rule", function()
+    local blocks = mdview.parse_blocks("---\ntitle: Demo\n---\n\n# Body\n")
+    eq(blocks[1].kind, "code", "front matter kind")
+    eq(blocks[1].lines[1], "title: Demo", "front matter line")
+    eq(blocks[2].kind, "heading", "body heading follows")
+end)
+
+test("unordered, ordered and nested lists render markers", function()
+    local markdown = "- one\n- two\n  - nested\n1. first\n2. second\n"
+    local lines = render_lines(markdown, 40)
+    truthy(contains(lines, "• one"), "bullet one")
+    truthy(contains(lines, "• nested"), "nested bullet")
+    truthy(contains(lines, "1. first"), "ordered first")
+    truthy(contains(lines, "2. second"), "ordered second")
+end)
+
+test("task list items use checkbox glyphs", function()
+    local lines = render_lines("- [ ] todo\n- [x] done", 40)
+    truthy(contains(lines, "☐ todo"), "unchecked box")
+    truthy(contains(lines, "☑ done"), "checked box")
+end)
+
+test("blockquotes prefix every line and nest recursively", function()
+    local markdown = "> quoted text\n>\n> > nested quote\n"
+    local lines = render_lines(markdown, 40)
+    for _, line in ipairs(lines) do
+        truthy(line.text:sub(1, 3) == "│", "quote bar missing: " .. line.text)
+    end
+    truthy(contains(lines, "nested quote"), "nested quote text")
+end)
+
+test("tables render borders, header separator and alignment", function()
+    local markdown = "| Item | Qty |\n| :--- | ---: |\n| apple | 3 |\n| pear | 12 |\n"
+    local lines = render_lines(markdown, 40)
+    truthy(contains(lines, "┌"), "top border")
+    truthy(contains(lines, "├"), "header separator")
+    truthy(contains(lines, "└"), "bottom border")
+    truthy(contains(lines, "Item"), "header cell")
+
+    local apple
+    for _, line in ipairs(lines) do
+        if line.text:find("apple", 1, true) then
+            apple = line.text
+        end
+    end
+    truthy(apple, "apple row present")
+    truthy(apple:find("3 │$") ~= nil, "right aligned quantity: " .. tostring(apple))
+end)
+
+test("wide table cells truncate to the requested width", function()
+    local markdown = "| Key | Value |\n| --- | --- |\n| a | "
+        .. string.rep("long value ", 10) .. "|\n"
+    local lines = render_lines(markdown, 30)
+    assert_widths(lines, 30, "table truncation")
+    truthy(contains(lines, "…"), "ellipsis on truncated cell")
+end)
+
+test("horizontal rules and empty documents are safe", function()
+    local lines = render_lines("before\n\n---\n\nafter", 20)
+    truthy(contains(lines, string.rep("─", 20)), "full-width rule")
+    eq(#render_lines("", 40), 0, "empty document has no lines")
+    eq(#render_lines("   \n\n\t\n", 40), 0, "whitespace-only document has no lines")
+end)
+
+-- =========================================================================
+-- Search and highlighting
+-- =========================================================================
+test("search is case-insensitive and counts every occurrence", function()
+    local lines = render_lines("Alpha beta\n\nalpha BETA\n\ngamma", 40)
+    local matches = mdview.find_matches(lines, "alpha")
+    eq(#matches, 2, "two matches")
+    eq(matches[1].line, 1, "first line")
+    eq(matches[2].line, 3, "second line")
+    eq(#mdview.find_matches(lines, "ALPHA"), 2, "upper-case query")
+    eq(#mdview.find_matches(lines, "missing"), 0, "no matches")
+end)
+
+test("highlighting splits spans and marks only matched bytes", function()
+    local line = render_lines("prefix target suffix", 40)[1]
+    local ranges = mdview.find_matches({ line }, "target")
+    local spans = mdview.highlight_spans(line.spans, ranges)
+    local highlighted, plain = "", ""
+    for _, span in ipairs(spans) do
+        if span.style and span.style.search then
+            highlighted = highlighted .. span.text
+        else
+            plain = plain .. span.text
+        end
+    end
+    eq(highlighted, "target", "highlighted text")
+    eq(plain, "prefix  suffix", "remaining text")
+end)
+
+test("search state builds a match map and jumps to the first hit", function()
+    local lines = mdview.render(string.rep("line\n\n", 60) .. "needle here\n", 40)
+    local view = mdview.new_view("test", lines)
+    local count = mdview.search(view, "needle", 12)
+    eq(count, 1, "match count")
+    eq(view.search.index, 1, "current match index")
+    truthy(view.match_map[#lines] ~= nil, "match map entry")
+    truthy(view.top > 1, "viewport moved to match")
+    truthy(view.message:find("match 1/1", 1, true) ~= nil, "status message")
+end)
+
+test("no-match search reports a warning and leaves the viewport alone", function()
+    local view = mdview.new_view("test", render_lines(string.rep("alpha\n\n", 40), 30))
+    view.top = 5
+    local count = mdview.search(view, "zzz", 10)
+    eq(count, 0, "no matches")
+    eq(view.top, 5, "viewport unchanged")
+    eq(view.message_kind, "warn", "warning kind")
+    truthy(view.message:find("pattern not found", 1, true) ~= nil, "warning text")
+end)
+
+-- =========================================================================
+-- Pager navigation and key handling
+-- =========================================================================
+test("navigation clamps at first and last page", function()
+    local lines = render_lines(string.rep("row\n\n", 100), 40)
+    local view = mdview.new_view("nav", lines)
+    eq(view.top, 1, "initial top")
+
+    mdview.handle_key(view, "k", 10)
+    eq(view.top, 1, "cannot scroll above first line")
+
+    mdview.handle_key(view, "j", 10)
+    eq(view.top, 2, "j scrolls one line")
+
+    mdview.handle_key(view, "G", 10)
+    eq(view.top, #lines - 8 + 1, "G jumps to last page")
+
+    mdview.handle_key(view, "j", 10)
+    eq(view.top, #lines - 8 + 1, "cannot scroll past last page")
+
+    mdview.handle_key(view, "g", 10)
+    eq(view.top, 1, "g jumps home")
+end)
+
+test("paging and half-page keys move by viewport size", function()
+    local lines = render_lines(string.rep("row\n\n", 100), 40)
+    local view = mdview.new_view("page", lines)
+
+    mdview.handle_key(view, "SPACE", 12)
+    eq(view.top, 11, "space pages down by content rows")
+
+    mdview.handle_key(view, "b", 12)
+    eq(view.top, 1, "b pages back")
+
+    mdview.handle_key(view, "d", 12)
+    eq(view.top, 6, "d half page down")
+
+    mdview.handle_key(view, "u", 12)
+    eq(view.top, 1, "u half page up")
+
+    mdview.handle_key(view, "PAGE_DOWN", 12)
+    eq(view.top, 6, "PgDn half page")
+end)
+
+test("vim control and boundary keys scroll like a pager", function()
+    local lines = render_lines(string.rep("row\n\n", 100), 40)
+    local view = mdview.new_view("vim", lines)
+
+    mdview.handle_key(view, "CTRL_D", 12)
+    eq(view.top, 6, "Ctrl-d half page down")
+    mdview.handle_key(view, "CTRL_U", 12)
+    eq(view.top, 1, "Ctrl-u half page up")
+
+    mdview.handle_key(view, "CTRL_F", 12)
+    eq(view.top, 11, "Ctrl-f full page down")
+    mdview.handle_key(view, "CTRL_B", 12)
+    eq(view.top, 1, "Ctrl-b full page up")
+
+    mdview.handle_key(view, "CTRL_E", 12)
+    eq(view.top, 2, "Ctrl-e one line down")
+    mdview.handle_key(view, "CTRL_Y", 12)
+    eq(view.top, 1, "Ctrl-y one line up")
+
+    mdview.handle_key(view, "$", 12)
+    eq(view.top, #lines - 10 + 1, "$ jumps to the bottom page")
+    mdview.handle_key(view, "0", 12)
+    eq(view.top, 1, "0 jumps to the top")
+    mdview.handle_key(view, "$", 12)
+    mdview.handle_key(view, "^", 12)
+    eq(view.top, 1, "^ jumps to the top")
+end)
+
+test("search prompt is incremental, handles tokens, and cancels cleanly", function()
+    local lines = render_lines("needle one\n\nneedle two\n", 40)
+    local view = mdview.new_view("prompt", lines)
+
+    mdview.handle_key(view, "/", 10)
+    eq(view.mode, "search", "search mode")
+    eq(view.prompt, "", "prompt starts empty")
+
+    mdview.handle_key(view, "n", 10)
+    mdview.handle_key(view, "e", 10)
+    mdview.handle_key(view, "SPACE", 10)
+    eq(view.prompt, "ne ", "space token appended")
+
+    mdview.handle_key(view, "BACKSPACE", 10)
+    mdview.handle_key(view, "BACKSPACE", 10)
+    mdview.handle_key(view, "BACKSPACE", 10)
+    eq(view.prompt, "", "backspace clears the prompt")
+    eq(#view.search.matches, 0, "empty prompt clears matches")
+
+    for _, key in ipairs({ "n", "e", "e", "d", "l", "e" }) do
+        mdview.handle_key(view, key, 10)
+    end
+    eq(view.prompt, "needle", "typed query")
+    eq(#view.search.matches, 2, "matches update while typing")
+    truthy(view.message:find("match", 1, true) ~= nil, "incremental jump message")
+
+    mdview.handle_key(view, "ESC", 10)
+    eq(view.mode, "normal", "escape leaves search")
+    eq(view.prompt, "", "escape clears the pending prompt")
+    eq(#view.search.matches, 0, "escape restores the previous search")
+
+    mdview.handle_key(view, "/", 10)
+    for _, key in ipairs({ "n", "e", "e", "d", "l", "e" }) do
+        mdview.handle_key(view, key, 10)
+    end
+    mdview.handle_key(view, "ENTER", 10)
+    eq(view.mode, "normal", "enter leaves search mode")
+    eq(#view.search.matches, 2, "enter keeps the search")
+    eq(view.search.direction, 1, "forward direction")
+
+    mdview.handle_key(view, "n", 10)
+    eq(view.search.index, 2, "n advances to next match")
+    mdview.handle_key(view, "n", 10)
+    eq(view.search.index, 1, "n wraps around")
+    mdview.handle_key(view, "N", 10)
+    eq(view.search.index, 2, "N wraps backwards")
+end)
+
+test("backward search starts above the viewport and n/N follow its direction", function()
+    local markdown = "needle first\n\n" .. string.rep("filler\n\n", 20) .. "needle second\n"
+    local lines = render_lines(markdown, 60)
+    local second
+    for index, line in ipairs(lines) do
+        if line.text:find("needle second", 1, true) then
+            second = index
+        end
+    end
+    truthy(second, "second match line found")
+
+    local view = mdview.new_view("back", lines)
+    view.top = second
+    mdview.handle_key(view, "?", 10)
+    for _, key in ipairs({ "n", "e", "e", "d", "l", "e" }) do
+        mdview.handle_key(view, key, 10)
+    end
+    eq(view.search.direction, -1, "backward direction")
+    mdview.handle_key(view, "ENTER", 10)
+    eq(view.search.index, 1, "selected the match above the viewport")
+    truthy(view.top < second, "viewport moved backwards")
+
+    mdview.handle_key(view, "n", 10)
+    eq(view.search.index, 2, "n continues backwards and wraps")
+    mdview.handle_key(view, "N", 10)
+    eq(view.search.index, 1, "N moves the other way")
+end)
+
+test("help mode round trip restores the previous viewport", function()
+    local lines = render_lines(string.rep("payload\n\n", 80), 40)
+    local view = mdview.new_view("help", lines)
+    view.top = 21
+    mdview.handle_key(view, "h", 12)
+    eq(view.mode, "help", "help opened")
+    mdview.handle_key(view, "j", 12)
+    eq(view.mode, "help", "navigation keys are ignored in help")
+    mdview.handle_key(view, "h", 12)
+    eq(view.mode, "normal", "help closed")
+    eq(view.top, 21, "viewport preserved")
+end)
+
+-- =========================================================================
+-- Frame rendering
+-- =========================================================================
+test("frame fills every row to the terminal width", function()
+    local lines = render_lines(string.rep("A paragraph of text.\n\n", 40), 60)
+    local view = mdview.new_view("frame.md", lines)
+    for _, size in ipairs({ { 80, 24 }, { 24, 4 }, { 120, 40 }, { 25, 5 } }) do
+        local frame = mdview.render_frame(view, size[1], size[2])
+        eq(#frame.rows, size[2], "row count")
+        for row = 1, size[2] do
+            eq(mdview.display_width(frame.plain[row]), size[1],
+                string.format("row %d width at %dx%d", row, size[1], size[2]))
+        end
+    end
+end)
+
+test("frame header, status bar and content are present", function()
+    local lines = render_lines("# Title\n\nBody text\n", 60)
+    local view = mdview.new_view("doc.md", lines)
+    local frame = mdview.render_frame(view, 70, 12)
+    truthy(frame.plain[1]:find("mdview", 1, true), "header title")
+    truthy(frame.plain[1]:find("doc.md", 1, true), "file name")
+    truthy(frame.plain[1]:find("1/" .. #lines, 1, true), "line position")
+    truthy(frame.plain[2]:find("Title", 1, true), "first content row")
+    truthy(frame.plain[12]:find("q quit", 1, true), "status keys")
+end)
+
+test("frame handles empty documents and tiny terminals", function()
+    local view = mdview.new_view("empty.md", {})
+    local frame = mdview.render_frame(view, 40, 10)
+    eq(#frame.rows, 10, "empty frame rows")
+    for row = 1, 10 do
+        eq(mdview.display_width(frame.plain[row]), 40, "padded empty row")
+    end
+
+    local tiny = mdview.render_frame(view, 20, 3)
+    truthy(tiny.plain[1]:find("too small", 1, true), "too-small warning")
+    eq(#tiny.rows, 3, "tiny frame rows")
+    eq(mdview.display_width(tiny.plain[1]), 20, "tiny frame width")
+end)
+
+test("help overlay renders the key table and closes cleanly", function()
+    local view = mdview.new_view("help.md", render_lines("# Doc\n\n" .. string.rep("text\n\n", 30), 40))
+    mdview.handle_key(view, "h", 24)
+    local frame = mdview.render_frame(view, 80, 24)
+    truthy(frame.plain[2]:find("mdview keys", 1, true), "help heading")
+    truthy(frame.plain[24]:find("close", 1, true), "help status")
+
+    mdview.handle_key(view, "ESC", 24)
+    local restored = mdview.render_frame(view, 80, 24)
+    truthy(restored.plain[2]:find("Doc", 1, true), "document restored")
+end)
+
+test("search highlights appear in rendered frames", function()
+    local lines = render_lines("alpha beta\n\nalpha gamma\n", 40)
+    local view = mdview.new_view("search.md", lines)
+    mdview.search(view, "alpha", 10)
+    local frame = mdview.render_frame(view, 60, 10)
+    truthy(frame.rows[2]:find("43m", 1, true) ~= nil, "search background code")
+    truthy(frame.plain[10]:find("match 1/2", 1, true), "match status")
+end)
+
+test("search prompt renders the typed query with a cursor", function()
+    local view = mdview.new_view("prompt.md", render_lines("alpha\n", 40))
+    mdview.handle_key(view, "/", 10)
+    mdview.handle_key(view, "a", 10)
+    mdview.handle_key(view, "SPACE", 10)
+    mdview.handle_key(view, "b", 10)
+    local frame = mdview.render_frame(view, 60, 10)
+    truthy(frame.plain[10]:find("/a b", 1, true), "prompt text")
+    truthy(frame.plain[10]:find("▏", 1, true), "prompt cursor")
+
+    mdview.handle_key(view, "ESC", 10)
+    mdview.handle_key(view, "?", 10)
+    mdview.handle_key(view, "a", 10)
+    local backward = mdview.render_frame(view, 60, 10)
+    truthy(backward.plain[10]:find("?a", 1, true), "backward prompt marker")
+end)
+
+test("viewport transitions leave no stale content behind", function()
+    local long_lines = render_lines(string.rep("XXXXXXX\n\n", 50), 40)
+    local view = mdview.new_view("transition.md", long_lines)
+    local frame = mdview.render_frame(view, 40, 10)
+    truthy(frame.plain[2]:find("XXXXXXX", 1, true), "content before")
+
+    view.lines = render_lines("short", 40)
+    mdview.clamp_view(view, 10)
+    local short_frame = mdview.render_frame(view, 40, 10)
+    truthy(short_frame.plain[2]:find("short", 1, true), "new content")
+    for row = 3, 9 do
+        eq(short_frame.plain[row]:match("^%s*$") ~= nil, true, "row " .. row .. " cleared")
+    end
+end)
+
+-- =========================================================================
+-- Inline images
+-- =========================================================================
+test("standalone image syntax parses alt text and source", function()
+    local blocks = mdview.parse_blocks('![Chart](pics/chart.png "A title")\n\nAfter')
+    eq(blocks[1].kind, "image", "image block kind")
+    eq(blocks[1].alt, "Chart", "alt text")
+    eq(blocks[1].src, "pics/chart.png", "title stripped from source")
+    eq(blocks[2].kind, "paragraph", "following paragraph preserved")
+end)
+
+test("image blocks render half-block art from native PPM", function()
+    local path = os.tmpname() .. ".ppm"
+    write_ppm(path, 4, 4, function(x)
+        if x < 2 then
+            return 255, 0, 0
+        end
+        return 0, 0, 255
+    end)
+    local lines = mdview.render("![swatch](" .. path .. ")", 40)
+    local art = {}
+    for _, line in ipairs(lines) do
+        if line.text:find("▀", 1, true) then
+            art[#art + 1] = line
+        end
+    end
+    eq(#art, 2, "4x4 image occupies two cell rows")
+    eq(#art[1].spans, 2, "equal colours merge into two runs")
+    eq(art[1].spans[1].style.fg, "38;2;255;0;0", "red foreground")
+    eq(art[1].spans[1].style.bg, "48;2;255;0;0", "red background")
+    eq(art[1].spans[2].style.fg, "38;2;0;0;255", "blue foreground")
+    truthy(contains(lines, "swatch"), "alt caption rendered")
+    os.remove(path)
+end)
+
+test("relative image paths resolve against the document directory", function()
+    local directory = os.tmpname()
+    os.remove(directory)
+    eq(os.execute("mkdir -p '" .. directory .. "'"), 0, "temp directory")
+    local path = directory .. "/dot.ppm"
+    write_ppm(path, 2, 2, function()
+        return 0, 255, 0
+    end)
+    local lines = mdview.render("![dot](dot.ppm)", 30, { base_dir = directory })
+    local art = 0
+    for _, line in ipairs(lines) do
+        if line.text:find("▀", 1, true) then
+            art = art + 1
+        end
+    end
+    eq(art, 1, "2x2 image is one cell row")
+    os.remove(path)
+    os.remove(directory)
+end)
+
+test("missing, remote and disabled images show visible placeholders", function()
+    local missing = mdview.render("![chart](no-such-image.png)", 40)
+    truthy(contains(missing, "[image] chart"), "alt in placeholder")
+    truthy(contains(missing, "no-such-image.png"), "path in placeholder")
+    truthy(contains(missing, "cannot open image"), "failure reason shown")
+
+    local remote = mdview.render("![diagram](https://example.com/x.png)", 40)
+    truthy(contains(remote, "remote image not loaded"), "remote fallback")
+    truthy(contains(remote, "diagram"), "remote alt text")
+
+    local disabled = mdview.render("![chart](x.png)", 40, { images = false })
+    truthy(contains(disabled, "disabled"), "disabled fallback")
+end)
+
+test("wide images are capped and fit the requested width", function()
+    local path = os.tmpname() .. ".ppm"
+    write_ppm(path, 100, 10, function()
+        return 200, 200, 200
+    end)
+    local lines = mdview.render("![wide](" .. path .. ")", 24)
+    local art = 0
+    for _, line in ipairs(lines) do
+        if line.text:find("▀", 1, true) then
+            art = art + 1
+            truthy(mdview.display_width(line.text) <= 24, "image row width")
+        end
+    end
+    truthy(art >= 1, "image rendered")
+    os.remove(path)
+end)
+
+test("PNG images decode through ImageMagick or ffmpeg", function()
+    local ppm = os.tmpname() .. ".ppm"
+    local png = os.tmpname() .. ".png"
+    write_ppm(ppm, 4, 4, function()
+        return 255, 128, 0
+    end)
+    local converted = os.execute("convert '" .. ppm .. "' '" .. png .. "' >/dev/null 2>&1")
+    if converted ~= 0 then
+        os.remove(ppm)
+        print("  (skipped PNG decode: no ImageMagick 'convert')")
+        return
+    end
+
+    local lines = mdview.render("![orange](" .. png .. ")", 40)
+    local art = 0
+    for _, line in ipairs(lines) do
+        if line.text:find("▀", 1, true) then
+            art = art + 1
+        end
+    end
+    eq(art, 2, "decoded PNG cell rows")
+    truthy(contains(lines, "orange"), "PNG caption")
+    os.remove(ppm)
+    os.remove(png)
+end)
+
+-- =========================================================================
+-- CLI behavior
+-- =========================================================================
+test("CLI renders plain output without escape codes", function()
+    local path = os.tmpname()
+    local file = assert(io.open(path, "wb"))
+    file:write("# Heading\n\nSome **bold** text and a [link](https://example.com).\n")
+    file:close()
+
+    local output_path = os.tmpname()
+    local status = os.execute(string.format(
+        "%s mdview.lua --no-pager --width 40 %s > %s 2>&1",
+        luajit_bin, path, output_path))
+    local file_out = assert(io.open(output_path, "rb"))
+    local output = file_out:read("*a")
+    file_out:close()
+    os.remove(output_path)
+    os.remove(path)
+
+    eq(status, 0, "exit status")
+    truthy(output:find("Heading", 1, true), "heading in output")
+    truthy(output:find("Some bold text", 1, true), "inline text preserved")
+    truthy(output:find("\27[", 1, true) == nil, "no ANSI escapes when piped")
+    for line in (output .. "\n"):gmatch("([^\n]*)\n") do
+        truthy(mdview.display_width(line) <= 40, "plain output width: " .. line)
+    end
+end)
+
+test("CLI snapshot prints exactly the requested number of rows", function()
+    local path = os.tmpname()
+    local file = assert(io.open(path, "wb"))
+    file:write("# Snapshot\n\nhello\n")
+    file:close()
+
+    local command = string.format("%s mdview.lua --snapshot 60x12 %s 2>&1", luajit_bin, path)
+    local handle = assert(io.popen(command))
+    local output = handle:read("*a")
+    local status = handle:close()
+    os.remove(path)
+
+    truthy(status == 0 or status == true, "snapshot exit status")
+    local rows = 0
+    for line in (output:gsub("\n$", "") .. "\n"):gmatch("([^\n]*)\n") do
+        rows = rows + 1
+        eq(mdview.display_width(mdview.strip_ansi(line)), 60,
+            "snapshot row " .. rows .. " width")
+    end
+    eq(rows, 12, "snapshot row count")
+    truthy(output:find("Snapshot", 1, true), "snapshot content")
+end)
+
+test("CLI search option highlights and reports matches in snapshots", function()
+    local path = os.tmpname()
+    local file = assert(io.open(path, "wb"))
+    file:write("# Doc\n\nalpha beta\n\nalpha gamma\n")
+    file:close()
+
+    local command = string.format(
+        "%s mdview.lua --snapshot 70x10 --search alpha %s 2>&1", luajit_bin, path)
+    local handle = assert(io.popen(command))
+    local output = handle:read("*a")
+    handle:close()
+    os.remove(path)
+
+    truthy(output:find("match 1/2", 1, true), "match status line")
+    truthy(output:find("43m", 1, true), "highlight escape in output")
+end)
+
+test("CLI can disable inline images", function()
+    local directory = os.tmpname()
+    os.remove(directory)
+    eq(os.execute("mkdir -p '" .. directory .. "'"), 0, "temp directory")
+    write_ppm(directory .. "/dot.ppm", 2, 2, function()
+        return 255, 0, 0
+    end)
+    local file = assert(io.open(directory .. "/doc.md", "wb"))
+    file:write("![dot](dot.ppm)\n")
+    file:close()
+
+    local handle = assert(io.popen(string.format(
+        "%s mdview.lua --snapshot 60x10 --no-images %s/doc.md 2>&1",
+        luajit_bin, directory)))
+    local output = handle:read("*a")
+    handle:close()
+    os.remove(directory .. "/dot.ppm")
+    os.remove(directory .. "/doc.md")
+    os.remove(directory)
+
+    truthy(output:find("[image] dot", 1, true), "placeholder shown")
+    truthy(output:find("disabled", 1, true), "disabled reason shown")
+end)
+
+test("CLI snapshot renders images relative to the document", function()
+    local directory = os.tmpname()
+    os.remove(directory)
+    eq(os.execute("mkdir -p '" .. directory .. "'"), 0, "temp directory")
+    write_ppm(directory .. "/dot.ppm", 2, 2, function()
+        return 255, 0, 0
+    end)
+    local file = assert(io.open(directory .. "/doc.md", "wb"))
+    file:write("![dot](dot.ppm)\n")
+    file:close()
+
+    local handle = assert(io.popen(string.format(
+        "%s mdview.lua --snapshot 60x10 %s/doc.md 2>&1", luajit_bin, directory)))
+    local output = handle:read("*a")
+    handle:close()
+    os.remove(directory .. "/dot.ppm")
+    os.remove(directory .. "/doc.md")
+    os.remove(directory)
+
+    truthy(output:find("▀", 1, true), "half-block art in snapshot")
+    truthy(output:find("dot", 1, true), "caption in snapshot")
+end)
+
+test("CLI reports missing files and bad options on stderr", function()
+    local error_path = os.tmpname()
+    local status = os.execute(string.format(
+        "%s mdview.lua --no-pager /nonexistent/mdview-test.md > /dev/null 2> %s",
+        luajit_bin, error_path))
+    truthy(status ~= 0, "missing file fails")
+    local file = assert(io.open(error_path, "rb"))
+    local message = file:read("*a")
+    file:close()
+    os.remove(error_path)
+    truthy(message:find("cannot open", 1, true), "missing file message")
+    truthy(message:find("/nonexistent/mdview-test.md", 1, true), "path in message")
+
+    local bad_status = os.execute(string.format(
+        "%s mdview.lua --bogus > /dev/null 2>&1", luajit_bin))
+    truthy(bad_status ~= 0, "unknown option fails")
+    local no_input = os.execute(string.format(
+        "%s mdview.lua > /dev/null 2>&1", luajit_bin))
+    truthy(no_input ~= 0, "missing input fails")
+end)
+
+test("CLI renders stdin with '-'", function()
+    local path = os.tmpname()
+    local status = os.execute(string.format(
+        "printf '# From stdin\\n\\nbody\\n' | %s mdview.lua --no-pager - > %s 2>&1",
+        luajit_bin, path))
+    local file = assert(io.open(path, "rb"))
+    local output = file:read("*a")
+    file:close()
+    os.remove(path)
+    eq(status, 0, "stdin exit status")
+    truthy(output:find("From stdin", 1, true), "stdin heading")
+end)
+
+test("rendering never exceeds width across a real document", function()
+    local file = assert(io.open("README.md", "rb"))
+    local data = file:read("*a")
+    file:close()
+    for _, width in ipairs({ 20, 33, 48, 80, 120 }) do
+        assert_widths(mdview.render(data, width), width, "README width " .. width)
+    end
+    truthy(#mdview.render(data, 80) > 50, "README renders many lines")
+end)
+
+-- =========================================================================
+-- Scoping and terminal safety
+-- =========================================================================
+test("bytecode analysis finds no undeclared globals", function()
+    local handle = assert(io.popen(luajit_bin .. " -bl mdview.lua 2>&1"))
+    local output = handle:read("*a")
+    handle:close()
+    local allowed = {
+        require = true, ffi = true, bit = true, math = true, string = true,
+        table = true, io = true, os = true, debug = true, arg = true,
+        pcall = true, xpcall = true, setmetatable = true, tonumber = true,
+        tostring = true, type = true, ipairs = true, pairs = true,
+        assert = true, error = true, print = true, next = true,
+    }
+    local leaked = {}
+    for name in output:gmatch('GGET%s+.-;%s*"([%w_]+)"') do
+        if not allowed[name] then
+            leaked[#leaked + 1] = name
+        end
+    end
+    truthy(#leaked == 0, "undeclared globals: " .. table.concat(leaked, ", "))
+    truthy(output:find("GSET") == nil, "no global assignments")
+end)
+
+test("module can be required without running the CLI", function()
+    eq(type(mdview.main), "function", "main exported")
+    eq(type(mdview.render), "function", "render exported")
+    eq(mdview.VERSION, "1.0.0", "version")
+    eq(mdview.Terminal.in_raw_mode, false, "no raw mode after load")
+end)
+
+print(string.format("\n%d passed, %d failed", passed, failed))
+if failed > 0 then
+    os.exit(1)
+end
+os.exit(0)
