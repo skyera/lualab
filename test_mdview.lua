@@ -1006,7 +1006,7 @@ test("CLI search option highlights and reports matches in snapshots", function()
     file:close()
 
     local command = string.format(
-        "%s mdview.lua --snapshot 70x10 --search alpha %s 2>&1", luajit_bin, path)
+        "%s mdview.lua --color --snapshot 70x10 --search alpha %s 2>&1", luajit_bin, path)
     local handle = assert(io.popen(command))
     local output = handle:read("*a")
     handle:close()
@@ -1034,7 +1034,7 @@ test("CLI honors --no-color, --theme and NO_COLOR", function()
     truthy(plain:find("\27", 1, true) == nil, "--no-color removes escapes")
 
     local light = run(string.format(
-        "%s mdview.lua --snapshot 50x8 --theme light %s", luajit_bin, path))
+        "%s mdview.lua --color --snapshot 50x8 --theme light %s", luajit_bin, path))
     truthy(light:find("38;2;24;74;158", 1, true), "light theme heading color")
 
     local env_prefix = IS_WINDOWS and "set NO_COLOR=1&& " or "NO_COLOR=1 "
@@ -1238,6 +1238,33 @@ test("terminal layer exposes a platform key reader", function()
     else
         eq(mdview.Terminal.is_tty(0), false, "test stdin is not a tty")
     end
+end)
+
+test("document controls are inert in plain, styled and frame output", function()
+    local payload = "before\27[2Jafter\7\r\194\15531m\155"
+    local plain = render_plain(payload, 100)
+    truthy(not plain:find("[\1-\31\127]"), "no ASCII controls")
+    truthy(not plain:find("\194\155", 1, true), "no Unicode C1 controls")
+    truthy(plain:find("before^[", 1, true), "escape is visible text")
+    local malformed = render_plain("a\194\155\12831mb\224\128\155", 100)
+    truthy(not malformed:find("\194\155", 1, true), "C1 cannot hide before a stray continuation")
+    truthy(not malformed:find("[\128-\255]"), "malformed UTF-8 becomes inert ASCII")
+    local unicode = "你好 café"
+    eq(render_plain(unicode, 100), unicode, "Unicode remains intact")
+    for _, color in ipairs({ false, true }) do
+        mdview.set_color(color)
+        local output = mdview.spans_to_ansi({
+            { text = payload, style = { href = "https://example.test/\7\27[2J" } },
+        }, 100, false)
+        truthy(not output:find("\27[2J", 1, true), "no injected screen clear")
+        truthy(not output:find("\27]8;", 1, true), "unsafe hyperlink omitted")
+        local view = mdview.new_view(payload, render_lines(payload, 60))
+        local frame = mdview.render_frame(view, 60, 8)
+        for _, row in ipairs(frame.rows) do
+            truthy(not row:find("\27[2J", 1, true), "safe title and body")
+        end
+    end
+    mdview.set_color(true)
 end)
 
 print(string.format("\n%d passed, %d failed", passed, failed))

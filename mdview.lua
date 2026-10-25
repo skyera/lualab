@@ -56,10 +56,60 @@ local M = { VERSION = "1.0.0" }
 -- =========================================================================
 -- 1. Text Utilities: UTF-8 Width, Truncation, ANSI Helpers
 -- =========================================================================
-local UTF8_CHAR = "[%z\1-\127\194-\244][\128-\191]*"
-
 local function next_char(text, pos)
-    return text:match(UTF8_CHAR, pos)
+    local first = text:byte(pos)
+    if not first then
+        return nil
+    end
+    if first < 128 then
+        return text:sub(pos, pos)
+    end
+    local length
+    if first >= 194 and first <= 223 then
+        length = 2
+    elseif first >= 224 and first <= 239 then
+        length = 3
+    elseif first >= 240 and first <= 244 then
+        length = 4
+    else
+        return nil
+    end
+    for index = pos + 1, pos + length - 1 do
+        local byte = text:byte(index)
+        if not byte or byte < 128 or byte > 191 then
+            return nil
+        end
+    end
+    local second = text:byte(pos + 1)
+    if (first == 224 and second < 160) or (first == 237 and second >= 160)
+        or (first == 240 and second < 144) or (first == 244 and second > 143) then
+        return nil
+    end
+    return text:sub(pos, pos + length - 1)
+end
+
+-- Document bytes must never become terminal commands. Preserve structural
+-- newlines/tabs only before parsing; span text is always a single safe row.
+local function sanitize_text(text, multiline)
+    local out = {}
+    local pos = 1
+    while pos <= #text do
+        local char = next_char(text, pos) or text:sub(pos, pos)
+        local byte = char:byte()
+        if multiline and (char == "\n" or char == "\t") then
+            out[#out + 1] = char
+        elseif byte < 32 or byte == 127 then
+            out[#out + 1] = byte == 127 and "^?" or "^" .. string.char(byte + 64)
+        elseif char:match("^\194[\128-\159]$") then
+            out[#out + 1] = string.format("<U+%04X>", char:byte(2))
+        elseif #char == 1 and byte >= 128 then
+            out[#out + 1] = string.format("<%02X>", byte)
+        else
+            out[#out + 1] = char
+        end
+        pos = pos + #char
+    end
+    return table.concat(out)
 end
 
 local function character_width(char)
@@ -191,6 +241,7 @@ local function add_span(spans, text, style)
     if text == nil or text == "" then
         return
     end
+    text = sanitize_text(text)
     local last = spans[#spans]
     if last and style_signature(last.style) == style_signature(style) then
         last.text = last.text .. text
@@ -414,7 +465,7 @@ local function plain_spans(spans, max_width, pad)
         if used >= max_width then
             break
         end
-        local text, width = clip_to_width(span.text, max_width - used)
+        local text, width = clip_to_width(sanitize_text(span.text), max_width - used)
         if #text > 0 then
             parts[#parts + 1] = text
             used = used + width
@@ -436,10 +487,13 @@ local function spans_to_ansi(spans, max_width, pad)
         if used >= max_width then
             break
         end
-        local text, width = clip_to_width(span.text, max_width - used)
+        local text, width = clip_to_width(sanitize_text(span.text), max_width - used)
         if #text > 0 then
             local ansi = style_to_ansi(span.style)
             local href = span.style and span.style.href
+            if href and sanitize_text(href) ~= href then
+                href = nil
+            end
             if href then
                 parts[#parts + 1] = "\27]8;;" .. href .. "\27\\"
             end
@@ -1772,6 +1826,7 @@ local function append_footnotes(out, width, context)
 end
 
 function M.render(text, width, options)
+    text = sanitize_text(text:gsub("\r\n", "\n"), true)
     width = math.max(20, width or 80)
     if type(options) ~= "table" then
         options = {}
@@ -1907,7 +1962,7 @@ the pager redraws without clearing the screen.
 
 function M.new_view(title, lines)
     return {
-        title = title or "untitled",
+        title = sanitize_text(title or "untitled"),
         lines = lines or {},
         gutter_width = lines and lines.gutter_width or 0,
         top = 1,
