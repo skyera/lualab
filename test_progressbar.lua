@@ -270,6 +270,37 @@ do
     check(#bad_list == 0, "Zero undeclared global accesses in progressbar.lua: " .. table.concat(bad_list, ", "))
 end
 
+-- -------------------------------------------------------------------------
+-- Test 10: CLI Argument Parsing and Help Flag
+-- -------------------------------------------------------------------------
+print("\nTest 10: CLI Argument Parsing and Help Flags")
+do
+    -- In-process main tests
+    check(M.main({ "--help" }) == 0, "--help returns exit code 0")
+    check(M.main({ "-h" }) == 0, "-h returns exit code 0")
+    check(M.main({ "/?" }) == 0, "/? returns exit code 0")
+    check(M.main({ "--invalid-option" }) == 1, "--invalid-option returns exit code 1")
+    check(M.main({ "--total", "-5" }) == 1, "Negative --total returns exit code 1")
+    check(M.main({ "--style" }) == 1, "--style without value returns exit code 1")
+    check(M.main({ "--total", "5", "--width", "10", "--delay", "0", "--no-eta", "--no-rate" }) == 0, "Custom bar execution returns exit code 0")
+
+    -- External subprocess invocation tests
+    local luajit = arg[-1] or "luajit"
+    local p_help = io.popen(luajit .. " progressbar.lua --help", "r")
+    assert(p_help, "Failed to run luajit progressbar.lua --help")
+    local help_txt = p_help:read("*a")
+    p_help:close()
+
+    check(help_txt:find("USAGE:") ~= nil, "--help output contains USAGE section")
+    check(help_txt:find("OPTIONS:") ~= nil, "--help output contains OPTIONS section")
+    check(help_txt:find("%-%-style") ~= nil, "--help output lists --style option")
+    check(help_txt:find("LIBRARY USAGE:") ~= nil, "--help output provides library require snippet")
+
+    -- Test invalid flag exits with nonzero status
+    local ret_invalid = os.execute(luajit .. " progressbar.lua --unknown-flag >/dev/null 2>&1")
+    check(ret_invalid ~= 0, "Subprocess with unknown flag exits with nonzero code")
+end
+
 print(string.format("\n=================================================="))
 print(string.format("All tests completed: %d / %d passed", tests_passed, tests_run))
 print(string.format("==================================================\n"))

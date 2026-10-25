@@ -346,6 +346,9 @@ local function draw_progress(progress, width)
 end
 
 -- Export module table & class
+local print_help
+local cli_main
+
 local M = {
     ProgressBar = ProgressBar,
     new = ProgressBar.new,
@@ -353,19 +356,51 @@ local M = {
     get_now_sec = get_now_sec,
     is_tty = is_tty_stream,
     make_progress_bar = make_progress_bar,
-    draw_progress = draw_progress
+    draw_progress = draw_progress,
+    print_help = function(stream) return print_help(stream) end,
+    main = function(args) return cli_main(args) end
 }
 
 -- =========================================================================
--- Standalone CLI Showcase Runner
+-- CLI Help & Argument Dispatcher
 -- =========================================================================
 
-local is_standalone = false
-if not pcall(debug.getlocal, 4, 1) and arg and arg[0] and arg[0]:match("progressbar%.lua$") then
-    is_standalone = true
+print_help = function(stream)
+    stream = stream or io.stdout
+    stream:write([[
+progressbar.lua - High-Performance ANSI/Unicode Terminal Progress Bar
+
+USAGE:
+  luajit progressbar.lua [OPTIONS]
+  ./progressbar.lua [OPTIONS]
+
+OPTIONS:
+  -h, --help, /?        Show this help documentation and exit
+  --demo                Run the interactive multi-style showcase (default)
+  --style <name>        Bar style: unicode (default), ascii, shaded
+  --total <num>         Total item count or steps (default: 100)
+  --width <num>         Bar width in character cells (default: 30)
+  --label <text>        Prefix description label (e.g. "Downloading")
+  --color <name>        ANSI color: cyan, green, blue, yellow, magenta
+  --unit <text>         Throughput unit label (default: "it")
+  --delay <ms>          Delay between simulated steps in ms (default: 20)
+  --no-eta              Disable ETA calculation display
+  --no-rate             Disable throughput rate display
+  --no-counts           Disable item counts (current/total)
+  --no-percent          Disable percentage display
+
+LIBRARY USAGE:
+  local ProgressBar = require("progressbar")
+  local bar = ProgressBar.new({ total = 100, style = "unicode", color = "cyan" })
+  for i = 1, 100 do
+      bar:update(i, "chunk_" .. i)
+  end
+  bar:finish("Done!")
+]])
+    stream:flush()
 end
 
-if is_standalone then
+local function run_demo()
     io_write("\n=== ProgressBar Showcase ===\n\n")
 
     -- Demo 1: Smooth Unicode 8th-block filling
@@ -423,6 +458,113 @@ if is_standalone then
     end
 
     io_write("\nAll demos passed successfully!\n")
+    return 0
+end
+
+cli_main = function(args)
+    args = args or {}
+    if #args == 0 then
+        return run_demo()
+    end
+
+    local opts = { delay = 20 }
+    local i = 1
+    while i <= #args do
+        local a = args[i]
+        if a == "-h" or a == "--help" or a == "/?" then
+            print_help()
+            return 0
+        elseif a == "--demo" then
+            return run_demo()
+        elseif a == "--style" then
+            i = i + 1
+            if not args[i] then
+                io.stderr:write("Error: --style requires an argument (unicode, ascii, shaded).\n")
+                return 1
+            end
+            opts.style = args[i]
+        elseif a == "--total" then
+            i = i + 1
+            local val = tonumber(args[i])
+            if not val or val < 1 then
+                io.stderr:write("Error: --total must be a positive integer.\n")
+                return 1
+            end
+            opts.total = val
+        elseif a == "--width" then
+            i = i + 1
+            local val = tonumber(args[i])
+            if not val or val < 5 then
+                io.stderr:write("Error: --width must be an integer >= 5.\n")
+                return 1
+            end
+            opts.width = val
+        elseif a == "--delay" then
+            i = i + 1
+            local val = tonumber(args[i])
+            if not val or val < 0 then
+                io.stderr:write("Error: --delay must be a non-negative number of milliseconds.\n")
+                return 1
+            end
+            opts.delay = val
+        elseif a == "--label" then
+            i = i + 1
+            opts.label = args[i] or ""
+        elseif a == "--color" then
+            i = i + 1
+            opts.color = args[i]
+        elseif a == "--unit" then
+            i = i + 1
+            opts.unit = args[i]
+        elseif a == "--no-eta" then
+            opts.show_eta = false
+        elseif a == "--no-rate" then
+            opts.show_rate = false
+        elseif a == "--no-counts" then
+            opts.show_counts = false
+        elseif a == "--no-percent" then
+            opts.show_percent = false
+        else
+            io.stderr:write(string_format("Error: Unrecognized option '%s'.\n", a))
+            io.stderr:write("Try 'luajit progressbar.lua --help' for available options.\n")
+            return 1
+        end
+        i = i + 1
+    end
+
+    local bar = ProgressBar.new(opts)
+    local total = bar.total
+    local delay = opts.delay or 20
+    for step = 1, total do
+        bar:update(step)
+        if delay > 0 then
+            sleep_ms(delay)
+        end
+    end
+    bar:finish("Complete!")
+    return 0
+end
+
+-- =========================================================================
+-- Standalone CLI Invocation
+-- =========================================================================
+
+local is_standalone = false
+if not pcall(debug.getlocal, 4, 1) and arg and arg[0] and arg[0]:match("progressbar%.lua$") then
+    is_standalone = true
+end
+
+if is_standalone then
+    local cli_args = {}
+    if arg then
+        for idx = 1, #arg do
+            cli_args[#cli_args + 1] = arg[idx]
+        end
+    end
+    local exit_code = cli_main(cli_args)
+    if exit_code ~= 0 then
+        os.exit(exit_code)
+    end
 end
 
 return M
