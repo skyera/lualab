@@ -536,6 +536,39 @@ test("line numbers track source lines and leave wrapped rows blank", function()
     eq(lines[paragraph_index + 1].number, nil, "wrapped continuation has no number")
 end)
 
+test("themes switch the palette colors", function()
+    local function ansi_for(theme)
+        mdview.set_theme(theme)
+        local parts = {}
+        for _, line in ipairs(mdview.render("# Heading\n\n`code`\n", 40)) do
+            parts[#parts + 1] = mdview.spans_to_ansi(line.spans, 40, false)
+        end
+        return table.concat(parts, "\n")
+    end
+
+    local dark = ansi_for("dark")
+    local light = ansi_for("light")
+    truthy(dark ~= light, "palettes produce different output")
+    truthy(dark:find("38;2;130;170;255", 1, true), "dark heading color")
+    truthy(light:find("38;2;24;74;158", 1, true), "light heading color")
+    truthy(mdview.set_theme("dark"), "dark theme restored")
+    local ok = mdview.set_theme("neon")
+    eq(ok, false, "unknown theme rejected")
+end)
+
+test("NO_COLOR mode drops ANSI and OSC sequences but keeps layout", function()
+    mdview.set_color(false)
+    local lines = mdview.render("**bold** [link](https://example.com)\n", 40)
+    local view = mdview.new_view("plain.md", lines)
+    local frame = mdview.render_frame(view, 40, 8)
+    for row = 1, 8 do
+        truthy(frame.rows[row]:find("\27", 1, true) == nil, "no escapes in row " .. row)
+        eq(mdview.display_width(frame.plain[row]), 40, "row width " .. row)
+    end
+    mdview.set_color(true)
+    truthy(mdview.color_enabled(), "color restored")
+end)
+
 test("search ignores the line-number gutter", function()
     local markdown = "alpha\n\n" .. string.rep("beta\n\n", 15) .. "alpha\n"
     local lines = mdview.render(markdown, 40, { numbers = true })
@@ -838,6 +871,39 @@ test("CLI search option highlights and reports matches in snapshots", function()
 
     truthy(output:find("match 1/2", 1, true), "match status line")
     truthy(output:find("43m", 1, true), "highlight escape in output")
+end)
+
+test("CLI honors --no-color, --theme and NO_COLOR", function()
+    local path = os.tmpname()
+    local file = assert(io.open(path, "wb"))
+    file:write("# Heading\n\nBody\n")
+    file:close()
+
+    local function run(command)
+        local handle = assert(io.popen(command .. " 2>&1", "r"))
+        local output = handle:read("*a")
+        handle:close()
+        return output
+    end
+
+    local plain = run(string.format(
+        "%s mdview.lua --snapshot 50x8 --no-color %s", luajit_bin, path))
+    truthy(plain:find("\27", 1, true) == nil, "--no-color removes escapes")
+
+    local light = run(string.format(
+        "%s mdview.lua --snapshot 50x8 --theme light %s", luajit_bin, path))
+    truthy(light:find("38;2;24;74;158", 1, true), "light theme heading color")
+
+    local env_prefix = IS_WINDOWS and "set NO_COLOR=1&& " or "NO_COLOR=1 "
+    local env_plain = run(env_prefix .. string.format(
+        "%s mdview.lua --snapshot 50x8 %s", luajit_bin, path))
+    truthy(env_plain:find("\27", 1, true) == nil, "NO_COLOR is honored")
+
+    local forced = run(env_prefix .. string.format(
+        "%s mdview.lua --snapshot 50x8 --color %s", luajit_bin, path))
+    truthy(forced:find("\27", 1, true) ~= nil, "--color overrides NO_COLOR")
+
+    os.remove(path)
 end)
 
 test("CLI can disable inline images", function()

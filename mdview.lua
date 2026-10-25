@@ -10,6 +10,7 @@
     - Block images rendered as truecolor half-block art: PPM/PGM natively,
       PNG/JPEG/GIF/WebP through ImageMagick or ffmpeg when installed.
     - Source line-number gutter (wrapped continuation rows stay blank).
+    - Dark and light palettes (--theme) plus NO_COLOR-compatible output.
     - Unicode-aware word wrapping (wide characters, combining marks, tabs).
     - Raw-mode pager via FFI on both POSIX (termios + poll) and Windows
       (Win32 console + VT sequences): alternate screen, resize handling,
@@ -36,6 +37,8 @@
       -w, --width N        wrap width for non-interactive output (default 80)
       --no-pager           render the document and exit
       --color              keep ANSI colors when output is not a tty
+      --no-color           disable ANSI colors (also honors NO_COLOR)
+      --theme dark|light   color palette (default: dark)
       --no-images          show image placeholders instead of block art
       -n, --numbers        show source line numbers (default in the pager)
       --no-numbers         hide source line numbers
@@ -150,7 +153,7 @@ end
 -- =========================================================================
 local STYLE_ORDER = {
     "bold", "dim", "italic", "underline", "strike", "reverse", "search",
-    "link", "code", "code_block", "quote", "fg", "bg", "href",
+    "search_current", "link", "code", "code_block", "quote", "fg", "bg", "href",
 }
 
 local function style_signature(style)
@@ -236,7 +239,7 @@ end
 -- =========================================================================
 -- 3. ANSI Theme and Span Serialization
 -- =========================================================================
-local THEME = {
+local DARK_PALETTE = {
     text = "38;2;200;208;222",
     heading1 = "38;2;130;170;255",
     heading2 = "38;2;86;182;194",
@@ -257,36 +260,102 @@ local THEME = {
     bar_bg = "48;2;32;38;48",
     info = "38;2;120;200;230",
     warn = "38;2;240;190;90",
+    task_done = "38;2;120;200;140",
+    line_number = "38;2;95;105;125",
     search_fg = "30",
     search_bg = "43",
+    search_current_fg = "30",
+    search_current_bg = "48;2;255;150;60",
 }
 
-local STYLE = {
-    heading = {
+local LIGHT_PALETTE = {
+    text = "38;2;40;46;58",
+    heading1 = "38;2;24;74;158",
+    heading2 = "38;2;0;110;120",
+    heading3 = "38;2;100;55;150",
+    heading4 = "38;2;142;88;0",
+    rule1 = "38;2;140;168;205",
+    rule2 = "38;2;175;184;196",
+    block_bar = "38;2;145;155;172",
+    code_fg = "38;2;150;92;0",
+    code_bg = "48;2;238;241;246",
+    code_block_fg = "38;2;58;68;84",
+    quote_fg = "38;2;74;100;145",
+    link = "38;2;0;90;186",
+    marker = "38;2;36;84;164",
+    table_border = "38;2;145;155;172",
+    table_header = "38;2;28;36;48",
+    bar_fg = "38;2;28;36;48",
+    bar_bg = "48;2;226;231;238",
+    info = "38;2;0;104;132",
+    warn = "38;2;154;98;0",
+    task_done = "38;2;22;120;70",
+    line_number = "38;2;128;138;154",
+    search_fg = "30",
+    search_bg = "43",
+    search_current_fg = "30",
+    search_current_bg = "48;2;255;165;70",
+}
+
+local THEME = {}
+local STYLE = {}
+local COLOR_ENABLED = true
+
+local function apply_palette(palette)
+    for key in pairs(THEME) do
+        THEME[key] = nil
+    end
+    for key, value in pairs(palette) do
+        THEME[key] = value
+    end
+    STYLE.heading = {
         { bold = true, fg = THEME.heading1 },
         { bold = true, fg = THEME.heading2 },
         { bold = true, fg = THEME.heading3 },
         { bold = true, fg = THEME.heading4 },
         { bold = true, dim = true },
         { dim = true, italic = true },
-    },
-    rule = {
+    }
+    STYLE.rule = {
         { fg = THEME.rule1 },
         { fg = THEME.rule2 },
-    },
-    code_block = { code_block = true },
-    block_bar = { fg = THEME.block_bar },
-    quote_text = { italic = true, quote = true },
-    marker = { bold = true, fg = THEME.marker },
-    table_border = { fg = THEME.table_border },
-    table_header = { bold = true, fg = THEME.table_header },
-    task_done = { fg = "38;2;120;200;140" },
-    line_number = { fg = "38;2;95;105;125" },
-    search = { search = true },
-    bar = { bold = true, fg = THEME.bar_fg, bg = THEME.bar_bg },
-    info = { fg = THEME.info },
-    warn = { fg = THEME.warn },
-}
+    }
+    STYLE.code_block = { code_block = true }
+    STYLE.block_bar = { fg = THEME.block_bar }
+    STYLE.quote_text = { italic = true, quote = true }
+    STYLE.marker = { bold = true, fg = THEME.marker }
+    STYLE.table_border = { fg = THEME.table_border }
+    STYLE.table_header = { bold = true, fg = THEME.table_header }
+    STYLE.task_done = { fg = THEME.task_done }
+    STYLE.line_number = { fg = THEME.line_number }
+    STYLE.search = { search = true }
+    STYLE.search_current = { search_current = true }
+    STYLE.bar = { bold = true, fg = THEME.bar_fg, bg = THEME.bar_bg }
+    STYLE.info = { fg = THEME.info }
+    STYLE.warn = { fg = THEME.warn }
+end
+
+apply_palette(DARK_PALETTE)
+
+function M.set_theme(name)
+    if name == "dark" then
+        apply_palette(DARK_PALETTE)
+        return true
+    elseif name == "light" then
+        apply_palette(LIGHT_PALETTE)
+        return true
+    end
+    return false, "unknown theme: " .. tostring(name)
+end
+
+function M.set_color(enabled)
+    COLOR_ENABLED = enabled and true or false
+    return COLOR_ENABLED
+end
+
+function M.color_enabled()
+    return COLOR_ENABLED
+end
 
 local function style_to_ansi(style)
     if not style then
@@ -309,7 +378,11 @@ local function style_to_ansi(style)
 
     local fg = style.fg
     local bg = style.bg
-    if style.search then
+    if style.search_current then
+        fg = fg or THEME.search_current_fg
+        bg = THEME.search_current_bg
+        add("1")
+    elseif style.search then
         fg = fg or THEME.search_fg
         bg = THEME.search_bg
         add("1")
@@ -334,7 +407,29 @@ local function style_to_ansi(style)
     return "\27[" .. table.concat(codes, ";") .. "m"
 end
 
+local function plain_spans(spans, max_width, pad)
+    local parts = {}
+    local used = 0
+    for _, span in ipairs(spans) do
+        if used >= max_width then
+            break
+        end
+        local text, width = clip_to_width(span.text, max_width - used)
+        if #text > 0 then
+            parts[#parts + 1] = text
+            used = used + width
+        end
+    end
+    if pad and used < max_width then
+        parts[#parts + 1] = string.rep(" ", max_width - used)
+    end
+    return table.concat(parts)
+end
+
 local function spans_to_ansi(spans, max_width, pad)
+    if not COLOR_ENABLED then
+        return plain_spans(spans, max_width, pad)
+    end
     local parts = {}
     local used = 0
     for _, span in ipairs(spans) do
@@ -2554,10 +2649,13 @@ OPTIONS:
   -w, --width N        Wrap width for non-interactive output (default 80)
   --no-pager           Render the document and exit
   --color              Keep ANSI colors when output is not a tty
+  --no-color           Disable ANSI colors (also honors NO_COLOR)
+  --theme dark|light   Color palette (default: dark)
   --no-images          Show image placeholders instead of block art
   -n, --numbers        Show source line numbers (default in the pager)
   --no-numbers         Hide source line numbers
   --snapshot [WxH]     Print one TUI frame and exit (default 80x24)
+  --case-sensitive     Search matches case exactly
   --search PATTERN     Pre-fill search (useful with --snapshot)
   -h, --help           Show this help
 
@@ -2611,6 +2709,9 @@ local function parse_arguments(argv)
         pager = true,
         images = true,
         numbers = nil,
+        theme = "dark",
+        no_color = false,
+        case_sensitive = false,
         snapshot = nil,
         search = nil,
     }
@@ -2623,6 +2724,19 @@ local function parse_arguments(argv)
             options.pager = false
         elseif value == "--color" then
             options.color = true
+        elseif value == "--no-color" then
+            options.no_color = true
+        elseif value == "--case-sensitive" then
+            options.case_sensitive = true
+        elseif value == "--theme" then
+            local following = argv[index + 1]
+            if not following then
+                return nil, "--theme requires dark or light"
+            end
+            options.theme = following
+            index = index + 1
+        elseif value:match("^%-%-theme=") then
+            options.theme = value:sub(#"--theme=" + 1)
         elseif value == "--no-images" then
             options.images = false
         elseif value == "-n" or value == "--numbers" then
@@ -2667,6 +2781,9 @@ local function parse_arguments(argv)
     end
     if options.width < 20 then
         return nil, "--width must be at least 20"
+    end
+    if options.theme ~= "dark" and options.theme ~= "light" then
+        return nil, "unknown theme: " .. tostring(options.theme)
     end
     return options
 end
@@ -2740,6 +2857,15 @@ local function main(argv)
             .. tostring(read_error) .. "\n")
         return 1
     end
+
+    local theme_ok, theme_error = M.set_theme(options.theme)
+    if not theme_ok then
+        io.stderr:write("mdview: " .. tostring(theme_error) .. "\n")
+        return 1
+    end
+    local color_enabled = options.color
+        or (not options.no_color and os.getenv("NO_COLOR") == nil)
+    M.set_color(color_enabled)
 
     local title = document_title(options.file)
     local interactive = options.pager and Terminal.is_tty(1) and Terminal.is_tty(0)
