@@ -1267,6 +1267,59 @@ test("document controls are inert in plain, styled and frame output", function()
     mdview.set_color(true)
 end)
 
+test("reflow retains words, source position and search through width changes", function()
+    local paragraph = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu"
+    local source = "# Title\n\n" .. paragraph .. "\n\n" .. string.rep("tail\n\n", 20)
+    local view = mdview.new_view("resize.md", mdview.render(source, 80, { numbers = true }))
+    mdview.search(view, "epsilon", 8)
+    view.top = 4
+    for _, width in ipairs({ 24, 50, 80 }) do
+        mdview.reflow(view, width, 8)
+        eq(view.lines[view.top].number, 3, "source paragraph stays at top")
+        eq(view.search.query, "epsilon", "query retained")
+        eq(#view.search.matches, 1, "match rebuilt")
+        local match = view.search.matches[view.search.index]
+        truthy(view.match_map[match.line], "match map uses new row indices")
+        assert_widths(view.lines, width - view.gutter_width, "reflow")
+        local words = {}
+        for _, line in ipairs(view.lines) do
+            for word in line.text:gmatch("%a+") do
+                words[#words + 1] = word
+            end
+        end
+        truthy(table.concat(words, " "):find(paragraph, 1, true), "all paragraph words retained")
+        local frame = mdview.render_frame(view, width, 8)
+        eq(#frame.rows, 8, "resized frame renders")
+    end
+    mdview.handle_key(view, "/", 8)
+    for _, key in ipairs({ "t", "a", "i", "l" }) do
+        mdview.handle_key(view, key, 8)
+    end
+    mdview.reflow(view, 30, 8)
+    mdview.handle_key(view, "ESC", 8)
+    eq(view.search.query, "epsilon", "cancel after resize restores search")
+    eq(view.lines[view.top].number, 3, "cancel restores reflowed source anchor")
+    local empty = mdview.new_view("empty", render_lines("", 80))
+    mdview.reflow(empty, 24, 4)
+    eq(empty.top, 1, "empty reflow remains clamped")
+    mdview.render_frame(empty, 24, 4)
+end)
+
+test("snapshot wraps at requested width without losing paragraph words", function()
+    local path = os.tmpname()
+    local file = assert(io.open(path, "wb"))
+    file:write("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu\n")
+    file:close()
+    local pipe = assert(io.popen(string.format(
+        "%s mdview.lua --snapshot 24x12 --no-color --no-numbers %s", luajit_bin, path)))
+    local output = pipe:read("*a")
+    pipe:close()
+    os.remove(path)
+    for _, word in ipairs({ "alpha", "epsilon", "theta", "lambda", "mu" }) do
+        truthy(output:find(word, 1, true), "snapshot retains " .. word)
+    end
+end)
+
 print(string.format("\n%d passed, %d failed", passed, failed))
 if failed > 0 then
     os.exit(1)

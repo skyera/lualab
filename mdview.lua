@@ -1855,7 +1855,7 @@ function M.render(text, width, options)
         end
         gutter = #tostring(math.max(1, source_lines)) + 1
     end
-    local content_width = math.max(20, width - gutter)
+    local content_width = math.max(1, width - gutter)
     local lines = {}
     render_blocks(parse_blocks(cleaned), content_width, lines, nil, context)
     append_footnotes(lines, content_width, context)
@@ -1863,6 +1863,9 @@ function M.render(text, width, options)
         lines[#lines] = nil
     end
     lines.gutter_width = gutter
+    lines.source = text
+    lines.render_options = options
+    lines.width = width
     return lines
 end
 
@@ -2058,6 +2061,61 @@ function M.search(view, query, height, direction, incremental, anchor)
     end
     goto_match(view, index, height)
     return #matches
+end
+
+local function source_anchor(lines, top)
+    for index = math.min(top, #lines), 1, -1 do
+        if lines[index].number then
+            return lines[index].number
+        end
+    end
+    return 1
+end
+
+local function row_for_source(lines, number)
+    local nearest = 1
+    for index, line in ipairs(lines) do
+        if line.number then
+            if line.number == number then
+                return index
+            elseif line.number < number then
+                nearest = index
+            end
+        end
+    end
+    return nearest
+end
+
+function M.reflow(view, width, height)
+    width = math.max(20, width)
+    local old_lines = view.lines
+    if old_lines.source == nil or old_lines.width == width then
+        M.clamp_view(view, height)
+        return
+    end
+    local anchor = source_anchor(old_lines, view.top)
+    local snapshot = view.prompt_snapshot
+    local snapshot_anchor = snapshot and source_anchor(old_lines, snapshot.top)
+    view.lines = M.render(old_lines.source, width, old_lines.render_options)
+    view.gutter_width = view.lines.gutter_width
+    local top = row_for_source(view.lines, anchor)
+    local search = view.search
+    M.search(view, search.query, height, search.direction, true, top)
+    view.top = top
+    M.clamp_view(view, height)
+    if snapshot then
+        local saved = M.new_view(view.title, view.lines)
+        saved.case_sensitive = view.case_sensitive
+        local saved_top = row_for_source(view.lines, snapshot_anchor)
+        M.search(saved, snapshot.search.query, height, snapshot.search.direction, true, saved_top)
+        saved.top = saved_top
+        M.clamp_view(saved, height)
+        view.prompt_snapshot = {
+            top = saved.top,
+            search = saved.search,
+            match_map = saved.match_map,
+        }
+    end
 end
 
 local function begin_search(view, direction)
@@ -2836,6 +2894,7 @@ local function run_pager(title, lines, initial_search, settings)
     end
 
     local width, height = Terminal.get_size()
+    M.reflow(view, math.max(20, width - 1), height)
     local previous_rows = {}
     local redraw = true
 
@@ -2844,6 +2903,7 @@ local function run_pager(title, lines, initial_search, settings)
             local new_width, new_height = Terminal.get_size()
             if new_width ~= width or new_height ~= height then
                 width, height = new_width, new_height
+                M.reflow(view, math.max(20, width - 1), height)
                 previous_rows = {}
                 -- A resize is one of the few cases where a full clear is safe.
                 io.write("\27[H\27[2J")
@@ -3056,10 +3116,15 @@ local function print_document(title, lines, options)
     io.flush()
 end
 
-local function run_snapshot(title, lines, specification, search, settings)
+local function snapshot_size(specification)
     local columns, rows = specification:match("^(%d+)x(%d+)$")
     columns = math.max(1, math.min(500, tonumber(columns) or 80))
     rows = math.max(1, math.min(200, tonumber(rows) or 24))
+    return columns, rows
+end
+
+local function run_snapshot(title, lines, specification, search, settings)
+    local columns, rows = snapshot_size(specification)
     local view = M.new_view(title, lines)
     view.case_sensitive = settings and settings.case_sensitive or false
     if search and #search > 0 then
@@ -3112,6 +3177,9 @@ local function main(argv)
     if interactive then
         local columns = Terminal.get_size()
         width = math.max(20, columns - 1)
+    end
+    if options.snapshot then
+        width = snapshot_size(options.snapshot)
     end
 
     local base_dir = "."
