@@ -5671,6 +5671,8 @@ local function gui_open_url(state, url)
     return true
 end
 
+M.gui_open_url = gui_open_url
+
 local function gui_handle_click(state, hwnd, lparam)
     local point = ffi.new("mdview_point[1]")
     local value = tonumber(lparam) or 0
