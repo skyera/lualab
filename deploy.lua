@@ -173,9 +173,9 @@ do
     end
 end
 
-if opts.app ~= "all" and not APPS[opts.app] and opts.app ~= "wl" and opts.app ~= "ltop" and opts.app ~= "cfweb" and opts.app ~= "ldrop" and opts.app ~= "yt-web" then
+if opts.app ~= "all" and not APPS[opts.app] and opts.app ~= "wl" and opts.app ~= "ltop" and opts.app ~= "cfweb" and opts.app ~= "ldrop" and opts.app ~= "yt-web" and opts.app ~= "pix-web" then
     io.stderr:write("deploy: unknown --app '" .. tostring(opts.app)
-        .. "' (use all, pix, lumina, yt, weblite, luatop, codefind, codefind_web, landrop, ytweb, logexplorer, or mdview)\n")
+        .. "' (use all, pix, lumina, yt, weblite, luatop, codefind, codefind_web, landrop, ytweb, pixweb, logexplorer, or mdview)\n")
     os.exit(2)
 end
 
@@ -190,6 +190,17 @@ end
 local host_is_windows = (ffi.os == "Windows")
 local target_is_windows = (target_os == "windows")
 local SEP = host_is_windows and "\\" or "/"
+
+if host_is_windows then
+    ffi.cdef[[
+        uint32_t GetCurrentDirectoryA(uint32_t nBufferLength, char *lpBuffer);
+        uint32_t GetModuleFileNameA(void *hModule, char *lpFilename, uint32_t nSize);
+    ]]
+else
+    ffi.cdef[[
+        char *getcwd(char *buf, size_t size);
+    ]]
+end
 
 -- =========================================================================
 -- 2. Filesystem & path helpers
@@ -256,8 +267,26 @@ local function command_output(cmd)
 end
 
 local function get_cwd()
-    local cwd = os.getenv("PWD") or command_output(host_is_windows and "cd" or "pwd")
-    if not cwd or cwd == "" then cwd = "." end
+    if host_is_windows then
+        local buf = ffi.new("char[4096]")
+        local len = ffi.C.GetCurrentDirectoryA(4096, buf)
+        if len > 0 and len < 4096 then
+            return ffi.string(buf, len)
+        end
+        local cwd = command_output("cd")
+        if cwd and cwd ~= "" then
+            return cwd
+        end
+        return "."
+    end
+    local buf = ffi.new("char[4096]")
+    if ffi.C.getcwd(buf, 4096) ~= nil then
+        return ffi.string(buf)
+    end
+    local cwd = os.getenv("PWD") or command_output("pwd")
+    if not cwd or cwd == "" then
+        cwd = "."
+    end
     return cwd
 end
 
@@ -266,8 +295,20 @@ local function normalize_dir(path)
     path = path:gsub("^%s+", ""):gsub("%s+$", "")
     path = path:gsub('"', ""):gsub("'", "")
     if host_is_windows then
+        local drive, rest = path:match("^[/\\](%a)([/\\].*)$")
+        if drive then
+            path = drive:upper() .. ":" .. rest
+        else
+            local bare_drive = path:match("^[/\\](%a)$")
+            if bare_drive then
+                path = bare_drive:upper() .. ":\\"
+            end
+        end
         path = path:gsub("/", "\\")
         path = path:gsub("\\+$", "")
+        if path:match("^%a:$") then
+            path = path .. "\\"
+        end
         if path == "" then path = "\\" end
     else
         path = path:gsub("\\", "/")
@@ -286,18 +327,49 @@ end
 
 -- Directory holding this script (deploy.lua), used to locate pix.lua
 local function get_script_dir()
-    local self_path = (arg and arg[0]) or "deploy.lua"
-    local dir = self_path:match("^(.*)[/\\][^/\\]*$")
-
-    if dir and dir ~= "" then
-        if is_absolute(dir) then return normalize_dir(dir) end
-        return normalize_dir(get_cwd() .. SEP .. dir)
+    local candidates = {}
+    local function add_candidate(dir)
+        if not dir or dir == "" then
+            return
+        end
+        local norm = is_absolute(dir) and normalize_dir(dir) or normalize_dir(get_cwd() .. SEP .. dir)
+        table.insert(candidates, norm)
     end
-    return normalize_dir(get_cwd())
+
+    local self_path = (arg and arg[0]) or "deploy.lua"
+    add_candidate(self_path:match("^(.*)[/\\][^/\\]*$"))
+
+    local info = debug.getinfo(1, "S")
+    if info and info.source and info.source:sub(1, 1) == "@" then
+        local src = info.source:sub(2)
+        add_candidate(src:match("^(.*)[/\\][^/\\]*$"))
+    end
+
+    table.insert(candidates, normalize_dir(get_cwd()))
+    table.insert(candidates, ".")
+
+    for _, cand in ipairs(candidates) do
+        for _, app in pairs(APPS) do
+            if file_exists(cand .. SEP .. app.script) then
+                return cand
+            end
+        end
+    end
+    return candidates[1] or normalize_dir(get_cwd())
 end
 
 -- Absolute path of the luajit that is running this deploy (bare names resolved via PATH)
 local function resolve_luajit()
+    if host_is_windows then
+        local buf = ffi.new("char[4096]")
+        local len = ffi.C.GetModuleFileNameA(nil, buf, 4096)
+        if len > 0 and len < 4096 then
+            local exe = ffi.string(buf, len)
+            if exe:lower():find("luajit", 1, true) then
+                return normalize_dir(exe)
+            end
+        end
+    end
     local interp = (arg and arg[-1]) or ""
     if interp == "" then interp = "luajit" end
 
@@ -437,14 +509,33 @@ print("  Target : " .. target_dir .. "   (" .. kind .. ")")
 print("  Runtime: " .. luajit_path)
 print("")
 
+local available_apps = {}
+local skipped_apps = {}
 for _, app in ipairs(apps_to_deploy) do
     app.source_path = script_dir .. SEP .. app.script
     app.installed_lua = target_dir .. SEP .. app.script
-    if not file_exists(app.source_path) then
+    if file_exists(app.source_path) then
+        table.insert(available_apps, app)
+    elseif opts.app == "all" then
+        table.insert(skipped_apps, app)
+    else
         io.stderr:write("deploy: " .. app.script .. " not found next to deploy.lua (" .. app.source_path .. ")\n")
         os.exit(1)
     end
 end
+
+if #available_apps == 0 then
+    io.stderr:write("deploy: no tool scripts found next to deploy.lua (searched: " .. display_path(script_dir) .. ")\n")
+    io.stderr:write("  Ensure the .lua tool scripts (e.g. pix.lua, mdview.lua) are in the same directory as deploy.lua.\n")
+    os.exit(1)
+end
+if #skipped_apps > 0 then
+    for _, app in ipairs(skipped_apps) do
+        print(string.format("  [skip] %s not found in %s (skipping %s)", app.script, display_path(script_dir), app.name))
+    end
+    print("")
+end
+apps_to_deploy = available_apps
 
 -- -------------------------------------------------------------------------
 -- --check: report the planned actions and stop
@@ -506,9 +597,14 @@ for _, app in ipairs(apps_to_deploy) do
 
     if app.id == 'logexplorer' then
         local test_name = 'test_ffi_log_explorer.lua'
-        local copied, err = copy_file(script_dir .. SEP .. test_name, target_dir .. SEP .. test_name)
-        if not copied then error('Cannot install log explorer tests: ' .. tostring(err)) end
-        written = written + 1
+        local test_src = script_dir .. SEP .. test_name
+        if file_exists(test_src) then
+            local copied, err = copy_file(test_src, target_dir .. SEP .. test_name)
+            if not copied then
+                error('Cannot install log explorer tests: ' .. tostring(err))
+            end
+            written = written + 1
+        end
     elseif app.id == 'codefind_web' then
         -- codefind_web requires json.lua and codefind.lua
         for _, dep in ipairs({ "codefind.lua", "json.lua" }) do
