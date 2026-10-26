@@ -78,9 +78,37 @@ local function write_file(path, text)
     local file = assert(io.open(path, "wb"))
     file:write(text)
     file:close()
-end
+end    -- Writes a 24-bit BMP split into a red left half and a blue right half, so
+    -- the rendered pixels can be checked without an external image tool.
+    local function write_swatch_bmp(path, width, height)
+        local stride = math.floor((width * 3 + 3) / 4) * 4
+        local rows = {}
+        for y = 0, height - 1 do
+            local row = {}
+            for x = 0, width - 1 do
+                if x * 2 < width then
+                    row[#row + 1] = "\0\0\255"
+                else
+                    row[#row + 1] = "\255\0\0"
+                end
+            end
+            for _ = width * 3, stride - 1 do
+                row[#row + 1] = "\0"
+            end
+            rows[#rows + 1] = table.concat(row)
+        end
+        local pixels = table.concat(rows)
+        local size = 54 + #pixels
+        local header = "BM"
+            .. string.char(size % 256, math.floor(size / 256) % 256, 0, 0)
+            .. string.char(0, 0, 0, 0, 54, 0, 0, 0)
+            .. string.char(40, 0, 0, 0, width % 256, math.floor(width / 256), 0, 0,
+                height % 256, math.floor(height / 256), 0, 0, 1, 0, 24, 0)
+            .. string.rep("\0", 24)
+        write_file(path, header .. pixels)
+    end
 
-local function read_u32(bytes, offset)
+    local function read_u32(bytes, offset)
     local a, b, c, d = bytes:byte(offset, offset + 3)
     return a + b * 256 + c * 65536 + d * 16777216
 end
@@ -523,6 +551,70 @@ else
         truthy(joined:find("│ A", 1, true) and joined:find("┌", 1, true), "table rendered")
         eq(mdview.gui_open_path(state, fixture .. "/missing.md"), false, "missing file")
         truthy(state.message:find("Cannot open", 1, true), "visible error message")
+        mdview.gui_destroy(state)
+    end)
+
+    test("images render as real pixels in the document pane", function()
+        local image_path = fixture .. "/swatch.bmp"
+        write_swatch_bmp(image_path, 40, 20)
+        write_file(fixture .. "/pictures.md",
+            "# Pictures\n\n![swatch](swatch.bmp)\n\nDone.\n")
+        local state = assert(mdview.gui_create_state({
+            file = fixture .. "/pictures.md", numbers = true,
+        }))
+        local rows, spec = 0, nil
+        for _, line in ipairs(state.view.lines) do
+            if line.image then
+                rows = rows + 1
+                spec = line.image
+            end
+        end
+        truthy(spec, "image block reserved rows")
+        eq(spec.width, 40, "source width")
+        eq(spec.height, 20, "source height")
+        eq(rows, spec.rows, "one line per reserved row")
+        truthy(spec.rows > 1, "multi-row image")
+        local shot = "_mdview_gui_image.bmp"
+        local ok, err = mdview.gui_snapshot(state, 1000, 700, shot)
+        truthy(ok, "snapshot: " .. tostring(err))
+        local red, blue = false, false
+        local file = assert(io.open(shot, "rb"))
+        local header = file:read(54)
+        local width = read_u32(header, 19)
+        local height = read_u32(header, 23)
+        local stride = math.floor((width * 3 + 3) / 4) * 4
+        local pixels = file:read(stride * height)
+        file:close()
+        for y = 0, height - 1, 2 do
+            local row = (height - 1 - y) * stride
+            for x = 0, width - 1, 2 do
+                local offset = row + x * 3 + 1
+                local b, g, r = pixels:byte(offset, offset + 2)
+                if r > 180 and g < 60 and b < 60 then
+                    red = true
+                elseif b > 180 and g < 60 and r < 60 then
+                    blue = true
+                end
+            end
+        end
+        truthy(red and blue, "both swatch colours painted")
+        os.remove(shot)
+        mdview.gui_destroy(state)
+    end)
+
+    test("a missing image falls back to a text placeholder", function()
+        write_file(fixture .. "/broken.md", "# Broken\n\n![gone](nowhere.png)\n")
+        local state = assert(mdview.gui_create_state({
+            file = fixture .. "/broken.md", numbers = true,
+        }))
+        for _, line in ipairs(state.view.lines) do
+            truthy(not line.image, "no image rows for a missing file")
+        end
+        local joined = {}
+        for _, line in ipairs(state.view.lines) do
+            joined[#joined + 1] = line.text
+        end
+        truthy(table.concat(joined, "\n"):find("[image]", 1, true), "placeholder text")
         mdview.gui_destroy(state)
     end)
 

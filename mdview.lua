@@ -1641,6 +1641,63 @@ local function render_image(block, width, out, context)
         fallback(path_error)
         return
     end
+
+    -- The GUI paints the decoded bitmap itself, so the block only reserves the
+    -- rows it needs and carries the path for the painter.
+    if context.gui then
+        local pixel_w, pixel_h
+        if context.image_size then
+            pixel_w, pixel_h = context.image_size(path)
+        end
+        if not pixel_w then
+            local probe = load_image_file(path)
+            if probe then
+                pixel_w, pixel_h = probe.width, probe.height
+            end
+        end
+        if not pixel_w or not pixel_h or pixel_w <= 0 or pixel_h <= 0 then
+            fallback("cannot decode")
+            return
+        end
+        local columns = math.max(1, math.min(width, context.max_image_width or 60, pixel_w))
+        local aspect = pixel_h / pixel_w
+        local rows = math.max(1, math.floor(columns * aspect * 0.5 + 0.5))
+        local max_rows = math.max(1, context.max_image_height or 24)
+        if rows > max_rows then
+            rows = max_rows
+            columns = math.max(1, math.min(width, math.floor(rows * 2 / aspect + 0.5)))
+        end
+        local spec = {
+            path = path,
+            src = block.src,
+            width = pixel_w,
+            height = pixel_h,
+            columns = columns,
+            rows = rows,
+            alt = alt,
+        }
+        for index = 1, rows do
+            local line = make_line({}, index == 1 and block.line or nil)
+            line.image = {
+                path = spec.path,
+                src = spec.src,
+                width = spec.width,
+                height = spec.height,
+                columns = spec.columns,
+                rows = spec.rows,
+                row = index - 1,
+                alt = spec.alt,
+            }
+            out[#out + 1] = line
+        end
+        if #alt > 0 then
+            local spans = {}
+            add_span(spans, alt, { dim = true, italic = true })
+            out[#out + 1] = make_line(spans)
+        end
+        return
+    end
+
     local image, decode_error = load_image_file(path)
     if not image then
         fallback(decode_error)
@@ -1883,6 +1940,8 @@ function M.render(text, width, options)
         images = options.images ~= false,
         max_image_width = options.max_image_width or 48,
         max_image_height = options.max_image_height or 16,
+        gui = options.gui == true,
+        image_size = options.image_size,
         defs = defs,
         footnote_state = footnote_state,
         headings = {},
@@ -4132,6 +4191,15 @@ local function gui_native()
         int __stdcall IntersectClipRect(void *, int32_t, int32_t, int32_t, int32_t);
         int __stdcall GetDIBits(void *, void *, uint32_t, uint32_t, void *,
                                 mdview_bitmap_info *, uint32_t);
+        typedef struct {
+            int32_t type, width, height, width_bytes;
+            uint16_t planes, bits_pixel;
+            void *bits;
+        } mdview_bitmap;
+        int __stdcall GetObjectW(void *, int, void *);
+        int __stdcall SetStretchBltMode(void *, int);
+        int __stdcall StretchBlt(void *, int32_t, int32_t, int32_t, int32_t, void *,
+                                 int32_t, int32_t, int32_t, int32_t, uint32_t);
     ]]
     gui_libs = {
         kernel32 = ffi.load("kernel32"),
@@ -4143,7 +4211,100 @@ local function gui_native()
     return gui_libs
 end
 
-local function gui_wide(libs, text)
+-- Images are decoded with GDI+, which ships with Windows and reads PNG, JPEG,
+-- GIF and BMP. When it cannot be loaded the document falls back to text.
+local gui_gdiplus_lib
+local gui_gdiplus_token
+
+local function gui_gdiplus()
+    if gui_gdiplus_lib ~= nil then
+        return gui_gdiplus_lib or nil
+    end
+    local ok, lib = pcall(ffi.load, "gdiplus")
+    if not ok then
+        gui_gdiplus_lib = false
+        return nil
+    end
+    ffi.cdef[[
+        typedef struct {
+            uint32_t version;
+            void *debug_callback;
+            int32_t suppress_background;
+            int32_t suppress_codecs;
+        } mdview_gdiplus_input;
+        int __stdcall GdiplusStartup(uintptr_t *, const mdview_gdiplus_input *, void *);
+        void __stdcall GdiplusShutdown(uintptr_t);
+        int __stdcall GdipCreateBitmapFromFile(const uint16_t *, void **);
+        int __stdcall GdipCreateHBITMAPFromBitmap(void *, void **, uint32_t);
+        int __stdcall GdipDisposeImage(void *);
+    ]]
+    local input = ffi.new("mdview_gdiplus_input[1]")
+    input[0].version = 1
+    local token = ffi.new("uintptr_t[1]")
+    if lib.GdiplusStartup(token, input, nil) ~= 0 then
+        gui_gdiplus_lib = false
+        return nil
+    end
+    gui_gdiplus_token = token[0]
+    gui_gdiplus_lib = lib
+    return lib
+end
+
+local gui_wide
+
+local function gui_native_path(path)
+    return tostring(path):gsub("/", string.char(92))
+end
+
+-- Returns the decoded bitmap handle and its pixel size, or nil and a reason.
+-- Decoded images are cached for the lifetime of the GUI state.
+local function gui_image(state, path)
+    local cache = state.images
+    local entry = cache[path]
+    if entry ~= nil then
+        if entry == false then
+            return nil, "cannot decode"
+        end
+        return entry
+    end
+    local lib = gui_gdiplus()
+    if not lib then
+        cache[path] = false
+        return nil, "cannot decode"
+    end
+    local wide, _ = gui_wide(state.libs, gui_native_path(path))
+    local image = ffi.new("void *[1]")
+    if lib.GdipCreateBitmapFromFile(wide, image) ~= 0 or image[0] == nil then
+        cache[path] = false
+        return nil, "cannot decode"
+    end
+    local header = ffi.new("void *[1]")
+    local status = lib.GdipCreateHBITMAPFromBitmap(image[0], header, 0x00FFFFFF)
+    local width, height = 0, 0
+    if status == 0 and header[0] ~= nil then
+        -- The GDI bitmap keeps its own copy of the pixels, so the GDI+ image
+        -- is only needed while the handle is created.
+        local size = ffi.new("mdview_bitmap[1]")
+        local gdi = state.libs.gdi32
+        if gdi.GetObjectW(header[0], ffi.sizeof("mdview_bitmap"), size) > 0 then
+            width = tonumber(size[0].width) or 0
+            height = tonumber(size[0].height) or 0
+        end
+    end
+    lib.GdipDisposeImage(image[0])
+    if status ~= 0 or header[0] == nil or width <= 0 or height <= 0 then
+        if header[0] ~= nil then
+            state.libs.gdi32.DeleteObject(header[0])
+        end
+        cache[path] = false
+        return nil, "cannot decode"
+    end
+    entry = { handle = header[0], width = width, height = height }
+    cache[path] = entry
+    return entry
+end
+
+gui_wide = function(libs, text)
     text = tostring(text or "")
     local count = libs.kernel32.MultiByteToWideChar(65001, 0, text, #text, nil, 0)
     local buffer = ffi.new("uint16_t[?]", math.max(1, count + 1))
@@ -4508,7 +4669,13 @@ local function gui_release_state(state)
         for _, brush in pairs(state.brush_cache) do
             gdi.DeleteObject(brush)
         end
+        for _, entry in pairs(state.images or {}) do
+            if entry and entry.handle then
+                gdi.DeleteObject(entry.handle)
+            end
+        end
     end
+    state.images = {}
     state.fonts = { doc = {}, tree = {} }
     state.brushes = {}
     state.brush_cache = {}
@@ -4523,6 +4690,14 @@ local function gui_document_options(state)
         base_dir = state.path ~= "-" and path_parent(state.path) or ".",
         images = state.settings.images,
         numbers = state.settings.numbers,
+        gui = true,
+        image_size = function(path)
+            local entry = gui_image(state, path)
+            if not entry then
+                return nil
+            end
+            return entry.width, entry.height
+        end,
     }
 end
 
@@ -5051,6 +5226,7 @@ local function gui_create_state(options)
         metrics = metrics,
         brushes = {},
         brush_cache = {},
+        images = {},
         layout = M.gui_layout(GUI_DEFAULT_WIDTH, GUI_DEFAULT_HEIGHT, metrics),
         view = nil,
         doc_cols = 0,
@@ -5186,6 +5362,38 @@ local function gui_document_position(state)
     return string.format("%3d%%  %d/%d", percent, view.top, #view.lines)
 end
 
+-- Draws a decoded image block: the pixels are stretched into the reserved
+-- character cells with the aspect ratio preserved and a frame around them.
+local function gui_paint_image(state, hdc, spec, x, y, metrics)
+    local gdi = state.libs.gdi32
+    local entry = gui_image(state, spec.path)
+    if not entry then
+        return false
+    end
+    local box_w = math.max(1, spec.columns * metrics.cell_w)
+    local box_h = math.max(1, spec.rows * metrics.cell_h)
+    local scale = math.min(box_w / entry.width, box_h / entry.height)
+    local width = math.max(1, math.floor(entry.width * scale + 0.5))
+    local height = math.max(1, math.floor(entry.height * scale + 0.5))
+    local left = x + math.floor((box_w - width) / 2)
+    local top = y + math.floor((box_h - height) / 2)
+    local memory = gdi.CreateCompatibleDC(hdc)
+    if memory == nil then
+        return false
+    end
+    local previous = gdi.SelectObject(memory, entry.handle)
+    gdi.SetStretchBltMode(hdc, 4) -- HALFTONE
+    gdi.StretchBlt(hdc, left, top, width, height, memory, 0, 0, entry.width,
+        entry.height, 0x00CC0020)
+    gdi.SelectObject(memory, previous)
+    gdi.DeleteDC(memory)
+    gui_fill(state, hdc, left - 1, top - 1, width + 2, 1, state.brushes.separator)
+    gui_fill(state, hdc, left - 1, top + height, width + 2, 1, state.brushes.separator)
+    gui_fill(state, hdc, left - 1, top, 1, height, state.brushes.separator)
+    gui_fill(state, hdc, left + width, top, 1, height, state.brushes.separator)
+    return true
+end
+
 local function gui_paint_document(state, hdc)
     local libs = state.libs
     local layout = state.layout
@@ -5224,7 +5432,15 @@ local function gui_paint_document(state, hdc)
             break
         end
         local y = layout.header_height + (row - 1) * metrics.cell_h
-        if gutter > 0 then
+        if line.image then
+            local block_top = y - (line.image.row or 0) * metrics.cell_h
+            if not gui_paint_image(state, hdc, line.image, text_x + gutter * metrics.cell_w,
+                block_top, metrics) then
+                gui_draw_text(state, hdc, "[image] " .. (line.image.src or ""), text_x,
+                    y + metrics.text_offset, gui_color(THEME.line_number),
+                    state.fonts.doc.regular)
+            end
+        elseif gutter > 0 then
             gui_draw_text(state, hdc, gui_gutter_text(line, gutter), text_x,
                 y + metrics.text_offset, gui_color(THEME.line_number),
                 state.fonts.doc.regular)

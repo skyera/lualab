@@ -277,7 +277,11 @@ file or press Enter to open it. Folders load lazily the first time they are
 expanded, Tab switches between the tree and the document, and the mouse wheel,
 arrow/Page/Home/End keys or the scrollbar move the document. The right pane
 renders Markdown with GDI at the current width, so the window is resizable and
-re-wraps the document to the new width.
+re-wraps the document to the new width. Images referenced by the document
+(`![alt](file.png)`) are decoded with GDI+ (PNG, JPEG, GIF and BMP, no extra
+DLLs) and painted into the page at the column width with their aspect ratio
+kept; `--no-images` draws text placeholders instead, and unreadable files fall
+back to the same placeholder with the reason.
 
 Deployment checks: `python3 test_deploy_mdview.py` (or `python` on Windows).
 Browser checks: `luajit test_mdview.lua`, `luajit test_mdview_gui.lua`,
