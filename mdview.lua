@@ -10,7 +10,7 @@
     - Block images rendered as truecolor half-block art: PPM/PGM natively,
       PNG/JPEG/GIF/WebP through ImageMagick or ffmpeg when installed.
     - Source line-number gutter (wrapped continuation rows stay blank).
-    - Dark and light palettes (--theme) plus NO_COLOR-compatible output.
+    - Dark and light terminal palettes (--theme) plus NO_COLOR-compatible output.
     - Unicode-aware word wrapping (wide characters, combining marks, tabs).
     - Raw-mode pager via FFI on both POSIX (termios + poll) and Windows
       (Win32 console + VT sequences): alternate screen, resize handling,
@@ -19,10 +19,12 @@
     - Filterable heading outline (t), with source-anchored navigation.
     - Lazy Markdown file tree with folder/file icons and Vim navigation.
     - Pure render/frame functions for headless tests and --snapshot output.
-    - Optional Win32 GUI (--gui): a native window with the same Markdown file
-      tree and theme, drawn with GDI through the Windows SDK. No toolkits or
-      extra DLLs; the tree lazy-loads folders and the document re-wraps on
-      resize, with mouse, wheel, keyboard and scrollbar navigation.
+    - Optional Win32 GUI (--gui): a native window that follows the Windows
+      theme. The file list is a SysTreeView32 common control with standard
+      Explorer folder/file icons from the shell image list; the Markdown page
+      is drawn with GDI. No toolkits or extra DLLs; folders load lazily, the
+      document re-wraps on resize, and the mouse (click, double-click, wheel)
+      plus the keyboard navigate both panes.
 
     Usage:
       luajit mdview.lua                         # Browse the current directory
@@ -54,7 +56,7 @@
       --no-pager           render the document and exit
       --color              keep ANSI colors when output is not a tty
       --no-color           disable ANSI colors (also honors NO_COLOR)
-      --theme dark|light   color palette (default: dark)
+      --theme dark|light   terminal palette (default: dark; GUI uses Windows)
       --no-images          show image placeholders instead of block art
       -n, --numbers        show source line numbers (default in the pager)
       --no-numbers         hide source line numbers
@@ -3872,7 +3874,9 @@ end
 -- The GUI is plain LuaJIT FFI over user32/gdi32: no toolkit, no DLLs to ship.
 -- It reuses the terminal renderer's span output and palette, so both viewers
 -- show the same document. Layout, hit-testing and scrolling stay pure Lua so
--- they can be tested without a window.
+-- they can be tested without a window. The whole section lives in one function
+-- scope because LuaJIT limits a chunk to 200 active locals.
+local gui = (function()
 local GUI_CLASS_NAME = "mdviewGuiWindow"
 local GUI_DEFAULT_WIDTH = 1120
 local GUI_DEFAULT_HEIGHT = 800
@@ -3896,9 +3900,66 @@ local WM_GETMINMAXINFO = 0x0024
 local WM_TIMER = 0x0113
 local WM_MOUSEWHEEL = 0x020A
 local WM_LBUTTONDOWN = 0x0201
+local WM_LBUTTONUP = 0x0202
 local WM_LBUTTONDBLCLK = 0x0203
 local WM_KEYDOWN = 0x0100
 local WM_VSCROLL = 0x0115
+local WM_NOTIFY = 0x004E
+local WM_SETFONT = 0x0030
+local WM_PRINTCLIENT = 0x0318
+local WS_CHILD = 0x40000000
+local WS_VISIBLE = 0x10000000
+local WS_TABSTOP = 0x00010000
+local WS_CLIPCHILDREN = 0x02000000
+local SW_HIDE = 0
+local SW_SHOW = 5
+
+-- SysTreeView32 (comctl32) constants; verified against commctrl.h on x64.
+local TVS_HASBUTTONS = 0x0001
+local TVS_HASLINES = 0x0002
+local TVS_LINESATROOT = 0x0004
+local TVS_SHOWSELALWAYS = 0x0020
+local TVM_INSERTITEMW = 0x1132
+local TVM_EXPAND = 0x1102
+local TVM_SETIMAGELIST = 0x1109
+local TVM_GETNEXTITEM = 0x110A
+local TVM_SELECTITEM = 0x110B
+local TVM_SETITEMW = 0x113F
+local TVM_GETITEMW = 0x113E
+local TVM_HITTEST = 0x1111
+local TVHT_ONITEMBUTTON = 0x0010
+local TVM_ENSUREVISIBLE = 0x1114
+local TVM_SETBKCOLOR = 0x111D
+local TVM_SETTEXTCOLOR = 0x111E
+local TVGN_ROOT = 0
+local TVGN_CARET = 9
+local TVE_EXPAND = 2
+local TVE_COLLAPSE = 1
+local TVE_TOGGLE = 3
+local TVIF_TEXT = 0x0001
+local TVIF_IMAGE = 0x0002
+local TVIF_SELECTEDIMAGE = 0x0020
+local TVIF_CHILDREN = 0x0040
+local TVN_SELCHANGEDW = 0xFFFFFE3D
+local TVN_ITEMEXPANDINGW = 0xFFFFFE3A
+local TVN_ITEMEXPANDEDW = 0xFFFFFE39
+local NM_CLICK = 0xFFFFFFFE
+local NM_DBLCLK = 0xFFFFFFFD
+local NM_RETURN = 0xFFFFFFFC
+local NM_SETFOCUS = 0xFFFFFFF9
+local NM_KILLFOCUS = 0xFFFFFFF8
+local SHGFI_SMALLICON = 0x00000001
+local SHGFI_SYSICONINDEX = 0x00004000
+local TVI_ROOT = -65536
+local TVI_LAST = -2
+local SYS_COLOR_WINDOW = 5
+local SYS_COLOR_WINDOWTEXT = 8
+local SYS_COLOR_HIGHLIGHT = 13
+local SYS_COLOR_BTNFACE = 15
+local SYS_COLOR_BTNSHADOW = 16
+local SYS_COLOR_GRAYTEXT = 17
+local SYS_COLOR_BTNTEXT = 18
+local SYS_COLOR_HOTLIGHT = 26
 
 local GUI_VIRTUAL_KEYS = {
     [0x25] = "LEFT", [0x26] = "UP", [0x27] = "RIGHT", [0x28] = "DOWN",
@@ -3909,7 +3970,13 @@ local GUI_VIRTUAL_KEYS = {
 
 local gui_libs
 local gui_state
+-- Callback objects referenced by the OS (window class, subclass proc) must
+-- outlive every window they serve: Windows keeps the raw function pointer, so
+-- freeing the Lua callback would crash the next dispatched message.
 local gui_wndproc_ref
+local gui_treeproc_ref
+local gui_class_registered = false
+local gui_tree_proc
 
 local function gui_native()
     if gui_libs then
@@ -3957,6 +4024,47 @@ local function gui_native()
         typedef struct {
             mdview_bitmap_header header; uint32_t colors[3];
         } mdview_bitmap_info;
+        typedef struct { uint32_t dwSize, dwICC; } mdview_init_controls;
+        typedef struct { void *hwndFrom; uintptr_t idFrom; uint32_t code; } mdview_nmhdr;
+        typedef struct {
+            uint32_t mask;
+            void *hItem;
+            uint32_t state, stateMask;
+            const uint16_t *pszText;
+            int32_t cchTextMax, iImage, iSelectedImage, cChildren;
+            intptr_t lParam;
+        } mdview_tvitem;
+        typedef struct {
+            void *hParent, *hInsertAfter;
+            mdview_tvitem item;
+            uint8_t tvitem_ex[24];
+        } mdview_tvinsert;
+        typedef struct {
+            mdview_point pt;
+            uint32_t flags;
+            void *hItem;
+        } mdview_tvhittest;
+        typedef struct {
+            mdview_nmhdr hdr;
+            uint32_t action;
+            mdview_tvitem itemOld, itemNew;
+            mdview_point ptDrag;
+        } mdview_nmtreeview;
+        typedef struct {
+            mdview_nmhdr hdr;
+            int32_t iItem, iSubItem;
+            uint32_t uNewState, uOldState, uChanged;
+            mdview_point ptAction;
+            intptr_t lParam;
+            uint32_t uKeyFlags;
+        } mdview_nmitemactivate;
+        typedef struct {
+            void *hIcon;
+            int32_t iIcon;
+            uint32_t dwAttributes;
+            uint16_t szDisplayName[260];
+            uint16_t szTypeName[80];
+        } mdview_shfileinfo;
 
         void *__stdcall GetModuleHandleW(const uint16_t *);
         int __stdcall MultiByteToWideChar(unsigned int, uint32_t, const char *, int,
@@ -3987,6 +4095,14 @@ local function gui_native()
         int __stdcall KillTimer(void *, uintptr_t);
         int __stdcall PostMessageW(void *, uint32_t, uintptr_t, intptr_t);
         int __stdcall SetScrollInfo(void *, int, const mdview_scroll_info *, int);
+        intptr_t __stdcall SendMessageW(void *, uint32_t, uintptr_t, intptr_t);
+        intptr_t __stdcall SetWindowLongPtrW(void *, int, intptr_t);
+        int __stdcall MoveWindow(void *, int32_t, int32_t, int32_t, int32_t, int);
+        int __stdcall PrintWindow(void *, void *, uint32_t);
+        uint32_t __stdcall GetSysColor(int);
+        int __stdcall InitCommonControlsEx(const mdview_init_controls *);
+        uintptr_t __stdcall SHGetFileInfoW(const uint16_t *, uint32_t,
+                                           mdview_shfileinfo *, uint32_t, uint32_t);
         int __stdcall GetClientRect(void *, mdview_rect *);
         int __stdcall AdjustWindowRectEx(mdview_rect *, uint32_t, int, uint32_t);
         int __stdcall SetProcessDPIAware(void);
@@ -4021,6 +4137,8 @@ local function gui_native()
         kernel32 = ffi.load("kernel32"),
         user32 = ffi.load("user32"),
         gdi32 = ffi.load("gdi32"),
+        comctl32 = ffi.load("comctl32"),
+        shell32 = ffi.load("shell32"),
     }
     return gui_libs
 end
@@ -4045,6 +4163,37 @@ local function gui_color(spec)
         return nil
     end
     return tonumber(r) + tonumber(g) * 256 + tonumber(b) * 65536
+end
+
+local function gui_system_spec(libs, index, background)
+    local value = tonumber(libs.user32.GetSysColor(index)) or 0
+    local red = value % 256
+    local green = math.floor(value / 256) % 256
+    local blue = math.floor(value / 65536) % 256
+    return string.format("%s;2;%d;%d;%d", background and "48" or "38", red, green, blue)
+end
+
+-- The GUI follows the current Windows colors instead of the terminal palettes.
+-- Document styles keep light-background colors so text stays readable.
+local function gui_system_palette(libs)
+    local palette = {}
+    for key, value in pairs(LIGHT_PALETTE) do
+        palette[key] = value
+    end
+    palette.text = gui_system_spec(libs, SYS_COLOR_WINDOWTEXT, false)
+    palette.link = gui_system_spec(libs, SYS_COLOR_HOTLIGHT, false)
+    palette.bar_fg = gui_system_spec(libs, SYS_COLOR_BTNTEXT, false)
+    palette.bar_bg = gui_system_spec(libs, SYS_COLOR_BTNFACE, true)
+    palette.line_number = gui_system_spec(libs, SYS_COLOR_GRAYTEXT, false)
+    palette.info = gui_system_spec(libs, SYS_COLOR_GRAYTEXT, false)
+    palette.folder_icon = gui_system_spec(libs, SYS_COLOR_BTNTEXT, false)
+    palette.file_icon = gui_system_spec(libs, SYS_COLOR_BTNTEXT, false)
+    palette.gui_bg = gui_system_spec(libs, SYS_COLOR_WINDOW, true)
+    palette.gui_panel = gui_system_spec(libs, SYS_COLOR_BTNFACE, true)
+    palette.gui_selection = gui_system_spec(libs, SYS_COLOR_HIGHLIGHT, true)
+    palette.gui_separator = gui_system_spec(libs, SYS_COLOR_BTNSHADOW, true)
+    palette.gui_accent = gui_system_spec(libs, SYS_COLOR_HIGHLIGHT, false)
+    return palette
 end
 
 local function gui_scale(dpi, value)
@@ -4410,41 +4559,6 @@ local function gui_sync_document(state)
     gui_clamp_document(state)
 end
 
-local function gui_tree_clamp(state)
-    local browser = state.browser
-    local count = #browser.entries
-    if count == 0 then
-        browser.selected = 1
-        state.tree_top = 1
-        return
-    end
-    browser.selected = gui_clamp(browser.selected or 1, 1, count)
-    state.tree_top = M.gui_ensure_visible(state.tree_top, browser.selected,
-        state.layout.tree_rows, count)
-end
-
-local function gui_toggle_node(state, node)
-    if not node or not node.directory then
-        return
-    end
-    if node.expanded then
-        node.expanded = false
-    elseif node.children then
-        node.expanded = true
-    else
-        local ok, err = load_tree_node(state.browser, node)
-        if not ok then
-            state.message = sanitize_text(err)
-            state.message_kind = "warn"
-            return
-        end
-    end
-    state.message = ""
-    state.message_kind = "info"
-    rebuild_tree(state.browser, state.layout.tree_rows + 2, node.path)
-    gui_tree_clamp(state)
-end
-
 local function gui_update_window_title(state)
     if state.hwnd == nil then
         return
@@ -4485,11 +4599,393 @@ function M.gui_open_path(state, path)
     })
 end
 
+-- =========================================================================
+-- 16c. Native Win32 File Tree (SysTreeView32 + shell icons)
+-- =========================================================================
+-- The tree is the common-controls tree view, so selection, keyboard
+-- navigation, expanders and mouse clicks are native Windows behavior. Icons
+-- come from the shell system image list via SHGetFileInfo, so folders and
+-- Markdown files look like Explorer items.
+local function gui_item_key(handle)
+    return tonumber(ffi.cast("intptr_t", handle))
+end
+
+local function gui_item_pointer(key)
+    return ffi.cast("void *", ffi.cast("intptr_t", key))
+end
+
+local function gui_icon_index(state, path)
+    local libs = state.libs
+    local info = ffi.new("mdview_shfileinfo[1]")
+    local native_path = tostring(path):gsub("/", string.char(92))
+    local ok = libs.shell32.SHGetFileInfoW(gui_wide(libs, native_path), 0, info,
+        ffi.sizeof("mdview_shfileinfo"), SHGFI_SYSICONINDEX + SHGFI_SMALLICON)
+    if tonumber(ok) == 0 then
+        return 0
+    end
+    return tonumber(info[0].iIcon) or 0
+end
+
+local function gui_tree_insert(state, node, parent)
+    local libs = state.libs
+    local insert = ffi.new("mdview_tvinsert[1]")
+    insert[0].hParent = parent or gui_item_pointer(TVI_ROOT)
+    insert[0].hInsertAfter = gui_item_pointer(TVI_LAST)
+    local text, length = gui_wide(libs, sanitize_text(node.name))
+    local icon = gui_icon_index(state, node.path)
+    insert[0].item.mask = TVIF_TEXT + TVIF_IMAGE + TVIF_SELECTEDIMAGE + TVIF_CHILDREN
+    insert[0].item.pszText = text
+    insert[0].item.cchTextMax = length
+    insert[0].item.iImage = icon
+    insert[0].item.iSelectedImage = icon
+    insert[0].item.cChildren = node.directory and 1 or 0
+    local result = libs.user32.SendMessageW(state.tree_hwnd, TVM_INSERTITEMW, 0,
+        ffi.cast("intptr_t", insert))
+    local handle = ffi.cast("void *", result)
+    if handle == nil then
+        return nil
+    end
+    local key = gui_item_key(handle)
+    state.tree_items[node.path] = key
+    state.tree_nodes[key] = node
+    return key
+end
+
+local function gui_tree_set_children_flag(state, key, has_children)
+    local item = ffi.new("mdview_tvitem[1]")
+    item[0].mask = TVIF_CHILDREN
+    item[0].hItem = gui_item_pointer(key)
+    item[0].cChildren = has_children and 1 or 0
+    state.libs.user32.SendMessageW(state.tree_hwnd, TVM_SETITEMW, 0,
+        ffi.cast("intptr_t", item))
+end
+
+local function gui_tree_fill(state, node)
+    local key = state.tree_items[node.path]
+    if not key or state.tree_filled[key] then
+        return true
+    end
+    state.tree_filled[key] = true
+    local children = node.children
+    if not children then
+        local ok, err = load_tree_node(state.browser, node)
+        if not ok then
+            state.tree_filled[key] = nil
+            state.message = sanitize_text(err)
+            state.message_kind = "warn"
+            return false
+        end
+        children = node.children
+    end
+    local parent = gui_item_pointer(key)
+    for _, child in ipairs(children or {}) do
+        gui_tree_insert(state, child, parent)
+    end
+    if #(children or {}) == 0 then
+        gui_tree_set_children_flag(state, key, false)
+    end
+    return true
+end
+
+-- TreeView hit testing is repeated here because the selection itself must
+-- not depend on the control's internal mouse state: a synthetic or posted
+-- WM_LBUTTONDOWN can leave the control with no caret at all.
+local function gui_tree_hit_node(state, lparam)
+    local tree = state.tree_hwnd
+    if not tree then
+        return nil, 0
+    end
+    local packed = tonumber(ffi.cast("intptr_t", lparam)) or 0
+    local hit = ffi.new("mdview_tvhittest[1]")
+    hit[0].pt.x = packed % 65536
+    hit[0].pt.y = math.floor(packed / 65536) % 65536
+    local found = state.libs.user32.SendMessageW(tree, TVM_HITTEST, 0,
+        ffi.cast("intptr_t", hit))
+    local flags = tonumber(hit[0].flags) or 0
+    if tonumber(ffi.cast("intptr_t", found)) == 0 or flags == 0 then
+        return nil, flags
+    end
+    return state.tree_nodes[gui_item_key(ffi.cast("void *", found))], flags
+end
+
+local function gui_tree_toggle(state, node)
+    local key = node and state.tree_items[node.path]
+    if not key then
+        return false
+    end
+    state.libs.user32.SendMessageW(state.tree_hwnd, TVM_EXPAND, TVE_TOGGLE,
+        ffi.cast("intptr_t", key))
+    return true
+end
+
+local function gui_tree_select(state, node)
+    local key = node and state.tree_items[node.path]
+    if not key then
+        return false
+    end
+    state.libs.user32.SendMessageW(state.tree_hwnd, TVM_SELECTITEM, TVGN_CARET,
+        ffi.cast("intptr_t", key))
+    state.libs.user32.SendMessageW(state.tree_hwnd, TVM_ENSUREVISIBLE, 0,
+        ffi.cast("intptr_t", key))
+    if state.focus ~= "tree" then
+        state.focus = "tree"
+        state.libs.user32.InvalidateRect(state.hwnd, nil, 0)
+    end
+    return true
+end
+
+local function gui_tree_selected_node(state)
+    if not state.tree_hwnd then
+        return nil
+    end
+    local result = state.libs.user32.SendMessageW(state.tree_hwnd, TVM_GETNEXTITEM,
+        TVGN_CARET, 0)
+    return state.tree_nodes[gui_item_key(ffi.cast("void *", result))]
+end
+
+local function gui_tree_activate(state, node)
+    if not node then
+        return false
+    end
+    if node.directory then
+        local key = state.tree_items[node.path]
+        if not key then
+            return false
+        end
+        state.libs.user32.SendMessageW(state.tree_hwnd, TVM_EXPAND, TVE_TOGGLE,
+            ffi.cast("intptr_t", key))
+        return true
+    end
+    return gui_open_node(state, node)
+end
+
+local function gui_tree_build(state)
+    local browser = state.browser
+    local root = browser.root
+    if not state.tree_hwnd or not root then
+        return false
+    end
+    state.tree_building = true
+    local key = gui_tree_insert(state, root, nil)
+    local ok = key ~= nil and gui_tree_fill(state, root)
+    if ok then
+        state.libs.user32.SendMessageW(state.tree_hwnd, TVM_EXPAND, TVE_EXPAND,
+            ffi.cast("intptr_t", key))
+        local selected = browser.path and state.tree_items[browser.path]
+        if selected then
+            state.libs.user32.SendMessageW(state.tree_hwnd, TVM_SELECTITEM, TVGN_CARET,
+                ffi.cast("intptr_t", selected))
+            state.libs.user32.SendMessageW(state.tree_hwnd, TVM_ENSUREVISIBLE, 0,
+                ffi.cast("intptr_t", selected))
+        end
+    end
+    state.tree_building = false
+    if not ok then
+        state.message = "Cannot build the file tree"
+        state.message_kind = "warn"
+    end
+    return ok
+end
+
+local function gui_sync_tree_bounds(state)
+    local tree = state.tree_hwnd
+    if not tree then
+        return
+    end
+    local layout = state.layout
+    if layout.tree_width <= 0 then
+        state.libs.user32.ShowWindow(tree, SW_HIDE)
+        return
+    end
+    state.libs.user32.ShowWindow(tree, SW_SHOW)
+    local height = math.max(1, layout.content_height - layout.header_height)
+    state.libs.user32.MoveWindow(tree, 0, layout.header_height, layout.tree_width,
+        height, 1)
+end
+
+local function gui_tree_create(state)
+    local libs = state.libs
+    local init = ffi.new("mdview_init_controls[1]")
+    init[0].dwSize = ffi.sizeof("mdview_init_controls")
+    init[0].dwICC = 0x00000002 -- ICC_TREEVIEW_CLASSES
+    libs.comctl32.InitCommonControlsEx(init)
+    local style = WS_CHILD + WS_VISIBLE + WS_TABSTOP
+        + TVS_HASBUTTONS + TVS_HASLINES + TVS_LINESATROOT + TVS_SHOWSELALWAYS
+    local tree = libs.user32.CreateWindowExW(0, gui_wide(libs, "SysTreeView32"),
+        gui_wide(libs, ""), style, 0, state.metrics.header_h, 10, 10,
+        state.hwnd, nil, libs.kernel32.GetModuleHandleW(nil), nil)
+    if tree == nil then
+        return nil, "cannot create the file tree control (" .. gui_last_error(libs) .. ")"
+    end
+    state.tree_hwnd = tree
+    libs.user32.SendMessageW(tree, WM_SETFONT,
+        ffi.cast("uintptr_t", state.fonts.tree.regular), 1)
+    local info = ffi.new("mdview_shfileinfo[1]")
+    local image_list = libs.shell32.SHGetFileInfoW(gui_wide(libs, ""), 0, info,
+        ffi.sizeof("mdview_shfileinfo"), SHGFI_SYSICONINDEX + SHGFI_SMALLICON)
+    if tonumber(image_list) ~= 0 then
+        libs.user32.SendMessageW(tree, TVM_SETIMAGELIST, 0,
+            ffi.cast("intptr_t", image_list))
+    end
+    libs.user32.SendMessageW(tree, TVM_SETBKCOLOR, 0, gui_color(THEME.gui_bg) or 0)
+    libs.user32.SendMessageW(tree, TVM_SETTEXTCOLOR, 0, gui_color(THEME.text) or 0)
+    if not gui_treeproc_ref then
+        gui_treeproc_ref = ffi.cast("mdview_wndproc", gui_tree_proc)
+    end
+    local previous = libs.user32.SetWindowLongPtrW(tree, -4, -- GWLP_WNDPROC
+        ffi.cast("intptr_t", gui_treeproc_ref))
+    state.tree_original_proc = ffi.cast("mdview_wndproc", previous)
+    gui_tree_build(state)
+    gui_sync_tree_bounds(state)
+    return tree
+end
+
+local function gui_handle_notify(state, hwnd, lparam)
+    local hdr = ffi.cast("mdview_nmhdr *", lparam)
+    if hdr == nil or hdr.hwndFrom ~= state.tree_hwnd then
+        return false
+    end
+    local code = tonumber(hdr.code) or 0
+    local libs = state.libs
+    if code == NM_CLICK or code == NM_SETFOCUS or code == TVN_SELCHANGEDW then
+        if not state.tree_building and state.focus ~= "tree" then
+            state.focus = "tree"
+            libs.user32.InvalidateRect(hwnd, nil, 0)
+        end
+        return true
+    elseif code == NM_KILLFOCUS then
+        return true
+    elseif code == NM_DBLCLK then
+        local detail = ffi.cast("mdview_nmitemactivate *", lparam)
+        if detail.iItem and tonumber(detail.iItem) and tonumber(detail.iItem) >= 0 then
+            -- The control already toggles folders on a double click; only
+            -- files need an explicit open here.
+            local node = gui_tree_selected_node(state)
+            if node and not node.directory then
+                gui_open_node(state, node)
+                libs.user32.InvalidateRect(hwnd, nil, 0)
+            end
+        end
+        return true
+    elseif code == TVN_ITEMEXPANDEDW then
+        return true
+    elseif code == TVN_ITEMEXPANDINGW then
+        -- Children must exist before the control expands an item, so folders
+        -- are filled here; returning TRUE would cancel the expansion.
+        local detail = ffi.cast("mdview_nmtreeview *", lparam)
+        local node = state.tree_nodes[gui_item_key(detail.itemNew.hItem)]
+        if tonumber(detail.action) ~= TVE_COLLAPSE and node and node.directory
+            and not state.tree_building then
+            gui_tree_fill(state, node)
+        end
+        return false
+    end
+    return false
+end
+
+-- Tab and Enter are not forwarded to the parent by the tree control, so the
+-- control is subclassed to switch panes and open the selected file.
+gui_tree_proc = function(hwnd, message, wparam, lparam)
+    local state = gui_state
+    if not state or state.tree_hwnd ~= hwnd then
+        local libs = gui_libs
+        if not libs then
+            return 0
+        end
+        return tonumber(libs.user32.DefWindowProcW(hwnd, message, wparam, lparam)) or 0
+    end
+    local ok, result = pcall(function()
+        -- Mouse input is handled entirely here instead of being forwarded:
+        -- the control's own button handling starts a drag loop that blocks the
+        -- message loop until more mouse input arrives. Selecting the row and
+        -- opening the document here keeps clicks immediate and predictable.
+        if message == WM_LBUTTONDOWN then
+            local node, flags = gui_tree_hit_node(state, lparam)
+            if node then
+                if bit.band(flags, TVHT_ONITEMBUTTON) ~= 0 then
+                    gui_tree_toggle(state, node)
+                else
+                    gui_tree_select(state, node)
+                    state.libs.user32.SetFocus(hwnd)
+                end
+            end
+            return 0
+        elseif message == WM_LBUTTONUP then
+            return 0
+        elseif message == WM_LBUTTONDBLCLK then
+            local node, flags = gui_tree_hit_node(state, lparam)
+            if node and bit.band(flags, TVHT_ONITEMBUTTON) == 0 then
+                gui_tree_select(state, node)
+                if node.directory then
+                    gui_tree_toggle(state, node)
+                else
+                    gui_open_node(state, node)
+                end
+                state.libs.user32.InvalidateRect(state.hwnd, nil, 0)
+            end
+            return 0
+        elseif message == WM_KEYDOWN then
+            local token = GUI_VIRTUAL_KEYS[tonumber(wparam) or 0]
+            if token == "TAB" or token == "ESC" then
+                state.focus = "document"
+                state.libs.user32.SetFocus(state.hwnd)
+                state.libs.user32.InvalidateRect(state.hwnd, nil, 0)
+                return 0
+            elseif token == "ENTER" then
+                M.gui_activate(state)
+                return 0
+            end
+        end
+        local original = state.tree_original_proc
+        if original then
+            return tonumber(original(hwnd, message, wparam, lparam)) or 0
+        end
+        return tonumber(state.libs.user32.DefWindowProcW(hwnd, message, wparam, lparam)) or 0
+    end)
+    if ok then
+        return tonumber(result) or 0
+    end
+    io.stderr:write("mdview: GUI tree callback failed: " .. tostring(result) .. "\n")
+    io.stderr:flush()
+    state.message = "GUI tree error: " .. tostring(result)
+    state.message_kind = "warn"
+    return 0
+end
+
+local function gui_activate_selection(state)
+    local node = gui_tree_selected_node(state)
+    if not node then
+        return false
+    end
+    local ok = gui_tree_activate(state, node)
+    state.libs.user32.InvalidateRect(state.hwnd, nil, 0)
+    return ok
+end
+
+function M.gui_tree_item(state, path)
+    if not state or not state.tree_items then
+        return nil
+    end
+    return state.tree_items[path]
+end
+
+function M.gui_activate(state)
+    if not state or not state.tree_hwnd then
+        return false
+    end
+    return gui_activate_selection(state)
+end
+
 local function gui_create_state(options)
     if not IS_WINDOWS then
         return nil, "--gui requires Windows (Win32 GUI)"
     end
     local libs = gui_native()
+    if not libs then
+        return nil, "--gui requires Windows (Win32 GUI)"
+    end
+    -- The window follows the Windows theme, never the terminal palette.
+    apply_palette(gui_system_palette(libs))
     local fs, fs_error = filesystem()
     if not fs then
         return nil, "file browsing is unavailable: " .. tostring(fs_error)
@@ -4558,11 +5054,17 @@ local function gui_create_state(options)
         layout = M.gui_layout(GUI_DEFAULT_WIDTH, GUI_DEFAULT_HEIGHT, metrics),
         view = nil,
         doc_cols = 0,
-        tree_top = 1,
         focus = is_directory and "tree" or "document",
         message = "",
         message_kind = "info",
+        hook_error = nil,
         hwnd = nil,
+        tree_hwnd = nil,
+        tree_items = {},
+        tree_nodes = {},
+        tree_filled = {},
+        tree_building = false,
+        tree_original_proc = nil,
         buffer = nil,
         paints = 0,
     }
@@ -4584,10 +5086,6 @@ local function gui_create_state(options)
         gui_release_state(state)
         return nil, message
     end
-    if not is_directory then
-        rebuild_tree(browser, state.layout.tree_rows + 2, path)
-    end
-    gui_tree_clamp(state)
     gui_sync_document(state)
     return state
 end
@@ -4662,49 +5160,17 @@ local function gui_gutter_text(line, gutter)
     return string.rep(" ", gutter)
 end
 
+-- The tree body is a real SysTreeView32 child window, so only its header bar
+-- and the focus accent are painted by the parent.
 local function gui_paint_tree(state, hdc)
-    local libs = state.libs
     local layout = state.layout
     local metrics = state.metrics
-    local browser = state.browser
-    gui_fill(state, hdc, 0, 0, layout.tree_width, layout.content_height,
-        state.brushes.panel)
     gui_fill(state, hdc, 0, 0, layout.tree_width, layout.header_height,
         state.brushes.bar)
     gui_draw_text_box(state, hdc, "FILES", metrics.padding, 0, layout.tree_width - 4,
         layout.header_height, gui_color(THEME.bar_fg), state.fonts.tree.bold, "left")
     if state.focus == "tree" then
-        gui_fill(state, hdc, 0, 0, 3, layout.content_height, state.brushes.accent)
-    end
-    for row = 1, layout.tree_rows do
-        local index = state.tree_top + row - 1
-        local node = browser.entries[index]
-        if not node then
-            break
-        end
-        local y = layout.header_height + (row - 1) * metrics.tree_row_h
-        local selected = index == browser.selected
-        if selected then
-            gui_fill(state, hdc, 0, y, layout.tree_width, metrics.tree_row_h,
-                state.brushes.selection)
-        end
-        local x = metrics.padding + math.min(node.depth or 0, 8) * metrics.tree_indent
-        local marker = node.directory and (node.expanded and "▾" or "▸") or "·"
-        local marker_color = node.directory and THEME.folder_icon or THEME.file_icon
-        gui_draw_text_box(state, hdc, marker, x, y, x + metrics.tree_marker,
-            y + metrics.tree_row_h, gui_color(marker_color), state.fonts.tree.bold, "left")
-        local name_x = x + metrics.tree_marker
-        local name_color = selected and THEME.bar_fg
-            or (node.directory and THEME.text or THEME.file_icon)
-        gui_draw_text_box(state, hdc, sanitize_text(node.name), name_x, y,
-            layout.tree_width - 4, y + metrics.tree_row_h, gui_color(name_color),
-            node.directory and state.fonts.tree.bold or state.fonts.tree.regular, "left")
-    end
-    if #browser.entries == 0 then
-        gui_draw_text_box(state, hdc, "No Markdown files or folders", metrics.padding,
-            layout.header_height, layout.tree_width - 4,
-            layout.header_height + metrics.tree_row_h * 2, gui_color(THEME.warn),
-            state.fonts.tree.regular, "left")
+        gui_fill(state, hdc, 0, 0, 3, layout.header_height, state.brushes.accent)
     end
 end
 
@@ -4796,12 +5262,14 @@ local function gui_status_text(state)
     if state.message ~= "" then
         return state.message, state.message_kind == "warn" and THEME.warn or THEME.info
     end
+    if #state.browser.entries == 0 then
+        return "No Markdown files or folders here", THEME.warn
+    end
     if state.focus == "tree" then
-        return "Tree: arrows move · Enter opens · Tab switches pane · double-click opens",
+        return "Tree: click to select · double-click or Enter opens · Tab switches pane",
             THEME.info
     end
-    return "Wheel or keys scroll · Tab switches pane · double-click a file in the tree",
-        THEME.info
+    return "Wheel or keys scroll · Tab switches to the file tree", THEME.info
 end
 
 local function gui_paint_status(state, hdc)
@@ -4889,7 +5357,7 @@ end
 
 local function gui_apply_layout(state, width, height)
     state.layout = M.gui_layout(width, height, state.metrics)
-    gui_tree_clamp(state)
+    gui_sync_tree_bounds(state)
     gui_sync_document(state)
     gui_sync_scrollbar(state)
 end
@@ -4918,8 +5386,10 @@ local function gui_handle_size(state, hwnd)
     state.libs.user32.InvalidateRect(hwnd, nil, 0)
 end
 
-local function gui_handle_click(state, hwnd, lparam, double_click)
-    local libs = state.libs
+-- Clicks inside the tree are handled by SysTreeView32 itself (selection and
+-- double-click already behave natively); the parent only reacts to the
+-- document pane.
+local function gui_handle_click(state, hwnd, lparam)
     local point = ffi.new("mdview_point[1]")
     local value = tonumber(lparam) or 0
     point[0].x = bit.band(value, 0xFFFF)
@@ -4931,28 +5401,11 @@ local function gui_handle_click(state, hwnd, lparam, double_click)
         point[0].y = point[0].y - 0x10000
     end
     local target = M.gui_hit_test(state.layout, state.metrics, point[0].x, point[0].y)
-    if target.pane == "tree" and target.row then
-        state.focus = "tree"
-        local index = state.tree_top + target.row - 1
-        local node = state.browser.entries[index]
-        if node then
-            state.browser.selected = index
-            if node.directory then
-                -- A double click starts with a normal click, so toggle once.
-                if not double_click then
-                    gui_toggle_node(state, node)
-                end
-            elseif double_click then
-                gui_open_node(state, node)
-            end
-            gui_tree_clamp(state)
-        end
-    elseif target.pane == "document" then
+    if target.pane == "document" then
         state.focus = "document"
+        state.libs.user32.SetFocus(hwnd)
     end
-    libs.user32.SetFocus(hwnd)
-    gui_sync_scrollbar(state)
-    libs.user32.InvalidateRect(hwnd, nil, 0)
+    state.libs.user32.InvalidateRect(hwnd, nil, 0)
 end
 
 local function gui_handle_wheel(state, hwnd, wparam, lparam)
@@ -4981,10 +5434,9 @@ local function gui_handle_wheel(state, hwnd, wparam, lparam)
     end
     libs.user32.ScreenToClient(hwnd, point)
     local target = M.gui_hit_test(state.layout, state.metrics, point[0].x, point[0].y)
-    if target.pane == "tree" then
-        local count = #state.browser.entries
-        local maximum = math.max(1, count - state.layout.tree_rows + 1)
-        state.tree_top = gui_clamp(state.tree_top - steps, 1, maximum)
+    if target.pane == "tree" and state.tree_hwnd then
+        libs.user32.SendMessageW(state.tree_hwnd, WM_MOUSEWHEEL, wparam, lparam)
+        return
     elseif state.view then
         local action = steps > 0 and "up" or "down"
         for _ = 1, math.abs(steps) do
@@ -4996,68 +5448,34 @@ local function gui_handle_wheel(state, hwnd, wparam, lparam)
     libs.user32.InvalidateRect(hwnd, nil, 0)
 end
 
+-- Keys for the tree control are handled inside the control (arrows, Home/End,
+-- PageUp/PageDown, +/-, type-ahead) and by its subclass for Tab/Enter.
 local function gui_handle_key(state, hwnd, wparam, lparam)
     local token = GUI_VIRTUAL_KEYS[tonumber(wparam) or 0]
     if not token then
         return false
     end
     local repeated = bit.band(bit.rshift(tonumber(lparam) or 0, 30), 1) == 1
-    if repeated and (token == "ENTER" or token == "TAB") then
+    if repeated and token == "TAB" then
         return true
     end
-    local action = M.gui_key_action(token, state.focus)
+    if token == "TAB" then
+        state.focus = "tree"
+        if state.tree_hwnd then
+            state.libs.user32.SetFocus(state.tree_hwnd)
+        end
+        state.libs.user32.InvalidateRect(hwnd, nil, 0)
+        return true
+    end
+    if state.focus ~= "document" or not state.view then
+        return false
+    end
+    local action = M.gui_key_action(token, "document")
     if not action then
         return false
     end
-    if action == "switch" then
-        state.focus = state.focus == "tree" and "document" or "tree"
-        if state.focus == "tree" then
-            gui_tree_clamp(state)
-        end
-    elseif action == "escape" then
-        state.focus = "document"
-    elseif state.focus == "tree" then
-        local browser = state.browser
-        local node = browser.entries[browser.selected]
-        local page = math.max(1, state.layout.tree_rows - 1)
-        if action == "up" then
-            browser.selected = browser.selected - 1
-        elseif action == "down" then
-            browser.selected = browser.selected + 1
-        elseif action == "first" then
-            browser.selected = 1
-        elseif action == "last" then
-            browser.selected = #browser.entries
-        elseif action == "page_up" then
-            browser.selected = browser.selected - page
-        elseif action == "page_down" then
-            browser.selected = browser.selected + page
-        elseif action == "expand" then
-            if node and node.directory then
-                if not node.expanded then
-                    gui_toggle_node(state, node)
-                elseif #(node.children or {}) > 0 then
-                    browser.selected = browser.selected + 1
-                end
-            end
-        elseif action == "collapse" then
-            if node and node.directory and node.expanded then
-                gui_toggle_node(state, node)
-            elseif node and node.parent then
-                rebuild_tree(browser, state.layout.tree_rows + 2, node.parent.path)
-            end
-        elseif action == "open" then
-            if node and node.directory then
-                gui_toggle_node(state, node)
-            elseif node then
-                gui_open_node(state, node)
-            end
-        end
-        gui_tree_clamp(state)
-    elseif state.view then
-        state.view.top = M.gui_scroll_top(state.view.top, #state.view.lines,
-            state.layout.rows, action)
-    end
+    state.view.top = M.gui_scroll_top(state.view.top, #state.view.lines,
+        state.layout.rows, action)
     gui_sync_scrollbar(state)
     state.libs.user32.InvalidateRect(hwnd, nil, 0)
     return true
@@ -5099,6 +5517,9 @@ local function gui_dispatch(state, hwnd, message, wparam, lparam)
     if message == WM_PAINT then
         gui_handle_paint(state, hwnd)
         return 0
+    elseif message == WM_PRINTCLIENT then
+        gui_present(state, ffi.cast("void *", wparam))
+        return 0
     elseif message == WM_ERASEBKGND then
         return 1
     elseif message == WM_SIZE then
@@ -5107,12 +5528,13 @@ local function gui_dispatch(state, hwnd, message, wparam, lparam)
     elseif message == WM_MOUSEWHEEL then
         gui_handle_wheel(state, hwnd, wparam, lparam)
         return 0
-    elseif message == WM_LBUTTONDOWN then
-        gui_handle_click(state, hwnd, lparam, false)
+    elseif message == WM_LBUTTONDOWN or message == WM_LBUTTONDBLCLK then
+        gui_handle_click(state, hwnd, lparam)
         return 0
-    elseif message == WM_LBUTTONDBLCLK then
-        gui_handle_click(state, hwnd, lparam, true)
-        return 0
+    elseif message == WM_NOTIFY then
+        if gui_handle_notify(state, hwnd, lparam) then
+            return 0
+        end
     elseif message == WM_KEYDOWN then
         gui_handle_key(state, hwnd, wparam, lparam)
         return 0
@@ -5171,7 +5593,9 @@ function M.gui_run(state, options)
     local libs = state.libs
     local instance = libs.kernel32.GetModuleHandleW(nil)
     local class_name = gui_wide(libs, GUI_CLASS_NAME)
-    gui_wndproc_ref = ffi.cast("mdview_wndproc", gui_window_proc)
+    if not gui_wndproc_ref then
+        gui_wndproc_ref = ffi.cast("mdview_wndproc", gui_window_proc)
+    end
     local wndclass = ffi.new("mdview_wndclass[1]")
     wndclass[0].cbSize = ffi.sizeof("mdview_wndclass")
     wndclass[0].style = 0x0001 + 0x0002
@@ -5183,13 +5607,19 @@ function M.gui_run(state, options)
     local icon = libs.user32.LoadIconW(nil, ffi.cast("const uint16_t *", 32512))
     wndclass[0].hIcon = icon
     wndclass[0].hIconSm = icon
-    local atom = libs.user32.RegisterClassExW(wndclass)
-    if atom == 0 and tonumber(libs.kernel32.GetLastError()) ~= 1410 then
-        gui_wndproc_ref = nil
-        return 1, "cannot register the mdview window class (" .. gui_last_error(libs) .. ")"
+    if not gui_class_registered then
+        local atom = libs.user32.RegisterClassExW(wndclass)
+        if atom ~= 0 then
+            gui_class_registered = true
+        elseif tonumber(libs.kernel32.GetLastError()) == 1410 then
+            -- ERROR_CLASS_ALREADY_EXISTS: reopen a window from a previous run.
+            gui_class_registered = true
+        else
+            return 1, "cannot register the mdview window class (" .. gui_last_error(libs) .. ")"
+        end
     end
 
-    local style = 0x00CF0000 + 0x00200000
+    local style = 0x00CF0000 + 0x00200000 + WS_CLIPCHILDREN
     local dpi = state.metrics.dpi
     local screen_width = math.max(640, tonumber(libs.user32.GetSystemMetrics(0)) or 1024)
     local screen_height = math.max(480, tonumber(libs.user32.GetSystemMetrics(1)) or 768)
@@ -5208,20 +5638,37 @@ function M.gui_run(state, options)
     if hwnd == nil then
         local message = "cannot create the mdview window (" .. gui_last_error(libs) .. ")"
         gui_state = nil
-        gui_wndproc_ref = nil
         return 1, message
     end
     state.hwnd = hwnd
-    libs.user32.ShowWindow(hwnd, 5)
+    local tree, tree_error = gui_tree_create(state)
+    if not tree then
+        libs.user32.DestroyWindow(hwnd)
+        state.hwnd = nil
+        gui_state = nil
+        return 1, tree_error
+    end
+    libs.user32.ShowWindow(hwnd, SW_SHOW)
     libs.user32.UpdateWindow(hwnd)
+    if state.focus == "tree" then
+        libs.user32.SetFocus(tree)
+    else
+        libs.user32.SetFocus(hwnd)
+    end
     if options and options.auto_close_ms then
         libs.user32.SetTimer(hwnd, 1, options.auto_close_ms, nil)
     end
     if options and options.on_ready then
         local ready, hook_error = pcall(options.on_ready, state, hwnd)
         if not ready then
+            -- Surface the failure instead of silently keeping the window: a
+            -- broken startup hook usually means the caller's own checks ran
+            -- against a half-initialised window.
+            state.hook_error = tostring(hook_error)
             state.message = "GUI hook failed: " .. tostring(hook_error)
             state.message_kind = "warn"
+            io.stderr:write("mdview: GUI hook failed: " .. tostring(hook_error) .. "\n")
+            io.stderr:flush()
         end
     end
 
@@ -5242,8 +5689,10 @@ function M.gui_run(state, options)
     end
     gui_release_buffer(state)
     state.hwnd = nil
+    state.tree_hwnd = nil
     gui_state = nil
-    gui_wndproc_ref = nil
+    -- The registered class and the tree subclass still hold these function
+    -- pointers, so they stay alive for the rest of the process.
     return code, run_error
 end
 
@@ -5336,6 +5785,55 @@ function M.gui_snapshot(state, width, height, path)
     return ok, err
 end
 
+-- Capture the live window's client area (including the native tree control)
+-- so the real rendering can be inspected without screen grabbing.
+function M.gui_capture(state, path)
+    if not IS_WINDOWS or not state or not state.hwnd then
+        return nil, "gui_capture requires a live GUI window"
+    end
+    local libs = state.libs
+    local rect = ffi.new("mdview_rect[1]")
+    if libs.user32.GetClientRect(state.hwnd, rect) == 0 then
+        return nil, "cannot measure the window (" .. gui_last_error(libs) .. ")"
+    end
+    local width = rect[0].right - rect[0].left
+    local height = rect[0].bottom - rect[0].top
+    if width < 2 or height < 2 then
+        return nil, "window is too small to capture"
+    end
+    local screen = libs.user32.GetDC(nil)
+    if screen == nil then
+        return nil, "cannot acquire the screen device context"
+    end
+    local mem = libs.gdi32.CreateCompatibleDC(screen)
+    local bitmap = libs.gdi32.CreateCompatibleBitmap(screen, width, height)
+    if mem == nil or bitmap == nil then
+        if mem then
+            libs.gdi32.DeleteDC(mem)
+        end
+        if bitmap then
+            libs.gdi32.DeleteObject(bitmap)
+        end
+        libs.user32.ReleaseDC(nil, screen)
+        return nil, "cannot allocate a " .. width .. "x" .. height .. " bitmap"
+    end
+    local previous = libs.gdi32.SelectObject(mem, bitmap)
+    local printed = libs.user32.PrintWindow(state.hwnd, mem, 1)
+    if tonumber(printed) ~= 1 then
+        local window_dc = libs.user32.GetDC(state.hwnd)
+        if window_dc ~= nil then
+            libs.gdi32.BitBlt(mem, 0, 0, width, height, window_dc, 0, 0, 0x00CC0020)
+            libs.user32.ReleaseDC(state.hwnd, window_dc)
+        end
+    end
+    local ok, err = gui_save_bitmap(state, mem, bitmap, width, height, path)
+    libs.gdi32.SelectObject(mem, previous)
+    libs.gdi32.DeleteObject(bitmap)
+    libs.gdi32.DeleteDC(mem)
+    libs.user32.ReleaseDC(nil, screen)
+    return ok, err
+end
+
 local function run_gui(options)
     if not IS_WINDOWS then
         io.stderr:write("mdview: --gui requires Windows (Win32); use the terminal pager instead\n")
@@ -5345,9 +5843,9 @@ local function run_gui(options)
         io.stderr:write("mdview: --gui cannot read from stdin; pass a Markdown file or a folder\n")
         return 1
     end
-    local theme_ok, theme_error = M.set_theme(options.theme)
-    if not theme_ok then
-        io.stderr:write("mdview: " .. tostring(theme_error) .. "\n")
+    if options.theme_set then
+        io.stderr:write("mdview: --gui always follows the Windows theme; "
+            .. "--theme applies to the terminal pager only\n")
         return 1
     end
     local state, state_error = gui_create_state(options)
@@ -5363,7 +5861,8 @@ local function run_gui(options)
     return code
 end
 
-
+return { run = run_gui }
+end)()
 
 -- =========================================================================
 -- 17. CLI
@@ -5382,7 +5881,8 @@ OPTIONS:
   --no-pager           Render the document and exit
   --color              Keep ANSI colors when output is not a tty
   --no-color           Disable ANSI colors (also honors NO_COLOR)
-  --theme dark|light   Color palette (default: dark)
+  --theme dark|light   Terminal palette (default: dark; --gui uses the
+                       Windows theme)
   --no-images          Show image placeholders instead of block art
   -n, --numbers        Show source line numbers (default in the pager)
   --no-numbers         Hide source line numbers
@@ -5400,9 +5900,11 @@ KEYS:
         Enter open, Ctrl-d/u half-page, r refresh, ? help, Esc document
 
 GUI:
-  --gui opens a native window: click a folder to expand, double-click a
-  file or press Enter to open it, Tab switches panes and the wheel or
-  keyboard scrolls the document. Requires Windows; conflicts with --snapshot.
+  --gui opens a native window in the current Windows theme. The file list
+  is the Windows tree control with standard folder and file icons: click to
+  select, double-click a folder to expand, double-click a file or press
+  Enter to open it. Tab switches panes and the wheel or keyboard scrolls.
+  Requires Windows; conflicts with --snapshot and --theme.
 
 NOTES:
   Windows pager support needs Windows 10+ with VT sequences enabled
@@ -5461,6 +5963,7 @@ local function parse_arguments(argv)
         images = true,
         numbers = nil,
         theme = "dark",
+        theme_set = false,
         no_color = false,
         case_sensitive = false,
         snapshot = nil,
@@ -5487,9 +5990,11 @@ local function parse_arguments(argv)
                 return nil, "--theme requires dark or light"
             end
             options.theme = following
+            options.theme_set = true
             index = index + 1
         elseif value:match("^%-%-theme=") then
             options.theme = value:sub(#"--theme=" + 1)
+            options.theme_set = true
         elseif value == "--no-images" then
             options.images = false
         elseif value == "-n" or value == "--numbers" then
@@ -5610,7 +6115,7 @@ local function main(argv)
     end
     options.file = options.file or "."
     if options.gui then
-        return run_gui(options)
+        return gui.run(options)
     end
     local interactive = options.pager and Terminal.is_tty(1) and Terminal.is_tty(0)
     local is_directory = false

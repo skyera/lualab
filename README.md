@@ -265,12 +265,19 @@ an error without replacing the current document. In the document pane, press
 Use `mdview --snapshot 100x24 docs/` to inspect the tree without an interactive terminal.
 
 On Windows, `mdview --gui [FILE|DIR]` opens a native window built directly on the
-Windows SDK through LuaJIT FFI (`user32`/`gdi32`), with no extra libraries or
-DLLs to ship. The left pane is the same lazy Markdown tree; the right pane
-renders the document with the current `--theme`. Click a folder to expand it,
-double-click a file or press Enter to open it, Tab switches panes, and the mouse
-wheel, arrow/Page/Home/End keys or the scrollbar move the document. The window
-is resizable and re-wraps the Markdown to the new width.
+Windows SDK through LuaJIT FFI (`user32`/`gdi32`/`comctl32`/`shell32`), with no
+extra libraries or DLLs to ship. The window follows the current Windows theme
+(light system colors, not the terminal palette); `--theme` applies to the pager
+only and is rejected with `--gui`.
+
+The file list is the real Windows tree control (`SysTreeView32`), with the
+standard Explorer folder and file icons taken from the shell system image list.
+Click to select, double-click a folder to expand it, double-click a Markdown
+file or press Enter to open it. Folders load lazily the first time they are
+expanded, Tab switches between the tree and the document, and the mouse wheel,
+arrow/Page/Home/End keys or the scrollbar move the document. The right pane
+renders Markdown with GDI at the current width, so the window is resizable and
+re-wraps the document to the new width.
 
 Deployment checks: `python3 test_deploy_mdview.py` (or `python` on Windows).
 Browser checks: `luajit test_mdview.lua`, `luajit test_mdview_gui.lua`,

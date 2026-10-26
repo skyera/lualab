@@ -202,6 +202,18 @@ test("CLI rejects incompatible --gui invocations", function()
     truthy(message:find("--gui cannot be combined with --snapshot", 1, true),
         "conflict message: " .. message)
 
+    local third = os.tmpname()
+    local theme_status = os.execute(string.format(
+        "%s mdview.lua --gui --theme dark README.md > %s 2>&1",
+        luajit_bin, third))
+    truthy(theme_status ~= 0, "--gui with --theme fails")
+    local theme_file = assert(io.open(third, "rb"))
+    local theme_message = theme_file:read("*a")
+    theme_file:close()
+    os.remove(third)
+    truthy(theme_message:find("--gui always follows the Windows theme", 1, true),
+        "theme message: " .. theme_message)
+
     local second = os.tmpname()
     local stdin_status = os.execute(string.format(
         "%s -e \"io.write('# stdin\\\\n')\" | %s mdview.lua --gui - > %s 2>&1",
@@ -227,6 +239,105 @@ if not IS_WINDOWS then
 else
     local fixture = "_mdview_gui_test"
     local long_path = fixture .. "/long.md"
+    local bit = require("bit")
+    local user32 = ffi.load("user32")
+    ffi.cdef[[
+        typedef struct {
+            uint32_t mask;
+            void *hItem;
+            uint32_t state, stateMask;
+            const uint16_t *pszText;
+            int32_t cchTextMax, iImage, iSelectedImage, cChildren;
+            intptr_t lParam;
+            int32_t iIntegral;
+            uint32_t uStateEx;
+            void *hwnd;
+            int32_t iExpandedImage, iReserved;
+        } test_tvitem;
+        typedef struct { int32_t left, top, right, bottom; } test_rect;
+        intptr_t __stdcall SendMessageW(void *, uint32_t, uintptr_t, intptr_t);
+        int __stdcall PostMessageW(void *, uint32_t, uintptr_t, intptr_t);
+        int __stdcall UpdateWindow(void *);
+        uint32_t __stdcall GetSysColor(int);
+        int __stdcall GetClassNameW(void *, uint16_t *, int);
+    ]]
+
+    local TVM_GETITEMW = 0x113E
+    local TVM_EXPAND = 0x1102
+    local TVM_SELECTITEM = 0x110B
+    local TVM_GETNEXTITEM = 0x110A
+    local TVM_GETITEMRECT = 0x1104
+    local TVM_GETBKCOLOR = 0x111D
+    local TVGN_CARET = 9
+    local TVE_EXPAND = 2
+    local TVIS_EXPANDED = 0x0020
+    local TVIF_TEXT = 0x0001
+    local TVIF_IMAGE = 0x0002
+    local TVIF_STATE = 0x0010
+    local WM_KEYDOWN = 0x0100
+    local VK_RETURN = 0x0D
+
+    local function tree_item_info(state, path)
+        local handle = mdview.gui_tree_item(state, path)
+        if not handle then
+            return nil
+        end
+        local item = ffi.new("test_tvitem[1]")
+        local buffer = ffi.new("uint16_t[260]")
+        item[0].mask = TVIF_TEXT + TVIF_IMAGE + TVIF_STATE
+        item[0].hItem = ffi.cast("void *", handle)
+        item[0].pszText = buffer
+        item[0].cchTextMax = 260
+        user32.SendMessageW(state.tree_hwnd, TVM_GETITEMW, 0, ffi.cast("intptr_t", item))
+        local length = 0
+        while length < 259 and buffer[length] ~= 0 do
+            length = length + 1
+        end
+        return {
+            handle = handle,
+            text = ffi.string(buffer, length * 2):gsub("%z", ""),
+            image = tonumber(item[0].iImage) or -1,
+            state = tonumber(item[0].state) or 0,
+        }
+    end
+
+    local function tree_rect(state, handle)
+        local rect = ffi.new("test_rect[1]")
+        -- TreeView_GetItemRect hands the item handle to the control through
+        -- the first pointer-sized field of the RECT.
+        ffi.cast("void **", rect)[0] = ffi.cast("void *", handle)
+        user32.SendMessageW(state.tree_hwnd, TVM_GETITEMRECT, 1, ffi.cast("intptr_t", rect))
+        return rect[0]
+    end
+
+    local function tree_click(state, handle, double)
+        local rect = tree_rect(state, handle)
+        local x = math.floor((rect.left + rect.right) / 2)
+        local y = math.floor((rect.top + rect.bottom) / 2)
+        local point = ffi.cast("intptr_t", x + y * 65536)
+        local function send(message, wparam)
+            user32.SendMessageW(state.tree_hwnd, message, wparam, point)
+        end
+        send(0x0201, 1)
+        send(0x0202, 0)
+        if double then
+            send(0x0203, 1)
+            send(0x0202, 0)
+        end
+    end
+
+    local function bmp_pixel(path, x, y)
+        local file = assert(io.open(path, "rb"))
+        local header = file:read(54)
+        local width = read_u32(header, 19)
+        local height = read_u32(header, 23)
+        local stride = math.floor((width * 3 + 3) / 4) * 4
+        file:seek("set", 54 + (height - 1 - y) * stride + x * 3)
+        local pixel = file:read(3)
+        file:close()
+        local b, g, r = pixel:byte(1, 3)
+        return r, g, b
+    end
 
     local function prepare_fixture()
         ensure_directory(fixture)
@@ -285,26 +396,103 @@ else
         mdview.gui_destroy(state)
     end)
 
-    test("expanding a folder from the keyboard reveals its files", function()
-        ffi.cdef[[ int __stdcall PostMessageW(void *, uint32_t, uintptr_t, intptr_t); ]]
-        local user32 = ffi.load("user32")
+    test("the file list is the native Windows tree control", function()
         local state = assert(mdview.gui_create_state({
             file = fixture, images = false, numbers = true,
         }))
-        local folder = entry_index(state, "guides")
-        truthy(folder, "guides in tree")
         local code = mdview.gui_run(state, {
             auto_close_ms = 400,
-            on_ready = function(_, hwnd)
-                for _ = 2, folder do
-                    user32.PostMessageW(hwnd, 0x0100, 0x28, 0)
-                end
-                user32.PostMessageW(hwnd, 0x0100, 0x27, 0)
+            on_ready = function(state)
+                truthy(state.tree_hwnd, "tree control exists")
+                local class_name = ffi.new("uint16_t[64]")
+                local length = user32.GetClassNameW(state.tree_hwnd, class_name, 64)
+                local actual = ffi.string(class_name, length * 2):gsub("%z", "")
+                eq(actual, "SysTreeView32", "common control class")
+                eq(tonumber(user32.SendMessageW(state.tree_hwnd, TVM_GETBKCOLOR, 0, 0)),
+                    tonumber(user32.GetSysColor(5)), "system window background")
+                local root = tree_item_info(state, state.browser.root_path)
+                truthy(root, "root item")
+                eq(root.text, state.browser.root.name, "root label")
+                local readme = tree_item_info(state, state.browser.root_path .. "/README.md")
+                truthy(readme, "README item")
+                truthy(root.image >= 0 and readme.image >= 0, "shell icon indices")
+                truthy(root.image ~= readme.image, "folder and file icons differ")
             end,
         })
         eq(code, 0, "run exit code")
-        truthy(entry_index(state, "install.md"), "expanded folder lists install.md")
-        truthy(#state.browser.entries > 4, "tree grew after expanding")
+        eq(state.hook_error, nil, "startup hook")
+        mdview.gui_destroy(state)
+    end)
+
+    test("expanding a folder adds its Markdown files", function()
+        local state = assert(mdview.gui_create_state({
+            file = fixture, images = false, numbers = true,
+        }))
+        local code = mdview.gui_run(state, {
+            auto_close_ms = 400,
+            on_ready = function(state)
+                local path = state.browser.root_path .. "/guides"
+                local folder = tree_item_info(state, path)
+                truthy(folder, "guides item")
+                user32.SendMessageW(state.tree_hwnd, TVM_EXPAND, TVE_EXPAND,
+                    ffi.cast("intptr_t", folder.handle))
+                local expanded = tree_item_info(state, path)
+                truthy(expanded, "guides still listed")
+                truthy(bit.band(expanded.state, TVIS_EXPANDED) ~= 0, "folder expanded")
+                truthy(mdview.gui_tree_item(state, path .. "/install.md"),
+                    "install.md added")
+                truthy(mdview.gui_tree_item(state, path .. "/usage.md"), "usage.md added")
+            end,
+        })
+        eq(code, 0, "run exit code")
+        eq(state.hook_error, nil, "startup hook")
+        mdview.gui_destroy(state)
+    end)
+
+    test("mouse selects, double-click opens a Markdown file", function()
+        local state = assert(mdview.gui_create_state({
+            file = fixture, images = false, numbers = true,
+        }))
+        local code = mdview.gui_run(state, {
+            auto_close_ms = 500,
+            on_ready = function(state)
+                local path = state.browser.root_path .. "/README.md"
+                local readme = mdview.gui_tree_item(state, path)
+                truthy(readme, "README item")
+                tree_click(state, readme, false)
+                local caret = user32.SendMessageW(state.tree_hwnd, TVM_GETNEXTITEM,
+                    TVGN_CARET, 0)
+                eq(tonumber(caret), readme, "single click selects the item")
+                eq(state.title, "Select a Markdown file", "single click does not open")
+                tree_click(state, readme, true)
+                eq(state.title, "README.md", "double click opens the file")
+                truthy(state.path:find("README.md", 1, true), "opened path")
+                truthy(state.focus == "tree", "tree keeps focus after opening")
+            end,
+        })
+        eq(code, 0, "run exit code")
+        eq(state.hook_error, nil, "startup hook")
+        mdview.gui_destroy(state)
+    end)
+
+    test("Enter opens the selected file", function()
+        local state = assert(mdview.gui_create_state({
+            file = fixture, images = false, numbers = true,
+        }))
+        local code = mdview.gui_run(state, {
+            auto_close_ms = 400,
+            on_ready = function(state)
+                local readme = mdview.gui_tree_item(state,
+                    state.browser.root_path .. "/README.md")
+                truthy(readme, "README item")
+                user32.SendMessageW(state.tree_hwnd, TVM_SELECTITEM, TVGN_CARET,
+                    ffi.cast("intptr_t", readme))
+                user32.PostMessageW(state.tree_hwnd, WM_KEYDOWN, VK_RETURN, 0)
+            end,
+        })
+        eq(code, 0, "run exit code")
+        eq(state.hook_error, nil, "startup hook")
+        eq(state.title, "README.md", "Enter opened the file")
         mdview.gui_destroy(state)
     end)
 
@@ -378,42 +566,55 @@ else
         mdview.gui_destroy(state)
     end)
 
-    test("window opens files through the tree", function()
-        ffi.cdef[[ int __stdcall PostMessageW(void *, uint32_t, uintptr_t, intptr_t); ]]
-        local user32 = ffi.load("user32")
-        local key_down, key_return = 0x28, 0x0D
-        local state = assert(mdview.gui_create_state({
-            file = fixture, images = false, numbers = true,
-        }))
-        local readme = entry_index(state, "README.md")
-        truthy(readme, "README in tree")
-        local code = mdview.gui_run(state, {
-            auto_close_ms = 400,
-            on_ready = function(_, hwnd)
-                for _ = 2, readme do
-                    user32.PostMessageW(hwnd, 0x0100, key_down, 0)
-                end
-                user32.PostMessageW(hwnd, 0x0100, key_return, 0)
-            end,
-        })
-        eq(code, 0, "run exit code")
-        truthy(state.path:find("README.md", 1, true), "README opened from tree")
-        truthy(state.view and #state.view.lines > 3, "opened document rendered")
-        mdview.gui_destroy(state)
-    end)
-
-    test("theme switch keeps the GUI renderable", function()
-        assert(mdview.set_theme("light"))
+    test("the GUI ignores the terminal palette", function()
+        assert(mdview.set_theme("dark"))
         local state = assert(mdview.gui_create_state({
             file = fixture .. "/README.md", images = false, numbers = true,
         }))
-        local shot = "_mdview_gui_light.bmp"
+        local shot = "_mdview_gui_system.bmp"
         local ok, err = mdview.gui_snapshot(state, 640, 480, shot)
-        truthy(ok, "light snapshot: " .. tostring(err))
-        truthy(io.open(shot, "rb"), "light bitmap exists")
+        truthy(ok, "snapshot: " .. tostring(err))
+        local window = tonumber(user32.GetSysColor(5))
+        local r, g, b = bmp_pixel(shot, 630, 300)
+        eq(r, window % 256, "document red channel")
+        eq(g, math.floor(window / 256) % 256, "document green channel")
+        eq(b, math.floor(window / 65536) % 256, "document blue channel")
         os.remove(shot)
         mdview.gui_destroy(state)
         assert(mdview.set_theme("dark"))
+    end)
+
+    test("live capture includes the native tree", function()
+        local state = assert(mdview.gui_create_state({
+            file = fixture, images = false, numbers = true,
+        }))
+        local shot = "_mdview_gui_capture.bmp"
+        local code = mdview.gui_run(state, {
+            auto_close_ms = 500,
+            on_ready = function(state)
+                user32.UpdateWindow(state.hwnd)
+                local ok, err = mdview.gui_capture(state, shot)
+                truthy(ok, "capture: " .. tostring(err))
+            end,
+        })
+        eq(code, 0, "run exit code")
+        eq(state.hook_error, nil, "startup hook")
+        local file = assert(io.open(shot, "rb"))
+        local header = file:read(26)
+        local size = file:seek("end")
+        file:close()
+        eq(header:sub(1, 2), "BM", "bitmap magic")
+        truthy(read_u32(header, 19) > 600, "captured width")
+        truthy(size > 54, "captured pixels")
+        -- The tree header uses the system button face, proving the light
+        -- Windows chrome (not the dark terminal palette) was rendered.
+        local face = tonumber(user32.GetSysColor(15))
+        local r, g, b = bmp_pixel(shot, 4, 4)
+        eq(r, face % 256, "header red channel")
+        eq(g, math.floor(face / 256) % 256, "header green channel")
+        eq(b, math.floor(face / 65536) % 256, "header blue channel")
+        os.remove(shot)
+        mdview.gui_destroy(state)
     end)
 
     remove_fixture()
