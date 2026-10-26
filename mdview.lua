@@ -4162,6 +4162,8 @@ local function gui_native()
         int __stdcall InitCommonControlsEx(const mdview_init_controls *);
         uintptr_t __stdcall SHGetFileInfoW(const uint16_t *, uint32_t,
                                            mdview_shfileinfo *, uint32_t, uint32_t);
+        intptr_t __stdcall ShellExecuteW(void *, const uint16_t *, const uint16_t *,
+                                         const uint16_t *, const uint16_t *, int);
         int __stdcall GetClientRect(void *, mdview_rect *);
         int __stdcall AdjustWindowRectEx(mdview_rect *, uint32_t, int, uint32_t);
         int __stdcall SetProcessDPIAware(void);
@@ -5605,6 +5607,70 @@ end
 -- Clicks inside the tree are handled by SysTreeView32 itself (selection and
 -- double-click already behave natively); the parent only reacts to the
 -- document pane.
+-- Web links open in the default browser through the shell. Only absolute
+-- web/mail addresses are handed over; anything else is left alone.
+local function gui_web_link(url)
+    if type(url) ~= "string" then
+        return false
+    end
+    local scheme = url:lower():match("^([%a][%w+.-]*):")
+    return scheme == "http" or scheme == "https" or scheme == "mailto"
+end
+
+-- Returns the link under a client point and the URL it points at.
+function M.gui_link_at(state, x, y)
+    if not state or not state.view then
+        return nil
+    end
+    local layout = state.layout
+    local metrics = state.metrics
+    local target = M.gui_hit_test(layout, metrics, x, y)
+    if target.pane ~= "document" or not target.row then
+        return nil
+    end
+    local line = state.view.lines[state.view.top + target.row - 1]
+    if not line or line.image then
+        return nil
+    end
+    local gutter = state.view.gutter_width or 0
+    local text_x = layout.doc_x + metrics.padding + gutter * metrics.cell_w
+    local column = math.floor((x - text_x) / metrics.cell_w) + 1
+    if column < 1 then
+        return nil
+    end
+    local offset = 0
+    for _, span in ipairs(line.spans) do
+        local cells = display_width(span.text)
+        if cells > 0 and column >= offset + 1 and column <= offset + cells then
+            local href = span.style and span.style.href
+            if href and gui_web_link(href) then
+                return href
+            end
+            return nil
+        end
+        offset = offset + cells
+    end
+    return nil
+end
+
+local function gui_open_url(state, url)
+    if not gui_web_link(url) then
+        return false
+    end
+    local wide_verb = gui_wide(state.libs, "open")
+    local wide_url = gui_wide(state.libs, url)
+    local result = state.libs.shell32.ShellExecuteW(state.hwnd, wide_verb, wide_url,
+        nil, nil, 1)
+    if tonumber(result) <= 32 then
+        state.message = "Cannot open " .. url
+        state.message_kind = "warn"
+        return false
+    end
+    state.message = "Opened " .. url .. " in the browser"
+    state.message_kind = "info"
+    return true
+end
+
 local function gui_handle_click(state, hwnd, lparam)
     local point = ffi.new("mdview_point[1]")
     local value = tonumber(lparam) or 0
@@ -5620,6 +5686,11 @@ local function gui_handle_click(state, hwnd, lparam)
     if target.pane == "document" then
         state.focus = "document"
         state.libs.user32.SetFocus(hwnd)
+        local url = M.gui_link_at(state, point[0].x, point[0].y)
+        if url then
+            local opener = state.open_link or gui_open_url
+            opener(state, url)
+        end
     end
     state.libs.user32.InvalidateRect(hwnd, nil, 0)
 end

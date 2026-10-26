@@ -618,6 +618,64 @@ else
         mdview.gui_destroy(state)
     end)
 
+    test("clicking a web link opens the default browser", function()
+        write_file(fixture .. "/links.md",
+            "# Links\n\nVisit [the site](https://example.com/docs) for details.\n")
+        local state = assert(mdview.gui_create_state({
+            file = fixture .. "/links.md", numbers = true,
+        }))
+        -- Locate the first character of the link span.
+        local row, offset
+        for index, line in ipairs(state.view.lines) do
+            local column = 0
+            for _, span in ipairs(line.spans) do
+                if span.style and span.style.href then
+                    row = index - state.view.top + 1
+                    offset = column
+                    break
+                end
+                column = column + #span.text
+            end
+            if row then
+                break
+            end
+        end
+        truthy(row, "link rendered")
+        local metrics = state.metrics
+        local layout = state.layout
+        local gutter = state.view.gutter_width or 0
+        local text_x = layout.doc_x + metrics.padding + gutter * metrics.cell_w
+        local x = text_x + offset * metrics.cell_w + math.floor(metrics.cell_w / 2)
+        local y = layout.header_height + (row - 1) * metrics.cell_h + math.floor(metrics.cell_h / 2)
+        eq(mdview.gui_link_at(state, x, y), "https://example.com/docs", "link under the cursor")
+        eq(mdview.gui_link_at(state, text_x, y - metrics.cell_h * 2), nil, "no link on plain text")
+
+        local opened = nil
+        state.open_link = function(_, url)
+            opened = url
+        end
+        local code = mdview.gui_run(state, {
+            auto_close_ms = 400,
+            on_ready = function(live)
+                -- The window resizes on creation, so the click is placed with
+                -- the live layout rather than the one measured above.
+                local live_layout = live.layout
+                local live_gutter = live.view and live.view.gutter_width or 0
+                local click_x = live_layout.doc_x + live.metrics.padding
+                    + live_gutter * live.metrics.cell_w + offset * live.metrics.cell_w
+                    + math.floor(live.metrics.cell_w / 2)
+                local click_y = live_layout.header_height + (row - 1) * live.metrics.cell_h
+                    + math.floor(live.metrics.cell_h / 2)
+                user32.PostMessageW(live.hwnd, 0x0201, 1, click_x + click_y * 65536)
+                user32.PostMessageW(live.hwnd, 0x0202, 0, click_x + click_y * 65536)
+            end,
+        })
+        eq(code, 0, "run exit code")
+        eq(state.hook_error, nil, "startup hook")
+        eq(opened, "https://example.com/docs", "browser opened with the link")
+        mdview.gui_destroy(state)
+    end)
+
     test("offscreen snapshot writes a valid bitmap", function()
         local state = assert(mdview.gui_create_state({
             file = long_path, images = false, numbers = true,

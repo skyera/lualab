@@ -281,7 +281,9 @@ re-wraps the document to the new width. Images referenced by the document
 (`![alt](file.png)`) are decoded with GDI+ (PNG, JPEG, GIF and BMP, no extra
 DLLs) and painted into the page at the column width with their aspect ratio
 kept; `--no-images` draws text placeholders instead, and unreadable files fall
-back to the same placeholder with the reason.
+back to the same placeholder with the reason. Clicking a web link
+(`http`, `https` or `mailto`) in the document opens it in the default browser
+through the shell; other link targets are ignored.
 
 Deployment checks: `python3 test_deploy_mdview.py` (or `python` on Windows).
 Browser checks: `luajit test_mdview.lua`, `luajit test_mdview_gui.lua`,
