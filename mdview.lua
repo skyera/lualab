@@ -19,6 +19,10 @@
     - Filterable heading outline (t), with source-anchored navigation.
     - Lazy Markdown file tree with folder/file icons and Vim navigation.
     - Pure render/frame functions for headless tests and --snapshot output.
+    - Optional Win32 GUI (--gui): a native window with the same Markdown file
+      tree and theme, drawn with GDI through the Windows SDK. No toolkits or
+      extra DLLs; the tree lazy-loads folders and the document re-wraps on
+      resize, with mouse, wheel, keyboard and scrollbar navigation.
 
     Usage:
       luajit mdview.lua                         # Browse the current directory
@@ -26,6 +30,7 @@
       luajit mdview.lua README.md
       luajit mdview.lua --width 100 --no-pager README.md
       luajit mdview.lua --snapshot 100x30 README.md
+      luajit mdview.lua --gui docs/             # Windows GUI with file tree
       cat README.md | luajit mdview.lua -
 
     Keys:
@@ -39,6 +44,11 @@
       f             toggle file tree        Tab           switch panes
       Tree: j/k move, h/l collapse/expand/open, gg/G first/last, ? help
 
+    GUI keys:
+      Tree: arrows move, Left/Right fold, Enter opens, Tab switches pane
+      Document: arrows, PgUp/PgDn, Home/End scroll; mouse wheel scrolls
+      Click a folder to expand it; double-click a file or press Enter to open
+
     Options:
       -w, --width N        wrap width for non-interactive output (default 80)
       --no-pager           render the document and exit
@@ -50,6 +60,7 @@
       --no-numbers         hide source line numbers
       --snapshot [WxH]     print one TUI frame and exit (default 80x24)
       --search PATTERN     pre-fill search (useful with --snapshot)
+      --gui                open the Windows GUI (Win32 SDK, requires Windows)
       -h, --help           show this help
 ]]
 
@@ -325,6 +336,11 @@ local DARK_PALETTE = {
     search_current_bg = "48;2;255;150;60",
     folder_icon = "38;2;240;190;90",
     file_icon = "38;2;120;200;230",
+    gui_bg = "48;2;22;26;34",
+    gui_panel = "48;2;30;35;44",
+    gui_selection = "48;2;52;68;94",
+    gui_separator = "48;2;52;60;74",
+    gui_accent = "38;2;97;175;239",
 }
 
 local LIGHT_PALETTE = {
@@ -356,6 +372,11 @@ local LIGHT_PALETTE = {
     search_current_bg = "48;2;255;165;70",
     folder_icon = "38;2;180;120;0",
     file_icon = "38;2;0;104;180",
+    gui_bg = "48;2;250;251;253",
+    gui_panel = "48;2;238;241;246",
+    gui_selection = "48;2;208;224;244",
+    gui_separator = "48;2;200;207;217",
+    gui_accent = "38;2;0;90;186",
 }
 
 local THEME = {}
@@ -3846,7 +3867,1506 @@ local function run_pager(browser, initial_search, settings)
 end
 
 -- =========================================================================
--- 16. CLI
+-- 16. Windows GUI (Win32 SDK + GDI)
+-- =========================================================================
+-- The GUI is plain LuaJIT FFI over user32/gdi32: no toolkit, no DLLs to ship.
+-- It reuses the terminal renderer's span output and palette, so both viewers
+-- show the same document. Layout, hit-testing and scrolling stay pure Lua so
+-- they can be tested without a window.
+local GUI_CLASS_NAME = "mdviewGuiWindow"
+local GUI_DEFAULT_WIDTH = 1120
+local GUI_DEFAULT_HEIGHT = 800
+local GUI_MIN_WIDTH = 560
+local GUI_MIN_HEIGHT = 360
+local GUI_SCROLL_LINES = 3
+local GUI_TREE_RATIO = 0.28
+local GUI_TREE_MIN = 200
+local GUI_TREE_MAX = 340
+local GUI_TREE_BREAK = 560
+local GUI_MIN_DOC_WIDTH = 240
+
+local WM_DESTROY = 0x0002
+local WM_SIZE = 0x0005
+local WM_SETFOCUS = 0x0007
+local WM_KILLFOCUS = 0x0008
+local WM_CLOSE = 0x0010
+local WM_PAINT = 0x000F
+local WM_ERASEBKGND = 0x0014
+local WM_GETMINMAXINFO = 0x0024
+local WM_TIMER = 0x0113
+local WM_MOUSEWHEEL = 0x020A
+local WM_LBUTTONDOWN = 0x0201
+local WM_LBUTTONDBLCLK = 0x0203
+local WM_KEYDOWN = 0x0100
+local WM_VSCROLL = 0x0115
+
+local GUI_VIRTUAL_KEYS = {
+    [0x25] = "LEFT", [0x26] = "UP", [0x27] = "RIGHT", [0x28] = "DOWN",
+    [0x24] = "HOME", [0x23] = "END",
+    [0x21] = "PAGE_UP", [0x22] = "PAGE_DOWN",
+    [0x0D] = "ENTER", [0x09] = "TAB", [0x20] = "SPACE", [0x1B] = "ESC",
+}
+
+local gui_libs
+local gui_state
+local gui_wndproc_ref
+
+local function gui_native()
+    if gui_libs then
+        return gui_libs
+    end
+    if not IS_WINDOWS then
+        return nil
+    end
+    ffi.cdef[[
+        typedef intptr_t (__stdcall *mdview_wndproc)(void *, uint32_t, uintptr_t, intptr_t);
+        typedef struct {
+            uint32_t cbSize, style;
+            mdview_wndproc lpfnWndProc;
+            int32_t cbClsExtra, cbWndExtra;
+            void *hInstance, *hIcon, *hCursor, *hbrBackground;
+            const uint16_t *lpszMenuName;
+            const uint16_t *lpszClassName;
+            void *hIconSm;
+        } mdview_wndclass;
+        typedef struct { int32_t left, top, right, bottom; } mdview_rect;
+        typedef struct { int32_t cx, cy; } mdview_size;
+        typedef struct { int32_t x, y; } mdview_point;
+        typedef struct {
+            void *hdc; int32_t fErase; mdview_rect rcPaint;
+            int32_t fRestore, fIncUpdate; uint8_t rgbReserved[32];
+        } mdview_paint_struct;
+        typedef struct {
+            void *hwnd; uint32_t message; uintptr_t wParam; intptr_t lParam;
+            uint32_t time; int32_t x, y; uint32_t private_data;
+        } mdview_msg;
+        typedef struct {
+            uint32_t cbSize, fMask;
+            int32_t nMin, nMax, nPage, nPos, nTrackPos;
+        } mdview_scroll_info;
+        typedef struct {
+            mdview_point reserved, max_size, max_position, min_track, max_track;
+        } mdview_minmax_info;
+        typedef struct {
+            uint32_t biSize; int32_t biWidth, biHeight;
+            uint16_t biPlanes, biBitCount;
+            uint32_t biCompression, biSizeImage;
+            int32_t biXPelsPerMeter, biYPelsPerMeter;
+            uint32_t biClrUsed, biClrImportant;
+        } mdview_bitmap_header;
+        typedef struct {
+            mdview_bitmap_header header; uint32_t colors[3];
+        } mdview_bitmap_info;
+
+        void *__stdcall GetModuleHandleW(const uint16_t *);
+        int __stdcall MultiByteToWideChar(unsigned int, uint32_t, const char *, int,
+                                          uint16_t *, int);
+        uint32_t __stdcall GetLastError(void);
+        uint16_t __stdcall RegisterClassExW(const mdview_wndclass *);
+        void *__stdcall CreateWindowExW(uint32_t, const uint16_t *, const uint16_t *, uint32_t,
+                                        int32_t, int32_t, int32_t, int32_t, void *, void *,
+                                        void *, void *);
+        intptr_t __stdcall DefWindowProcW(void *, uint32_t, uintptr_t, intptr_t);
+        int __stdcall DestroyWindow(void *);
+        void __stdcall PostQuitMessage(int);
+        int __stdcall GetMessageW(mdview_msg *, void *, uint32_t, uint32_t);
+        int __stdcall TranslateMessage(const mdview_msg *);
+        intptr_t __stdcall DispatchMessageW(const mdview_msg *);
+        int __stdcall ShowWindow(void *, int);
+        int __stdcall UpdateWindow(void *);
+        int __stdcall InvalidateRect(void *, const mdview_rect *, int);
+        void *__stdcall BeginPaint(void *, mdview_paint_struct *);
+        int __stdcall EndPaint(void *, const mdview_paint_struct *);
+        void *__stdcall GetDC(void *);
+        int __stdcall ReleaseDC(void *, void *);
+        int __stdcall FillRect(void *, const mdview_rect *, void *);
+        void *__stdcall LoadCursorW(void *, const uint16_t *);
+        void *__stdcall LoadIconW(void *, const uint16_t *);
+        int __stdcall SetWindowTextW(void *, const uint16_t *);
+        uintptr_t __stdcall SetTimer(void *, uintptr_t, uint32_t, void *);
+        int __stdcall KillTimer(void *, uintptr_t);
+        int __stdcall PostMessageW(void *, uint32_t, uintptr_t, intptr_t);
+        int __stdcall SetScrollInfo(void *, int, const mdview_scroll_info *, int);
+        int __stdcall GetClientRect(void *, mdview_rect *);
+        int __stdcall AdjustWindowRectEx(mdview_rect *, uint32_t, int, uint32_t);
+        int __stdcall SetProcessDPIAware(void);
+        int __stdcall GetSystemMetrics(int);
+        void *__stdcall SetFocus(void *);
+        int __stdcall ScreenToClient(void *, mdview_point *);
+        int __stdcall DrawTextW(void *, const uint16_t *, int, mdview_rect *, uint32_t);
+
+        void *__stdcall CreateCompatibleDC(void *);
+        void *__stdcall CreateCompatibleBitmap(void *, int32_t, int32_t);
+        void *__stdcall SelectObject(void *, void *);
+        int __stdcall DeleteDC(void *);
+        int __stdcall DeleteObject(void *);
+        int __stdcall BitBlt(void *, int32_t, int32_t, int32_t, int32_t, void *,
+                             int32_t, int32_t, uint32_t);
+        void *__stdcall CreateSolidBrush(uint32_t);
+        void *__stdcall CreateFontW(int32_t, int32_t, int32_t, int32_t, int32_t,
+                                    uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+                                    uint32_t, uint32_t, uint32_t, const uint16_t *);
+        int __stdcall SetTextColor(void *, uint32_t);
+        int __stdcall SetBkMode(void *, int);
+        int __stdcall TextOutW(void *, int32_t, int32_t, const uint16_t *, int);
+        int __stdcall GetTextExtentPoint32W(void *, const uint16_t *, int, mdview_size *);
+        int __stdcall GetDeviceCaps(void *, int);
+        int __stdcall SaveDC(void *);
+        int __stdcall RestoreDC(void *, int);
+        int __stdcall IntersectClipRect(void *, int32_t, int32_t, int32_t, int32_t);
+        int __stdcall GetDIBits(void *, void *, uint32_t, uint32_t, void *,
+                                mdview_bitmap_info *, uint32_t);
+    ]]
+    gui_libs = {
+        kernel32 = ffi.load("kernel32"),
+        user32 = ffi.load("user32"),
+        gdi32 = ffi.load("gdi32"),
+    }
+    return gui_libs
+end
+
+local function gui_wide(libs, text)
+    text = tostring(text or "")
+    local count = libs.kernel32.MultiByteToWideChar(65001, 0, text, #text, nil, 0)
+    local buffer = ffi.new("uint16_t[?]", math.max(1, count + 1))
+    if count > 0 then
+        libs.kernel32.MultiByteToWideChar(65001, 0, text, #text, buffer, count)
+    end
+    return buffer, count
+end
+
+-- COLORREF is 0x00BBGGRR; theme values are ANSI 24-bit truecolor.
+local function gui_color(spec)
+    if type(spec) == "number" then
+        return spec
+    end
+    local r, g, b = tostring(spec or ""):match("^[34]8;2;(%d+);(%d+);(%d+)$")
+    if not r then
+        return nil
+    end
+    return tonumber(r) + tonumber(g) * 256 + tonumber(b) * 65536
+end
+
+local function gui_scale(dpi, value)
+    return math.max(1, math.floor(value * dpi / 96 + 0.5))
+end
+
+local function gui_clamp(value, low, high)
+    if high < low then
+        return low
+    end
+    return math.max(low, math.min(value, high))
+end
+
+local function gui_last_error(libs)
+    return "Windows error " .. tonumber(libs.kernel32.GetLastError())
+end
+
+function M.gui_layout(width, height, metrics)
+    width = math.max(1, math.floor(width or 1))
+    height = math.max(1, math.floor(height or 1))
+    local content_height = math.max(1, height - metrics.status_h)
+    local header_height = math.min(metrics.header_h, content_height)
+    local body_height = math.max(1, content_height - header_height)
+    local tree_width = 0
+    if width >= metrics.tree_break then
+        tree_width = math.floor(width * metrics.tree_ratio)
+        tree_width = gui_clamp(tree_width, metrics.tree_min, metrics.tree_max)
+        if width - tree_width < metrics.min_doc_width then
+            tree_width = width - metrics.min_doc_width
+        end
+        if tree_width < metrics.tree_min then
+            tree_width = 0
+        end
+    end
+    local separator = tree_width > 0 and 1 or 0
+    local doc_x = tree_width + separator
+    return {
+        width = width,
+        height = height,
+        content_height = content_height,
+        header_height = header_height,
+        body_height = body_height,
+        tree_width = tree_width,
+        separator = separator,
+        doc_x = doc_x,
+        doc_width = math.max(1, width - doc_x),
+        rows = math.max(1, math.floor(body_height / metrics.cell_h)),
+        tree_rows = tree_width > 0
+            and math.max(1, math.floor(body_height / metrics.tree_row_h)) or 0,
+    }
+end
+
+function M.gui_document_columns(layout, metrics)
+    local available = math.max(1, layout.doc_width - 2 * metrics.padding)
+    return math.max(20, math.floor(available / metrics.cell_w))
+end
+
+function M.gui_hit_test(layout, metrics, x, y)
+    if x < 0 or y < 0 or x >= layout.width or y >= layout.height then
+        return { pane = "none" }
+    end
+    if y >= layout.content_height then
+        return { pane = "status" }
+    end
+    if y < layout.header_height then
+        return { pane = "header" }
+    end
+    if layout.tree_width > 0 and x < layout.tree_width then
+        local row = math.floor((y - layout.header_height) / metrics.tree_row_h) + 1
+        if row >= 1 and row <= layout.tree_rows then
+            return { pane = "tree", row = row }
+        end
+        return { pane = "tree" }
+    end
+    if x >= layout.doc_x then
+        local row = math.floor((y - layout.header_height) / metrics.cell_h) + 1
+        if row >= 1 and row <= layout.rows then
+            return { pane = "document", row = row }
+        end
+        return { pane = "document" }
+    end
+    return { pane = "separator" }
+end
+
+function M.gui_scroll_top(top, total, rows, action)
+    total = math.max(1, total or 1)
+    rows = math.max(1, rows or 1)
+    top = gui_clamp(top or 1, 1, total)
+    local maximum = math.max(1, total - rows + 1)
+    if action == "up" then
+        top = top - 1
+    elseif action == "down" then
+        top = top + 1
+    elseif action == "page_up" then
+        top = top - math.max(1, rows - 1)
+    elseif action == "page_down" then
+        top = top + math.max(1, rows - 1)
+    elseif action == "top" then
+        top = 1
+    elseif action == "bottom" then
+        top = maximum
+    end
+    return gui_clamp(top, 1, maximum)
+end
+
+function M.gui_ensure_visible(top, selected, rows, total)
+    rows = math.max(1, rows or 1)
+    total = math.max(1, total or 1)
+    selected = gui_clamp(selected or 1, 1, total)
+    top = math.max(1, top or 1)
+    if selected < top then
+        top = selected
+    elseif selected >= top + rows then
+        top = selected - rows + 1
+    end
+    return gui_clamp(top, 1, math.max(1, total - rows + 1))
+end
+
+function M.gui_key_action(token, pane)
+    if token == "TAB" then
+        return "switch"
+    elseif token == "ESC" then
+        return pane == "tree" and "escape" or nil
+    end
+    if pane == "tree" then
+        if token == "UP" then
+            return "up"
+        elseif token == "DOWN" then
+            return "down"
+        elseif token == "LEFT" then
+            return "collapse"
+        elseif token == "RIGHT" then
+            return "expand"
+        elseif token == "HOME" then
+            return "first"
+        elseif token == "END" then
+            return "last"
+        elseif token == "PAGE_UP" then
+            return "page_up"
+        elseif token == "PAGE_DOWN" then
+            return "page_down"
+        elseif token == "ENTER" then
+            return "open"
+        end
+        return nil
+    end
+    if token == "UP" then
+        return "up"
+    elseif token == "DOWN" then
+        return "down"
+    elseif token == "PAGE_UP" then
+        return "page_up"
+    elseif token == "PAGE_DOWN" or token == "SPACE" then
+        return "page_down"
+    elseif token == "HOME" then
+        return "top"
+    elseif token == "END" then
+        return "bottom"
+    end
+    return nil
+end
+
+-- =========================================================================
+-- 16b. GUI Resources, State and Document Handling
+-- =========================================================================
+local function gui_create_font(libs, face, pixel_height, weight, italic)
+    local name = gui_wide(libs, face)
+    return libs.gdi32.CreateFontW(-pixel_height, 0, 0, 0, weight,
+        italic and 1 or 0, 0, 0, 1, 4, 0, 5, 49, name)
+end
+
+local function gui_create_fonts(libs, dpi)
+    local doc_height = math.max(10, gui_scale(dpi, 15))
+    local tree_height = math.max(10, gui_scale(dpi, 14))
+    return {
+        doc = {
+            regular = gui_create_font(libs, "Consolas", doc_height, 400, false),
+            bold = gui_create_font(libs, "Consolas", doc_height, 700, false),
+            italic = gui_create_font(libs, "Consolas", doc_height, 400, true),
+            bold_italic = gui_create_font(libs, "Consolas", doc_height, 700, true),
+        },
+        tree = {
+            regular = gui_create_font(libs, "Segoe UI", tree_height, 400, false),
+            bold = gui_create_font(libs, "Segoe UI", tree_height, 700, false),
+        },
+    }
+end
+
+local function gui_create_metrics(libs, dc, dpi, fonts)
+    local gdi = libs.gdi32
+    local size = ffi.new("mdview_size[1]")
+    gdi.SelectObject(dc, fonts.doc.regular)
+    local sample = gui_wide(libs, string.rep("M", 64))
+    gdi.GetTextExtentPoint32W(dc, sample, 64, size)
+    local cell_width = math.max(1, math.floor(size[0].cx / 64 + 0.5))
+    local cell_height = math.max(1, size[0].cy + gui_scale(dpi, 3))
+    gdi.SelectObject(dc, fonts.tree.regular)
+    local probe = gui_wide(libs, "M")
+    gdi.GetTextExtentPoint32W(dc, probe, 1, size)
+    local tree_row_height = math.max(cell_height, size[0].cy + gui_scale(dpi, 5))
+    return {
+        dpi = dpi,
+        cell_w = cell_width,
+        cell_h = cell_height,
+        tree_row_h = tree_row_height,
+        header_h = gui_scale(dpi, 28),
+        status_h = gui_scale(dpi, 26),
+        padding = gui_scale(dpi, 10),
+        tree_indent = gui_scale(dpi, 14),
+        tree_marker = gui_scale(dpi, 16),
+        text_offset = gui_scale(dpi, 2),
+        tree_ratio = GUI_TREE_RATIO,
+        tree_min = gui_scale(dpi, GUI_TREE_MIN),
+        tree_max = gui_scale(dpi, GUI_TREE_MAX),
+        tree_break = gui_scale(dpi, GUI_TREE_BREAK),
+        min_doc_width = gui_scale(dpi, GUI_MIN_DOC_WIDTH),
+    }
+end
+
+local function gui_brush(state, spec)
+    local key = spec or "default"
+    local cached = state.brush_cache[key]
+    if cached then
+        return cached
+    end
+    local brush = state.libs.gdi32.CreateSolidBrush(gui_color(spec) or 0)
+    state.brush_cache[key] = brush
+    return brush
+end
+
+local function gui_span_colors(style)
+    local fg = style and style.fg
+    local bg = style and style.bg
+    if style then
+        if style.search_current then
+            fg = fg or THEME.search_current_fg
+            bg = bg or THEME.search_current_bg
+        elseif style.search then
+            fg = fg or THEME.search_fg
+            bg = bg or THEME.search_bg
+        end
+        if not bg and style.code and not style.code_block then
+            bg = THEME.code_bg
+        end
+        if not fg then
+            if style.link then
+                fg = THEME.link
+            elseif style.code or style.code_block then
+                fg = THEME.code_block_fg
+            elseif style.quote then
+                fg = THEME.quote_fg
+            end
+        end
+    end
+    return fg or THEME.text, bg
+end
+
+local function gui_span_font(state, style)
+    local key = "regular"
+    if style then
+        if style.bold and style.italic then
+            key = "bold_italic"
+        elseif style.bold then
+            key = "bold"
+        elseif style.italic then
+            key = "italic"
+        end
+    end
+    return state.fonts.doc[key]
+end
+
+local function gui_placeholder()
+    return "# Markdown browser\n\n"
+        .. "Select a Markdown file in the tree and press Enter, or double-click it.\n\n"
+        .. "Tab switches panes. Arrow keys move in the tree; PgUp/PgDn scroll the document.\n"
+end
+
+local function gui_release_buffer(state)
+    local buffer = state.buffer
+    if not buffer then
+        return
+    end
+    local gdi = state.libs.gdi32
+    if buffer.previous then
+        gdi.SelectObject(buffer.dc, buffer.previous)
+    end
+    if buffer.bitmap then
+        gdi.DeleteObject(buffer.bitmap)
+    end
+    if buffer.dc then
+        gdi.DeleteDC(buffer.dc)
+    end
+    state.buffer = nil
+end
+
+local function gui_release_state(state)
+    if not state then
+        return
+    end
+    local gdi = state.libs and state.libs.gdi32
+    if gdi then
+        gui_release_buffer(state)
+        for _, font in pairs(state.fonts.doc) do
+            gdi.DeleteObject(font)
+        end
+        for _, font in pairs(state.fonts.tree) do
+            gdi.DeleteObject(font)
+        end
+        for _, brush in pairs(state.brushes) do
+            gdi.DeleteObject(brush)
+        end
+        for _, brush in pairs(state.brush_cache) do
+            gdi.DeleteObject(brush)
+        end
+    end
+    state.fonts = { doc = {}, tree = {} }
+    state.brushes = {}
+    state.brush_cache = {}
+end
+
+local function gui_document_title(name)
+    return sanitize_text(name or "untitled")
+end
+
+local function gui_document_options(state)
+    return {
+        base_dir = state.path ~= "-" and path_parent(state.path) or ".",
+        images = state.settings.images,
+        numbers = state.settings.numbers,
+    }
+end
+
+local function gui_clamp_document(state)
+    local view = state.view
+    if not view then
+        return
+    end
+    local maximum = math.max(1, #view.lines - state.layout.rows + 1)
+    view.top = gui_clamp(view.top or 1, 1, maximum)
+end
+
+local function gui_sync_document(state)
+    local columns = M.gui_document_columns(state.layout, state.metrics)
+    if state.view and state.doc_cols == columns then
+        gui_clamp_document(state)
+        return
+    end
+    if state.view then
+        M.reflow(state.view, columns, state.layout.rows + 2)
+    else
+        local ok, lines = pcall(M.render, state.source, columns, gui_document_options(state))
+        if not ok then
+            state.message = "Cannot render " .. state.title .. ": " .. tostring(lines)
+            state.message_kind = "warn"
+            return
+        end
+        state.view = M.new_view(state.title, lines)
+        state.view.document_source = state.source
+        state.view.case_sensitive = state.settings.case_sensitive
+        state.view.top = 1
+    end
+    state.doc_cols = columns
+    gui_clamp_document(state)
+end
+
+local function gui_tree_clamp(state)
+    local browser = state.browser
+    local count = #browser.entries
+    if count == 0 then
+        browser.selected = 1
+        state.tree_top = 1
+        return
+    end
+    browser.selected = gui_clamp(browser.selected or 1, 1, count)
+    state.tree_top = M.gui_ensure_visible(state.tree_top, browser.selected,
+        state.layout.tree_rows, count)
+end
+
+local function gui_toggle_node(state, node)
+    if not node or not node.directory then
+        return
+    end
+    if node.expanded then
+        node.expanded = false
+    elseif node.children then
+        node.expanded = true
+    else
+        local ok, err = load_tree_node(state.browser, node)
+        if not ok then
+            state.message = sanitize_text(err)
+            state.message_kind = "warn"
+            return
+        end
+    end
+    state.message = ""
+    state.message_kind = "info"
+    rebuild_tree(state.browser, state.layout.tree_rows + 2, node.path)
+    gui_tree_clamp(state)
+end
+
+local function gui_update_window_title(state)
+    if state.hwnd == nil then
+        return
+    end
+    local title = gui_wide(state.libs, "mdview — " .. state.path)
+    state.libs.user32.SetWindowTextW(state.hwnd, title)
+end
+
+local function gui_open_node(state, node)
+    if not node or node.directory then
+        return false
+    end
+    local data, err = (state.fs.read_document or read_document)(node.path)
+    if not data then
+        state.message = "Cannot open " .. node.name .. ": " .. tostring(err)
+        state.message_kind = "warn"
+        return false
+    end
+    state.source = data
+    state.path = node.path
+    state.title = gui_document_title(node.name)
+    state.view = nil
+    state.doc_cols = 0
+    state.message = ""
+    state.message_kind = "info"
+    gui_sync_document(state)
+    gui_update_window_title(state)
+    return true
+end
+
+function M.gui_open_path(state, path)
+    if not state or not path then
+        return false
+    end
+    return gui_open_node(state, {
+        name = path:match("([^/\\]+)$") or path,
+        path = path,
+    })
+end
+
+local function gui_create_state(options)
+    if not IS_WINDOWS then
+        return nil, "--gui requires Windows (Win32 GUI)"
+    end
+    local libs = gui_native()
+    local fs, fs_error = filesystem()
+    if not fs then
+        return nil, "file browsing is unavailable: " .. tostring(fs_error)
+    end
+    local requested = options.file or "."
+    local kind, kind_error = fs.kind(requested)
+    if not kind then
+        return nil, "cannot open '" .. requested .. "': " .. tostring(kind_error)
+    end
+    local path, resolve_error = fs.resolve(requested)
+    if not path then
+        return nil, "cannot resolve '" .. requested .. "': " .. tostring(resolve_error)
+    end
+    local is_directory = kind == "directory"
+    local source
+    local title
+    if is_directory then
+        source = gui_placeholder()
+        title = "Select a Markdown file"
+    else
+        local data, read_error = (fs.read_document or read_document)(path)
+        if not data then
+            return nil, "cannot open '" .. requested .. "': " .. tostring(read_error)
+        end
+        source = data
+        title = gui_document_title(path:match("([^/\\]+)$") or path)
+    end
+
+    -- System-DPI awareness must be set before measuring fonts, or GDI metrics
+    -- come back virtualized while the window is created at physical pixels.
+    libs.user32.SetProcessDPIAware()
+    local screen = libs.user32.GetDC(nil)
+    if screen == nil then
+        return nil, "cannot query the screen device context (" .. gui_last_error(libs) .. ")"
+    end
+    local dpi = tonumber(libs.gdi32.GetDeviceCaps(screen, 90))
+    if not dpi or dpi <= 0 then
+        dpi = 96
+    end
+    local fonts = gui_create_fonts(libs, dpi)
+    local metrics = gui_create_metrics(libs, screen, dpi, fonts)
+    libs.user32.ReleaseDC(nil, screen)
+
+    local settings = {
+        images = options.images ~= false,
+        numbers = options.numbers ~= false,
+        case_sensitive = options.case_sensitive or false,
+    }
+    local view = M.new_view(title, {})
+    local browser = M.new_browser(view, path, is_directory, settings, fs)
+    browser.tree_visible = true
+    browser.pending = { kind = "root" }
+    local state = {
+        libs = libs,
+        fs = fs,
+        browser = browser,
+        path = path,
+        source = source,
+        title = title,
+        is_directory = is_directory,
+        settings = settings,
+        fonts = fonts,
+        metrics = metrics,
+        brushes = {},
+        brush_cache = {},
+        layout = M.gui_layout(GUI_DEFAULT_WIDTH, GUI_DEFAULT_HEIGHT, metrics),
+        view = nil,
+        doc_cols = 0,
+        tree_top = 1,
+        focus = is_directory and "tree" or "document",
+        message = "",
+        message_kind = "info",
+        hwnd = nil,
+        buffer = nil,
+        paints = 0,
+    }
+    local brush_specs = {
+        background = THEME.gui_bg,
+        panel = THEME.gui_panel,
+        bar = THEME.bar_bg,
+        selection = THEME.gui_selection,
+        separator = THEME.gui_separator,
+        accent = THEME.gui_accent,
+    }
+    for name, spec in pairs(brush_specs) do
+        state.brushes[name] = libs.gdi32.CreateSolidBrush(gui_color(spec) or 0)
+    end
+
+    M.process_browser_pending(browser, state.layout.width, state.layout.height)
+    if browser.message ~= "" then
+        local message = browser.message
+        gui_release_state(state)
+        return nil, message
+    end
+    if not is_directory then
+        rebuild_tree(browser, state.layout.tree_rows + 2, path)
+    end
+    gui_tree_clamp(state)
+    gui_sync_document(state)
+    return state
+end
+
+M.gui_create_state = gui_create_state
+M.gui_destroy = gui_release_state
+
+local function gui_fill(state, hdc, x, y, width, height, brush)
+    if width <= 0 or height <= 0 then
+        return
+    end
+    local rect = ffi.new("mdview_rect[1]")
+    rect[0].left = x
+    rect[0].top = y
+    rect[0].right = x + width
+    rect[0].bottom = y + height
+    state.libs.user32.FillRect(hdc, rect, brush)
+end
+
+local function gui_text_color(state, hdc, font, color)
+    local gdi = state.libs.gdi32
+    if font then
+        gdi.SelectObject(hdc, font)
+    end
+    gdi.SetBkMode(hdc, 1)
+    gdi.SetTextColor(hdc, color or gui_color(THEME.text) or 0)
+end
+
+local function gui_draw_text(state, hdc, text, x, y, color, font)
+    local wide, length = gui_wide(state.libs, text)
+    if length == 0 then
+        return
+    end
+    gui_text_color(state, hdc, font, color)
+    state.libs.gdi32.TextOutW(hdc, x, y, wide, length)
+end
+
+local function gui_draw_text_box(state, hdc, text, left, top, right, bottom, color, font,
+                                 align)
+    local wide, length = gui_wide(state.libs, text)
+    local rect = ffi.new("mdview_rect[1]")
+    rect[0].left = left
+    rect[0].top = top
+    rect[0].right = right
+    rect[0].bottom = bottom
+    local format = 0x0020 + 0x0004 + 0x0800
+    if align == "right" then
+        format = format + 0x0002
+    end
+    gui_text_color(state, hdc, font, color)
+    state.libs.user32.DrawTextW(hdc, wide, length, rect, format)
+end
+
+local function gui_measure_text(state, hdc, text, font)
+    local wide, length = gui_wide(state.libs, text)
+    if length == 0 then
+        return 0
+    end
+    state.libs.gdi32.SelectObject(hdc, font)
+    local size = ffi.new("mdview_size[1]")
+    state.libs.gdi32.GetTextExtentPoint32W(hdc, wide, length, size)
+    return size[0].cx
+end
+
+local function gui_gutter_text(line, gutter)
+    if gutter <= 0 then
+        return ""
+    end
+    if line.number then
+        return string.format("%" .. (gutter - 1) .. "d ", line.number)
+    end
+    return string.rep(" ", gutter)
+end
+
+local function gui_paint_tree(state, hdc)
+    local libs = state.libs
+    local layout = state.layout
+    local metrics = state.metrics
+    local browser = state.browser
+    gui_fill(state, hdc, 0, 0, layout.tree_width, layout.content_height,
+        state.brushes.panel)
+    gui_fill(state, hdc, 0, 0, layout.tree_width, layout.header_height,
+        state.brushes.bar)
+    gui_draw_text_box(state, hdc, "FILES", metrics.padding, 0, layout.tree_width - 4,
+        layout.header_height, gui_color(THEME.bar_fg), state.fonts.tree.bold, "left")
+    if state.focus == "tree" then
+        gui_fill(state, hdc, 0, 0, 3, layout.content_height, state.brushes.accent)
+    end
+    for row = 1, layout.tree_rows do
+        local index = state.tree_top + row - 1
+        local node = browser.entries[index]
+        if not node then
+            break
+        end
+        local y = layout.header_height + (row - 1) * metrics.tree_row_h
+        local selected = index == browser.selected
+        if selected then
+            gui_fill(state, hdc, 0, y, layout.tree_width, metrics.tree_row_h,
+                state.brushes.selection)
+        end
+        local x = metrics.padding + math.min(node.depth or 0, 8) * metrics.tree_indent
+        local marker = node.directory and (node.expanded and "▾" or "▸") or "·"
+        local marker_color = node.directory and THEME.folder_icon or THEME.file_icon
+        gui_draw_text_box(state, hdc, marker, x, y, x + metrics.tree_marker,
+            y + metrics.tree_row_h, gui_color(marker_color), state.fonts.tree.bold, "left")
+        local name_x = x + metrics.tree_marker
+        local name_color = selected and THEME.bar_fg
+            or (node.directory and THEME.text or THEME.file_icon)
+        gui_draw_text_box(state, hdc, sanitize_text(node.name), name_x, y,
+            layout.tree_width - 4, y + metrics.tree_row_h, gui_color(name_color),
+            node.directory and state.fonts.tree.bold or state.fonts.tree.regular, "left")
+    end
+    if #browser.entries == 0 then
+        gui_draw_text_box(state, hdc, "No Markdown files or folders", metrics.padding,
+            layout.header_height, layout.tree_width - 4,
+            layout.header_height + metrics.tree_row_h * 2, gui_color(THEME.warn),
+            state.fonts.tree.regular, "left")
+    end
+end
+
+local function gui_document_position(state)
+    local view = state.view
+    if not view or #view.lines == 0 then
+        return "0/0"
+    end
+    local percent = 0
+    if #view.lines > 1 then
+        percent = math.floor((view.top - 1) / (#view.lines - 1) * 100)
+    end
+    return string.format("%3d%%  %d/%d", percent, view.top, #view.lines)
+end
+
+local function gui_paint_document(state, hdc)
+    local libs = state.libs
+    local layout = state.layout
+    local metrics = state.metrics
+    gui_fill(state, hdc, layout.doc_x, 0, layout.doc_width, layout.content_height,
+        state.brushes.background)
+    gui_fill(state, hdc, layout.doc_x, 0, layout.doc_width, layout.header_height,
+        state.brushes.bar)
+    if state.focus == "document" then
+        gui_fill(state, hdc, layout.doc_x, 0, 3, layout.content_height,
+            state.brushes.accent)
+    end
+    local position = gui_document_position(state)
+    local position_width = gui_measure_text(state, hdc, position, state.fonts.tree.regular)
+    local header_right = layout.doc_x + layout.doc_width - metrics.padding
+    gui_draw_text_box(state, hdc, state.title, layout.doc_x + metrics.padding, 0,
+        header_right - position_width - metrics.padding, layout.header_height,
+        gui_color(THEME.bar_fg), state.fonts.tree.regular, "left")
+    gui_draw_text_box(state, hdc, position, header_right - position_width, 0,
+        header_right, layout.header_height,
+        gui_color(THEME.bar_fg), state.fonts.tree.regular, "right")
+
+    local view = state.view
+    if not view then
+        return
+    end
+    local gutter = view.gutter_width or 0
+    local text_x = layout.doc_x + metrics.padding
+    local top = view.top
+    local saved = libs.gdi32.SaveDC(hdc)
+    libs.gdi32.IntersectClipRect(hdc, layout.doc_x, layout.header_height,
+        layout.doc_x + layout.doc_width, layout.content_height)
+    for row = 1, layout.rows do
+        local line = view.lines[top + row - 1]
+        if not line then
+            break
+        end
+        local y = layout.header_height + (row - 1) * metrics.cell_h
+        if gutter > 0 then
+            gui_draw_text(state, hdc, gui_gutter_text(line, gutter), text_x,
+                y + metrics.text_offset, gui_color(THEME.line_number),
+                state.fonts.doc.regular)
+        end
+        local x = text_x + gutter * metrics.cell_w
+        for _, span in ipairs(line.spans) do
+            local cells = display_width(span.text)
+            if cells > 0 then
+                local fg_spec, bg_spec = gui_span_colors(span.style)
+                if bg_spec then
+                    gui_fill(state, hdc, x, y, cells * metrics.cell_w, metrics.cell_h,
+                        gui_brush(state, bg_spec))
+                end
+                gui_draw_text(state, hdc, span.text, x, y + metrics.text_offset,
+                    gui_color(fg_spec), gui_span_font(state, span.style))
+                if span.style and (span.style.strike or span.style.underline) then
+                    local line_brush = gui_brush(state, fg_spec)
+                    if span.style.strike then
+                        gui_fill(state, hdc, x, y + math.floor(metrics.cell_h * 0.55),
+                            cells * metrics.cell_w, 1, line_brush)
+                    end
+                    if span.style.underline then
+                        gui_fill(state, hdc, x, y + metrics.cell_h - gui_scale(metrics.dpi, 3),
+                            cells * metrics.cell_w, 1, line_brush)
+                    end
+                end
+                x = x + cells * metrics.cell_w
+            end
+        end
+    end
+    libs.gdi32.RestoreDC(hdc, saved)
+end
+
+local function gui_status_text(state)
+    if state.message ~= "" then
+        return state.message, state.message_kind == "warn" and THEME.warn or THEME.info
+    end
+    if state.focus == "tree" then
+        return "Tree: arrows move · Enter opens · Tab switches pane · double-click opens",
+            THEME.info
+    end
+    return "Wheel or keys scroll · Tab switches pane · double-click a file in the tree",
+        THEME.info
+end
+
+local function gui_paint_status(state, hdc)
+    local libs = state.libs
+    local layout = state.layout
+    local metrics = state.metrics
+    gui_fill(state, hdc, 0, layout.content_height, layout.width, layout.height
+        - layout.content_height, state.brushes.bar)
+    local text, color = gui_status_text(state)
+    local view = state.view
+    local right = view and string.format("%d lines", #view.lines) or ""
+    local right_width = right ~= "" and gui_measure_text(state, hdc, right,
+        state.fonts.tree.regular) or 0
+    local status_right = layout.width - metrics.padding - right_width
+    gui_draw_text_box(state, hdc, sanitize_text(text), metrics.padding,
+        layout.content_height, status_right - metrics.padding, layout.height,
+        gui_color(color), state.fonts.tree.regular, "left")
+    if right ~= "" then
+        gui_draw_text_box(state, hdc, right, status_right,
+            layout.content_height, layout.width - metrics.padding, layout.height,
+            gui_color(THEME.bar_fg), state.fonts.tree.regular, "right")
+    end
+end
+
+local function gui_paint(state, hdc)
+    local layout = state.layout
+    gui_sync_document(state)
+    gui_fill(state, hdc, 0, 0, layout.width, layout.height, state.brushes.background)
+    if layout.tree_width > 0 then
+        gui_paint_tree(state, hdc)
+        gui_fill(state, hdc, layout.tree_width, 0, layout.separator,
+            layout.content_height, state.brushes.separator)
+    end
+    gui_paint_document(state, hdc)
+    gui_paint_status(state, hdc)
+end
+
+local function gui_sync_scrollbar(state)
+    if state.hwnd == nil or not state.view then
+        return
+    end
+    local info = ffi.new("mdview_scroll_info[1]")
+    info[0].cbSize = ffi.sizeof("mdview_scroll_info")
+    info[0].fMask = 1 + 2 + 4
+    info[0].nMin = 1
+    info[0].nMax = math.max(1, #state.view.lines)
+    info[0].nPage = math.max(1, state.layout.rows)
+    info[0].nPos = state.view.top
+    state.libs.user32.SetScrollInfo(state.hwnd, 1, info, 1)
+end
+
+local function gui_present(state, hdc)
+    local libs = state.libs
+    local layout = state.layout
+    if layout.width <= 0 or layout.height <= 0 then
+        return
+    end
+    local buffer = state.buffer
+    if not buffer or buffer.width ~= layout.width or buffer.height ~= layout.height then
+        gui_release_buffer(state)
+        local mem = libs.gdi32.CreateCompatibleDC(hdc)
+        local bitmap = libs.gdi32.CreateCompatibleBitmap(hdc, layout.width, layout.height)
+        if mem == nil or bitmap == nil then
+            if mem then
+                libs.gdi32.DeleteDC(mem)
+            end
+            if bitmap then
+                libs.gdi32.DeleteObject(bitmap)
+            end
+            return
+        end
+        buffer = {
+            dc = mem,
+            bitmap = bitmap,
+            previous = libs.gdi32.SelectObject(mem, bitmap),
+            width = layout.width,
+            height = layout.height,
+        }
+        state.buffer = buffer
+    end
+    gui_paint(state, buffer.dc)
+    state.paints = (state.paints or 0) + 1
+    libs.gdi32.BitBlt(hdc, 0, 0, layout.width, layout.height, buffer.dc, 0, 0, 0x00CC0020)
+end
+
+local function gui_apply_layout(state, width, height)
+    state.layout = M.gui_layout(width, height, state.metrics)
+    gui_tree_clamp(state)
+    gui_sync_document(state)
+    gui_sync_scrollbar(state)
+end
+
+local function gui_handle_paint(state, hwnd)
+    local libs = state.libs
+    local paint = ffi.new("mdview_paint_struct[1]")
+    local hdc = libs.user32.BeginPaint(hwnd, paint)
+    if hdc ~= nil then
+        gui_present(state, hdc)
+        libs.user32.EndPaint(hwnd, paint)
+    end
+end
+
+local function gui_handle_size(state, hwnd)
+    local rect = ffi.new("mdview_rect[1]")
+    if state.libs.user32.GetClientRect(hwnd, rect) == 0 then
+        return
+    end
+    local width = rect[0].right - rect[0].left
+    local height = rect[0].bottom - rect[0].top
+    if width < 1 or height < 1 then
+        return
+    end
+    gui_apply_layout(state, width, height)
+    state.libs.user32.InvalidateRect(hwnd, nil, 0)
+end
+
+local function gui_handle_click(state, hwnd, lparam, double_click)
+    local libs = state.libs
+    local point = ffi.new("mdview_point[1]")
+    local value = tonumber(lparam) or 0
+    point[0].x = bit.band(value, 0xFFFF)
+    if point[0].x >= 0x8000 then
+        point[0].x = point[0].x - 0x10000
+    end
+    point[0].y = bit.band(bit.rshift(value, 16), 0xFFFF)
+    if point[0].y >= 0x8000 then
+        point[0].y = point[0].y - 0x10000
+    end
+    local target = M.gui_hit_test(state.layout, state.metrics, point[0].x, point[0].y)
+    if target.pane == "tree" and target.row then
+        state.focus = "tree"
+        local index = state.tree_top + target.row - 1
+        local node = state.browser.entries[index]
+        if node then
+            state.browser.selected = index
+            if node.directory then
+                -- A double click starts with a normal click, so toggle once.
+                if not double_click then
+                    gui_toggle_node(state, node)
+                end
+            elseif double_click then
+                gui_open_node(state, node)
+            end
+            gui_tree_clamp(state)
+        end
+    elseif target.pane == "document" then
+        state.focus = "document"
+    end
+    libs.user32.SetFocus(hwnd)
+    gui_sync_scrollbar(state)
+    libs.user32.InvalidateRect(hwnd, nil, 0)
+end
+
+local function gui_handle_wheel(state, hwnd, wparam, lparam)
+    local libs = state.libs
+    local value = tonumber(wparam) or 0
+    local delta = bit.band(bit.rshift(value, 16), 0xFFFF)
+    if delta >= 0x8000 then
+        delta = delta - 0x10000
+    end
+    if delta == 0 then
+        return
+    end
+    local steps = math.floor(delta * GUI_SCROLL_LINES / 120 + 0.5)
+    if steps == 0 then
+        steps = delta > 0 and 1 or -1
+    end
+    local point = ffi.new("mdview_point[1]")
+    local position = tonumber(lparam) or 0
+    point[0].x = bit.band(position, 0xFFFF)
+    if point[0].x >= 0x8000 then
+        point[0].x = point[0].x - 0x10000
+    end
+    point[0].y = bit.band(bit.rshift(position, 16), 0xFFFF)
+    if point[0].y >= 0x8000 then
+        point[0].y = point[0].y - 0x10000
+    end
+    libs.user32.ScreenToClient(hwnd, point)
+    local target = M.gui_hit_test(state.layout, state.metrics, point[0].x, point[0].y)
+    if target.pane == "tree" then
+        local count = #state.browser.entries
+        local maximum = math.max(1, count - state.layout.tree_rows + 1)
+        state.tree_top = gui_clamp(state.tree_top - steps, 1, maximum)
+    elseif state.view then
+        local action = steps > 0 and "up" or "down"
+        for _ = 1, math.abs(steps) do
+            state.view.top = M.gui_scroll_top(state.view.top, #state.view.lines,
+                state.layout.rows, action)
+        end
+    end
+    gui_sync_scrollbar(state)
+    libs.user32.InvalidateRect(hwnd, nil, 0)
+end
+
+local function gui_handle_key(state, hwnd, wparam, lparam)
+    local token = GUI_VIRTUAL_KEYS[tonumber(wparam) or 0]
+    if not token then
+        return false
+    end
+    local repeated = bit.band(bit.rshift(tonumber(lparam) or 0, 30), 1) == 1
+    if repeated and (token == "ENTER" or token == "TAB") then
+        return true
+    end
+    local action = M.gui_key_action(token, state.focus)
+    if not action then
+        return false
+    end
+    if action == "switch" then
+        state.focus = state.focus == "tree" and "document" or "tree"
+        if state.focus == "tree" then
+            gui_tree_clamp(state)
+        end
+    elseif action == "escape" then
+        state.focus = "document"
+    elseif state.focus == "tree" then
+        local browser = state.browser
+        local node = browser.entries[browser.selected]
+        local page = math.max(1, state.layout.tree_rows - 1)
+        if action == "up" then
+            browser.selected = browser.selected - 1
+        elseif action == "down" then
+            browser.selected = browser.selected + 1
+        elseif action == "first" then
+            browser.selected = 1
+        elseif action == "last" then
+            browser.selected = #browser.entries
+        elseif action == "page_up" then
+            browser.selected = browser.selected - page
+        elseif action == "page_down" then
+            browser.selected = browser.selected + page
+        elseif action == "expand" then
+            if node and node.directory then
+                if not node.expanded then
+                    gui_toggle_node(state, node)
+                elseif #(node.children or {}) > 0 then
+                    browser.selected = browser.selected + 1
+                end
+            end
+        elseif action == "collapse" then
+            if node and node.directory and node.expanded then
+                gui_toggle_node(state, node)
+            elseif node and node.parent then
+                rebuild_tree(browser, state.layout.tree_rows + 2, node.parent.path)
+            end
+        elseif action == "open" then
+            if node and node.directory then
+                gui_toggle_node(state, node)
+            elseif node then
+                gui_open_node(state, node)
+            end
+        end
+        gui_tree_clamp(state)
+    elseif state.view then
+        state.view.top = M.gui_scroll_top(state.view.top, #state.view.lines,
+            state.layout.rows, action)
+    end
+    gui_sync_scrollbar(state)
+    state.libs.user32.InvalidateRect(hwnd, nil, 0)
+    return true
+end
+
+local function gui_handle_scrollbar(state, hwnd, wparam)
+    local view = state.view
+    if not view then
+        return
+    end
+    local value = tonumber(wparam) or 0
+    local code = bit.band(value, 0xFFFF)
+    local action
+    if code == 0 then
+        action = "up"
+    elseif code == 1 then
+        action = "down"
+    elseif code == 2 then
+        action = "page_up"
+    elseif code == 3 then
+        action = "page_down"
+    elseif code == 6 then
+        action = "top"
+    elseif code == 7 then
+        action = "bottom"
+    end
+    if code == 4 or code == 5 then
+        local position = bit.band(bit.rshift(value, 16), 0xFFFF)
+        view.top = gui_clamp(position, 1, math.max(1, #view.lines - state.layout.rows + 1))
+    elseif action then
+        view.top = M.gui_scroll_top(view.top, #view.lines, state.layout.rows, action)
+    end
+    gui_sync_scrollbar(state)
+    state.libs.user32.InvalidateRect(hwnd, nil, 0)
+end
+
+local function gui_dispatch(state, hwnd, message, wparam, lparam)
+    local libs = state.libs
+    if message == WM_PAINT then
+        gui_handle_paint(state, hwnd)
+        return 0
+    elseif message == WM_ERASEBKGND then
+        return 1
+    elseif message == WM_SIZE then
+        gui_handle_size(state, hwnd)
+        return 0
+    elseif message == WM_MOUSEWHEEL then
+        gui_handle_wheel(state, hwnd, wparam, lparam)
+        return 0
+    elseif message == WM_LBUTTONDOWN then
+        gui_handle_click(state, hwnd, lparam, false)
+        return 0
+    elseif message == WM_LBUTTONDBLCLK then
+        gui_handle_click(state, hwnd, lparam, true)
+        return 0
+    elseif message == WM_KEYDOWN then
+        gui_handle_key(state, hwnd, wparam, lparam)
+        return 0
+    elseif message == WM_VSCROLL then
+        gui_handle_scrollbar(state, hwnd, wparam)
+        return 0
+    elseif message == WM_TIMER then
+        libs.user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+        return 0
+    elseif message == WM_CLOSE then
+        libs.user32.DestroyWindow(hwnd)
+        return 0
+    elseif message == WM_DESTROY then
+        gui_release_buffer(state)
+        libs.user32.PostQuitMessage(0)
+        return 0
+    elseif message == WM_GETMINMAXINFO then
+        local info = ffi.cast("mdview_minmax_info *", lparam)
+        info.min_track.x = gui_scale(state.metrics.dpi, GUI_MIN_WIDTH)
+        info.min_track.y = gui_scale(state.metrics.dpi, GUI_MIN_HEIGHT)
+        return 0
+    elseif message == WM_SETFOCUS or message == WM_KILLFOCUS then
+        libs.user32.InvalidateRect(hwnd, nil, 0)
+        return 0
+    end
+    return tonumber(libs.user32.DefWindowProcW(hwnd, message, wparam, lparam)) or 0
+end
+
+local function gui_window_proc(hwnd, message, wparam, lparam)
+    local state = gui_state
+    if not state then
+        local libs = gui_libs
+        if not libs then
+            return 0
+        end
+        return tonumber(libs.user32.DefWindowProcW(hwnd, message, wparam, lparam)) or 0
+    end
+    local ok, result = pcall(gui_dispatch, state, hwnd, message, wparam, lparam)
+    if not ok then
+        io.stderr:write("mdview: GUI callback failed: " .. tostring(result) .. "\n")
+        io.stderr:flush()
+        state.message = "GUI error: " .. tostring(result)
+        state.message_kind = "warn"
+        return 0
+    end
+    return tonumber(result) or 0
+end
+
+function M.gui_run(state, options)
+    if not IS_WINDOWS then
+        return 1, "--gui requires Windows (Win32 GUI)"
+    end
+    if not state then
+        return 1, "no GUI state"
+    end
+    local libs = state.libs
+    local instance = libs.kernel32.GetModuleHandleW(nil)
+    local class_name = gui_wide(libs, GUI_CLASS_NAME)
+    gui_wndproc_ref = ffi.cast("mdview_wndproc", gui_window_proc)
+    local wndclass = ffi.new("mdview_wndclass[1]")
+    wndclass[0].cbSize = ffi.sizeof("mdview_wndclass")
+    wndclass[0].style = 0x0001 + 0x0002
+    wndclass[0].lpfnWndProc = gui_wndproc_ref
+    wndclass[0].hInstance = instance
+    wndclass[0].hCursor = libs.user32.LoadCursorW(nil, ffi.cast("const uint16_t *", 32512))
+    wndclass[0].hbrBackground = nil
+    wndclass[0].lpszClassName = class_name
+    local icon = libs.user32.LoadIconW(nil, ffi.cast("const uint16_t *", 32512))
+    wndclass[0].hIcon = icon
+    wndclass[0].hIconSm = icon
+    local atom = libs.user32.RegisterClassExW(wndclass)
+    if atom == 0 and tonumber(libs.kernel32.GetLastError()) ~= 1410 then
+        gui_wndproc_ref = nil
+        return 1, "cannot register the mdview window class (" .. gui_last_error(libs) .. ")"
+    end
+
+    local style = 0x00CF0000 + 0x00200000
+    local dpi = state.metrics.dpi
+    local screen_width = math.max(640, tonumber(libs.user32.GetSystemMetrics(0)) or 1024)
+    local screen_height = math.max(480, tonumber(libs.user32.GetSystemMetrics(1)) or 768)
+    local rect = ffi.new("mdview_rect[1]")
+    rect[0].left = 0
+    rect[0].top = 0
+    rect[0].right = math.max(gui_scale(dpi, GUI_MIN_WIDTH), math.min(
+        gui_scale(dpi, GUI_DEFAULT_WIDTH), math.floor(screen_width * 0.94)))
+    rect[0].bottom = math.max(gui_scale(dpi, GUI_MIN_HEIGHT), math.min(
+        gui_scale(dpi, GUI_DEFAULT_HEIGHT), math.floor(screen_height * 0.90)))
+    libs.user32.AdjustWindowRectEx(rect, style, 0, 0)
+    local window_title = gui_wide(libs, "mdview — " .. state.path)
+    gui_state = state
+    local hwnd = libs.user32.CreateWindowExW(0, class_name, window_title, style, 100, 100,
+        rect[0].right - rect[0].left, rect[0].bottom - rect[0].top, nil, nil, instance, nil)
+    if hwnd == nil then
+        local message = "cannot create the mdview window (" .. gui_last_error(libs) .. ")"
+        gui_state = nil
+        gui_wndproc_ref = nil
+        return 1, message
+    end
+    state.hwnd = hwnd
+    libs.user32.ShowWindow(hwnd, 5)
+    libs.user32.UpdateWindow(hwnd)
+    if options and options.auto_close_ms then
+        libs.user32.SetTimer(hwnd, 1, options.auto_close_ms, nil)
+    end
+    if options and options.on_ready then
+        local ready, hook_error = pcall(options.on_ready, state, hwnd)
+        if not ready then
+            state.message = "GUI hook failed: " .. tostring(hook_error)
+            state.message_kind = "warn"
+        end
+    end
+
+    local message = ffi.new("mdview_msg[1]")
+    local code = 0
+    local run_error
+    while true do
+        local result = libs.user32.GetMessageW(message, nil, 0, 0)
+        if result == 0 then
+            break
+        elseif result == -1 then
+            code = 1
+            run_error = "message loop failed (" .. gui_last_error(libs) .. ")"
+            break
+        end
+        libs.user32.TranslateMessage(message)
+        libs.user32.DispatchMessageW(message)
+    end
+    gui_release_buffer(state)
+    state.hwnd = nil
+    gui_state = nil
+    gui_wndproc_ref = nil
+    return code, run_error
+end
+
+local function gui_le16(value)
+    return string.char(value % 256, math.floor(value / 256) % 256)
+end
+
+local function gui_le32(value)
+    value = value % 4294967296
+    return string.char(value % 256, math.floor(value / 256) % 256,
+        math.floor(value / 65536) % 256, math.floor(value / 16777216) % 256)
+end
+
+local function gui_save_bitmap(state, dc, bitmap, width, height, path)
+    local libs = state.libs
+    local stride = math.floor((width * 3 + 3) / 4) * 4
+    local image = ffi.new("mdview_bitmap_info[1]")
+    image[0].header.biSize = ffi.sizeof("mdview_bitmap_header")
+    image[0].header.biWidth = width
+    image[0].header.biHeight = height
+    image[0].header.biPlanes = 1
+    image[0].header.biBitCount = 24
+    image[0].header.biCompression = 0
+    local pixels = ffi.new("uint8_t[?]", stride * height)
+    if libs.gdi32.GetDIBits(dc, bitmap, 0, height, pixels, image, 0) == 0 then
+        return nil, "cannot read the rendered pixels (" .. gui_last_error(libs) .. ")"
+    end
+    local data = ffi.string(pixels, stride * height)
+    local header = "BM" .. gui_le32(54 + #data) .. gui_le16(0) .. gui_le16(0)
+        .. gui_le32(54) .. gui_le32(40) .. gui_le32(width) .. gui_le32(height)
+        .. gui_le16(1) .. gui_le16(24) .. gui_le32(0) .. gui_le32(#data)
+        .. gui_le32(2835) .. gui_le32(2835) .. gui_le32(0) .. gui_le32(0)
+    local file, open_error = io.open(path, "wb")
+    if not file then
+        return nil, "cannot write " .. path .. ": " .. tostring(open_error)
+    end
+    local wrote, write_error = file:write(header, data)
+    local closed, close_error = file:close()
+    if not wrote or not closed then
+        return nil, "cannot write " .. path .. ": " .. tostring(write_error or close_error)
+    end
+    local check = io.open(path, "rb")
+    if not check then
+        return nil, "cannot verify " .. path
+    end
+    local size = check:seek("end")
+    check:close()
+    if size ~= 54 + #data then
+        return nil, string.format("incomplete image write: %s has %d of %d bytes",
+            path, size or -1, 54 + #data)
+    end
+    return true
+end
+
+function M.gui_snapshot(state, width, height, path)
+    if not IS_WINDOWS or not state then
+        return nil, "GUI snapshots require Windows and a GUI state"
+    end
+    width = math.floor(tonumber(width) or 0)
+    height = math.floor(tonumber(height) or 0)
+    if width < 2 or height < 2 then
+        return nil, "snapshot size must be at least 2x2"
+    end
+    local libs = state.libs
+    local screen = libs.user32.GetDC(nil)
+    if screen == nil then
+        return nil, "cannot acquire the screen device context"
+    end
+    local mem = libs.gdi32.CreateCompatibleDC(screen)
+    local bitmap = libs.gdi32.CreateCompatibleBitmap(screen, width, height)
+    if mem == nil or bitmap == nil then
+        if mem then
+            libs.gdi32.DeleteDC(mem)
+        end
+        if bitmap then
+            libs.gdi32.DeleteObject(bitmap)
+        end
+        libs.user32.ReleaseDC(nil, screen)
+        return nil, "cannot allocate a " .. width .. "x" .. height .. " bitmap"
+    end
+    local previous = libs.gdi32.SelectObject(mem, bitmap)
+    state.layout = M.gui_layout(width, height, state.metrics)
+    gui_sync_document(state)
+    gui_paint(state, mem)
+    local ok, err = gui_save_bitmap(state, mem, bitmap, width, height, path)
+    libs.gdi32.SelectObject(mem, previous)
+    libs.gdi32.DeleteObject(bitmap)
+    libs.gdi32.DeleteDC(mem)
+    libs.user32.ReleaseDC(nil, screen)
+    return ok, err
+end
+
+local function run_gui(options)
+    if not IS_WINDOWS then
+        io.stderr:write("mdview: --gui requires Windows (Win32); use the terminal pager instead\n")
+        return 1
+    end
+    if options.file == "-" then
+        io.stderr:write("mdview: --gui cannot read from stdin; pass a Markdown file or a folder\n")
+        return 1
+    end
+    local theme_ok, theme_error = M.set_theme(options.theme)
+    if not theme_ok then
+        io.stderr:write("mdview: " .. tostring(theme_error) .. "\n")
+        return 1
+    end
+    local state, state_error = gui_create_state(options)
+    if not state then
+        io.stderr:write("mdview: " .. tostring(state_error) .. "\n")
+        return 1
+    end
+    local code, run_error = M.gui_run(state, nil)
+    M.gui_destroy(state)
+    if code ~= 0 and run_error then
+        io.stderr:write("mdview: " .. tostring(run_error) .. "\n")
+    end
+    return code
+end
+
+
+
+-- =========================================================================
+-- 17. CLI
 -- =========================================================================
 local function usage(stream)
     stream:write([[
@@ -3869,6 +5389,7 @@ OPTIONS:
   --snapshot [WxH]     Print one TUI frame and exit (default 80x24)
   --case-sensitive     Search matches case exactly
   --search PATTERN     Pre-fill search (useful with --snapshot)
+  --gui                Open the Windows GUI (Win32 SDK, requires Windows)
   -h, --help           Show this help
 
 KEYS:
@@ -3877,6 +5398,11 @@ KEYS:
   f files      Tab switch panes
   Tree: j/k move, h/l collapse/expand/open, gg/G first/last,
         Enter open, Ctrl-d/u half-page, r refresh, ? help, Esc document
+
+GUI:
+  --gui opens a native window: click a folder to expand, double-click a
+  file or press Enter to open it, Tab switches panes and the wheel or
+  keyboard scrolls the document. Requires Windows; conflicts with --snapshot.
 
 NOTES:
   Windows pager support needs Windows 10+ with VT sequences enabled
@@ -3931,6 +5457,7 @@ local function parse_arguments(argv)
         width = 80,
         color = false,
         pager = true,
+        gui = false,
         images = true,
         numbers = nil,
         theme = "dark",
@@ -3946,6 +5473,8 @@ local function parse_arguments(argv)
             options.help = true
         elseif value == "--no-pager" then
             options.pager = false
+        elseif value == "--gui" then
+            options.gui = true
         elseif value == "--color" then
             options.color = true
         elseif value == "--no-color" then
@@ -4008,6 +5537,9 @@ local function parse_arguments(argv)
     end
     if options.theme ~= "dark" and options.theme ~= "light" then
         return nil, "unknown theme: " .. tostring(options.theme)
+    end
+    if options.gui and options.snapshot then
+        return nil, "--gui cannot be combined with --snapshot"
     end
     return options
 end
@@ -4077,6 +5609,9 @@ local function main(argv)
         return 0
     end
     options.file = options.file or "."
+    if options.gui then
+        return run_gui(options)
+    end
     local interactive = options.pager and Terminal.is_tty(1) and Terminal.is_tty(0)
     local is_directory = false
     local fs
@@ -4185,7 +5720,7 @@ local function main(argv)
 end
 
 -- =========================================================================
--- 17. Entry Point
+-- 18. Entry Point
 -- =========================================================================
 M.Terminal = Terminal
 M.parse_blocks = parse_blocks

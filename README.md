@@ -221,6 +221,7 @@ mdview
 mdview docs/
 mdview README.md
 mdview --no-pager README.md
+mdview --gui docs/          # native Windows GUI with the Markdown tree
 ```
 
 The installer creates `mdview.lua` and an executable `mdview` launcher in
@@ -263,9 +264,18 @@ an error without replacing the current document. In the document pane, press
 `t` for the heading outline, `/` to search, `h` for help, and `q` to quit.
 Use `mdview --snapshot 100x24 docs/` to inspect the tree without an interactive terminal.
 
+On Windows, `mdview --gui [FILE|DIR]` opens a native window built directly on the
+Windows SDK through LuaJIT FFI (`user32`/`gdi32`), with no extra libraries or
+DLLs to ship. The left pane is the same lazy Markdown tree; the right pane
+renders the document with the current `--theme`. Click a folder to expand it,
+double-click a file or press Enter to open it, Tab switches panes, and the mouse
+wheel, arrow/Page/Home/End keys or the scrollbar move the document. The window
+is resizable and re-wraps the Markdown to the new width.
+
 Deployment checks: `python3 test_deploy_mdview.py` (or `python` on Windows).
-Browser checks: `luajit test_mdview.lua`, `python3 test_mdview_browser.py`, and
-`python3 test_mdview_pty.py` (Linux terminal integration).
+Browser checks: `luajit test_mdview.lua`, `luajit test_mdview_gui.lua`,
+`python3 test_mdview_browser.py`, and `python3 test_mdview_pty.py`
+(Linux terminal integration).
 
 ### 🔎 Duplicate-file finder
 
