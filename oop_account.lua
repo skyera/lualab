@@ -6,6 +6,12 @@ local setmetatable = setmetatable
 local Account = {}
 Account.__index = Account
 
+setmetatable(Account, {
+    __call = function(cls, ...)
+        return cls:new(...)
+    end
+})
+
 local next_account_id = 1001
 
 
@@ -66,7 +72,12 @@ function Account:transfer(amount, target)
     return true, self.balance
 end
 
-local SavingAccount = setmetatable({}, {__index=Account})
+local SavingAccount = setmetatable({}, {
+    __index = Account,
+    __call = function(cls, ...)
+        return cls:new(...)
+    end
+})
 SavingAccount.__index = SavingAccount
 
 local next_saving_id = 2001

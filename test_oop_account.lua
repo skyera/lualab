@@ -23,6 +23,16 @@ print("\nTest 1: Acccount Instantiation & ID Generation")
 do
     local a1 = Account:new(1000)
     check(a1:get_balance() == 1000, "Initial balance initialized to 1000")
+
+    -- Callable class syntax (__call)
+    local a2 = Account(2500, "ACC-CALL-01")
+    check(a2:get_balance() == 2500, "Account callable syntax initializes balance")
+    check(a2.id == "ACC-CALL-01", "Account callable syntax forwards arguments")
+
+    local s2 = SavingAccount(1200, 0.08, 300, "SAV-CALL-01")
+    check(s2:get_balance() == 1200, "SavingAccount callable syntax initializes balance")
+    check(s2.overdraft_limit == 300, "SavingAccount callable syntax forwards overdraft_limit")
+    check(s2.id == "SAV-CALL-01", "SavingAccount callable syntax forwards custom id")
 end
 
 -- Test 2: Deposit & Input Validation
