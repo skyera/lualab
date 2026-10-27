@@ -59,6 +59,18 @@ function Account:__tostring()
     return string_format("Account(%s, balance: %.2f)", self.id, self.balance)
 end
 
+function Account.__eq(a, b)
+    if type(a) ~= "table" or type(b) ~= "table" then
+        return false
+    end
+
+    return a.id == b.id
+end
+
+function Account.__lt(a, b)
+    return a.balance < b.balance
+end
+
 function Account:transfer(amount, target)
     if not target or type(target.deposit) ~= "function" then
         return false, "Invalid target account for transfer"
@@ -79,6 +91,8 @@ local SavingAccount = setmetatable({}, {
     end
 })
 SavingAccount.__index = SavingAccount
+SavingAccount.__eq = Account.__eq
+SavingAccount.__lt = Account.__lt
 
 local next_saving_id = 2001
 

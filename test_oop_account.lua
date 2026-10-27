@@ -126,8 +126,33 @@ do
     check(s_str:find("SavingAccount") ~= nil and s_str:find("limit:") ~= nil, "SavingAccount __tostring includes overdraft limit")
 end
 
--- Test 8: Bytecode Scoping & Undeclared Global Check (GGET/GSET)
-print("\nTest 8: Bytecode Scoping & Undeclared Global Analysis")
+-- Test 8: Metamethods __eq and __lt (Equality & Sorting)
+print("\nTest 8: Metamethods __eq and __lt (Equality & Sorting)")
+do
+    local a1 = Account(100, "ACC-SAME")
+    local a2 = Account(500, "ACC-SAME")
+    local a3 = Account(300, "ACC-DIFF")
+
+    check(a1 == a2, "Accounts with same ID are equal (__eq)")
+    check(a1 ~= a3, "Accounts with different IDs are not equal")
+
+    check(a1 < a2, "Account with $100 is less than $500 (__lt)")
+    check(not (a2 < a1), "Account with $500 is not less than $100")
+
+    local list = { a2, a1, a3 }
+    table.sort(list)
+    check(list[1].balance == 100, "Sorted 1st element has lowest balance ($100)")
+    check(list[2].balance == 300, "Sorted 2nd element has middle balance ($300)")
+    check(list[3].balance == 500, "Sorted 3rd element has highest balance ($500)")
+
+    local s1 = SavingAccount(200, 0.05, 100, "SAV-SAME")
+    local s2 = SavingAccount(800, 0.05, 100, "SAV-SAME")
+    check(s1 == s2, "SavingAccount instances with same ID are equal")
+    check(s1 < s2, "SavingAccount instances compare by balance")
+end
+
+-- Test 9: Bytecode Scoping & Undeclared Global Check (GGET/GSET)
+print("\nTest 9: Bytecode Scoping & Undeclared Global Analysis")
 do
     local luajit = arg[-1] or "luajit"
     local p_bc = io.popen(luajit .. " -bl oop_account.lua", "r")
