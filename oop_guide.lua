@@ -110,3 +110,77 @@ print(e)
 local p = Player("Hero", 0, 0, 150)
 p:move(3, 4)
 print(p)
+
+-- ============================================================================
+-- Chapter 3: Single-Pass Polymorphic Inheritance
+-- Key Concepts:
+--   1. Dynamic 'self' in base constructor prevents double-blessing
+--   2. Explicit parent delegation via Character.new(self, ...)
+--   3. Method overriding with polymorphic behavior
+-- ============================================================================
+print("\n=== Chapter 3: Single-Pass Polymorphic Inheritance ===")
+
+local Character = {}
+Character.__index = Character
+
+setmetatable(Character, {
+    __call = function(cls, ...)
+        return cls:new(...)
+    end
+})
+
+function Character:new(name, health)
+    -- 'self' dynamically binds to the calling class (Character or Warrior)
+    local instance = setmetatable({}, self)
+    instance.name = name or "Hero"
+    instance.health = health or 100
+    instance.level = 1
+    return instance
+end
+
+function Character:take_damage(amount)
+    self.health = math.max(0, self.health - amount)
+    print(string.format("%s took %d damage. Health is now %d", self.name, amount, self.health))
+    return self.health
+end
+
+function Character:display_status()
+    print(string.format("Name: %-8s | Level: %d | Health: %3d", self.name, self.level, self.health))
+end
+
+-- Subclass: Warrior
+local Warrior = setmetatable({}, {
+    __index = Character,
+    __call = function(cls, ...)
+        return cls:new(...)
+    end
+})
+Warrior.__index = Warrior
+
+function Warrior:new(name, health, armor)
+    -- Single-pass instantiation: pass 'self' (Warrior) into Character.new
+    local instance = Character.new(self, name, health)
+    instance.armor = armor or 10
+    return instance
+end
+
+function Warrior:take_damage(amount)
+    local effective_damage = math.max(1, amount - self.armor)
+    print(string.format("%s's armor (%d) absorbed damage! Incoming: %d -> Effective: %d",
+        self.name, self.armor, amount, effective_damage))
+    return Character.take_damage(self, effective_damage)
+end
+
+function Warrior:shield_bash()
+    print(string.format("%s performs a shield bash with armor rating %d!", self.name, self.armor))
+end
+
+-- Chapter 3 Demo
+local mage = Character("Gandalf", 80)
+mage:display_status()
+mage:take_damage(25)
+
+local thorin = Warrior("Thorin", 150, 20)
+thorin:display_status()
+thorin:take_damage(35)
+thorin:shield_bash()
