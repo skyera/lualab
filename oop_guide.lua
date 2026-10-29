@@ -184,3 +184,83 @@ local thorin = Warrior("Thorin", 150, 20)
 thorin:display_status()
 thorin:take_damage(35)
 thorin:shield_bash()
+
+-- ============================================================================
+-- Chapter 4: Dynamic Properties & Geometric Metamethods
+-- Key Concepts:
+--   1. Clean constructor arguments (no dummy 'nil')
+--   2. Dynamically computed properties vs stale cached fields
+--   3. Subclassing with geometric invariants (Square is a Rectangle)
+--   4. Metamethods: __tostring and __eq
+-- ============================================================================
+print("\n=== Chapter 4: Dynamic Properties & Metamethods ===")
+
+local Rectangle = {}
+Rectangle.__index = Rectangle
+
+setmetatable(Rectangle, {
+    __call = function(cls, ...)
+        return cls:new(...)
+    end
+})
+
+function Rectangle:new(width, height)
+    local instance = setmetatable({}, self)
+    instance.width = width or 0
+    instance.height = height or 0
+    return instance
+end
+
+function Rectangle:area()
+    return self.width * self.height
+end
+
+function Rectangle:perimeter()
+    return 2 * (self.width + self.height)
+end
+
+function Rectangle:__tostring()
+    return string.format("Rectangle(width: %d, height: %d, area: %d)",
+        self.width, self.height, self:area())
+end
+
+function Rectangle.__eq(a, b)
+    if type(a) ~= "table" or type(b) ~= "table" then
+        return false
+    end
+    return a.width == b.width and a.height == b.height
+end
+
+-- Subclass: Square (where width == height)
+local Square = setmetatable({}, {
+    __index = Rectangle,
+    __call = function(cls, ...)
+        return cls:new(...)
+    end
+})
+Square.__index = Square
+Square.__eq = Rectangle.__eq
+
+function Square:new(side)
+    local instance = Rectangle.new(self, side, side)
+    return instance
+end
+
+function Square:__tostring()
+    return string.format("Square(side: %d, area: %d)", self.width, self:area())
+end
+
+-- Chapter 4 Demo
+local r1 = Rectangle(10, 20)
+print(r1)
+print("Perimeter:", r1:perimeter())
+
+r1.width = 30
+print("After resizing width to 30:", r1)
+
+local s1 = Square(15)
+print(s1)
+print("Square perimeter (inherited):", s1:perimeter())
+
+local r2 = Rectangle(30, 20)
+print("r1 == r2:", r1 == r2)
