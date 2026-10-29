@@ -264,3 +264,92 @@ print("Square perimeter (inherited):", s1:perimeter())
 
 local r2 = Rectangle(30, 20)
 print("r1 == r2:", r1 == r2)
+
+-- ============================================================================
+-- Chapter 5: The Universal Class:extend() Pattern
+-- Key Concepts:
+--   1. Reusable inheritance factory: Class:extend(name)
+--   2. Automatic metamethod inheritance (__call, __tostring, __eq)
+--   3. The 'super' reference: sub.super = self
+--   4. Universal type inspection: instance:is_a(Class)
+-- ============================================================================
+print("\n=== Chapter 5: The Universal Class:extend() Pattern ===")
+
+local Object = {}
+Object.__index = Object
+
+-- Creates a new sublcass linked to this class
+function Object:extend(class_name)
+    local sub = setmetatable({}, {
+        __index = self,
+        __call = function(cls, ...)
+            return cls:new(...)
+        end
+    })
+    sub.__index = sub
+    sub.super = self
+    sub.class_name = class_name or "AnonymousClass"
+
+    sub.__tostring = self.__tostring
+    sub.__eq = self.__eq
+
+    return sub
+end
+
+function Object:new(...)
+    local instance = setmetatable({}, self)
+    if instance._init then
+        instance:_init(...)
+    end
+    return instance
+end
+
+function Object:is_a(target_class)
+    local cls = getmetatable(self)
+    while cls do
+        if cls == target_class then
+            return true
+        end
+        cls = cls.super
+    end
+    return false
+end
+
+function Object:__tostring()
+    return string.format("<%s instance>", self.class_name or "Object")
+end
+
+-- Chapter 5 Demo: Building a Class Hierarchy
+local Vehicle = Object:extend("Vehicle")
+
+function Vehicle:_init(brand, max_speed)
+    self.brand = brand or "Generic"
+    self.max_speed = max_speed or 60
+end
+
+function Vehicle:__tostring()
+    return string.format("%s (Max Speed: %d mph)", self.brand, self.max_speed)
+end
+
+local ElectricCar = Vehicle:extend("ElectricCar")
+
+function ElectricCar:_init(brand, max_speed, battery_capacity)
+    ElectricCar.super._init(self, brand, max_speed)
+    self.battery_capacity = battery_capacity or 75
+end
+
+function ElectricCar:__tostring()
+    return string.format("%s (Max Speed: %d mph, Battery: %dkWh)",
+        self.brand, self.max_speed, self.battery_capacity)
+end
+
+local v = Vehicle("Toyota Camry", 115)
+local tesla = ElectricCar("Tesla Model 3", 140, 82)
+
+print(v)
+print(tesla)
+
+print("tesla:is_a(ElectricCar):", tesla:is_a(ElectricCar))
+print("tesla:is_a(Vehicle):    ", tesla:is_a(Vehicle))
+print("tesla:is_a(Object):     ", tesla:is_a(Object))
+print("v:is_a(ElectricCar):    ", v:is_a(ElectricCar))
