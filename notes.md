@@ -1,0 +1,179 @@
+# Lua OOP & Metatable Notes: Mental Model & Reference
+
+A concise guide to understanding Object-Oriented Programming and Metatables in Lua, mapped to familiar C++ concepts.
+
+---
+
+## 1. The Core Mental Model: "Find Method, Operate on Table"
+
+In Lua, there is no native `class` or `method` keyword.
+- A **class** is just a **table** holding functions.
+- An **instance** is a **table** holding data fields.
+- A **method call** (`t:method(...)`) is a two-step operation:
+  1. **Find the method**: Look up `"method"` in `t` itself; if not found, follow `getmetatable(t).__index`.
+  2. **Operate on the table**: Call the function and pass `t` as the **1st argument (`self`)**.
+
+```lua
+-- When you write:
+t:complete("now")
+
+-- Lua literally executes:
+t["complete"](t, "now")
+-- ^^^^^^^^^^  ^
+-- Step 1:     Step 2:
+-- Find method Pass table as 1st argument (self)
+```
+
+---
+
+## 2. Colon (`:`) vs. Dot (`.`): Syntax & Mechanics
+
+The colon `:` is pure syntactic sugar that automatically injects `self`.
+
+### A. When Defining a Function
+```lua
+-- Colon syntax (sugar):
+function Account:deposit(amount)
+    self.balance = self.balance + amount
+end
+
+-- Dot syntax (exact equivalent):
+function Account.deposit(self, amount)
+    self.balance = self.balance + amount
+end
+```
+
+### B. When Calling a Function
+```lua
+-- Colon call: passes 'acc' as 1st argument automatically
+acc:deposit(100)
+
+-- Dot call: requires passing 'acc' manually
+Account.deposit(acc, 100)
+
+-- CAUTION: acc.deposit(100) passes ONLY 100 -> self becomes 100, amount becomes nil!
+```
+
+---
+
+## 3. Method Lookup Chain: `rawget` and `__index`
+
+When accessing `t[key]` (or `t.key` / `t:key()`):
+
+1. **Check the table itself**: `rawget(t, key)`
+   - If the key exists directly on the instance, use it immediately (enables per-instance overrides).
+2. **Fallback to Metatable `__index`**:
+   - If `rawget(t, key)` is `nil`, Lua looks at `getmetatable(t).__index`.
+   - If `__index` is a table, Lua checks `__index[key]`.
+   - If `__index` has its own metatable (subclass chain), Lua repeats the lookup up the prototype hierarchy.
+
+```
+Lookup Path for t:complete():
+t (instance table)
+  │
+  ├─> Key "complete" found? ──Yes──> Return function
+  │
+  └─No─> getmetatable(t) (Class table, e.g. Task)
+           │
+           └─> Task.__index["complete"] ──Yes──> Return function
+```
+
+### What is `rawget` / `rawset`?
+- `rawget(t, key)`: Reads `t[key]` **without** querying `__index`.
+- `rawset(t, key, val)`: Writes `t[key] = val` **without** triggering `__newindex`.
+
+---
+
+## 4. The C++ to Lua Rosetta Stone
+
+If you know C++, you already know Lua OOP under the hood:
+
+| C++ Concept | Lua Equivalent | Notes |
+| :--- | :--- | :--- |
+| **`this` pointer** | **`self`** (1st argument) | Passed automatically by `:` |
+| **`obj.method(x)`** | **`obj:method(x)`** | Resolves function and passes `obj` as `self` |
+| **`vptr`** (vtable pointer) | **`setmetatable(obj, Class)`** | Connects instance to class table |
+| **`vtable`** (virtual method table) | **`Class.__index = Class`** | Stores shared function pointers |
+| **`Base::method(x)`** | **`Base.method(self, x)`** | Explicit supercall using dot syntax |
+| **`operator()` (Functor)** | **`__call`** metamethod | Allows `Class(...)` constructor syntax |
+| **`operator==` / `operator<`** | **`__eq` / `__lt`** metamethods | Operator overloading |
+| **`dynamic_cast<T*>`** | **`instance:is_a(T)`** | Walking the ancestor metatable chain |
+
+---
+
+## 5. `__call`: Making Tables Callable (Constructors)
+
+In Lua, only functions can be called with `()`. To make a class table callable like a constructor (`Task(...)` instead of `Task:new(...)`), assign `__call` to the **class metatable**.
+
+### The 1st Argument of `__call` is ALWAYS the Table Itself
+```lua
+setmetatable(Task, {
+    __call = function(cls, ...)
+        return cls:new(...)
+    end
+})
+```
+
+When you write `local t = Task("Buy milk", false)`:
+1. Lua sees `()` on the `Task` table $\rightarrow$ looks for `getmetatable(Task).__call`.
+2. Lua passes `Task` as the **1st argument (`cls`)**: `__call(Task, "Buy milk", false)`.
+3. Inside `__call`, `cls:new(...)` runs $\rightarrow$ calls `Task:new("Buy milk", false)`.
+4. `Task:new` allocates a table `{}` via `setmetatable({}, self)`, fills the fields, and returns it.
+
+---
+
+## 6. Two-Phase Initialization (`__call` + `_init`)
+
+Separating memory allocation from field population prevents constructor boilerplate and avoids double-blessing metatables in subclasses:
+
+```lua
+local Entity = {}
+Entity.__index = Entity
+
+-- Phase 1: Allocation
+setmetatable(Entity, {
+    __call = function(cls, ...)
+        local instance = setmetatable({}, cls) -- Allocates table with correct class
+        if instance._init then
+            instance:_init(...)                -- Phase 2: Populates fields
+        end
+        return instance
+    end
+})
+
+function Entity:_init(name)
+    self.name = name
+end
+```
+
+---
+
+## 7. Operator Overloading: The Dot (`.`) Invariant for Binary Operators
+
+Binary metamethods (`__eq`, `__lt`, `__add`) receive **two operands `(a, b)`**, not an implicit `self`.
+
+> [!WARNING]
+> Always define binary metamethods with **dot syntax (`.`)**, NEVER with a colon (`:`).
+
+```lua
+-- CORRECT: receives (a, b)
+function Rectangle.__eq(a, b)
+    if type(a) ~= "table" or type(b) ~= "table" then
+        return false
+    end
+    return a.width == b.width and a.height == b.height
+end
+
+-- WRONG: function Rectangle:__eq(a, b) inserts hidden 'self', so 'b' receives nil!
+```
+
+---
+
+## 8. Summary Checklist
+
+1. **To declare a method**: Use `function Class:method(...)`.
+2. **To call a method**: Use `instance:method(...)`.
+3. **To call a super method**: Use `SuperClass.method(self, ...)` with a **dot** and pass `self` explicitly.
+4. **To make a class callable**: Set `setmetatable(Class, { __call = function(cls, ...) return cls:new(...) end })`.
+5. **To overload binary operators (`==`, `<`)**: Use dot syntax (`Class.__eq = function(a, b) ... end`).
+6. **To check type hierarchy**: Walk `getmetatable(self)` / `.super` chain.
