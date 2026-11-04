@@ -169,11 +169,67 @@ end
 
 ---
 
-## 8. Summary Checklist
+## 8. The "Shared Table" Prototype Trap (Class vs. Instance Variables)
+
+In C++, putting a table on the class definition in Lua behaves like declaring a **`static` variable**:
+
+```cpp
+// What putting a table on the class secretly behaves like:
+class Player {
+public:
+    static std::vector<std::string> inventory; // ⚠️ SHARED across all instances!
+};
+```
+
+### The Bug: Primitives Shadow, Tables Mutate in Place
+
+```lua
+local Player = {
+    level = 1,      -- Primitive (number)
+    inventory = {}  -- ⚠️ DANGER! Single shared table in memory!
+}
+Player.__index = Player
+
+function Player:new(name)
+    return setmetatable({ name = name }, self)
+end
+
+local p1 = Player:new("Alice")
+local p2 = Player:new("Bob")
+
+-- 1. Primitives: SAFE (Assignment shadows the prototype)
+p1.level = 2
+-- Lua writes 'level = 2' directly into p1. Player.level remains 1.
+
+-- 2. Table mutation: DISASTER (Mutates the shared prototype table!)
+table.insert(p1.inventory, "Sword")
+-- Step A: p1 has no 'inventory' key -> resolves via __index to Player.inventory.
+-- Step B: table.insert mutates that single table in memory!
+print(#p2.inventory) -- Output: 1! Bob suddenly sees Alice's sword!
+```
+
+### The Golden Rule
+- **Primitives** (strings, numbers, booleans) can safely sit on the class table as defaults.
+- **Tables and Arrays** MUST ALWAYS be instantiated inside the constructor (`:new()` / `_init`) so each instance gets its own independent table in memory:
+
+```lua
+-- ✅ THE CORRECT PATTERN:
+function Player:new(name)
+    local instance = setmetatable({}, self)
+    instance.name = name
+    instance.inventory = {} -- 💡 Fresh, independent table for this instance!
+    return instance
+end
+```
+
+---
+
+## 9. Summary Checklist
 
 1. **To declare a method**: Use `function Class:method(...)`.
 2. **To call a method**: Use `instance:method(...)`.
 3. **To call a super method**: Use `SuperClass.method(self, ...)` with a **dot** and pass `self` explicitly.
 4. **To make a class callable**: Set `setmetatable(Class, { __call = function(cls, ...) return cls:new(...) end })`.
 5. **To overload binary operators (`==`, `<`)**: Use dot syntax (`Class.__eq = function(a, b) ... end`).
-6. **To check type hierarchy**: Walk `getmetatable(self)` / `.super` chain.
+6. **To avoid the shared table bug**: Always initialize nested tables and arrays inside constructors (`:new()` / `_init`), never on the class prototype.
+7. **To check type hierarchy**: Walk `getmetatable(self)` / `.super` chain.
