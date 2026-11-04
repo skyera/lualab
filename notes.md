@@ -298,7 +298,28 @@ Order:include(Loggable)
 
 ---
 
-## 11. Summary Checklist
+## 11. LuaJIT Performance Invariants: Static vs. Dynamic Metatables
+
+In LuaJIT, method calls (`obj:method()`) run at near-C++ speed because the JIT compiler compiles the call into native CPU instructions guarded by a single metatable check:
+
+```
+[Native CPU Assembly Guard]
+Is obj's metatable still 'Account'? ──Yes──> JUMP directly to machine code of method!
+                                    └──No───> JIT Guard Failure (Bailout)
+```
+
+### The JIT Trap: Mutating Metatables in Hot Loops
+If you re-bless objects (`setmetatable(obj, other_mt)`) or redefine methods dynamically inside hot loops:
+- The JIT guard fails repeatedly.
+- LuaJIT aborts compiled traces and de-optimizes back to the interpreter (~8x to 30x slowdown!).
+
+> [!TIP]
+> **The Golden Rule for LuaJIT Speed**:
+> Define all classes, methods, and metatables **once during application startup**. Keep metatables static and read-only during runtime so the JIT compiler can inline method calls.
+
+---
+
+## 12. Summary Checklist
 
 1. **To declare a method**: Use `function Class:method(...)`.
 2. **To call a method**: Use `instance:method(...)`.
@@ -308,4 +329,5 @@ Order:include(Loggable)
 6. **To avoid the shared table bug**: Always initialize nested tables and arrays inside constructors (`:new()` / `_init`), never on the class prototype.
 7. **To catch silent typos**: Use `__newindex` on instance metatables to intercept writing to undeclared keys.
 8. **To compose multiple behaviors**: Use mixins via `Class:include(mixin)` instead of multiple inheritance.
-9. **To check type hierarchy**: Walk `getmetatable(self)` / `.super` chain.
+9. **For LuaJIT performance**: Keep metatables static during runtime; never re-bless or mutate metatables in hot loops.
+10. **To check type hierarchy**: Walk `getmetatable(self)` / `.super` chain.
