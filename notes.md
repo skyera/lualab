@@ -224,7 +224,55 @@ end
 
 ---
 
-## 9. Summary Checklist
+## 9. Typo Protection & Strict Schemas via `__newindex`
+
+While `__index` intercepts **reading** missing keys (`val = t[missing]`), **`__newindex` intercepts WRITING to a key that does NOT exist in the table yet (`t[new_key] = val`)**.
+
+```
+                  t[key] = value
+                        │
+         Does 'key' ALREADY exist in 't'?
+                  │             │
+                 YES            NO
+                  │             │
+          Writes directly    Does metatable have __newindex?
+          into t[key]               │                │
+          (Fast, normal)           YES               NO
+                                    │                │
+                          Calls __newindex!    Creates new key in 't'
+                          (Intercepted!)       (Normal Lua behavior)
+```
+
+### The Bug: Silent Typos
+```lua
+function Account:deposit(amount)
+    self.balence = self.balance + amount -- ⚠️ Typo: creates 'balence', leaves 'balance' untouched!
+end
+```
+
+### The Fix: Lock Instance Fields with `__newindex`
+```lua
+function GuardedAccount:new(id, balance)
+    local instance = {
+        id = id,
+        balance = balance or 0,
+    }
+
+    local mt = {
+        __index = GuardedAccount,
+        __newindex = function(tbl, key, value)
+            error(string.format("Typo Error: Field '%s' does not exist on GuardedAccount!", key), 2)
+        end
+    }
+    return setmetatable(instance, mt)
+end
+```
+- Existing fields (`instance.balance = 200`) update directly without invoking `__newindex`.
+- Misspelled fields (`instance.balence = 999`) trigger `__newindex` and raise an immediate error pointing to the caller's line (`error(..., 2)`).
+
+---
+
+## 10. Summary Checklist
 
 1. **To declare a method**: Use `function Class:method(...)`.
 2. **To call a method**: Use `instance:method(...)`.
@@ -232,4 +280,5 @@ end
 4. **To make a class callable**: Set `setmetatable(Class, { __call = function(cls, ...) return cls:new(...) end })`.
 5. **To overload binary operators (`==`, `<`)**: Use dot syntax (`Class.__eq = function(a, b) ... end`).
 6. **To avoid the shared table bug**: Always initialize nested tables and arrays inside constructors (`:new()` / `_init`), never on the class prototype.
-7. **To check type hierarchy**: Walk `getmetatable(self)` / `.super` chain.
+7. **To catch silent typos**: Use `__newindex` on instance metatables to intercept writing to undeclared keys.
+8. **To check type hierarchy**: Walk `getmetatable(self)` / `.super` chain.
