@@ -272,7 +272,33 @@ end
 
 ---
 
-## 10. Summary Checklist
+## 10. Mixins & Composition (Beats Multiple Inheritance)
+
+In Lua, chaining multiple inheritance metatables is slow and prone to conflicts. The idiomatic approach is **Mixins** (copying reusable method tables into a class).
+
+```lua
+-- Reusable mixin:
+local Loggable = {}
+function Loggable:log(message)
+    print(string.format("[LOG][%s] %s", self.id or "Unknown", message))
+end
+
+-- Installer function on class:
+function Order:include(mixin)
+    for name, method in pairs(mixin) do
+        if type(method) == "function" then
+            self[name] = method
+        end
+    end
+    return self -- Allows chaining: Order:include(M1):include(M2)
+end
+
+Order:include(Loggable)
+```
+
+---
+
+## 11. Summary Checklist
 
 1. **To declare a method**: Use `function Class:method(...)`.
 2. **To call a method**: Use `instance:method(...)`.
@@ -281,4 +307,5 @@ end
 5. **To overload binary operators (`==`, `<`)**: Use dot syntax (`Class.__eq = function(a, b) ... end`).
 6. **To avoid the shared table bug**: Always initialize nested tables and arrays inside constructors (`:new()` / `_init`), never on the class prototype.
 7. **To catch silent typos**: Use `__newindex` on instance metatables to intercept writing to undeclared keys.
-8. **To check type hierarchy**: Walk `getmetatable(self)` / `.super` chain.
+8. **To compose multiple behaviors**: Use mixins via `Class:include(mixin)` instead of multiple inheritance.
+9. **To check type hierarchy**: Walk `getmetatable(self)` / `.super` chain.
