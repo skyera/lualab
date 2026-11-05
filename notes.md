@@ -26,7 +26,68 @@ t["complete"](t, "now")
 
 ---
 
-## 2. Colon (`:`) vs. Dot (`.`): Syntax & Mechanics
+## 2. Anatomy of a Lua Class: The 4 Steps + `__call`
+
+In Lua, there is no `class` keyword. A class is an architectural pattern built using a table, `__index`, `:` methods, and a constructor:
+
+```lua
+-- Step 1: Create the Class Table (The Blueprint / vtable)
+local BankAccount = {}
+
+-- Step 2: Set __index to point to itself (Lookup target for instances)
+BankAccount.__index = BankAccount
+
+-- Step 3: Add Shared Methods using ':' (auto-injects 'self')
+function BankAccount:deposit(amount)
+    self.balance = self.balance + amount
+    return self.balance
+end
+
+function BankAccount:get_balance()
+    return self.balance
+end
+
+-- Step 4: Write the Constructor (:new)
+function BankAccount:new(id, initial_balance)
+    local instance = {
+        id = id or "ACC-000",
+        balance = initial_balance or 0,
+    }
+    -- Bless the instance with the class table as its metatable:
+    return setmetatable(instance, self) -- 'self' is BankAccount
+end
+
+-- Step 5: Make the Class Callable via __call (Modern Polish)
+setmetatable(BankAccount, {
+    __call = function(cls, ...)
+        return cls:new(...)
+    end
+})
+
+-- Both instantiation styles work identically:
+local a1 = BankAccount:new("ACC-101", 500) -- Traditional style
+local a2 = BankAccount("ACC-102", 1000)    -- Modern style (via __call)
+```
+
+### Memory Layout: Separation of Data and Methods
+
+```
+[Instance Table: a1]               [Class Table: BankAccount]
++-------------------------+        +-----------------------------------+
+| id      = "ACC-101"     |        | __index = [points to BankAccount] |
+| balance = 500           |        | deposit = function(self, amount)  |
+|                         |        | get_balance = function(self)      |
+| [metatable] ────────────+───────>| new     = function(self, ...)     |
++-------------------------+        +-----------------------------------+
+ (Stores ONLY unique data)                (Stores ALL shared methods)
+```
+
+- **`a1`** stores only **numbers and strings** (`id`, `balance`). It contains zero functions.
+- **`BankAccount`** stores **all shared functions**. Even with 100,000 account instances, there is **only ONE copy** of `deposit()` in memory!
+
+---
+
+## 3. Colon (`:`) vs. Dot (`.`): Syntax & Mechanics
 
 The colon `:` is pure syntactic sugar that automatically injects `self`.
 
@@ -56,7 +117,7 @@ Account.deposit(acc, 100)
 
 ---
 
-## 3. Method Lookup Chain: `rawget` and `__index`
+## 4. Method Lookup Chain: `rawget` and `__index`
 
 When accessing `t[key]` (or `t.key` / `t:key()`):
 
@@ -84,7 +145,7 @@ t (instance table)
 
 ---
 
-## 4. The C++ to Lua Rosetta Stone
+## 5. The C++ to Lua Rosetta Stone
 
 If you know C++, you already know Lua OOP under the hood:
 
@@ -101,7 +162,7 @@ If you know C++, you already know Lua OOP under the hood:
 
 ---
 
-## 5. `__call`: Making Tables Callable (Constructors)
+## 6. `__call`: Making Tables Callable (Constructors)
 
 In Lua, only functions can be called with `()`. To make a class table callable like a constructor (`Task(...)` instead of `Task:new(...)`), assign `__call` to the **class metatable**.
 
@@ -122,7 +183,7 @@ When you write `local t = Task("Buy milk", false)`:
 
 ---
 
-## 6. Two-Phase Initialization (`__call` + `_init`)
+## 7. Two-Phase Initialization (`__call` + `_init`)
 
 Separating memory allocation from field population prevents constructor boilerplate and avoids double-blessing metatables in subclasses:
 
@@ -148,7 +209,7 @@ end
 
 ---
 
-## 7. Operator Overloading: The Dot (`.`) Invariant for Binary Operators
+## 8. Operator Overloading: The Dot (`.`) Invariant for Binary Operators
 
 Binary metamethods (`__eq`, `__lt`, `__add`) receive **two operands `(a, b)`**, not an implicit `self`.
 
@@ -169,7 +230,7 @@ end
 
 ---
 
-## 8. The "Shared Table" Prototype Trap (Class vs. Instance Variables)
+## 9. The "Shared Table" Prototype Trap (Class vs. Instance Variables)
 
 In C++, putting a table on the class definition in Lua behaves like declaring a **`static` variable**:
 
@@ -224,7 +285,7 @@ end
 
 ---
 
-## 9. Typo Protection & Strict Schemas via `__newindex`
+## 10. Typo Protection & Strict Schemas via `__newindex`
 
 While `__index` intercepts **reading** missing keys (`val = t[missing]`), **`__newindex` intercepts WRITING to a key that does NOT exist in the table yet (`t[new_key] = val`)**.
 
@@ -272,7 +333,7 @@ end
 
 ---
 
-## 10. Mixins & Composition (Beats Multiple Inheritance)
+## 11. Mixins & Composition (Beats Multiple Inheritance)
 
 In Lua, chaining multiple inheritance metatables is slow and prone to conflicts. The idiomatic approach is **Mixins** (copying reusable method tables into a class).
 
@@ -298,7 +359,7 @@ Order:include(Loggable)
 
 ---
 
-## 11. LuaJIT Performance Invariants: Static vs. Dynamic Metatables
+## 12. LuaJIT Performance Invariants: Static vs. Dynamic Metatables
 
 In LuaJIT, method calls (`obj:method()`) run at near-C++ speed because the JIT compiler compiles the call into native CPU instructions guarded by a single metatable check:
 
@@ -319,7 +380,7 @@ If you re-bless objects (`setmetatable(obj, other_mt)`) or redefine methods dyna
 
 ---
 
-## 12. Summary Checklist
+## 13. Summary Checklist
 
 1. **To declare a method**: Use `function Class:method(...)`.
 2. **To call a method**: Use `instance:method(...)`.
