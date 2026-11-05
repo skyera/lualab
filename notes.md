@@ -24,6 +24,27 @@ t["complete"](t, "now")
 -- Find method Pass table as 1st argument (self)
 ```
 
+### The Minimalist Essence: `__index` + `setmetatable`
+
+Strip away all syntax sugar, and a class in Lua is fundamentally **just two mechanisms**:
+
+1. **`Class.__index = Class`** $\rightarrow$ **The Rule**: *"If an instance table doesn't have a key, redirect the search to `Class`."*
+2. **`setmetatable(instance, Class)`** $\rightarrow$ **The Link**: *"Connect this specific instance table to `Class` as its metatable."*
+
+```lua
+-- The Minimalist 3-Line Class:
+local Dog = { sound = "Woof!" }      -- 1. The Class table
+Dog.__index = Dog                    -- 2. The Rule (__index)
+
+local my_dog = setmetatable({}, Dog) -- 3. The Link (setmetatable)
+
+print(my_dog.sound) -- Output: Woof! (Found via Dog.__index!)
+```
+
+- Without **`setmetatable`**, `my_dog` has no link to `Dog`.
+- Without **`__index`**, Lua will not search `Dog` for missing keys.
+- **`setmetatable` + `__index` = a complete class system in Lua.** Everything else is syntax styling!
+
 ---
 
 ## 2. Anatomy of a Lua Class: The 4 Steps + `__call`
