@@ -596,10 +596,8 @@ function Term.enable_raw_mode()
     local raw = ffi.new("struct termios")
     ffi.copy(raw, orig, ffi.sizeof("struct termios"))
 
-    raw.c_iflag = bit.band(raw.c_iflag, bit.bnot(bit.bor(BRKINT, ICRNL, INPCK, ISTRIP, IXON)))
-    raw.c_oflag = bit.band(raw.c_oflag, bit.bnot(OPOST))
-    raw.c_cflag = bit.bor(raw.c_cflag, CS8)
-    raw.c_lflag = bit.band(raw.c_lflag, bit.bnot(bit.bor(ECHO, ICANON, IEXTEN, ISIG)))
+    -- Disable canonical mode and echo; preserve OPOST so \n expands to \r\n properly
+    raw.c_lflag = bit.band(raw.c_lflag, bit.bnot(bit.bor(ICANON, ECHO)))
     raw.c_cc[5] = 0 -- VTIME
     raw.c_cc[6] = 1 -- VMIN
 
@@ -936,9 +934,10 @@ function TUI.overlay_modal(lines, target_w, target_h)
 
     for i = 1, modal_h do
         local line_idx = start_row + i - 1
-        if line_idx >= 4 and line_idx <= #lines - 3 then
+        if line_idx >= 4 and line_idx <= target_h - 3 then
             local m_text = left_pad .. modal_lines[i]
-            lines[line_idx] = Plotter.CYAN .. "│ " .. Plotter.RESET .. pad_box_row(Plotter.YELLOW .. m_text .. Plotter.RESET, target_w - 4) .. Plotter.CYAN .. " │" .. Plotter.RESET .. "\27[K\n"
+            lines[line_idx] = string.format("\27[%d;1H%s│ %s │%s\27[K\n",
+                line_idx, Plotter.CYAN, pad_box_row(Plotter.YELLOW .. m_text .. Plotter.RESET, target_w - 4), Plotter.RESET)
         end
     end
 end
@@ -949,25 +948,32 @@ function TUI.render_frame(state, cols, rows)
     local inner_w = target_w - 4
 
     local lines = {}
+    local cur_row = 1
+
+    local function add_row(content)
+        lines[#lines + 1] = string.format("\27[%d;1H%s\27[K\n", cur_row, content)
+        cur_row = cur_row + 1
+    end
 
     -- Row 1: Top border with title, poll rate, clock
     local title = " BATTERY MONITOR (LuaJIT FFI) "
     local interval_str = string.format(" [Live %.1fs] ", state.poll_interval)
     local now_str = " " .. os.date("%Y-%m-%d %H:%M:%S") .. " "
-    local top_fill = target_w - 2 - visible_width(title) - visible_width(interval_str) - visible_width(now_str)
-    if top_fill < 2 then top_fill = 2 end
+    local fixed_w = 6 + visible_width(title) + visible_width(interval_str) + visible_width(now_str)
+    local top_fill = target_w - fixed_w
+    if top_fill < 0 then top_fill = 0 end
     local top_dashes = string.rep("─", top_fill)
-    lines[#lines + 1] = Plotter.CYAN .. "┌─" .. Plotter.BOLD .. title .. Plotter.RESET .. Plotter.CYAN .. "─" .. interval_str .. "─" .. top_dashes .. now_str .. "─┐" .. Plotter.RESET .. "\27[K\n"
+    add_row(Plotter.CYAN .. "┌─" .. Plotter.BOLD .. title .. Plotter.RESET .. Plotter.CYAN .. "─" .. interval_str .. "─" .. top_dashes .. now_str .. "─┐" .. Plotter.RESET)
 
     -- Row 2: Tab Bar
     local t1 = (state.tab == 1 and (Plotter.BOLD .. Plotter.CYAN .. "[1] DASHBOARD" .. Plotter.RESET) or (Plotter.GRAY .. "[1] Dashboard" .. Plotter.RESET))
     local t2 = (state.tab == 2 and (Plotter.BOLD .. Plotter.CYAN .. "[2] HISTORY PLOT" .. Plotter.RESET) or (Plotter.GRAY .. "[2] History Plot" .. Plotter.RESET))
     local t3 = (state.tab == 3 and (Plotter.BOLD .. Plotter.CYAN .. "[3] SNAPSHOT LOG" .. Plotter.RESET) or (Plotter.GRAY .. "[3] Snapshot Log" .. Plotter.RESET))
     local tabs_str = string.format("  %s    │    %s    │    %s", t1, t2, t3)
-    lines[#lines + 1] = Plotter.CYAN .. "│ " .. Plotter.RESET .. pad_box_row(tabs_str, inner_w) .. Plotter.CYAN .. " │" .. Plotter.RESET .. "\27[K\n"
+    add_row(Plotter.CYAN .. "│ " .. Plotter.RESET .. pad_box_row(tabs_str, inner_w) .. Plotter.CYAN .. " │" .. Plotter.RESET)
 
     -- Row 3: Tab Divider
-    lines[#lines + 1] = Plotter.CYAN .. "├" .. string.rep("─", target_w - 2) .. "┤" .. Plotter.RESET .. "\27[K\n"
+    add_row(Plotter.CYAN .. "├" .. string.rep("─", target_w - 2) .. "┤" .. Plotter.RESET)
 
     -- Body Rows
     local body_h = target_h - 6
@@ -982,11 +988,11 @@ function TUI.render_frame(state, cols, rows)
 
     for i = 1, body_h do
         local content = body_lines[i] or ""
-        lines[#lines + 1] = Plotter.CYAN .. "│ " .. Plotter.RESET .. pad_box_row(content, inner_w) .. Plotter.CYAN .. " │" .. Plotter.RESET .. "\27[K\n"
+        add_row(Plotter.CYAN .. "│ " .. Plotter.RESET .. pad_box_row(content, inner_w) .. Plotter.CYAN .. " │" .. Plotter.RESET)
     end
 
     -- Footer Row N-2: Divider
-    lines[#lines + 1] = Plotter.CYAN .. "├" .. string.rep("─", target_w - 2) .. "┤" .. Plotter.RESET .. "\27[K\n"
+    add_row(Plotter.CYAN .. "├" .. string.rep("─", target_w - 2) .. "┤" .. Plotter.RESET)
 
     -- Footer Row N-1: Toast / Status
     local now_sec = os.time()
@@ -997,13 +1003,14 @@ function TUI.render_frame(state, cols, rows)
         local db_name = state.db and state.db.db_file or ".battery_history.db"
         toast = Plotter.GRAY .. "Database: " .. db_name .. " (" .. state.total_db_count .. " snapshots recorded) │ Press [?] for keybindings" .. Plotter.RESET
     end
-    lines[#lines + 1] = Plotter.CYAN .. "│ " .. Plotter.RESET .. pad_box_row(toast, inner_w) .. Plotter.CYAN .. " │" .. Plotter.RESET .. "\27[K\n"
+    add_row(Plotter.CYAN .. "│ " .. Plotter.RESET .. pad_box_row(toast, inner_w) .. Plotter.CYAN .. " │" .. Plotter.RESET)
 
     -- Footer Row N: Hotkey Bar
     local hotkeys = "[Tab] View  [r] Record  [s] Seed  [+/-] Rate  [?] Help  [q] Quit"
-    local bot_fill = target_w - 2 - visible_width(hotkeys) - 4
-    if bot_fill < 2 then bot_fill = 2 end
-    lines[#lines + 1] = Plotter.CYAN .. "└─── " .. Plotter.BOLD .. hotkeys .. Plotter.RESET .. Plotter.CYAN .. " " .. string.rep("─", bot_fill) .. "┘" .. Plotter.RESET .. "\27[K\n"
+    local fixed_bot = 7 + visible_width(hotkeys)
+    local bot_fill = target_w - fixed_bot
+    if bot_fill < 0 then bot_fill = 0 end
+    add_row(Plotter.CYAN .. "└─── " .. Plotter.BOLD .. hotkeys .. Plotter.RESET .. Plotter.CYAN .. " " .. string.rep("─", bot_fill) .. "┘" .. Plotter.RESET)
 
     if state.show_help then
         TUI.overlay_modal(lines, target_w, target_h)
@@ -1165,13 +1172,19 @@ function TUI.run(db)
 
     -- Initial screen render
     io.write("\27[2J") -- Cleared once on initial startup per standards
-    local last_cols, last_rows = 0, 0
+    local last_cols, last_rows = Term.get_size()
+    local initial_frame = TUI.render_frame(state, last_cols, last_rows)
+    io.write("\27[1;1H" .. initial_frame)
+    io.flush()
+
+    local needs_redraw = false
 
     while state.running do
         local now = os.time()
         if now - state.last_poll_time >= state.poll_interval then
             TUI.reload_data(state, db)
             state.last_poll_time = now
+            needs_redraw = true
         end
 
         local cols, rows = Term.get_size()
@@ -1179,15 +1192,22 @@ function TUI.run(db)
             -- Full screen clear on window resize event only
             io.write("\27[2J")
             last_cols, last_rows = cols, rows
+            needs_redraw = true
         end
 
-        local frame = TUI.render_frame(state, cols, rows)
-        io.write("\27[H\27[?2026h" .. frame .. "\27[?2026l")
-        io.flush()
+        if needs_redraw then
+            local frame = TUI.render_frame(state, cols, rows)
+            io.write("\27[1;1H" .. frame)
+            io.flush()
+            needs_redraw = false
+        end
 
-        local key = Term.read_key(100)
+        local key = Term.read_key(50)
         if key then
-            TUI.handle_key(state, key, db)
+            local handled = TUI.handle_key(state, key, db)
+            if handled then
+                needs_redraw = true
+            end
         end
     end
 
