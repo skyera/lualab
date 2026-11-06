@@ -634,6 +634,9 @@ function Term.get_size()
     if ffi.C.ioctl(STDOUT_FD, TIOCGWINSZ, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
         return tonumber(ws.ws_col), tonumber(ws.ws_row)
     end
+    if ffi.C.ioctl(STDIN_FD, TIOCGWINSZ, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
+        return tonumber(ws.ws_col), tonumber(ws.ws_row)
+    end
     return 80, 24
 end
 
@@ -936,7 +939,7 @@ function TUI.overlay_modal(lines, target_w, target_h)
         local line_idx = start_row + i - 1
         if line_idx >= 4 and line_idx <= target_h - 3 then
             local m_text = left_pad .. modal_lines[i]
-            lines[line_idx] = string.format("\27[%d;1H%s│ %s │%s\27[K\n",
+            lines[line_idx] = string.format("\27[%d;1H%s│ %s │%s\27[K",
                 line_idx, Plotter.CYAN, pad_box_row(Plotter.YELLOW .. m_text .. Plotter.RESET, target_w - 4), Plotter.RESET)
         end
     end
@@ -951,8 +954,10 @@ function TUI.render_frame(state, cols, rows)
     local cur_row = 1
 
     local function add_row(content)
-        lines[#lines + 1] = string.format("\27[%d;1H%s\27[K\n", cur_row, content)
-        cur_row = cur_row + 1
+        if cur_row <= target_h then
+            lines[#lines + 1] = string.format("\27[%d;1H%s\27[K", cur_row, content)
+            cur_row = cur_row + 1
+        end
     end
 
     -- Row 1: Top border with title, poll rate, clock
@@ -1197,7 +1202,7 @@ function TUI.run(db)
 
         if needs_redraw then
             local frame = TUI.render_frame(state, cols, rows)
-            io.write("\27[1;1H" .. frame)
+            io.write("\27[1;1H" .. frame .. "\27[1;1H")
             io.flush()
             needs_redraw = false
         end
