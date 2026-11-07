@@ -1,13 +1,34 @@
 #!/usr/bin/env luajit
--- oop_class_helper.lua: Rect/Square OOP in Lua, from metatables to a class() helper
+-- oop_class_helper.lua: Rect/Square built with a reusable class() helper
 
-local Rect = {}
-Rect.__index = Rect
+local function class(parent)
+    local cls = {}
+    cls.__index = cls
 
-function Rect.new(w, h)
-    local instance = { width = w, height = h }
-    setmetatable(instance, Rect)
-    return instance
+    if parent then
+        setmetatable(cls, { __index = parent })
+
+        for key, value in pairs(parent) do
+            if key:sub(1, 2) == "__" and key ~= "__index" then
+                cls[key] = value
+            end
+        end
+    end
+
+    function cls.new(...)
+        local obj = setmetatable({}, cls)
+        obj:init(...)
+        return obj
+    end
+
+    return cls
+end
+
+local Rect = class()
+
+function Rect:init(w, h)
+    self.width = w
+    self.height = h
 end
 
 function Rect:area()
@@ -34,17 +55,13 @@ function Rect.__le(a, b)
     return a:area() <= b:area()
 end
 
-local Square = setmetatable({}, { __index = Rect })
-Square.__index = Square
-Square.__tostring = Rect.__tostring
-Square.__eq = Rect.__eq
-Square.__lt = Rect.__lt
-Square.__le = Rect.__le
+local r = Rect.new(3, 4)
+print(r:area())
 
-function Square.new(side)
-    local instance = Rect.new(side, side)
-    setmetatable(instance, Square)
-    return instance
+local Square = class(Rect)
+
+function Square:init(side)
+    Rect.init(self, side, side)
 end
 
 function Square:describe()
@@ -55,8 +72,6 @@ function Square:describe_full()
     return Rect.describe(self) .. " (square)"
 end
 
-local r = Rect.new(3, 4)
-print(r:area())
 local s = Square.new(5)
 print(s:area())
 print(getmetatable(s) == Square)
