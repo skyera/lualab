@@ -31,6 +31,31 @@ local bit = require("bit")
 
 local is_windows = (ffi.os == "Windows")
 
+-- =========================================================================
+-- Wall clock
+-- =========================================================================
+-- os.clock() is CPU time on POSIX, which barely advances while the monitor sleeps, so refresh
+-- timing and every rate (CPU%, disk, network, I/O) would be wrong. Windows os.clock() is wall time.
+local CLOCK_MONOTONIC_IDS = { Linux = 1, OSX = 6, BSD = 4 }
+local monotonic_now = os.clock
+
+if not is_windows and CLOCK_MONOTONIC_IDS[ffi.os] then
+    ffi.cdef[[
+        struct luatop_timespec { long tv_sec; long tv_nsec; };
+        int clock_gettime(int clock_id, struct luatop_timespec *ts);
+    ]]
+    local clock_id = CLOCK_MONOTONIC_IDS[ffi.os]
+    local ts = ffi.new("struct luatop_timespec")
+
+    --- Returns monotonic wall-clock seconds as a float.
+    monotonic_now = function()
+        if ffi.C.clock_gettime(clock_id, ts) ~= 0 then
+            error("luatop: clock_gettime failed")
+        end
+        return tonumber(ts.tv_sec) + tonumber(ts.tv_nsec) / 1e9
+    end
+end
+
 -- Shared POSIX terminal toolkit (raw mode, key input); Windows uses the Win32 code below.
 local termkit
 if not is_windows then
@@ -1622,6 +1647,14 @@ else
         if t > 0 then clk_tck = tonumber(t) end
     end)
 
+    -- /proc reports RSS in pages; 4 KiB is not universal (16K/64K on some ARM kernels).
+    local SC_PAGESIZE = 30
+    local PAGE_SIZE_KB = 4
+    pcall(function()
+        local size = ffi.C.sysconf(SC_PAGESIZE)
+        if size > 0 then PAGE_SIZE_KB = tonumber(size) / 1024 end
+    end)
+
     local prev_cpu_totals = {}
     local prev_proc_times = {}
     local prev_proc_io = {}
@@ -1885,7 +1918,9 @@ else
                     local free = tonumber(sv.f_bfree) * bsize
                     local avail = tonumber(sv.f_bavail) * bsize
                     local used = math.max(0, total - free)
-                    local pct = (total > 0) and (used / total * 100.0) or 0
+                    -- df convention: reserved blocks count as unavailable, not as free space.
+                    local usable = used + avail
+                    local pct = (usable > 0) and (used / usable * 100.0) or 0
 
                     table.insert(mounts, {
                         mount = c.mnt,
@@ -2120,9 +2155,10 @@ else
                 end
                 f_uevent:close()
 
+                -- false = looked up before and unresolved; avoids re-running lspci every refresh.
                 local gpu_name = cached_drm_names[card_idx]
-                if not gpu_name then
-                    if slot then
+                if gpu_name == nil then
+                    if slot and slot:match("^%x+:%x+:%x+%.%x$") then
                         local p = io.popen("lspci -s " .. slot .. " 2>/dev/null")
                         if p then
                             local l = p:read("*l")
@@ -2154,7 +2190,7 @@ else
                         elseif driver == "msm" or driver == "freedreno" then gpu_name = "Qualcomm Adreno Graphics"
                         end
                     end
-                    cached_drm_names[card_idx] = gpu_name
+                    cached_drm_names[card_idx] = gpu_name or false
                 end
 
                 if gpu_name then
@@ -2368,6 +2404,7 @@ else
         end
 
         local procs = {}
+        local seen_pids = {}
         local st_buf = ffi.new("struct stat")
 
         while true do
@@ -2378,6 +2415,7 @@ else
             if name:match("^%d+$") then
                 local pid = tonumber(name)
                 local proc_path = "/proc/" .. name
+                seen_pids[pid] = true
 
                 -- Resolve UID via directory stat
                 local uid = 0
@@ -2421,6 +2459,11 @@ else
                             local total_time = utime + stime
                             local cpu_time_sec = total_time / clk_tck
                             local prev = prev_proc_times[pid]
+                            if prev and prev.start_time ~= start_time then
+                                -- Same pid, different process: old counters are meaningless.
+                                prev = nil
+                                prev_proc_io[pid] = nil
+                            end
                             local cpu_pct = 0
                             if prev and prev.clock > 0 then
                                 local dt = now_clock - prev.clock
@@ -2429,9 +2472,9 @@ else
                                     cpu_pct = math.min(100.0, (d_proc / clk_tck / dt) * 100.0)
                                 end
                             end
-                            prev_proc_times[pid] = { time = total_time, clock = now_clock }
+                            prev_proc_times[pid] = { time = total_time, clock = now_clock, start_time = start_time }
 
-                            local res_kb = rss_pages * 4
+                            local res_kb = rss_pages * PAGE_SIZE_KB
                             local mem_pct = (mem_total_kb > 0) and ((res_kb / mem_total_kb) * 100.0) or 0
 
                             local cmdline = comm
@@ -2505,6 +2548,13 @@ else
             end
         end
         ffi.C.closedir(d)
+
+        for pid in pairs(prev_proc_times) do
+            if not seen_pids[pid] then
+                prev_proc_times[pid] = nil
+                prev_proc_io[pid] = nil
+            end
+        end
         return procs
     end
 
@@ -2540,6 +2590,7 @@ local function parse_bytes_or_num(str)
     if unit == "K" then return val * 1024
     elseif unit == "M" then return val * 1024 * 1024
     elseif unit == "G" then return val * 1024 * 1024 * 1024
+    elseif unit == "T" then return val * 1024 * 1024 * 1024 * 1024
     else return val end
 end
 
@@ -2824,11 +2875,23 @@ local function get_diagnostic_presets()
     return is_windows and WINDOWS_DIAGNOSTIC_PRESETS or LINUX_DIAGNOSTIC_PRESETS
 end
 
+--- Quotes a process-controlled value (name, user) so the shell treats it as one literal word.
+-- Plain identifiers stay unquoted to keep previews readable.
+local function quote_shell_arg(value)
+    if value:match("^[%w_.@%-]*$") then
+        return value
+    end
+    if is_windows then
+        return '"' .. value:gsub('[%%"]', "") .. '"'
+    end
+    return "'" .. value:gsub("'", "'\\''") .. "'"
+end
+
 local function expand_diagnostic_cmd(template, proc)
     if not template or not proc then return template or "" end
-    local pid_str = tostring(proc.pid or "")
-    local comm_str = tostring(proc.comm or "")
-    local user_str = tostring(proc.username or "")
+    local pid_str = tostring(tonumber(proc.pid) or "")
+    local comm_str = quote_shell_arg(tostring(proc.comm or ""))
+    local user_str = quote_shell_arg(tostring(proc.username or ""))
 
     local res = template:gsub("%%%%", "\1")
     res = res:gsub("%%p", function() return pid_str end)
@@ -2923,14 +2986,18 @@ local function execute_diagnostic_command(cmd_template, proc)
     io.write(string.format("\27[1;32mCommand:  %s\27[0m\n\n", expanded))
     io.flush()
 
-    if is_windows then
-        os.execute('cmd.exe /c "' .. expanded .. '"')
-    else
-        os.execute(expanded)
-    end
+    local run_cmd = is_windows and ('cmd.exe /c "' .. expanded .. '"') or expanded
+    local ok, how, code = os.execute(run_cmd)
+    local succeeded = (ok == true or ok == 0)
 
-    io.write(string.format("\n\27[1;33m────────────────────────────────────────────────────────\27[0m\n"))
-    io.write(string.format("\27[1;33m[Diagnostic completed. Press Enter to return to luatop]\27[0m\n"))
+    io.write("\n\27[1;33m────────────────────────────────────────────────────────\27[0m\n")
+    if succeeded then
+        io.write("\27[1;33m[Diagnostic completed. Press Enter to return to luatop]\27[0m\n")
+    else
+        io.write(string.format(
+            "\27[1;31m[Diagnostic failed (%s %s). Press Enter to return to luatop]\27[0m\n",
+            tostring(how or "exit"), tostring(code or ok)))
+    end
     io.flush()
 
     -- Flush input before prompt
@@ -3115,7 +3182,7 @@ local function render_zoomed_pane(out, pane_idx, state, term_w, term_h)
             row_y = row_y + 1
         end
 
-        local storage = state.storage or (read_storage_stats and read_storage_stats(os.clock()) or { mounts = {}, read_speed = 0, write_speed = 0 })
+        local storage = state.storage or (read_storage_stats and read_storage_stats(monotonic_now()) or { mounts = {}, read_speed = 0, write_speed = 0 })
         local num_mounts = #(storage.mounts or {})
         local use_dual = (num_mounts >= 2 and zw >= 70)
 
@@ -3181,7 +3248,7 @@ local function render_zoomed_pane(out, pane_idx, state, term_w, term_h)
 
     elseif pane_idx == 3 then
         -- 3. Zoomed Network Pane
-        local net = state.net or (read_network_stats and read_network_stats(os.clock()) or { active_iface = "lo", rx_rate = 0, tx_rate = 0, rx_total = 0, tx_total = 0, ifaces = {} })
+        local net = state.net or (read_network_stats and read_network_stats(monotonic_now()) or { active_iface = "lo", rx_rate = 0, tx_rate = 0, rx_total = 0, tx_total = 0, ifaces = {} })
         local title = string.format("[3] Network (MAXIMIZED - Press [z] or [Esc] to Restore) [Active: %s]", net.active_iface or "net")
         draw_pane(out, 1, 2, zw, zh, title, true)
 
@@ -3230,7 +3297,7 @@ local function render_zoomed_pane(out, pane_idx, state, term_w, term_h)
 
     elseif pane_idx == 4 then
         -- 4. Zoomed Process Pane
-        local procs = state.procs or (read_process_table and read_process_table(16384000, os.clock()) or {})
+        local procs = state.procs or (read_process_table and read_process_table(16384000, monotonic_now()) or {})
         local raw_total_procs = state.raw_total_procs or #procs
         local sel_proc = state.sel_proc or 1
         local sort_mode = state.sort_mode or "cpu"
@@ -3373,6 +3440,9 @@ end
 -- =========================================================================
 -- 8. Main Interactive Application Loop
 -- =========================================================================
+local MIN_INTERVAL_MS = 250
+local MAX_INTERVAL_MS = 5000
+
 local function main(args)
     args = args or {}
     local arg_interval = nil
@@ -3415,8 +3485,14 @@ Keybindings:
         elseif a == "--version" or a == "-v" then
             print("luatop.lua v2.2.0 - High-Performance LuaJIT FFI System Monitor")
             return 0
-        elseif a == "--interval" and args[i + 1] then
+        elseif a == "--interval" then
             arg_interval = tonumber(args[i + 1])
+            if not arg_interval or arg_interval < MIN_INTERVAL_MS or arg_interval > MAX_INTERVAL_MS then
+                io.stderr:write(string.format(
+                    "luatop: --interval expects milliseconds between %d and %d (got %s)\n",
+                    MIN_INTERVAL_MS, MAX_INTERVAL_MS, tostring(args[i + 1])))
+                return 2
+            end
         elseif a == "--theme" and args[i + 1] then
             arg_theme = args[i + 1]
         elseif a == "--tree" then
@@ -3503,7 +3579,7 @@ Keybindings:
     end)
 
     while true do
-        local now_clock = os.clock()
+        local now_clock = monotonic_now()
         local term_w, term_h = get_terminal_size()
         local needs_redraw = false
 
@@ -3579,7 +3655,7 @@ Keybindings:
                             -- Clicked title bar of zoomed pane: unzoom
                             zoomed_pane = nil
                             status_flash_msg = "Restored 4-Pane Grid"
-                            status_flash_expiry = os.clock() + 1.5
+                            status_flash_expiry = monotonic_now() + 1.5
                         elseif zoomed_pane == 4 then
                             local pills_y = 3
                             local table_header_y = 4
@@ -3593,7 +3669,7 @@ Keybindings:
                                     sel_proc = 1
                                     local cat = PROCESS_CATEGORIES[selected_category_idx]
                                     status_flash_msg = string.format("Category: [%s] (%d processes)", cat.label, category_counts[cat.id] or 0)
-                                    status_flash_expiry = os.clock() + 1.5
+                                    status_flash_expiry = monotonic_now() + 1.5
                                 end
                             elseif k.y == table_header_y then
                                 local new_mode = nil
@@ -3620,7 +3696,7 @@ Keybindings:
                                         sort_reverse = false
                                     end
                                     status_flash_msg = string.format("Sort: %s (%s)", sort_mode:upper(), sort_reverse and "ASC" or "DESC")
-                                    status_flash_expiry = os.clock() + 2.0
+                                    status_flash_expiry = monotonic_now() + 2.0
                                 end
                             elseif k.y > table_header_y and k.y <= table_header_y + visible_rows then
                                 local page_offset = 1
@@ -3639,7 +3715,7 @@ Keybindings:
                                                 collapsed_pids[p.pid] = true
                                                 status_flash_msg = string.format("Folded %s (%d sub-processes)", p.comm, p.child_count or 0)
                                             end
-                                            status_flash_expiry = os.clock() + 2.0
+                                            status_flash_expiry = monotonic_now() + 2.0
                                         else
                                             show_inspector = true
                                         end
@@ -3673,7 +3749,7 @@ Keybindings:
                                 sel_proc = 1
                                 local cat = PROCESS_CATEGORIES[selected_category_idx]
                                 status_flash_msg = string.format("Category: [%s] (%d processes)", cat.label, category_counts[cat.id] or 0)
-                                status_flash_expiry = os.clock() + 1.5
+                                status_flash_expiry = monotonic_now() + 1.5
                             end
                         elseif k.y == table_header_y then
                             -- Clicked column header
@@ -3699,7 +3775,7 @@ Keybindings:
                                     sort_reverse = false
                                 end
                                 status_flash_msg = string.format("Sort: %s (%s)", sort_mode:upper(), sort_reverse and "ASC" or "DESC")
-                                status_flash_expiry = os.clock() + 2.0
+                                status_flash_expiry = monotonic_now() + 2.0
                             end
                         elseif k.y > table_header_y and k.y <= table_header_y + visible_rows then
                             -- Clicked a process row
@@ -3719,7 +3795,7 @@ Keybindings:
                                             collapsed_pids[p.pid] = true
                                             status_flash_msg = string.format("Folded %s (%d sub-processes)", p.comm, p.child_count or 0)
                                         end
-                                        status_flash_expiry = os.clock() + 2.0
+                                        status_flash_expiry = monotonic_now() + 2.0
                                     else
                                         show_inspector = true
                                     end
@@ -3777,7 +3853,7 @@ Keybindings:
                     show_signal_modal = false
                     local sig_info = SIGNALS[sel_signal_idx]
                     status_flash_msg = string.format("Dispatching %s (%d)...", sig_info.name, sig_info.sig)
-                    status_flash_expiry = os.clock() + 3.0
+                    status_flash_expiry = monotonic_now() + 3.0
                     -- Flag to execute kill
                     k = "__SEND_SIGNAL__"
                 end
@@ -3802,7 +3878,7 @@ Keybindings:
                         else
                             status_flash_msg = string.format("Failed to renice PID %d (Permission denied? Root required)", r_pid)
                         end
-                        status_flash_expiry = os.clock() + 3.0
+                        status_flash_expiry = monotonic_now() + 3.0
                     end
                     target_renice_pid = nil
                     target_renice_comm = nil
@@ -3891,7 +3967,7 @@ Keybindings:
                     if zoomed_pane then
                         zoomed_pane = nil
                         status_flash_msg = "Restored 4-Pane Grid"
-                        status_flash_expiry = os.clock() + 1.5
+                        status_flash_expiry = monotonic_now() + 1.5
                     elseif #filter_query > 0 then
                         filter_query = ""
                     end
@@ -3902,7 +3978,7 @@ Keybindings:
                     end
                     local pane_names = { "CPU", "Memory & Storage", "Network", "Processes" }
                     status_flash_msg = string.format("Focused [%d] %s", focused_pane, pane_names[focused_pane] or "")
-                    status_flash_expiry = os.clock() + 1.5
+                    status_flash_expiry = monotonic_now() + 1.5
                 elseif k == "SHIFT_TAB" then
                     focused_pane = (focused_pane == 1) and 4 or (focused_pane - 1)
                     if zoomed_pane then
@@ -3910,7 +3986,7 @@ Keybindings:
                     end
                     local pane_names = { "CPU", "Memory & Storage", "Network", "Processes" }
                     status_flash_msg = string.format("Focused [%d] %s", focused_pane, pane_names[focused_pane] or "")
-                    status_flash_expiry = os.clock() + 1.5
+                    status_flash_expiry = monotonic_now() + 1.5
                 elseif k == "1" or k == "2" or k == "3" or k == "4" then
                     local p_num = tonumber(k)
                     focused_pane = p_num
@@ -3919,7 +3995,7 @@ Keybindings:
                     end
                     local pane_names = { "CPU", "Memory & Storage", "Network", "Processes" }
                     status_flash_msg = string.format("Focused [%d] %s", focused_pane, pane_names[focused_pane] or "")
-                    status_flash_expiry = os.clock() + 1.5
+                    status_flash_expiry = monotonic_now() + 1.5
                 elseif k == "z" or k == "f" then
                     if zoomed_pane then
                         zoomed_pane = nil
@@ -3929,19 +4005,19 @@ Keybindings:
                         local pane_names = { "CPU", "Memory & Storage", "Network", "Processes" }
                         status_flash_msg = string.format("Maximized [%d] %s (Press [z] or [Esc] to Restore)", zoomed_pane, pane_names[zoomed_pane] or "")
                     end
-                    status_flash_expiry = os.clock() + 2.0
+                    status_flash_expiry = monotonic_now() + 2.0
                 elseif k == "[" then
                     selected_category_idx = (selected_category_idx == 1) and #PROCESS_CATEGORIES or (selected_category_idx - 1)
                     sel_proc = 1
                     local cat = PROCESS_CATEGORIES[selected_category_idx]
                     status_flash_msg = string.format("Category: [%s] (%d processes)", cat.label, category_counts[cat.id] or 0)
-                    status_flash_expiry = os.clock() + 1.5
+                    status_flash_expiry = monotonic_now() + 1.5
                 elseif k == "]" then
                     selected_category_idx = (selected_category_idx % #PROCESS_CATEGORIES) + 1
                     sel_proc = 1
                     local cat = PROCESS_CATEGORIES[selected_category_idx]
                     status_flash_msg = string.format("Category: [%s] (%d processes)", cat.label, category_counts[cat.id] or 0)
-                    status_flash_expiry = os.clock() + 1.5
+                    status_flash_expiry = monotonic_now() + 1.5
                 elseif k == "DOWN" or k == "j" then
                     sel_proc = sel_proc + 1
                 elseif k == "UP" or k == "k" then
@@ -3964,7 +4040,7 @@ Keybindings:
                             collapsed_pids[p.pid] = true
                             status_flash_msg = string.format("Folded %s (%d sub-processes)", p.comm, p.child_count or 0)
                         end
-                        status_flash_expiry = os.clock() + 2.0
+                        status_flash_expiry = monotonic_now() + 2.0
                     else
                         is_paused = not is_paused
                     end
@@ -3983,35 +4059,35 @@ Keybindings:
                         cpu_view_mode = "auto"
                     end
                     status_flash_msg = string.format("CPU view: %s", cpu_view_mode:upper())
-                    status_flash_expiry = os.clock() + 2.0
+                    status_flash_expiry = monotonic_now() + 2.0
                 elseif k == "c" then
                     sort_mode = "cpu"
                     status_flash_msg = string.format("Sort: CPU (%s)", sort_reverse and "ASC" or "DESC")
-                    status_flash_expiry = os.clock() + 2.0
+                    status_flash_expiry = monotonic_now() + 2.0
                 elseif k == "m" then
                     sort_mode = "mem"
                     status_flash_msg = string.format("Sort: MEM (%s)", sort_reverse and "ASC" or "DESC")
-                    status_flash_expiry = os.clock() + 2.0
+                    status_flash_expiry = monotonic_now() + 2.0
                 elseif k == "p" then
                     sort_mode = "pid"
                     status_flash_msg = string.format("Sort: PID (%s)", sort_reverse and "ASC" or "DESC")
-                    status_flash_expiry = os.clock() + 2.0
+                    status_flash_expiry = monotonic_now() + 2.0
                 elseif k == "n" then
                     sort_mode = "name"
                     status_flash_msg = string.format("Sort: NAME (%s)", sort_reverse and "ASC" or "DESC")
-                    status_flash_expiry = os.clock() + 2.0
+                    status_flash_expiry = monotonic_now() + 2.0
                 elseif k == "u" then
                     sort_mode = "user"
                     status_flash_msg = string.format("Sort: USER (%s)", sort_reverse and "ASC" or "DESC")
-                    status_flash_expiry = os.clock() + 2.0
+                    status_flash_expiry = monotonic_now() + 2.0
                 elseif k == "s" then
                     sort_mode = "threads"
                     status_flash_msg = string.format("Sort: THREADS (%s)", sort_reverse and "ASC" or "DESC")
-                    status_flash_expiry = os.clock() + 2.0
+                    status_flash_expiry = monotonic_now() + 2.0
                 elseif k == "d" then
                     sort_mode = "io"
                     status_flash_msg = string.format("Sort: DISK I/O (%s)", sort_reverse and "ASC" or "DESC")
-                    status_flash_expiry = os.clock() + 2.0
+                    status_flash_expiry = monotonic_now() + 2.0
                 elseif k == "e" then
                     if sort_mode == "time" then
                         sort_reverse = not sort_reverse
@@ -4020,12 +4096,12 @@ Keybindings:
                         sort_reverse = false
                     end
                     status_flash_msg = string.format("Sort: TIME+ (%s)", sort_reverse and "ASC" or "DESC")
-                    status_flash_expiry = os.clock() + 2.0
+                    status_flash_expiry = monotonic_now() + 2.0
                 elseif k == "r" then
                     sort_reverse = not sort_reverse
                     local mode_labels = { cpu = "CPU", mem = "MEM", pid = "PID", name = "NAME", user = "USER", threads = "THREADS", io = "DISK I/O", time = "TIME+" }
                     status_flash_msg = string.format("Sort: %s (%s)", mode_labels[sort_mode] or sort_mode:upper(), sort_reverse and "ASC" or "DESC")
-                    status_flash_expiry = os.clock() + 2.0
+                    status_flash_expiry = monotonic_now() + 2.0
                 elseif k == "T" then
                     cycle_theme()
                 elseif k == "?" or k == "h" then
@@ -4054,14 +4130,14 @@ Keybindings:
                     diagnostic_custom_cmd = get_diagnostic_presets()[1].cmd
                     diagnostic_is_editing = false
                 elseif k == "+" or k == "=" then
-                    refresh_interval_ms = math.max(250, refresh_interval_ms - 250)
+                    refresh_interval_ms = math.max(MIN_INTERVAL_MS, refresh_interval_ms - 250)
                 elseif k == "-" then
-                    refresh_interval_ms = math.min(5000, refresh_interval_ms + 250)
+                    refresh_interval_ms = math.min(MAX_INTERVAL_MS, refresh_interval_ms + 250)
                 end
             end
         end
 
-        local curr_clock = os.clock()
+        local curr_clock = monotonic_now()
         if (curr_clock >= next_refresh_time and not is_paused) or needs_redraw then
             next_refresh_time = curr_clock + (refresh_interval_ms / 1000.0)
 
@@ -4165,7 +4241,7 @@ Keybindings:
                     status_flash_msg = string.format("Failed to send %s to PID %d: %s",
                         sig_info.name, t_pid, err or "Access denied")
                 end
-                status_flash_expiry = os.clock() + 3.0
+                status_flash_expiry = monotonic_now() + 3.0
                 target_signal_pid = nil
                 target_signal_comm = nil
             end
@@ -4742,7 +4818,7 @@ Keybindings:
             if in_search_mode then
                 local raw_footer = string.format("  \27[1;38;2;254;231;21mSearch: \27[0m\27[4m%s\27[0m\27[5m_\27[0m  \27[90m(Enter confirm, Esc cancel)\27[0m", filter_query)
                 footer_line = string.format("\27[%d;1H\27[2K%s", footer_y, truncate(raw_footer, term_w - 1))
-            elseif os.clock() < status_flash_expiry and #status_flash_msg > 0 then
+            elseif monotonic_now() < status_flash_expiry and #status_flash_msg > 0 then
                 local raw_footer = string.format("  \27[1;38;2;34;197;94m✔ %s\27[0m", status_flash_msg)
                 footer_line = string.format("\27[%d;1H\27[2K%s", footer_y, truncate(raw_footer, term_w - 1))
             else
@@ -4784,11 +4860,11 @@ end
 -- =========================================================================
 local function test_cpu_performance(duration_sec)
     duration_sec = duration_sec or 0.05
-    local start_t = os.clock()
+    local start_t = monotonic_now()
     local end_target = start_t + duration_sec
     local iterations = 0
     local a, b, c = 1.0001, 1.0002, 0.5
-    while os.clock() < end_target do
+    while monotonic_now() < end_target do
         for _ = 1, 10000 do
             a = a * b + c
             b = b * c + a
@@ -4796,7 +4872,7 @@ local function test_cpu_performance(duration_sec)
         end
         iterations = iterations + 10000
     end
-    local elapsed = math.max(0.000001, os.clock() - start_t)
+    local elapsed = math.max(0.000001, monotonic_now() - start_t)
     local flops = iterations * 6
     local mflops = (flops / elapsed) / 1e6
     return {
@@ -4814,7 +4890,7 @@ local function test_disk_performance(target_dir, test_size_mb)
     local num_blocks = math.max(1, math.floor((test_size_mb * 1024 * 1024) / block_size))
     local dummy_data = string.rep("X", block_size)
 
-    local w_start = os.clock()
+    local w_start = monotonic_now()
     local f = io.open(tmp_file, "wb")
     if not f then
         return { error = "Failed to open temporary file for disk test", write_mbs = 0, read_mbs = 0 }
@@ -4824,11 +4900,11 @@ local function test_disk_performance(target_dir, test_size_mb)
     end
     f:flush()
     f:close()
-    local w_elapsed = math.max(0.000001, os.clock() - w_start)
+    local w_elapsed = math.max(0.000001, monotonic_now() - w_start)
     local written_bytes = num_blocks * block_size
     local write_mbs = (written_bytes / (1024 * 1024)) / w_elapsed
 
-    local r_start = os.clock()
+    local r_start = monotonic_now()
     f = io.open(tmp_file, "rb")
     local read_bytes = 0
     if f then
@@ -4839,7 +4915,7 @@ local function test_disk_performance(target_dir, test_size_mb)
         end
         f:close()
     end
-    local r_elapsed = math.max(0.000001, os.clock() - r_start)
+    local r_elapsed = math.max(0.000001, monotonic_now() - r_start)
     local read_mbs = (read_bytes / (1024 * 1024)) / r_elapsed
 
     os.remove(tmp_file)
@@ -4879,12 +4955,12 @@ local function run_self_test()
     print(string.format("  ✔ Memory Telemetry: Total=%s, Used=%s (%.1f%%)",
         format_bytes(mem.total_kb), format_bytes(mem.used_kb), mem.used_pct))
 
-    local net = read_network_stats(os.clock())
+    local net = read_network_stats(monotonic_now())
     assert(type(net) == "table", "Network stats should be a table")
     assert(type(net.active_iface) == "string", "Active interface should be a string")
     print(string.format("  ✔ Network Telemetry: Active=%s, RX Total=%s", net.active_iface, format_bytes(math.floor(net.rx_total / 1024))))
 
-    local storage = read_storage_stats(os.clock())
+    local storage = read_storage_stats(monotonic_now())
     assert(type(storage.mounts) == "table", "Mounts should be a table")
     assert(#storage.mounts > 0, "At least 1 filesystem mount must be discovered")
     print(string.format("  ✔ Storage Telemetry: %d mounted filesystems inspected", #storage.mounts))
@@ -4905,7 +4981,7 @@ local function run_self_test()
         print("  ✔ GPU Telemetry: Headless/Integrated system (Zero-fork fallback active)")
     end
 
-    local procs = read_process_table(mem.total_kb or 1, os.clock())
+    local procs = read_process_table(mem.total_kb or 1, monotonic_now())
     assert(#procs > 0, "Process table must contain at least 1 process")
     assert(procs[1].pid >= 0, "Process PID must be >= 0")
     assert(#procs[1].comm > 0, "Process comm must not be empty")
@@ -5130,6 +5206,8 @@ local M = {
     render_category_pills         = render_category_pills,
     get_category_tab_at_x         = get_category_tab_at_x,
     expand_diagnostic_cmd         = expand_diagnostic_cmd,
+    parse_bytes_or_num            = parse_bytes_or_num,
+    monotonic_now                 = monotonic_now,
     get_diagnostic_presets        = get_diagnostic_presets,
     render_diagnostic_modal_frame = render_diagnostic_modal_frame,
     suspend_raw_mode              = suspend_raw_mode,

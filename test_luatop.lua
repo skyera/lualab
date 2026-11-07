@@ -957,6 +957,44 @@ TestRunner.describe("12. Smart Process Filter & Search Input Engine", function()
     end)
 end)
 
+TestRunner.describe("11. Code review regressions", function()
+    TestRunner.it("should quote hostile process names so the shell sees one literal word", function()
+        local proc = { pid = 77, comm = "x;echo PWNED", username = "it's" }
+        local cmd = btop.expand_diagnostic_cmd("printf %s %c", proc)
+        local pipe = assert(io.popen(cmd, "r"))
+        local out = pipe:read("*a")
+        pipe:close()
+        assert_eq(out, "x;echo PWNED", "hostile comm printed literally, not executed")
+        local user_cmd = btop.expand_diagnostic_cmd("printf %s %u", proc)
+        local user_pipe = assert(io.popen(user_cmd, "r"))
+        assert_eq(user_pipe:read("*a"), "it's", "single quote in username survives")
+        user_pipe:close()
+    end)
+
+    TestRunner.it("should parse terabyte units in smart filters", function()
+        assert_eq(btop.parse_bytes_or_num("1T"), 1024 ^ 4, "1T")
+        assert_eq(btop.parse_bytes_or_num("2tb"), 2 * 1024 ^ 4, "2tb")
+        assert_eq(btop.parse_bytes_or_num("1G"), 1024 ^ 3, "1G unchanged")
+    end)
+
+    TestRunner.it("should reject invalid --interval values with a nonzero status", function()
+        for _, bad in ipairs({ "0", "-5", "abc", "100", "999999" }) do
+            assert_eq(btop.main({ "--interval", bad }), 2, "--interval " .. bad)
+        end
+        assert_eq(btop.main({ "--interval" }), 2, "--interval without value")
+    end)
+
+    TestRunner.it("should measure wall time while sleeping", function()
+        local ffi = require("ffi")
+        if ffi.os == "Windows" then return end
+        ffi.cdef("int usleep(unsigned int usec);")
+        local start = btop.monotonic_now()
+        ffi.C.usleep(200000)
+        local elapsed = btop.monotonic_now() - start
+        assert_true(elapsed >= 0.19 and elapsed < 1.0, "elapsed wall seconds: " .. elapsed)
+    end)
+end)
+
 -- Summary
 print("\n--------------------------------------------------")
 local total = TestRunner.passed + TestRunner.failed
