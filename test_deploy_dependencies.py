@@ -13,6 +13,18 @@ ROOT = Path(__file__).resolve().parent
 LUAJIT = shutil.which(os.environ.get("LUALAB_LUAJIT", "luajit"))
 
 
+def ansi_safe(path):
+    """Return a path luajit.exe can open: it uses the ANSI API, so on Windows a path with
+    characters outside the code page (e.g. CJK) must be given in its 8.3 short form."""
+    if os.name != "nt":
+        return str(path)
+    import ctypes
+    buf = ctypes.create_unicode_buffer(32768)
+    if ctypes.windll.kernel32.GetShortPathNameW(str(path), buf, len(buf)) == 0:
+        return str(path)
+    return buf.value
+
+
 def run(args, cwd, stdin_text=None, env=None, timeout=60):
     return subprocess.run(
         args, cwd=cwd, input=stdin_text, capture_output=True, text=True,
@@ -38,7 +50,7 @@ class DeployDependencies(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.target / "termkit.lua").is_file(), "termkit.lua not installed")
         self.assertIn("termkit.lua", result.stdout)
-        started = run([LUAJIT, str(self.target / "luatop.lua")], cwd=self.elsewhere,
+        started = run([LUAJIT, ansi_safe(self.target / "luatop.lua")], cwd=self.elsewhere,
                       stdin_text="q")
         self.assertEqual(started.returncode, 0, started.stderr)
         self.assertNotIn("not found", started.stderr)
@@ -49,7 +61,9 @@ class DeployDependencies(unittest.TestCase):
         for name in ("hwinfo_tui.lua", "termkit.lua", "hwtui"):
             self.assertTrue((self.target / name).is_file(), name + " missing")
         self.assertTrue(os.access(self.target / "hwtui", os.X_OK), "launcher not executable")
-        report = run([LUAJIT, str(self.target / "hwinfo_tui.lua"), "--text"], cwd=self.elsewhere)
+        if os.name == "nt":
+            self.skipTest("deploy verified; hwinfo_tui itself supports only Linux")
+        report = run([LUAJIT, ansi_safe(self.target / "hwinfo_tui.lua"), "--text"], cwd=self.elsewhere)
         self.assertEqual(report.returncode, 0, report.stderr)
         self.assertIn("== CPU ==", report.stdout)
         launched = run([str(self.target / "hwtui"), "--json"], cwd=self.elsewhere)

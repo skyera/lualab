@@ -25,7 +25,7 @@ local ffi = require("ffi")
 local bit = require("bit")
 
 -- Find termkit.lua next to this script even when launched from another directory.
-local script_dir = (arg and arg[0] or ""):match("^(.*)/[^/]*$")
+local script_dir = (arg and arg[0] or ""):match("^(.*)[/\\][^/\\]*$")
 if script_dir then
     package.path = script_dir .. "/?.lua;" .. package.path
 end
@@ -2089,7 +2089,7 @@ HW.helpers = {
 }
 
 local script = arg and arg[0]
-if script and (script == "hwinfo_tui.lua" or script:match("/hwinfo_tui%.lua$")) then
+if script and (script == "hwinfo_tui.lua" or script:match("[/\\]hwinfo_tui%.lua$")) then
     os.exit(HW.main(arg))
 end
 

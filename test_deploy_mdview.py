@@ -73,7 +73,7 @@ class DeployMarkdownViewer(unittest.TestCase):
     def test_windows_layout_and_native_launcher_when_available(self):
         self.install("windows")
         cmd = (self.target / "mdview.cmd").read_bytes()
-        self.assertIn(b'"%LUAJIT%" "%~dp0mdview.lua" %*', cmd)
+        self.assertIn(b'"%LUAJIT%" "%~dps0mdview.lua" %*', cmd)
         self.assertIn(b"%MDVIEW_LUAJIT%", cmd)
         self.assertNotIn(b"\n", cmd.replace(b"\r\n", b""))
         self.assertIn("MDVIEW_LUAJIT", (self.target / "mdview").read_text(encoding="utf-8"))
@@ -96,7 +96,7 @@ class DeployMarkdownViewer(unittest.TestCase):
         self.target.write_text("existing data", encoding="utf-8")
         result = self.deploy("--app", "mdview", "--dir", str(self.target))
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("failed to install mdview.lua", result.stderr)
+        self.assertIn("cannot create target directory", result.stderr)
         self.assertNotIn("Deploy complete", result.stdout)
         self.assertEqual(self.target.read_text(encoding="utf-8"), "existing data")
 

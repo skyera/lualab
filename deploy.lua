@@ -27,6 +27,7 @@
 ]]
 
 local ffi = require("ffi")
+local bit = require("bit")
 
 -- =========================================================================
 -- 1. Options & Registry
@@ -182,9 +183,155 @@ local function print_usage()
     print("  --check         Show what would be installed without writing anything")
 end
 
+-- =========================================================================
+-- 1b. Platform layer (Windows wide-character APIs)
+-- =========================================================================
+-- LuaJIT on Windows hands `arg` and io.open the ANSI code page, which turns characters
+-- such as CJK into "?" and cannot open such paths. So on Windows every path and argument
+-- is kept as UTF-8 and converted to UTF-16 for the Win32 / CRT wide-character APIs.
+local host_is_windows = (ffi.os == "Windows")
+local SEP = host_is_windows and "\\" or "/"
+
+local CP_UTF8 = 65001
+local PATH_BUFFER_CHARS = 32768
+local INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
+local FILE_ATTRIBUTE_DIRECTORY = 0x10
+local SEEK_END = 2
+local READ_CHUNK = 64 * 1024
+
+local shell32 = nil
+if host_is_windows then
+    ffi.cdef[[
+        uint32_t GetCurrentDirectoryW(uint32_t nBufferLength, wchar_t *lpBuffer);
+        uint32_t GetModuleFileNameW(void *hModule, wchar_t *lpFilename, uint32_t nSize);
+        uint32_t GetFileAttributesW(const wchar_t *lpFileName);
+        int CreateDirectoryW(const wchar_t *lpPathName, void *lpSecurityAttributes);
+        uint32_t GetLastError(void);
+        const wchar_t *GetCommandLineW(void);
+        void *LocalFree(void *hMem);
+        int MultiByteToWideChar(uint32_t cp, uint32_t flags, const char *src, int srcLen,
+                                wchar_t *dst, int dstLen);
+        int WideCharToMultiByte(uint32_t cp, uint32_t flags, const wchar_t *src, int srcLen,
+                                char *dst, int dstLen, const char *defaultChar, int *used);
+        wchar_t **CommandLineToArgvW(const wchar_t *lpCmdLine, int *pNumArgs);
+        void *_wfopen(const wchar_t *filename, const wchar_t *mode);
+        size_t fread(void *buf, size_t size, size_t count, void *stream);
+        size_t fwrite(const void *buf, size_t size, size_t count, void *stream);
+        int fclose(void *stream);
+        int _fseeki64(void *stream, int64_t offset, int origin);
+        int64_t _ftelli64(void *stream);
+    ]]
+    shell32 = ffi.load("shell32")
+else
+    ffi.cdef[[
+        char *getcwd(char *buf, size_t size);
+    ]]
+end
+
+--- UTF-8 string -> NUL-terminated wchar_t[] (Windows only).
+local function to_wide(text)
+    local count = ffi.C.MultiByteToWideChar(CP_UTF8, 0, text, #text, nil, 0)
+    local buf = ffi.new("wchar_t[?]", count + 1)
+    ffi.C.MultiByteToWideChar(CP_UTF8, 0, text, #text, buf, count)
+    return buf
+end
+
+--- NUL-terminated wchar_t* -> UTF-8 string (Windows only).
+local function from_wide(wide)
+    local count = ffi.C.WideCharToMultiByte(CP_UTF8, 0, wide, -1, nil, 0, nil, nil)
+    if count <= 1 then
+        return ""
+    end
+    local buf = ffi.new("char[?]", count)
+    ffi.C.WideCharToMultiByte(CP_UTF8, 0, wide, -1, buf, count, nil, nil)
+    return ffi.string(buf, count - 1)
+end
+
+-- Minimal io-file lookalike over a CRT FILE* opened with _wfopen, offering only the
+-- methods this script uses: read(count | "*a"), write, seek("end") and close.
+local WideFile = {}
+WideFile.__index = WideFile
+
+function WideFile:read(what)
+    if what == "*a" then
+        local chunks = {}
+        while true do
+            local chunk = self:read(READ_CHUNK)
+            if not chunk then
+                break
+            end
+            chunks[#chunks + 1] = chunk
+        end
+        return table.concat(chunks)
+    end
+    local buf = ffi.new("char[?]", what)
+    local got = tonumber(ffi.C.fread(buf, 1, what, self.stream))
+    if got == 0 then
+        return nil
+    end
+    return ffi.string(buf, got)
+end
+
+function WideFile:write(data)
+    if tonumber(ffi.C.fwrite(data, 1, #data, self.stream)) ~= #data then
+        return nil, "short write"
+    end
+    return self
+end
+
+--- Moves to the end of the file and returns its length (the only supported seek).
+function WideFile:seek(whence)
+    assert(whence == "end", "WideFile:seek supports only 'end'")
+    ffi.C._fseeki64(self.stream, 0, SEEK_END)
+    return tonumber(ffi.C._ftelli64(self.stream))
+end
+
+function WideFile:close()
+    return ffi.C.fclose(self.stream) == 0
+end
+
+--- Opens a file by UTF-8 path; same contract as io.open (file or nil, err).
+local function open_file(path, mode)
+    if not host_is_windows then
+        return io.open(path, mode)
+    end
+    local stream = ffi.C._wfopen(to_wide(path), to_wide(mode))
+    if stream == nil then
+        return nil, "cannot open " .. path
+    end
+    return setmetatable({ stream = stream }, WideFile)
+end
+
+--- Script arguments and script path as UTF-8. Returns args (1-based list), script_path.
+--- Falls back to the ANSI `arg` table (and says so) if the wide command line is unavailable.
+local function script_arguments()
+    local ansi = arg or {}
+    if not host_is_windows then
+        return ansi, ansi[0]
+    end
+    local count = ffi.new("int[1]")
+    local wide_argv = shell32.CommandLineToArgvW(ffi.C.GetCommandLineW(), count)
+    if wide_argv == nil or count[0] < #ansi + 1 then
+        io.stderr:write("deploy: warning: cannot read the Unicode command line;"
+            .. " non-ANSI characters in arguments may be lost\n")
+        return ansi, ansi[0]
+    end
+    local all = {}
+    for i = 0, count[0] - 1 do
+        all[#all + 1] = from_wide(wide_argv[i])
+    end
+    ffi.C.LocalFree(wide_argv)
+    local args = {}
+    for i = 1, #ansi do
+        args[i] = all[#all - #ansi + i]
+    end
+    return args, all[#all - #ansi]
+end
+
+local argv, SCRIPT_PATH = script_arguments()
+
 do
     local i = 1
-    local argv = arg or {}
     while i <= #argv do
         local a = argv[i]
         if a == "--app" then
@@ -229,33 +376,25 @@ end
 
 -- Two distinct notions: this filesystem (host) uses / or \, while the deployed layout (target)
 -- decides which launchers to write and which PATH syntax to advise.
-local host_is_windows = (ffi.os == "Windows")
 local target_is_windows = (target_os == "windows")
-local SEP = host_is_windows and "\\" or "/"
-
-if host_is_windows then
-    ffi.cdef[[
-        uint32_t GetCurrentDirectoryA(uint32_t nBufferLength, char *lpBuffer);
-        uint32_t GetModuleFileNameA(void *hModule, char *lpFilename, uint32_t nSize);
-    ]]
-else
-    ffi.cdef[[
-        char *getcwd(char *buf, size_t size);
-    ]]
-end
 
 -- =========================================================================
 -- 2. Filesystem & path helpers
 -- =========================================================================
 local function file_exists(path)
-    local f = io.open(path, "rb")
-    if f then f:close() return true end
+    local f = open_file(path, "rb")
+    if f then
+        f:close()
+        return true
+    end
     return false
 end
 
 local function file_size(path)
-    local f = io.open(path, "rb")
-    if not f then return nil end
+    local f = open_file(path, "rb")
+    if not f then
+        return nil
+    end
     local n = f:seek("end")
     f:close()
     return n
@@ -268,32 +407,56 @@ local function format_size(n)
     return string.format("%.2f MB", n / (1024 * 1024))
 end
 
+--- Copies src to dst. Returns true, bytes_copied or false, reason.
 local function copy_file(src, dst)
-    local in_f = io.open(src, "rb")
-    if not in_f then return false, "cannot read " .. src end
-    local out_f = io.open(dst, "wb")
+    local in_f = open_file(src, "rb")
+    if not in_f then
+        return false, "cannot read " .. src
+    end
+    local out_f = open_file(dst, "wb")
     if not out_f then
         in_f:close()
         return false, "cannot write " .. dst
     end
 
     local total = 0
+    local failure = nil
     while true do
-        local chunk = in_f:read(64 * 1024)
-        if not chunk then break end
-        out_f:write(chunk)
+        local chunk = in_f:read(READ_CHUNK)
+        if not chunk then
+            break
+        end
+        local ok, err = out_f:write(chunk)
+        if not ok then
+            failure = "cannot write " .. dst .. ": " .. tostring(err)
+            break
+        end
         total = total + #chunk
     end
     in_f:close()
-    out_f:close()
+    if not out_f:close() and not failure then
+        failure = "cannot finish writing " .. dst
+    end
+    if failure then
+        return false, failure
+    end
     return true, total
 end
 
+--- Writes data to path. Returns true or false, reason.
 local function write_file(path, data)
-    local f = io.open(path, "wb")
-    if not f then return false end
-    f:write(data)
-    f:close()
+    local f, open_err = open_file(path, "wb")
+    if not f then
+        return false, open_err
+    end
+    local ok, write_err = f:write(data)
+    local closed = f:close()
+    if not ok then
+        return false, write_err
+    end
+    if not closed then
+        return false, "cannot finish writing " .. path
+    end
     return true
 end
 
@@ -310,10 +473,10 @@ end
 
 local function get_cwd()
     if host_is_windows then
-        local buf = ffi.new("char[4096]")
-        local len = ffi.C.GetCurrentDirectoryA(4096, buf)
-        if len > 0 and len < 4096 then
-            return ffi.string(buf, len)
+        local buf = ffi.new("wchar_t[?]", PATH_BUFFER_CHARS)
+        local len = ffi.C.GetCurrentDirectoryW(PATH_BUFFER_CHARS, buf)
+        if len > 0 and len < PATH_BUFFER_CHARS then
+            return from_wide(buf)
         end
         local cwd = command_output("cd")
         if cwd and cwd ~= "" then
@@ -378,7 +541,7 @@ local function get_script_dir()
         table.insert(candidates, norm)
     end
 
-    local self_path = (arg and arg[0]) or "deploy.lua"
+    local self_path = SCRIPT_PATH or "deploy.lua"
     add_candidate(self_path:match("^(.*)[/\\][^/\\]*$"))
 
     local info = debug.getinfo(1, "S")
@@ -403,10 +566,10 @@ end
 -- Absolute path of the luajit that is running this deploy (bare names resolved via PATH)
 local function resolve_luajit()
     if host_is_windows then
-        local buf = ffi.new("char[4096]")
-        local len = ffi.C.GetModuleFileNameA(nil, buf, 4096)
-        if len > 0 and len < 4096 then
-            local exe = ffi.string(buf, len)
+        local buf = ffi.new("wchar_t[?]", PATH_BUFFER_CHARS)
+        local len = ffi.C.GetModuleFileNameW(nil, buf, PATH_BUFFER_CHARS)
+        if len > 0 and len < PATH_BUFFER_CHARS then
+            local exe = from_wide(buf)
             if exe:lower():find("luajit", 1, true) then
                 return normalize_dir(exe)
             end
@@ -435,12 +598,41 @@ local function default_target_dir()
     return normalize_dir(home) .. "/bin"
 end
 
+--- True when path is an existing directory (Windows only).
+local function windows_dir_exists(path)
+    local attrs = ffi.C.GetFileAttributesW(to_wide(path))
+    return attrs ~= INVALID_FILE_ATTRIBUTES and bit.band(attrs, FILE_ATTRIBUTE_DIRECTORY) ~= 0
+end
+
+--- Creates path and any missing parents (Windows only). Returns true or false, reason.
+local function windows_make_dirs(path)
+    if windows_dir_exists(path) then
+        return true
+    end
+    local parent = path:match("^(.*)[/\\][^/\\]+$")
+    if parent and parent ~= "" and not parent:match("^%a:$") then
+        local ok, err = windows_make_dirs(parent)
+        if not ok then
+            return false, err
+        end
+    end
+    if ffi.C.CreateDirectoryW(to_wide(path), nil) == 0 then
+        return false, string.format("CreateDirectoryW failed for %s (Windows error %d)",
+            path, ffi.C.GetLastError())
+    end
+    return true
+end
+
+--- Creates the directory and its parents. Returns true or false, reason.
 local function ensure_dir(path)
     if host_is_windows then
-        os.execute(string.format('if not exist "%s" mkdir "%s"', path, path))
-    else
-        os.execute(string.format('mkdir -p "%s" 2>/dev/null', path))
+        return windows_make_dirs(path)
     end
+    local status = os.execute(string.format('mkdir -p "%s" 2>/dev/null', path))
+    if status ~= 0 and status ~= true then
+        return false, "mkdir -p failed for " .. path
+    end
+    return true
 end
 
 local function dir_in_path(dir)
@@ -487,7 +679,9 @@ local function posix_launcher(app, luajit_path, script_path)
     }, "\n")
 end
 
--- cmd.exe needs CRLF line endings; script is located through %~dp0 so any target dir works.
+-- cmd.exe needs CRLF line endings. The script is located through %~dps0 (8.3 short form of the
+-- launcher directory) because luajit.exe opens its script via the ANSI API and cannot open
+-- paths with characters outside the system code page; the short path is plain ASCII.
 local function windows_cmd_launcher(app, luajit_path)
     return table.concat({
         "@echo off",
@@ -503,7 +697,7 @@ local function windows_cmd_launcher(app, luajit_path)
         '    echo ' .. app.name .. ': luajit not found - set ' .. app.env_var .. ' to the luajit executable 1>&2',
         '    exit /b 127',
         ')',
-        '"%LUAJIT%" "%~dp0' .. app.script .. '" %*',
+        '"%LUAJIT%" "%~dps0' .. app.script .. '" %*',
         "",
     }, "\r\n")
 end
@@ -512,7 +706,7 @@ end
 -- 3b. Dependency discovery
 -- =========================================================================
 local function read_file(path)
-    local f = io.open(path, "rb")
+    local f = open_file(path, "rb")
     if not f then
         return nil
     end
@@ -692,7 +886,23 @@ if opts.check then
     os.exit(0)
 end
 
-ensure_dir(target_dir)
+local dir_ok, dir_err = ensure_dir(target_dir)
+if not dir_ok then
+    io.stderr:write(string.format("deploy: cannot create target directory %s: %s\n",
+        display_path(target_dir), tostring(dir_err)))
+    io.stderr:write("  Choose a writable location with --dir <path>.\n")
+    os.exit(1)
+end
+
+--- Writes a launcher file or aborts the deploy naming the file and the reason.
+local function write_or_exit(path, data)
+    local ok, err = write_file(path, data)
+    if not ok then
+        io.stderr:write(string.format("deploy: failed to write %s: %s\n",
+            display_path(path), tostring(err)))
+        os.exit(1)
+    end
+end
 
 local written = 0
 local deployed_names = {}
@@ -761,10 +971,7 @@ for _, app in ipairs(apps_to_deploy) do
         if target_is_windows then
             -- cmd.exe / PowerShell
             local cmd_path = target_dir .. SEP .. n .. ".cmd"
-            if not write_file(cmd_path, windows_cmd_launcher(app, luajit_path)) then
-                io.stderr:write("deploy: failed to write " .. display_path(cmd_path) .. "\n")
-                os.exit(1)
-            end
+            write_or_exit(cmd_path, windows_cmd_launcher(app, luajit_path))
             written = written + 1
             print(string.format("  [ok] wrote   %s (cmd.exe / PowerShell)%s", display_path(cmd_path), alias_tag))
 
@@ -772,18 +979,12 @@ for _, app in ipairs(apps_to_deploy) do
             local sh_path = target_dir .. SEP .. n
             local sh_lua = host_is_windows and luajit_path:gsub("\\", "/") or luajit_path
             local sh_target = host_is_windows and app.installed_lua:gsub("\\", "/") or app.installed_lua
-            if not write_file(sh_path, posix_launcher(app, sh_lua, sh_target)) then
-                io.stderr:write("deploy: failed to write " .. display_path(sh_path) .. "\n")
-                os.exit(1)
-            end
+            write_or_exit(sh_path, posix_launcher(app, sh_lua, sh_target))
             written = written + 1
             print(string.format("  [ok] wrote   %s (Git Bash / MSYS sh)%s", display_path(sh_path), alias_tag))
         else
             local sh_path = target_dir .. SEP .. n
-            if not write_file(sh_path, posix_launcher(app, luajit_path, app.installed_lua)) then
-                io.stderr:write("deploy: failed to write " .. display_path(sh_path) .. "\n")
-                os.exit(1)
-            end
+            write_or_exit(sh_path, posix_launcher(app, luajit_path, app.installed_lua))
             os.execute(string.format('chmod +x "%s"', sh_path))
             written = written + 1
             print(string.format("  [ok] wrote   %s (executable)%s", display_path(sh_path), alias_tag))
