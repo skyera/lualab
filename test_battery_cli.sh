@@ -43,6 +43,18 @@ check() {
 
 echo "=== battery_monitor.lua CLI tests ==="
 
+# -- Static checks: no undeclared globals (a typo'd variable silently becomes nil) -
+globals_found="$(luajit -bl "$SCRIPT" | grep -E 'G(GET|SET)' \
+    | grep -vE '"(require|ipairs|pairs|print|tostring|tonumber|type|pcall|xpcall|assert|io|os|string|math|table|debug|setmetatable|arg|ffi|bit)"')"
+if [ -z "$globals_found" ]; then
+    echo "  [PASS] bytecode shows 0 undeclared globals"
+    PASS=$((PASS + 1))
+else
+    echo "  [FAIL] undeclared globals:"
+    echo "$globals_found"
+    FAIL=$((FAIL + 1))
+fi
+
 # -- Argument validation -------------------------------------------------------
 check "unknown flag rejected" 2 "Unknown option '--tuii'" -- luajit "$SCRIPT" --tuii
 check "--db without value rejected" 2 "--db requires" -- luajit "$SCRIPT" --db

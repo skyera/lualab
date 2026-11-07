@@ -131,16 +131,8 @@ local TCSANOW    = 0
 local TIOCGWINSZ = 0x5413
 local POLLIN     = 1
 
-local BRKINT = 0x0002
-local ICRNL  = 0x0100
-local INPCK  = 0x0010
-local ISTRIP = 0x0020
-local IXON   = 0x0400
-local OPOST  = 0x0001
-local CS8    = 0x0030
 local ECHO   = 0x0008
 local ICANON = 0x0002
-local IEXTEN = 0x8000
 local ISIG   = 0x0001
 
 local SIG_BLOCK   = 0
@@ -558,8 +550,12 @@ function Plotter.sparkline(values, min_val, max_val)
         min_v = values[1]
         max_v = values[1]
         for _, v in ipairs(values) do
-            if v < min_v then min_v = v end
-            if v > max_v then max_v = v end
+            if v < min_v then
+                min_v = v
+            end
+            if v > max_v then
+                max_v = v
+            end
         end
     end
     local range = max_v - min_v
@@ -712,7 +708,8 @@ function Plotter.render_chart(records, width, height, scrub_col)
     local spacing_half = math.floor((width - #t_start - #t_end - #t_mid) / 2)
     spacing_half = math.max(1, spacing_half)
 
-    local time_line = "      " .. t_start .. string.rep(" ", spacing_half) .. t_mid .. string.rep(" ", spacing_half) .. t_end
+    local gap = string.rep(" ", spacing_half)
+    local time_line = "      " .. t_start .. gap .. t_mid .. gap .. t_end
     lines[#lines + 1] = Plotter.GRAY .. time_line .. Plotter.RESET
 
     return table.concat(lines, "\n")
@@ -1030,7 +1027,8 @@ function TUI.render_dashboard(state, inner_w, inner_h)
     local col_w = math.floor((inner_w - 4) / 2)
     local p_title_1 = "┌─ HARDWARE TELEMETRY " .. string.rep("─", math.max(0, col_w - 23)) .. "┐"
     local p_title_2 = "┌─ LIFETIME & HEALTH " .. string.rep("─", math.max(0, col_w - 22)) .. "┐"
-    lines[#lines + 1] = Plotter.GRAY .. pad_box_row(p_title_1, col_w) .. "  " .. pad_box_row(p_title_2, col_w) .. Plotter.RESET
+    local title_row = pad_box_row(p_title_1, col_w) .. "  " .. pad_box_row(p_title_2, col_w)
+    lines[#lines + 1] = Plotter.GRAY .. title_row .. Plotter.RESET
 
     local rows_l = {
         string.format("│ Power Rate:   %s%.2f W%s",
@@ -1060,7 +1058,8 @@ function TUI.render_dashboard(state, inner_w, inner_h)
 
     local p_bot_1 = "└" .. string.rep("─", col_w - 2) .. "┘"
     local p_bot_2 = "└" .. string.rep("─", col_w - 2) .. "┘"
-    lines[#lines + 1] = Plotter.GRAY .. pad_box_row(p_bot_1, col_w) .. "  " .. pad_box_row(p_bot_2, col_w) .. Plotter.RESET
+    local bottom_row = pad_box_row(p_bot_1, col_w) .. "  " .. pad_box_row(p_bot_2, col_w)
+    lines[#lines + 1] = Plotter.GRAY .. bottom_row .. Plotter.RESET
     lines[#lines + 1] = ""
 
     -- Recent 24h Inline Sparkline
@@ -1085,13 +1084,15 @@ function TUI.render_plot(state, inner_w, inner_h)
     state.chart_cols = chart_w
 
     local hours_label = string.format(
-        "Time Window: %d Hours (%d snapshots in window) | [ / ] change window: 1h 6h 12h 24h 7d",
+        "Window: %dh (%d snapshots) │ [ / ] change: 1h 6h 12h 24h 7d",
         state.plot_hours, #state.records)
     lines[#lines + 1] = Plotter.BOLD .. hours_label .. Plotter.RESET
 
     if not state.records or #state.records < 2 then
         lines[#lines + 1] = ""
-        lines[#lines + 1] = Plotter.GRAY .. "  (Need at least 2 snapshots in window to render 2D plot. Press [s] to seed data or [r] to record)" .. Plotter.RESET
+        lines[#lines + 1] = Plotter.GRAY
+            .. "  (Need at least 2 snapshots in window to render 2D plot."
+            .. " Press [s] to seed data or [r] to record)" .. Plotter.RESET
         return lines
     end
 
@@ -1107,10 +1108,14 @@ function TUI.render_plot(state, inner_w, inner_h)
         if r then
             local t_str = os.date("%Y-%m-%d %H:%M:%S", r.timestamp)
             local cap_color = Plotter.capacity_color(r.capacity)
-            lines[#lines + 1] = string.format(" Scrub [%d/%d]: %s │ Cap: %s%3d%%%s │ Volt: %.2fV │ Power: %.2fW │ Status: %s",
-                scrub_col, chart_w, t_str, cap_color, r.capacity, Plotter.RESET, r.voltage_v, r.power_w, r.status)
+            lines[#lines + 1] = string.format(
+                " Scrub [%d/%d]: %s │ Cap: %s%3d%%%s │ Volt: %.2fV │ Power: %.2fW │ Status: %s",
+                scrub_col, chart_w, t_str, cap_color, r.capacity, Plotter.RESET,
+                r.voltage_v, r.power_w, r.status)
         else
-            lines[#lines + 1] = string.format(" Scrub [%d/%d]: [←/→ h/l] Scrub timeline │ [0] Start │ [$] End", scrub_col, chart_w)
+            lines[#lines + 1] = string.format(
+                " Scrub [%d/%d]: [←/→ h/l] Scrub timeline │ [0] Start │ [$] End",
+                scrub_col, chart_w)
         end
     else
         lines[#lines + 1] = " [←/→ h/l] Scrub timeline cursor │ [0] Start │ [$] End │ [r] Record snapshot"
@@ -1129,14 +1134,17 @@ function TUI.render_history(state, inner_w, inner_h)
     local lines = {}
     local total = #state.records
 
-    local header_info = string.format(" Snapshot Log: %d snapshots in view (%d total in DB) ── [↑/↓] Navigate  [PgUp/PgDn] Page",
+    local header_info = string.format(
+        " Snapshot Log: %d snapshots in view (%d total in DB) ── [↑/↓] Navigate  [PgUp/PgDn] Page",
         total, state.total_db_count)
     lines[#lines + 1] = Plotter.BOLD .. header_info .. Plotter.RESET
 
-    local table_header = string.format("   %-19s │ %-8s │ %-12s │ %-8s │ %-8s │ %-6s",
+    -- Two leading columns line up with the "▶ " selection marker used by data rows
+    local table_header = string.format("  %-19s │ %-8s │ %-12s │ %-8s │ %-8s │ %-6s",
         "Timestamp", "Capacity", "Status", "Voltage", "Power", "Health")
     lines[#lines + 1] = Plotter.CYAN .. table_header .. Plotter.RESET
-    lines[#lines + 1] = Plotter.GRAY .. string.rep("─", math.min(inner_w, visible_width(table_header) + 2)) .. Plotter.RESET
+    local rule_w = math.min(inner_w, visible_width(table_header) + 2)
+    lines[#lines + 1] = Plotter.GRAY .. string.rep("─", rule_w) .. Plotter.RESET
 
     if total == 0 then
         lines[#lines + 1] = "   (No historical snapshots found in database. Press [r] to record or [s] to seed)"
@@ -1177,7 +1185,7 @@ end
 TUI.HELP_ENTRIES = {
     { "[Tab] / [1-3]", "Switch views (Dashboard, Plot, Log)" },
     { "[r]", "Record snapshot to SQLite database" },
-    { "[s]", "Seed 24h synthetic telemetry (press twice)" },
+    { "[s]", "Seed 24h synthetic data (press twice)" },
     { "[+] / [-]", "Adjust telemetry polling rate" },
     { "[←] [→] / h l", "Scrub timeline cursor (Plot view)" },
     { "[ and ]", "Change history time window (Plot view)" },
@@ -1290,6 +1298,12 @@ function TUI.render_frame(state, cols, rows)
     local lines = {}
     local cur_row = 1
 
+    -- A content row inside the left/right frame borders
+    local function boxed(content)
+        return Plotter.CYAN .. "│ " .. Plotter.RESET .. pad_box_row(content, inner_w)
+            .. Plotter.CYAN .. " │" .. Plotter.RESET
+    end
+
     local function add_row(content)
         if cur_row <= target_h then
             -- Safety net: no row may ever exceed the frame width (auto-wrap is disabled)
@@ -1318,14 +1332,21 @@ function TUI.render_frame(state, cols, rows)
     end
     local top_fill = math.max(0, target_w - top_fixed_width())
     local top_dashes = string.rep("─", top_fill)
-    add_row(Plotter.CYAN .. "┌─" .. Plotter.BOLD .. title .. Plotter.RESET .. Plotter.CYAN .. "─" .. interval_str .. "─" .. top_dashes .. now_str .. "─┐" .. Plotter.RESET)
+    add_row(Plotter.CYAN .. "┌─" .. Plotter.BOLD .. title .. Plotter.RESET .. Plotter.CYAN
+        .. "─" .. interval_str .. "─" .. top_dashes .. now_str .. "─┐" .. Plotter.RESET)
 
     -- Row 2: Tab Bar
-    local t1 = (state.tab == 1 and (Plotter.BOLD .. Plotter.CYAN .. "[1] DASHBOARD" .. Plotter.RESET) or (Plotter.GRAY .. "[1] Dashboard" .. Plotter.RESET))
-    local t2 = (state.tab == 2 and (Plotter.BOLD .. Plotter.CYAN .. "[2] HISTORY PLOT" .. Plotter.RESET) or (Plotter.GRAY .. "[2] History Plot" .. Plotter.RESET))
-    local t3 = (state.tab == 3 and (Plotter.BOLD .. Plotter.CYAN .. "[3] SNAPSHOT LOG" .. Plotter.RESET) or (Plotter.GRAY .. "[3] Snapshot Log" .. Plotter.RESET))
+    local function tab_label(index, active_text, idle_text)
+        if state.tab == index then
+            return Plotter.BOLD .. Plotter.CYAN .. active_text .. Plotter.RESET
+        end
+        return Plotter.GRAY .. idle_text .. Plotter.RESET
+    end
+    local t1 = tab_label(1, "[1] DASHBOARD", "[1] Dashboard")
+    local t2 = tab_label(2, "[2] HISTORY PLOT", "[2] History Plot")
+    local t3 = tab_label(3, "[3] SNAPSHOT LOG", "[3] Snapshot Log")
     local tabs_str = string.format("  %s    │    %s    │    %s", t1, t2, t3)
-    add_row(Plotter.CYAN .. "│ " .. Plotter.RESET .. pad_box_row(tabs_str, inner_w) .. Plotter.CYAN .. " │" .. Plotter.RESET)
+    add_row(boxed(tabs_str))
 
     -- Row 3: Tab Divider
     add_row(Plotter.CYAN .. "├" .. string.rep("─", target_w - 2) .. "┤" .. Plotter.RESET)
@@ -1343,7 +1364,7 @@ function TUI.render_frame(state, cols, rows)
 
     for i = 1, body_h do
         local content = body_lines[i] or ""
-        add_row(Plotter.CYAN .. "│ " .. Plotter.RESET .. pad_box_row(content, inner_w) .. Plotter.CYAN .. " │" .. Plotter.RESET)
+        add_row(boxed(content))
     end
 
     -- Footer Row N-2: Divider
@@ -1359,9 +1380,10 @@ function TUI.render_frame(state, cols, rows)
         toast = Plotter.BOLD .. Plotter.RED .. "[DB ERROR] " .. state.db_error .. Plotter.RESET
     else
         local db_name = state.db and state.db.db_file or ".battery_history.db"
-        toast = Plotter.GRAY .. "Database: " .. db_name .. " (" .. state.total_db_count .. " snapshots recorded) │ Press [?] for keybindings" .. Plotter.RESET
+        toast = Plotter.GRAY .. "Database: " .. db_name .. " (" .. state.total_db_count
+            .. " snapshots recorded) │ Press [?] for keybindings" .. Plotter.RESET
     end
-    add_row(Plotter.CYAN .. "│ " .. Plotter.RESET .. pad_box_row(toast, inner_w) .. Plotter.CYAN .. " │" .. Plotter.RESET)
+    add_row(boxed(toast))
 
     -- Footer Row N: Hotkey Bar
     local hotkeys = "[Tab] View  [r] Record  [s] Seed  [+/-] Rate  [?] Help  [q] Quit"
@@ -1370,8 +1392,11 @@ function TUI.render_frame(state, cols, rows)
     end
     local fixed_bot = 7 + visible_width(hotkeys)
     local bot_fill = target_w - fixed_bot
-    if bot_fill < 0 then bot_fill = 0 end
-    add_row(Plotter.CYAN .. "└─── " .. Plotter.BOLD .. hotkeys .. Plotter.RESET .. Plotter.CYAN .. " " .. string.rep("─", bot_fill) .. "┘" .. Plotter.RESET)
+    if bot_fill < 0 then
+        bot_fill = 0
+    end
+    add_row(Plotter.CYAN .. "└─── " .. Plotter.BOLD .. hotkeys .. Plotter.RESET .. Plotter.CYAN
+        .. " " .. string.rep("─", bot_fill) .. "┘" .. Plotter.RESET)
 
     if state.show_help then
         TUI.overlay_modal(lines, target_w, target_h)
@@ -1589,12 +1614,14 @@ end
 -- ============================================================================
 -- Section 7: CLI Dashboard & Views
 -- ============================================================================
+local BANNER_RULE = string.rep("=", 80)
+
 local function print_banner()
     local now_str = os.date("%Y-%m-%d %H:%M:%S")
-    print(Plotter.BOLD .. Plotter.CYAN .. "================================================================================" .. Plotter.RESET)
+    print(Plotter.BOLD .. Plotter.CYAN .. BANNER_RULE .. Plotter.RESET)
     print(string.format("%s BATTERY MONITOR (LuaJIT FFI + SQLite3)%s  %s[%s]%s",
         Plotter.BOLD, Plotter.RESET, Plotter.GRAY, now_str, Plotter.RESET))
-    print(Plotter.BOLD .. Plotter.CYAN .. "================================================================================" .. Plotter.RESET)
+    print(Plotter.BOLD .. Plotter.CYAN .. BANNER_RULE .. Plotter.RESET)
 end
 
 local function render_status(info)
@@ -1640,7 +1667,9 @@ local function cmd_history(db, limit)
     limit = limit or 20
     local records, err = db:get_history(nil, limit)
     if not err and records then
-        print(Plotter.BOLD .. string.format("\nRecent %d Battery Snapshots (from %s):", #records, db.db_file) .. Plotter.RESET)
+        print(Plotter.BOLD
+            .. string.format("\nRecent %d Battery Snapshots (from %s):", #records, db.db_file)
+            .. Plotter.RESET)
         print("--------------------------------------------------------------------------------")
         print(string.format(" %-19s | %-8s | %-12s | %-8s | %-8s | %-6s",
             "Timestamp", "Capacity", "Status", "Voltage", "Power", "Health"))
@@ -1760,7 +1789,21 @@ local function run_self_tests(db)
         db = db,
         tab = 1,
         show_help = false,
-        info = info or { capacity = 100, status = "Full", voltage_v = 12.7, power_w = 0, energy_wh = 40, energy_full_wh = 40, energy_design_wh = 50, health_pct = 80, cycle_count = 100, manufacturer = "Test", model_name = "Model", technology = "Li-ion", path = "/sys" },
+        info = info or {
+            capacity = 100,
+            status = "Full",
+            voltage_v = 12.7,
+            power_w = 0,
+            energy_wh = 40,
+            energy_full_wh = 40,
+            energy_design_wh = 50,
+            health_pct = 80,
+            cycle_count = 100,
+            manufacturer = "Test",
+            model_name = "Model",
+            technology = "Li-ion",
+            path = "/sys",
+        },
         plot_hours = 24,
         records = dummy_records,
         total_db_count = count,
@@ -2000,7 +2043,8 @@ local function run_self_tests(db)
     -- Test 14: Failure paths are explicit (never silent) and leave data intact
     local bad_db, bad_err = BatteryDB.open("/nonexistent_dir_for_bm_test/x.db")
     assert(bad_db == nil, "opening an impossible path must fail")
-    assert(bad_err:find("/nonexistent_dir_for_bm_test/x.db", 1, true), "error must name the file: " .. tostring(bad_err))
+    assert(bad_err:find("/nonexistent_dir_for_bm_test/x.db", 1, true),
+        "error must name the file: " .. tostring(bad_err))
 
     local closed_db = assert(BatteryDB.open(":memory:"))
     closed_db:close()
@@ -2010,7 +2054,9 @@ local function run_self_tests(db)
 
     local broken = assert(BatteryDB.open(":memory:"))
     assert(broken:exec("DROP TABLE battery_snapshots;", "drop"))
-    local b_ok, b_err = broken:insert_snapshot({ timestamp = 1, capacity = 1, status = "x", voltage_v = 1, power_w = 1 })
+    local b_ok, b_err = broken:insert_snapshot({
+        timestamp = 1, capacity = 1, status = "x", voltage_v = 1, power_w = 1,
+    })
     assert(b_ok == false and b_err ~= nil, "insert into a missing table must report an error")
     local b_count, b_count_err = broken:count_records()
     assert(b_count == nil and b_count_err ~= nil, "count on a missing table must report an error, not 0")
@@ -2063,6 +2109,141 @@ local function run_self_tests(db)
     sdb:close()
     tdb:close()
     print("  [✓] Test 15 passed: seeding needs a confirming second keypress.")
+
+
+    -- Helpers: a tiny virtual screen so frames can be applied in sequence like a terminal would
+    local function frame_rows(frame)
+        local rows_out = {}
+        local starts = {}
+        for pos, row in frame:gmatch("()\27%[(%d+);1H") do
+            starts[#starts + 1] = { pos = pos, row = tonumber(row) }
+        end
+        for i, st in ipairs(starts) do
+            local stop = starts[i + 1] and (starts[i + 1].pos - 1) or #frame
+            local seg = frame:sub(st.pos, stop):gsub("^\27%[%d+;1H", "")
+            rows_out[st.row] = seg:sub(1, -4)
+        end
+        return rows_out
+    end
+
+    local function apply_frame(screen, frame)
+        for row, text in pairs(frame_rows(frame)) do
+            screen[row] = text
+        end
+    end
+
+    local function screen_text(screen)
+        local parts = {}
+        for row = 1, #screen do
+            parts[#parts + 1] = visible_width(screen[row]) > 0 and screen[row] or ""
+        end
+        return table.concat(parts, "\n")
+    end
+
+    -- Test 16: Populated view -> empty view leaves no ghost rows
+    local many = {}
+    for i = 1, 144 do
+        many[i] = {
+            timestamp = 1000000 + i * 600, capacity = (i % 100) + 1, status = "GhostStatus",
+            voltage_v = 12.3, power_w = 4.5, health_pct = 77,
+        }
+    end
+    local screen = {}
+    apply_frame(screen, TUI.render_frame(new_state({ tab = 3, records = many, log_scroll = 72 }), 100, 30))
+    assert(screen_text(screen):find("GhostStatus", 1, true), "populated log must show its rows")
+    apply_frame(screen, TUI.render_frame(new_state({ tab = 3, records = {}, total_db_count = 0 }), 100, 30))
+    assert(not screen_text(screen):find("GhostStatus", 1, true), "empty view must overwrite every populated row")
+    apply_frame(screen, TUI.render_frame(new_state({ tab = 1 }), 100, 30))
+    assert(not screen_text(screen):find("Snapshot Log:", 1, true), "tab switch must not leave the old header")
+    print("  [✓] Test 16 passed: populated -> empty -> other-tab transitions leave zero ghost text.")
+
+    -- Test 17: Help round trip preserves view state, cursor and data (no re-query)
+    local rt = new_state({ tab = 2, scrub_col = 7, plot_hours = 6, records = many, log_scroll = 3 })
+    local saved_records = rt.records
+    local rows_before = frame_rows(TUI.render_frame(rt, 100, 30))
+    TUI.handle_key(rt, "?", db)
+    local rows_help = frame_rows(TUI.render_frame(rt, 100, 30))
+    local changed = 0
+    for row = 2, 30 do
+        if rows_help[row] ~= rows_before[row] then
+            changed = changed + 1
+        end
+    end
+    assert(changed > 0, "help must visibly overlay the view")
+    TUI.handle_key(rt, "?", db)
+    local rows_after = frame_rows(TUI.render_frame(rt, 100, 30))
+    for row = 2, 30 do
+        assert(rows_after[row] == rows_before[row], "row " .. row .. " must be restored exactly after help")
+    end
+    assert(rt.tab == 2 and rt.scrub_col == 7 and rt.plot_hours == 6 and rt.log_scroll == 3,
+        "view state must survive the help round trip")
+    assert(rt.records == saved_records, "help must not re-query or replace the data")
+    print("  [✓] Test 17 passed: help open/close restores the exact previous screen and state.")
+
+    -- Test 18: Log viewport invariants at every boundary (selection always visible, exactly once)
+    for _, n in ipairs({ 1, 2, 3, 10, 144 }) do
+        local subset = {}
+        for i = 1, n do
+            subset[i] = many[i]
+        end
+        for _, sel in ipairs({ -5, 0, 1, 2, math.ceil(n / 2), n, n + 1, 9999 }) do
+            for _, size in ipairs({ { 40, 12 }, { 80, 24 }, { 120, 50 } }) do
+                local st = new_state({ tab = 3, records = subset, log_scroll = sel })
+                local frame = TUI.render_frame(st, size[1], size[2])
+                assert_frame_invariants(frame, size[1], size[2], string.format("log n=%d sel=%d", n, sel))
+                assert(st.log_scroll >= 1 and st.log_scroll <= n, "log_scroll must be clamped into 1..n")
+                local _, markers = frame:gsub("▶", "")
+                assert(markers == 1, string.format(
+                    "selected row must be visible exactly once (n=%d sel=%d %dx%d got %d)",
+                    n, sel, size[1], size[2], markers))
+            end
+        end
+    end
+    print("  [✓] Test 18 passed: log selection is clamped and always visible across sizes and boundaries.")
+
+
+    -- Test 19: Log table header separators line up with data-row separators, and the
+    -- plot/help text fits an 84-column terminal without being cut off
+    local function bar_columns(text)
+        local plain = text:gsub("\27%[[%d;]*%a", "")
+        local cols = {}
+        local col = 0
+        for ch in plain:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+            col = col + 1
+            if ch == "│" then
+                cols[#cols + 1] = col
+            end
+        end
+        return table.concat(cols, ",")
+    end
+    local log_rows = frame_rows(TUI.render_frame(new_state({ tab = 3, records = many, log_scroll = 1 }), 100, 30))
+    local header_bars, data_bars, selected_bars
+    for row = 1, 30 do
+        local text = log_rows[row] or ""
+        if text:find("Timestamp", 1, true) then
+            header_bars = bar_columns(text)
+        elseif text:find("▶", 1, true) then
+            selected_bars = bar_columns(text)
+        elseif not data_bars and text:find("GhostStatus", 1, true) then
+            data_bars = bar_columns(text)
+        end
+    end
+    assert(header_bars and data_bars and selected_bars, "log table rows must be found")
+    assert(header_bars == data_bars, "header separators must align with rows: " .. header_bars .. " vs " .. data_bars)
+    assert(selected_bars == data_bars, "selected row separators must align with other rows")
+
+    local plot_rows = frame_rows(TUI.render_frame(new_state({ tab = 2, records = many, plot_hours = 168 }), 84, 22))
+    local plot_header = ""
+    for row = 1, 22 do
+        if (plot_rows[row] or ""):find("Window:", 1, true) then
+            plot_header = plot_rows[row]
+        end
+    end
+    assert(plot_header:find("7d", 1, true), "plot header must show the full window choices at 84 cols")
+    for _, entry in ipairs(TUI.HELP_ENTRIES) do
+        assert(2 + 16 + visible_width(entry[2]) <= 58, "help text too long for the 60-col box: " .. entry[2])
+    end
+    print("  [✓] Test 19 passed: table separators align; plot/help labels fit without truncation.")
 
     print("=== All battery_monitor.lua self-tests passed successfully! ===")
     return true
