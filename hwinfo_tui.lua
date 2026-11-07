@@ -264,29 +264,68 @@ local function new_group(title)
 end
 
 --- Append a label/value row; rows with a nil value are skipped.
-local function add(group, label, value, key, num)
-    if value == nil then
+local function add(group, label, value)
+    if value == nil or value == false then
         return
     end
-    group.items[#group.items + 1] = {
-        label = label,
-        value = tostring(value),
-        key = key,
-        num = num,
-    }
+    group.items[#group.items + 1] = { label = label, value = tostring(value) }
 end
 
 --- Append a row using `fallback` when the value is missing (never silent).
 local function add_na(group, label, value, fallback)
-    if value == nil then
-        value = fallback or "N/A"
+    add(group, label, value == nil and (fallback or "N/A") or value)
+end
+
+--- Append a numeric row. `key` identifies it in the sensor history, `num` is the
+--- plotted value and `unit` selects the sparkline number format.
+local function add_metric(group, label, text, key, num, unit)
+    group.items[#group.items + 1] = {
+        label = label,
+        value = text,
+        key = key,
+        num = num,
+        unit = unit,
+    }
+end
+
+--- Join the non-empty arguments with `sep` (nil and false are skipped).
+local function join(sep, ...)
+    local parts = {}
+    for i = 1, select("#", ...) do
+        local value = select(i, ...)
+        if value and value ~= "" then
+            parts[#parts + 1] = tostring(value)
+        end
     end
-    add(group, label, value)
+    return table.concat(parts, sep)
+end
+
+--- Format a PCIe link as "8.0 GT/s PCIe x4 (max 16.0 GT/s PCIe x4)"; nil when the
+--- device reports no usable link (e.g. an integrated GPU).
+local function pcie_link(dir)
+    local speed = read_str(dir .. "current_link_speed")
+    local width = read_str(dir .. "current_link_width")
+    local max_speed = read_str(dir .. "max_link_speed")
+    local max_width = read_str(dir .. "max_link_width")
+    if not speed or not width or speed:find("Unknown", 1, true) or width == "0" then
+        return nil
+    end
+    local text = string.format("%s x%s", speed, width)
+    if max_speed and max_width and (max_speed ~= speed or max_width ~= width) then
+        text = text .. string.format(" (max %s x%s)", max_speed, max_width)
+    end
+    return text
 end
 
 -- =========================================================================
 -- 3. Collectors (each returns a list of groups)
 -- =========================================================================
+
+-- System ------------------------------------------------------------------
+local DMI_DIR = "/sys/class/dmi/id/"
+local NO_DMI = "N/A (no DMI)"
+
+-- SMBIOS chassis type codes (DMTF DSP0134, "System Enclosure").
 local CHASSIS = {
     [1] = "Other", [2] = "Unknown", [3] = "Desktop", [4] = "Low Profile Desktop",
     [6] = "Mini Tower", [7] = "Tower", [8] = "Portable", [9] = "Laptop",
@@ -296,256 +335,295 @@ local CHASSIS = {
     [35] = "Mini PC", [36] = "Stick PC",
 }
 
-function HW.collect_system()
-    local groups = {}
-    local ident = new_group("Machine")
-    local dmi = "/sys/class/dmi/id/"
-    add_na(ident, "Vendor", read_str(dmi .. "sys_vendor"), "N/A (no DMI)")
-    add_na(ident, "Product", read_str(dmi .. "product_name"), "N/A (no DMI)")
-    add(ident, "Version", read_str(dmi .. "product_version"))
-    local chassis = read_num(dmi .. "chassis_type")
+local function machine_group()
+    local g = new_group("Machine")
+    add_na(g, "Vendor", read_str(DMI_DIR .. "sys_vendor"), NO_DMI)
+    add_na(g, "Product", read_str(DMI_DIR .. "product_name"), NO_DMI)
+    add(g, "Version", read_str(DMI_DIR .. "product_version"))
+    local chassis = read_num(DMI_DIR .. "chassis_type")
     if chassis then
-        add(ident, "Chassis", CHASSIS[chassis] or ("Type " .. chassis))
+        add(g, "Chassis", CHASSIS[chassis] or ("Type " .. chassis))
     end
-    groups[#groups + 1] = ident
-
-    local board = new_group("Mainboard & Firmware")
-    add_na(board, "Board", read_str(dmi .. "board_name"), "N/A (no DMI)")
-    add(board, "Board vendor", read_str(dmi .. "board_vendor"))
-    add(board, "Board version", read_str(dmi .. "board_version"))
-    add_na(board, "BIOS vendor", read_str(dmi .. "bios_vendor"), "N/A (no DMI)")
-    add(board, "BIOS version", read_str(dmi .. "bios_version"))
-    add(board, "BIOS date", read_str(dmi .. "bios_date"))
-    local uefi = list_dir("/sys/firmware/efi")
-    add(board, "Boot mode", uefi and "UEFI" or "Legacy BIOS / unknown")
-    groups[#groups + 1] = board
-
-    local os_group = new_group("Operating System")
-    local u = ffi.new("struct hw_utsname")
-    if ffi.C.uname(u) == 0 then
-        add(os_group, "Kernel", ffi.string(u.sysname) .. " " .. ffi.string(u.release))
-        add(os_group, "Hostname", ffi.string(u.nodename))
-        add(os_group, "Architecture", ffi.string(u.machine))
-    else
-        add(os_group, "Kernel", "N/A (uname failed)")
-    end
-    local rel = read_raw("/etc/os-release")
-    if rel then
-        add(os_group, "Distribution", rel:match('PRETTY_NAME="?([^"\n]+)"?'))
-    end
-    local up = read_str("/proc/uptime")
-    if up and tonumber(up:match("^(%S+)")) then
-        add(os_group, "Uptime", format_uptime(tonumber(up:match("^(%S+)"))))
-    end
-    groups[#groups + 1] = os_group
-    return groups
+    return g
 end
 
+local function firmware_group()
+    local g = new_group("Mainboard & Firmware")
+    add_na(g, "Board", read_str(DMI_DIR .. "board_name"), NO_DMI)
+    add(g, "Board vendor", read_str(DMI_DIR .. "board_vendor"))
+    add(g, "Board version", read_str(DMI_DIR .. "board_version"))
+    add_na(g, "BIOS vendor", read_str(DMI_DIR .. "bios_vendor"), NO_DMI)
+    add(g, "BIOS version", read_str(DMI_DIR .. "bios_version"))
+    add(g, "BIOS date", read_str(DMI_DIR .. "bios_date"))
+    -- /sys/firmware/efi exists only when the kernel was booted through UEFI.
+    add(g, "Boot mode", list_dir("/sys/firmware/efi") and "UEFI" or "Legacy BIOS / unknown")
+    return g
+end
+
+local function os_group()
+    local g = new_group("Operating System")
+    local uts = ffi.new("struct hw_utsname")
+    if ffi.C.uname(uts) == 0 then
+        add(g, "Kernel", ffi.string(uts.sysname) .. " " .. ffi.string(uts.release))
+        add(g, "Hostname", ffi.string(uts.nodename))
+        add(g, "Architecture", ffi.string(uts.machine))
+    else
+        add(g, "Kernel", "N/A (uname failed)")
+    end
+    local os_release = read_raw("/etc/os-release")
+    if os_release then
+        add(g, "Distribution", os_release:match('PRETTY_NAME="?([^"\n]+)"?'))
+    end
+    local uptime = tonumber((read_str("/proc/uptime") or ""):match("^(%S+)"))
+    if uptime then
+        add(g, "Uptime", format_uptime(uptime))
+    end
+    return g
+end
+
+--- System tab: machine identity, firmware, kernel and uptime.
+function HW.collect_system()
+    return { machine_group(), firmware_group(), os_group() }
+end
+
+-- CPU ---------------------------------------------------------------------
+local CPU_DIR = "/sys/devices/system/cpu/cpu0/"
+
+--- Parse /proc/cpuinfo text. Handles x86 ("model name") and ARM ("Model") layouts.
+--- Returns { model, vendor, flags, mhz, logical, physical }.
 function HW.parse_cpuinfo(text)
-    local info = { logical = 0, cores = {}, flags = nil, model = nil, mhz = nil }
-    local phys, core = nil, nil
+    local info = { logical = 0 }
+    local cores = {} -- unique "package:core" pairs give the physical core count
+    local package_id
     for line in (text .. "\n"):gmatch("([^\n]*)\n") do
         local key, val = line:match("^([^:]-)%s*:%s*(.*)$")
-        if key then
-            if key == "processor" then
-                info.logical = info.logical + 1
-            elseif key == "model name" or key == "Model" or key == "Hardware" then
-                info.model = info.model or clean(val)
-            elseif key == "vendor_id" then
-                info.vendor = info.vendor or clean(val)
-            elseif key == "flags" or key == "Features" then
-                info.flags = info.flags or clean(val)
-            elseif key == "cpu MHz" then
-                info.mhz = info.mhz or tonumber(val)
-            elseif key == "physical id" then
-                phys = val
-            elseif key == "core id" then
-                core = val
-                info.cores[(phys or "0") .. ":" .. core] = true
-            end
+        if key == "processor" then
+            info.logical = info.logical + 1
+        elseif key == "model name" or key == "Model" or key == "Hardware" then
+            info.model = info.model or clean(val)
+        elseif key == "vendor_id" then
+            info.vendor = info.vendor or clean(val)
+        elseif key == "flags" or key == "Features" then
+            info.flags = info.flags or clean(val)
+        elseif key == "cpu MHz" then
+            info.mhz = info.mhz or tonumber(val)
+        elseif key == "physical id" then
+            package_id = val
+        elseif key == "core id" then
+            cores[(package_id or "0") .. ":" .. val] = true
         end
     end
-    local n = 0
-    for _ in pairs(info.cores) do
-        n = n + 1
+    info.physical = 0
+    for _ in pairs(cores) do
+        info.physical = info.physical + 1
     end
-    info.physical = n
     return info
 end
 
-function HW.collect_cpu()
-    local groups = {}
-    local text, err = read_raw("/proc/cpuinfo")
+local function processor_group(info)
     local g = new_group("Processor")
-    if not text then
-        add(g, "Model", "N/A (cannot read /proc/cpuinfo: " .. tostring(err) .. ")")
-        return { g }
-    end
-    local info = HW.parse_cpuinfo(text)
     add_na(g, "Model", info.model)
     add(g, "Vendor", info.vendor)
     add(g, "Threads", info.logical)
     if info.physical > 0 then
         add(g, "Cores", info.physical)
     end
-    groups[#groups + 1] = g
+    return g
+end
 
-    local freq = new_group("Frequency")
-    local base = "/sys/devices/system/cpu/cpu0/cpufreq/"
-    local min = read_num(base .. "cpuinfo_min_freq")
-    local max = read_num(base .. "cpuinfo_max_freq")
-    local cur = read_num(base .. "scaling_cur_freq")
-    if min and max then
-        add(freq, "Range", string.format("%.0f MHz - %.0f MHz", min / 1000, max / 1000))
+local function frequency_group(info)
+    local g = new_group("Frequency")
+    local base = CPU_DIR .. "cpufreq/"
+    local min_khz = read_num(base .. "cpuinfo_min_freq")
+    local max_khz = read_num(base .. "cpuinfo_max_freq")
+    local cur_khz = read_num(base .. "scaling_cur_freq")
+    if min_khz and max_khz then
+        add(g, "Range", string.format("%.0f MHz - %.0f MHz", min_khz / 1000, max_khz / 1000))
     end
-    if cur then
-        add(freq, "Current", string.format("%.0f MHz", cur / 1000))
+    if cur_khz then
+        add(g, "Current", string.format("%.0f MHz", cur_khz / 1000))
     elseif info.mhz then
-        add(freq, "Current", string.format("%.0f MHz", info.mhz))
+        add(g, "Current", string.format("%.0f MHz", info.mhz))
     end
-    add(freq, "Governor", read_str(base .. "scaling_governor"))
-    add(freq, "Driver", read_str(base .. "scaling_driver"))
-    if #freq.items == 0 then
-        add(freq, "Scaling", "N/A (cpufreq not exposed)")
+    add(g, "Governor", read_str(base .. "scaling_governor"))
+    add(g, "Driver", read_str(base .. "scaling_driver"))
+    if #g.items == 0 then
+        add(g, "Scaling", "N/A (cpufreq not exposed)")
     end
-    groups[#groups + 1] = freq
+    return g
+end
 
-    local cache = new_group("Cache (cpu0)")
-    local entries = list_dir("/sys/devices/system/cpu/cpu0/cache") or {}
-    for _, name in ipairs(entries) do
+local function cache_group()
+    local g = new_group("Cache (cpu0)")
+    for _, name in ipairs(list_dir(CPU_DIR .. "cache") or {}) do
         if name:match("^index%d+$") then
-            local dir = "/sys/devices/system/cpu/cpu0/cache/" .. name .. "/"
-            local level = read_str(dir .. "level")
-            local kind = read_str(dir .. "type")
-            local size = read_str(dir .. "size")
+            local dir = CPU_DIR .. "cache/" .. name .. "/"
+            local level, size = read_str(dir .. "level"), read_str(dir .. "size")
             if level and size then
-                add(cache, "L" .. level .. " " .. (kind or ""), size)
+                add(g, "L" .. level .. " " .. (read_str(dir .. "type") or ""), size)
             end
         end
     end
-    if #cache.items == 0 then
-        add(cache, "Cache", "N/A (not exposed)")
+    if #g.items == 0 then
+        add(g, "Cache", "N/A (not exposed)")
     end
-    groups[#groups + 1] = cache
+    return g
+end
 
+--- CPU tab: model, core counts, frequency scaling, caches and feature flags.
+function HW.collect_cpu()
+    local text, err = read_raw("/proc/cpuinfo")
+    if not text then
+        local g = new_group("Processor")
+        add(g, "Model", "N/A (cannot read /proc/cpuinfo: " .. tostring(err) .. ")")
+        return { g }
+    end
+    local info = HW.parse_cpuinfo(text)
+    local groups = { processor_group(info), frequency_group(info), cache_group() }
     if info.flags then
-        local fg = new_group("Flags")
-        add(fg, "Flags", info.flags)
-        groups[#groups + 1] = fg
+        local flags = new_group("Flags")
+        add(flags, "Flags", info.flags)
+        groups[#groups + 1] = flags
     end
     return groups
 end
 
---- Parse one raw SMBIOS type 17 (Memory Device) structure.
+-- Memory ------------------------------------------------------------------
+local DMI_ENTRIES = "/sys/firmware/dmi/entries"
+
+-- SMBIOS type 17 "Memory Device" memory-type codes.
+local SMBIOS_MEMORY_TYPES = {
+    [0x13] = "DDR2", [0x18] = "DDR3", [0x1A] = "DDR4", [0x1B] = "LPDDR", [0x1C] = "LPDDR2",
+    [0x1D] = "LPDDR3", [0x1E] = "LPDDR4", [0x22] = "DDR5", [0x23] = "LPDDR5",
+}
+
+--- Decode the SMBIOS "Size" field into MiB; nil for empty or unknown slots.
+--- 0x7FFF means "see the extended size field" (modules of 32 GiB and larger).
+local function decode_dimm_size(field, extended)
+    if field == 0x7FFF and extended then
+        return extended
+    elseif field == 0 or field == 0xFFFF then
+        return nil
+    elseif bit.band(field, 0x8000) ~= 0 then
+        return bit.band(field, 0x7FFF) / 1024 -- bit 15 set: the size is in KiB
+    end
+    return field
+end
+
+--- Parse one raw SMBIOS type 17 (Memory Device) structure; nil if it is not one.
+--- Field offsets are 0-based byte offsets from the DMTF SMBIOS specification.
 function HW.parse_smbios_type17(raw)
-    if #raw < 0x1B or raw:byte(1) ~= 17 then
+    local MIN_LENGTH, TYPE_MEMORY_DEVICE = 0x1B, 17
+    if #raw < MIN_LENGTH or raw:byte(1) ~= TYPE_MEMORY_DEVICE then
         return nil
     end
-    local len = raw:byte(2)
-    local strings = {}
-    for s in raw:sub(len + 1):gmatch("([^%z]+)") do
+    local formatted_len = raw:byte(2)
+    local strings = {} -- the string table follows the formatted area, NUL separated
+    for s in raw:sub(formatted_len + 1):gmatch("([^%z]+)") do
         strings[#strings + 1] = s
     end
-    local function word(off)
-        return raw:byte(off + 1) + raw:byte(off + 2) * 256
+    local function byte_at(off)
+        return raw:byte(off + 1)
     end
-    local function str(off)
-        local idx = raw:byte(off + 1)
-        return idx and idx > 0 and strings[idx] or nil
+    local function word_at(off)
+        return byte_at(off) + byte_at(off + 1) * 256
     end
-    local size_raw = word(0x0C)
-    local size_mb = nil
-    if size_raw ~= 0 and size_raw ~= 0xFFFF then
-        if size_raw == 0x7FFF and len >= 0x20 then
-            size_mb = raw:byte(0x1C + 1) + raw:byte(0x1D + 1) * 256
-        elseif bit.band(size_raw, 0x8000) ~= 0 then
-            size_mb = bit.band(size_raw, 0x7FFF) / 1024
-        else
-            size_mb = size_raw
-        end
+    local function string_at(off) -- the byte is a 1-based index into the string table
+        local index = byte_at(off)
+        return index > 0 and strings[index] or nil
     end
-    local types = { [0x1A] = "DDR4", [0x1B] = "LPDDR", [0x1C] = "LPDDR2", [0x1D] = "LPDDR3",
-        [0x1E] = "LPDDR4", [0x22] = "DDR5", [0x23] = "LPDDR5", [0x18] = "DDR3", [0x13] = "DDR2" }
+
+    local size_field = word_at(0x0C)
+    local extended = size_field == 0x7FFF and formatted_len >= 0x20 and word_at(0x1C) or nil
+    local size_mb = decode_dimm_size(size_field, extended)
+    local speed = word_at(0x15)
     return {
-        locator = str(0x10),
+        locator = string_at(0x10),
         size_mb = size_mb,
-        type = types[raw:byte(0x12 + 1)],
-        speed = word(0x15) > 0 and word(0x15) or nil,
-        manufacturer = str(0x17),
-        part = str(0x1A) and clean(str(0x1A)) or nil,
+        type = SMBIOS_MEMORY_TYPES[byte_at(0x12)],
+        speed = speed > 0 and speed or nil,
+        manufacturer = string_at(0x17),
+        part = string_at(0x1A) and clean(string_at(0x1A)) or nil,
     }
 end
 
-function HW.collect_memory()
-    local groups = {}
+--- Extract a /proc/meminfo field (reported in kB) as bytes.
+local function meminfo_bytes(text, key)
+    local kib = text:match("\n?" .. key .. ":%s*(%d+)%s*kB")
+    return kib and tonumber(kib) * 1024 or nil
+end
+
+local function capacity_group(meminfo)
     local g = new_group("Capacity")
-    local text, err = read_raw("/proc/meminfo")
-    if not text then
-        add(g, "Memory", "N/A (cannot read /proc/meminfo: " .. tostring(err) .. ")")
-        return { g }
-    end
-    local function kib(key)
-        local v = text:match("\n?" .. key .. ":%s*(%d+)%s*kB")
-        return v and tonumber(v) * 1024 or nil
-    end
-    local total, avail = kib("MemTotal"), kib("MemAvailable")
+    local total = meminfo_bytes(meminfo, "MemTotal")
+    local available = meminfo_bytes(meminfo, "MemAvailable")
     add(g, "Total", format_bytes(total))
-    if total and avail then
-        local used = total - avail
+    if total and available then
+        local used = total - available
         add(g, "Used", string.format("%s (%.0f%%)", format_bytes(used), used * 100 / total))
-        add(g, "Available", format_bytes(avail))
+        add(g, "Available", format_bytes(available))
     end
-    add(g, "Cached", kib("Cached") and format_bytes(kib("Cached")) or nil)
-    local swap_total, swap_free = kib("SwapTotal"), kib("SwapFree")
+    local cached = meminfo_bytes(meminfo, "Cached")
+    add(g, "Cached", cached and format_bytes(cached))
+    local swap_total = meminfo_bytes(meminfo, "SwapTotal")
+    local swap_free = meminfo_bytes(meminfo, "SwapFree")
     if swap_total then
         add(g, "Swap", string.format("%s (free %s)", format_bytes(swap_total),
             format_bytes(swap_free)))
     end
-    add(g, "Huge pages", kib("Hugepagesize") and format_bytes(kib("Hugepagesize")) or nil)
-    groups[#groups + 1] = g
+    local huge = meminfo_bytes(meminfo, "Hugepagesize")
+    add(g, "Huge pages", huge and format_bytes(huge))
+    return g
+end
 
-    local dimms = new_group("Memory Modules (SMBIOS)")
-    local entries = list_dir("/sys/firmware/dmi/entries") or {}
-    local seen = 0
-    local denied = false
-    for _, name in ipairs(entries) do
+local function describe_dimm(dimm)
+    local size = dimm.size_mb and format_bytes(dimm.size_mb * 1024 * 1024) or "empty"
+    local speed = dimm.speed and ("@" .. dimm.speed .. " MT/s")
+    return join(" ", size, dimm.type, speed, dimm.manufacturer and clean(dimm.manufacturer),
+        dimm.part)
+end
+
+local function dimm_group()
+    local g = new_group("Memory Modules (SMBIOS)")
+    local unreadable = false
+    for _, name in ipairs(list_dir(DMI_ENTRIES) or {}) do
         if name:match("^17%-%d+$") then
-            local raw = read_raw("/sys/firmware/dmi/entries/" .. name .. "/raw")
-            if raw then
-                local d = HW.parse_smbios_type17(raw)
-                if d then
-                    seen = seen + 1
-                    local desc = d.size_mb and format_bytes(d.size_mb * 1024 * 1024) or "empty"
-                    if d.type then
-                        desc = desc .. " " .. d.type
-                    end
-                    if d.speed then
-                        desc = desc .. " @" .. d.speed .. " MT/s"
-                    end
-                    if d.manufacturer then
-                        desc = desc .. " " .. clean(d.manufacturer)
-                    end
-                    if d.part then
-                        desc = desc .. " " .. d.part
-                    end
-                    add(dimms, d.locator or name, desc)
-                end
-            else
-                denied = true
+            local raw = read_raw(DMI_ENTRIES .. "/" .. name .. "/raw")
+            local dimm = raw and HW.parse_smbios_type17(raw)
+            if dimm then
+                add(g, dimm.locator or name, describe_dimm(dimm))
+            elseif not raw then
+                unreadable = true
             end
         end
     end
-    if seen == 0 then
-        if denied then
-            add(dimms, "DIMMs", "N/A (needs root to read /sys/firmware/dmi/entries)")
-        else
-            add(dimms, "DIMMs", "N/A (no SMBIOS memory entries exposed)")
-        end
+    if #g.items == 0 then
+        add(g, "DIMMs", unreadable
+            and "N/A (needs root to read " .. DMI_ENTRIES .. ")"
+            or "N/A (no SMBIOS memory entries exposed)")
     end
-    groups[#groups + 1] = dimms
-    return groups
+    return g
 end
 
+--- Memory tab: capacity/usage from /proc/meminfo and SMBIOS module details.
+function HW.collect_memory()
+    local meminfo, err = read_raw("/proc/meminfo")
+    if not meminfo then
+        local g = new_group("Capacity")
+        add(g, "Memory", "N/A (cannot read /proc/meminfo: " .. tostring(err) .. ")")
+        return { g }
+    end
+    return { capacity_group(meminfo), dimm_group() }
+end
+
+-- PCI and GPU -------------------------------------------------------------
+local PCI_DIR = "/sys/bus/pci/devices"
+local DRM_DIR = "/sys/class/drm"
+local PCI_BASE_CLASS_DISPLAY = "03"
+local PCI_IDS_PATHS = { "/usr/share/hwdata/pci.ids", "/usr/share/misc/pci.ids" }
+
+-- PCI class codes: first four hex digits of the class (base + sub-class), then
+-- the base class alone as a fallback.
 local PCI_CLASSES = {
     ["0300"] = "VGA controller", ["0302"] = "3D controller", ["0380"] = "Display controller",
     ["0108"] = "NVMe controller", ["0106"] = "SATA controller", ["0200"] = "Ethernet controller",
@@ -553,7 +631,7 @@ local PCI_CLASSES = {
     ["0600"] = "Host bridge", ["0601"] = "ISA bridge", ["0604"] = "PCI bridge",
     ["0c03"] = "USB controller", ["0c05"] = "SMBus", ["0d11"] = "Bluetooth",
 }
-local PCI_BASE = {
+local PCI_BASE_CLASSES = {
     ["00"] = "Unclassified", ["01"] = "Storage", ["02"] = "Network", ["03"] = "Display",
     ["04"] = "Multimedia", ["05"] = "Memory", ["06"] = "Bridge", ["07"] = "Communication",
     ["08"] = "System peripheral", ["09"] = "Input", ["0b"] = "Processor",
@@ -561,47 +639,94 @@ local PCI_BASE = {
     ["11"] = "Signal processing", ["12"] = "Accelerator",
 }
 
---- Resolve vendor/device names from pci.ids for the wanted vendor set.
+--- Resolve vendor/device names from pci.ids, keeping only vendors in `wanted`
+--- (a set of 4-digit hex ids). Returns { vendors = {id=name}, devices = {"v:d"=name} };
+--- both tables are empty when no pci.ids file is installed.
 function HW.load_pci_names(wanted)
     local names = { vendors = {}, devices = {} }
-    local f
-    for _, p in ipairs({ "/usr/share/hwdata/pci.ids", "/usr/share/misc/pci.ids" }) do
-        f = io.open(sys_path(p), "rb")
-        if f then
+    local file
+    for _, path in ipairs(PCI_IDS_PATHS) do
+        file = io.open(sys_path(path), "rb")
+        if file then
             break
         end
     end
-    if not f then
+    if not file then
         return names
     end
-    local cur = nil
-    for line in f:lines() do
-        local vid, vname = line:match("^(%x%x%x%x)%s%s(.+)$")
-        if vid then
-            cur = wanted[vid] and vid or nil
-            if cur then
-                names.vendors[vid] = vname
+    local vendor -- the wanted vendor whose device lines we are currently inside
+    for line in file:lines() do
+        local vendor_id, vendor_name = line:match("^(%x%x%x%x)%s%s(.+)$")
+        if vendor_id then
+            vendor = wanted[vendor_id] and vendor_id or nil
+            if vendor then
+                names.vendors[vendor] = vendor_name
             end
-        elseif cur then
-            local did, dname = line:match("^\t(%x%x%x%x)%s%s(.+)$")
-            if did then
-                names.devices[cur .. ":" .. did] = dname
+        elseif vendor then
+            local device_id, device_name = line:match("^\t(%x%x%x%x)%s%s(.+)$")
+            if device_id then
+                names.devices[vendor .. ":" .. device_id] = device_name
             end
         end
     end
-    f:close()
+    file:close()
     return names
 end
 
--- GPU details, displays (EDID) -------------------------------------------
---- Parse the interesting fields of a 128-byte EDID block; nil when invalid.
-function HW.parse_edid(raw)
-    if #raw < 128 or raw:sub(1, 8) ~= "\0\255\255\255\255\255\255\0" then
+--- Read every PCI device's ids and driver. Returns the device list and the set of
+--- vendor ids seen, or nil when /sys/bus/pci is unreadable.
+local function read_pci_devices()
+    local addresses = list_dir(PCI_DIR)
+    if not addresses then
         return nil
     end
-    local id = raw:byte(9) * 256 + raw:byte(10)
+    local devices, vendors = {}, {}
+    local function hex_id(path) -- sysfs ids look like "0x8086"
+        return ((read_str(path) or ""):gsub("^0x", ""))
+    end
+    for _, addr in ipairs(addresses) do
+        local dir = PCI_DIR .. "/" .. addr .. "/"
+        local vendor, device = hex_id(dir .. "vendor"), hex_id(dir .. "device")
+        local class = hex_id(dir .. "class"):sub(1, 4)
+        devices[#devices + 1] = {
+            addr = addr,
+            dir = dir,
+            vendor = vendor,
+            device = device,
+            class = class,
+            kind = PCI_CLASSES[class] or PCI_BASE_CLASSES[class:sub(1, 2)] or "Device",
+            driver = link_base(dir .. "driver"),
+        }
+        vendors[vendor] = true
+    end
+    return devices, vendors
+end
+
+local function describe_pci_device(dev, names)
+    local vendor = names.vendors[dev.vendor] or ("vendor " .. dev.vendor)
+    local device = names.devices[dev.vendor .. ":" .. dev.device] or ("device " .. dev.device)
+    local text = string.format("%s %s [%s:%s]", vendor, device, dev.vendor, dev.device)
+    if dev.driver then
+        text = text .. "  driver: " .. dev.driver
+    end
+    return text
+end
+
+-- Displays (EDID) -----------------------------------------------------------
+local EDID_MAGIC = "\0\255\255\255\255\255\255\0"
+local EDID_BLOCK_SIZE = 128
+local EDID_DESCRIPTOR_MONITOR_NAME = 0xFC
+
+--- Parse the interesting fields of a 128-byte EDID block; nil when invalid.
+--- Returns { mfr, product, width_cm, height_cm, year, name }.
+function HW.parse_edid(raw)
+    if #raw < EDID_BLOCK_SIZE or raw:sub(1, 8) ~= EDID_MAGIC then
+        return nil
+    end
+    -- Manufacturer id: three 5-bit letters packed into a big-endian 16-bit word.
+    local packed = raw:byte(9) * 256 + raw:byte(10)
     local function letter(shift)
-        return string.char(64 + bit.band(bit.rshift(id, shift), 31))
+        return string.char(64 + bit.band(bit.rshift(packed, shift), 31))
     end
     local info = {
         mfr = letter(10) .. letter(5) .. letter(0),
@@ -610,127 +735,112 @@ function HW.parse_edid(raw)
         height_cm = raw:byte(23),
         year = 1990 + raw:byte(18),
     }
-    for off = 55, 109, 18 do
-        if raw:byte(off) == 0 and raw:byte(off + 1) == 0 and raw:byte(off + 3) == 0xFC then
-            info.name = clean(raw:sub(off + 5, off + 17):match("^[^\n]*"))
+    -- Four 18-byte descriptors start at (1-based) byte 55; a monitor-name descriptor
+    -- is 0,0,0,0xFC,0 followed by up to 13 text bytes ending in a newline.
+    for first = 55, 109, 18 do
+        local is_text = raw:byte(first) == 0 and raw:byte(first + 1) == 0
+        if is_text and raw:byte(first + 3) == EDID_DESCRIPTOR_MONITOR_NAME then
+            info.name = clean(raw:sub(first + 5, first + 17):match("^[^\n]*"))
         end
     end
     return info
 end
 
+local function describe_display(dir)
+    local modes = read_raw(dir .. "modes")
+    local raw_edid = read_raw(dir .. "edid")
+    local edid = raw_edid and HW.parse_edid(raw_edid)
+    local name, size
+    if edid then
+        name = edid.name and (edid.name .. " (" .. edid.mfr .. ")") or edid.mfr
+        if edid.width_cm > 0 and edid.height_cm > 0 then
+            local diagonal_in = math.sqrt(edid.width_cm ^ 2 + edid.height_cm ^ 2) / 2.54
+            size = string.format("%dx%d cm (%.1f\")", edid.width_cm, edid.height_cm, diagonal_in)
+        end
+    end
+    return join("  ", "connected", modes and modes:match("^(%S+)"), name, size)
+end
+
+--- Displays group: one row per connected DRM output (mode, EDID name, size).
 function HW.collect_displays()
     local g = new_group("Displays")
-    local entries = list_dir("/sys/class/drm") or {}
-    for _, name in ipairs(entries) do
-        local conn = name:match("^card%d+%-(.+)$")
-        if conn then
-            local dir = "/sys/class/drm/" .. name .. "/"
-            if read_str(dir .. "status") == "connected" then
-                local parts = { "connected" }
-                local modes = read_raw(dir .. "modes")
-                local mode = modes and modes:match("^(%S+)")
-                parts[#parts + 1] = mode
-                local raw = read_raw(dir .. "edid")
-                local edid = raw and HW.parse_edid(raw)
-                if edid then
-                    parts[#parts + 1] = edid.name and (edid.name .. " (" .. edid.mfr .. ")")
-                        or edid.mfr
-                    if edid.width_cm > 0 and edid.height_cm > 0 then
-                        local diag = math.sqrt(edid.width_cm ^ 2 + edid.height_cm ^ 2) / 2.54
-                        parts[#parts + 1] = string.format("%dx%d cm (%.1f\")", edid.width_cm,
-                            edid.height_cm, diag)
-                    end
-                end
-                add(g, conn, table.concat(parts, "  "))
-            end
+    for _, name in ipairs(list_dir(DRM_DIR) or {}) do
+        local connector = name:match("^card%d+%-(.+)$")
+        local dir = DRM_DIR .. "/" .. name .. "/"
+        if connector and read_str(dir .. "status") == "connected" then
+            add(g, connector, describe_display(dir))
         end
     end
     if #g.items == 0 then
-        add(g, "Displays", "N/A (no connected outputs in /sys/class/drm)")
+        add(g, "Displays", "N/A (no connected outputs in " .. DRM_DIR .. ")")
     end
     return g
 end
 
-local function pcie_link(dir)
-    local cur, curw = read_str(dir .. "current_link_speed"), read_str(dir .. "current_link_width")
-    local max, maxw = read_str(dir .. "max_link_speed"), read_str(dir .. "max_link_width")
-    if not cur or not curw or cur:find("Unknown", 1, true) or curw == "0" then
-        return nil
+-- GPU details ---------------------------------------------------------------
+-- Matches the active clock in amdgpu's pp_dpm_* tables, e.g. "1: 1800Mhz *".
+local DPM_ACTIVE_PATTERN = "(%d+)%s*[Mm][Hh][Zz]%s*%*"
+
+local function intel_frequency_row(g, card_dir, card)
+    local requested = read_num(card_dir .. "gt_cur_freq_mhz")
+    if not requested then
+        return
     end
-    local text = string.format("%s x%s", cur, curw)
-    if max and maxw and (max ~= cur or maxw ~= curw) then
-        text = text .. string.format(" (max %s x%s)", max, maxw)
-    end
-    return text
+    local actual = read_num(card_dir .. "gt_act_freq_mhz")
+    local low = read_num(card_dir .. "gt_min_freq_mhz")
+    local high = read_num(card_dir .. "gt_max_freq_mhz")
+    local text = string.format("requested %d MHz%s  (range %s-%s MHz)", requested,
+        actual and (", actual " .. actual .. " MHz") or "", tostring(low or "?"),
+        tostring(high or "?"))
+    add_metric(g, "GT frequency", text, card .. "/gt_freq", actual or requested, "MHz")
 end
 
---- Per-GPU live details: PCIe link, clocks, utilization, VRAM, temperature.
-function HW.collect_gpu_details()
-    local groups = {}
-    local entries = list_dir("/sys/class/drm") or {}
-    for _, name in ipairs(entries) do
-        if name:match("^card%d+$") then
-            local dir = "/sys/class/drm/" .. name .. "/"
-            local dev = dir .. "device/"
-            local g = new_group("GPU Details (" .. name .. ")")
-            add(g, "Driver", link_base(dev .. "driver"))
-            add(g, "PCIe link", pcie_link(dev))
-            -- Intel i915/xe
-            local cur = read_num(dir .. "gt_cur_freq_mhz")
-            if cur then
-                local act = read_num(dir .. "gt_act_freq_mhz")
-                local lo, hi = read_num(dir .. "gt_min_freq_mhz"), read_num(dir .. "gt_max_freq_mhz")
-                add(g, "GT frequency", string.format("requested %d MHz%s  (range %s-%s MHz)", cur,
-                    act and (", actual " .. act .. " MHz") or "", tostring(lo or "?"),
-                    tostring(hi or "?")), name .. "/gt_freq", act or cur)
-                g.items[#g.items].unit = "MHz"
-            end
-            -- AMD amdgpu
-            local busy = read_num(dev .. "gpu_busy_percent")
-            if busy then
-                add(g, "Utilization", busy .. " %", name .. "/busy", busy)
-                g.items[#g.items].unit = "%"
-            end
-            local vram_used, vram_total = read_num(dev .. "mem_info_vram_used"),
-                read_num(dev .. "mem_info_vram_total")
-            if vram_used and vram_total then
-                add(g, "VRAM", string.format("%s / %s", format_bytes(vram_used),
-                    format_bytes(vram_total)))
-            end
-            local sclk = read_raw(dev .. "pp_dpm_sclk")
-            local mhz = sclk and sclk:match("(%d+)%s*[Mm][Hh][Zz]%s*%*")
-            if mhz then
-                add(g, "Core clock", mhz .. " MHz")
-            end
-            local mclk = read_raw(dev .. "pp_dpm_mclk")
-            mhz = mclk and mclk:match("(%d+)%s*[Mm][Hh][Zz]%s*%*")
-            if mhz then
-                add(g, "Memory clock", mhz .. " MHz")
-            end
-            -- hwmon under the device (amdgpu, i915 power, nouveau)
-            for _, hm in ipairs(list_dir(dev .. "hwmon") or {}) do
-                local hdir = dev .. "hwmon/" .. hm .. "/"
-                local t = read_num(hdir .. "temp1_input")
-                if t then
-                    add(g, "Temperature", string.format("%.1f °C", t / 1000),
-                        name .. "/temp", t / 1000)
-                    g.items[#g.items].unit = "°C"
-                end
-                local pw = read_num(hdir .. "power1_average") or read_num(hdir .. "power1_input")
-                if pw then
-                    add(g, "Power", string.format("%.1f W", pw / 1000000))
-                end
-                local fan = read_num(hdir .. "fan1_input")
-                if fan then
-                    add(g, "Fan", fan .. " RPM")
-                end
-            end
-            if #g.items > 0 then
-                groups[#groups + 1] = g
-            end
-        end
+local function amdgpu_rows(g, dev, card)
+    local busy = read_num(dev .. "gpu_busy_percent")
+    if busy then
+        add_metric(g, "Utilization", busy .. " %", card .. "/busy", busy, "%")
     end
-    -- NVIDIA proprietary driver
+    local vram_used, vram_total = read_num(dev .. "mem_info_vram_used"),
+        read_num(dev .. "mem_info_vram_total")
+    if vram_used and vram_total then
+        add(g, "VRAM", format_bytes(vram_used) .. " / " .. format_bytes(vram_total))
+    end
+    local core = (read_raw(dev .. "pp_dpm_sclk") or ""):match(DPM_ACTIVE_PATTERN)
+    add(g, "Core clock", core and (core .. " MHz"))
+    local memory = (read_raw(dev .. "pp_dpm_mclk") or ""):match(DPM_ACTIVE_PATTERN)
+    add(g, "Memory clock", memory and (memory .. " MHz"))
+end
+
+--- Temperature, power and fan from the hwmon nodes under a GPU device.
+local function gpu_hwmon_rows(g, dev, card)
+    for _, hwmon in ipairs(list_dir(dev .. "hwmon") or {}) do
+        local dir = dev .. "hwmon/" .. hwmon .. "/"
+        local temp_mc = read_num(dir .. "temp1_input")
+        if temp_mc then
+            add_metric(g, "Temperature", string.format("%.1f °C", temp_mc / 1000),
+                card .. "/temp", temp_mc / 1000, "°C")
+        end
+        local power_uw = read_num(dir .. "power1_average") or read_num(dir .. "power1_input")
+        add(g, "Power", power_uw and string.format("%.1f W", power_uw / 1000000))
+        local fan_rpm = read_num(dir .. "fan1_input")
+        add(g, "Fan", fan_rpm and (fan_rpm .. " RPM"))
+    end
+end
+
+local function drm_card_group(card)
+    local card_dir = DRM_DIR .. "/" .. card .. "/"
+    local dev = card_dir .. "device/"
+    local g = new_group("GPU Details (" .. card .. ")")
+    add(g, "Driver", link_base(dev .. "driver"))
+    add(g, "PCIe link", pcie_link(dev))
+    intel_frequency_row(g, card_dir, card)
+    amdgpu_rows(g, dev, card)
+    gpu_hwmon_rows(g, dev, card)
+    return g
+end
+
+local function nvidia_groups()
+    local groups = {}
     for _, gpu_id in ipairs(list_dir("/proc/driver/nvidia/gpus") or {}) do
         local info = read_raw("/proc/driver/nvidia/gpus/" .. gpu_id .. "/information")
         if info then
@@ -745,18 +855,93 @@ function HW.collect_gpu_details()
     return groups
 end
 
--- NVMe controllers and SMART health ---------------------------------------
-local function le64(buf, off)
-    local v = 0
-    for i = 7, 0, -1 do
-        v = v * 256 + buf:byte(off + i + 1)
+--- Per-GPU live details: PCIe link, clocks, utilization, VRAM, temperature.
+--- Covers Intel (i915/xe), AMD (amdgpu) and the NVIDIA proprietary driver.
+function HW.collect_gpu_details()
+    local groups = {}
+    for _, name in ipairs(list_dir(DRM_DIR) or {}) do
+        if name:match("^card%d+$") then
+            local g = drm_card_group(name)
+            if #g.items > 0 then
+                groups[#groups + 1] = g
+            end
+        end
     end
-    return v
+    for _, g in ipairs(nvidia_groups()) do
+        groups[#groups + 1] = g
+    end
+    return groups
 end
 
---- Parse a 512-byte NVMe SMART / Health log page.
+--- GPU/PCI tab: graphics adapters, live GPU details, displays, all PCI devices.
+function HW.collect_gpu_pci()
+    local devices, vendors = read_pci_devices()
+    if not devices then
+        local g = new_group("PCI Devices")
+        add(g, "PCI", "N/A (cannot read " .. PCI_DIR .. ")")
+        return { g }
+    end
+    local names = HW.load_pci_names(vendors)
+    local gpu, pci = new_group("Graphics"), new_group("PCI Devices")
+    for _, dev in ipairs(devices) do
+        local label, text = dev.addr .. " " .. dev.kind, describe_pci_device(dev, names)
+        add(pci, label, text)
+        if dev.class:sub(1, 2) == PCI_BASE_CLASS_DISPLAY then
+            add(gpu, label, text)
+            local vram = read_num(dev.dir .. "mem_info_vram_total")
+            add(gpu, "  VRAM", vram and format_bytes(vram))
+        end
+    end
+    if #gpu.items == 0 then
+        add(gpu, "GPU", "N/A (no display-class PCI device)")
+    end
+    if #pci.items == 0 then
+        add(pci, "PCI", "N/A (no devices)")
+    end
+    local groups = { gpu }
+    for _, g in ipairs(HW.collect_gpu_details()) do
+        groups[#groups + 1] = g
+    end
+    groups[#groups + 1] = HW.collect_displays()
+    groups[#groups + 1] = pci
+    return groups
+end
+
+-- Storage -------------------------------------------------------------------
+local NVME_DIR = "/sys/class/nvme"
+local SECTOR_BYTES = 512
+
+-- NVMe admin passthrough: ioctl NVME_IOCTL_ADMIN_CMD = _IOWR('N', 0x41, 72-byte command).
+local NVME_IOCTL_ADMIN_CMD = 0xC0484E41
+local NVME_ADMIN_GET_LOG_PAGE = 0x02
+local NVME_LOG_SMART_HEALTH = 0x02
+local NVME_NSID_ALL = 0xFFFFFFFF
+local SMART_LOG_BYTES = 512
+
+-- Byte offsets inside the SMART / Health log page (NVMe base specification).
+local SMART_OFFSET = {
+    data_units_read = 32,
+    data_units_written = 48,
+    power_cycles = 112,
+    power_on_hours = 128,
+    unsafe_shutdowns = 144,
+    media_errors = 160,
+}
+local SMART_MIN_BYTES = 192 -- through the error-log-entries counter at offset 176
+local SMART_DATA_UNIT_BYTES = 512000 -- one "data unit" is 1000 sectors of 512 bytes
+
+--- Read a little-endian 64-bit counter at 0-based `off` (exact below 2^53).
+local function le64(buf, off)
+    local value = 0
+    for i = 7, 0, -1 do
+        value = value * 256 + buf:byte(off + i + 1)
+    end
+    return value
+end
+
+--- Parse a 512-byte NVMe SMART / Health log page; nil when the buffer is too short.
 function HW.parse_nvme_smart(buf)
-    if #buf < 192 then
+    if #buf < SMART_MIN_BYTES then
         return nil
     end
     local kelvin = buf:byte(2) + buf:byte(3) * 256
@@ -766,277 +951,250 @@ function HW.parse_nvme_smart(buf)
         spare_pct = buf:byte(4),
         spare_threshold = buf:byte(5),
         used_pct = buf:byte(6),
-        read_bytes = le64(buf, 32) * 512000,
-        written_bytes = le64(buf, 48) * 512000,
-        power_cycles = le64(buf, 112),
-        power_on_hours = le64(buf, 128),
-        unsafe_shutdowns = le64(buf, 144),
-        media_errors = le64(buf, 160),
+        read_bytes = le64(buf, SMART_OFFSET.data_units_read) * SMART_DATA_UNIT_BYTES,
+        written_bytes = le64(buf, SMART_OFFSET.data_units_written) * SMART_DATA_UNIT_BYTES,
+        power_cycles = le64(buf, SMART_OFFSET.power_cycles),
+        power_on_hours = le64(buf, SMART_OFFSET.power_on_hours),
+        unsafe_shutdowns = le64(buf, SMART_OFFSET.unsafe_shutdowns),
+        media_errors = le64(buf, SMART_OFFSET.media_errors),
     }
 end
 
---- Query the SMART log via the NVMe admin passthrough ioctl (normally root only).
+--- Read the SMART log through the NVMe admin ioctl (normally root only).
+--- Returns the parsed table, or nil plus a message naming the failed step.
 function HW.read_nvme_smart(devpath)
+    local EACCES = 13
     local fd = ffi.C.open(devpath, 0)
     if fd < 0 then
         local errno = ffi.errno()
         return nil, string.format("cannot open %s: %s", devpath,
-            errno == 13 and "permission denied (run as root)" or ("errno " .. errno))
+            errno == EACCES and "permission denied (run as root)" or ("errno " .. errno))
     end
-    local data = ffi.new("uint8_t[512]")
+    local data = ffi.new("uint8_t[?]", SMART_LOG_BYTES)
     local cmd = ffi.new("struct hw_nvme_admin_cmd")
-    cmd.opcode = 0x02
-    cmd.nsid = 0xFFFFFFFF
+    cmd.opcode = NVME_ADMIN_GET_LOG_PAGE
+    cmd.nsid = NVME_NSID_ALL
     cmd.addr = tonumber(ffi.cast("uintptr_t", data))
-    cmd.data_len = 512
-    cmd.cdw10 = bit.bor(bit.lshift(127, 16), 0x02)
-    local rc = ffi.C.ioctl(fd, 0xC0484E41, cmd)
+    cmd.data_len = SMART_LOG_BYTES
+    -- cdw10: bits 31..16 = number of dwords - 1, bits 7..0 = log page id.
+    cmd.cdw10 = bit.bor(bit.lshift(SMART_LOG_BYTES / 4 - 1, 16), NVME_LOG_SMART_HEALTH)
+    local rc = ffi.C.ioctl(fd, NVME_IOCTL_ADMIN_CMD, cmd)
     local errno = ffi.errno()
     ffi.C.close(fd)
     if rc ~= 0 then
         return nil, string.format("NVMe SMART ioctl on %s failed (rc=%d, errno %d)", devpath,
             rc, errno)
     end
-    local parsed = HW.parse_nvme_smart(ffi.string(data, 512))
+    local parsed = HW.parse_nvme_smart(ffi.string(data, SMART_LOG_BYTES))
     if not parsed then
         return nil, "NVMe SMART log too short"
     end
     return parsed
 end
 
+local function add_smart_rows(g, smart)
+    local health = "OK"
+    if smart.critical_warning ~= 0 then
+        health = string.format("WARNING (flags 0x%02x)", smart.critical_warning)
+    end
+    add(g, "Health", health)
+    add(g, "Wear", string.format("%d%% used", smart.used_pct))
+    add(g, "Spare", string.format("%d%% (threshold %d%%)", smart.spare_pct,
+        smart.spare_threshold))
+    add(g, "Data written", format_bytes(smart.written_bytes))
+    add(g, "Data read", format_bytes(smart.read_bytes))
+    add(g, "Power-on", string.format("%d h", smart.power_on_hours))
+    add(g, "Power cycles", smart.power_cycles)
+    add(g, "Unsafe shutdowns", smart.unsafe_shutdowns)
+    add(g, "Media errors", smart.media_errors)
+end
+
+local function nvme_controller_group(name)
+    local dir = NVME_DIR .. "/" .. name .. "/"
+    local g = new_group("NVMe Controller " .. name)
+    add(g, "Model", read_str(dir .. "model"))
+    add(g, "Firmware", read_str(dir .. "firmware_rev"))
+    add(g, "State", read_str(dir .. "state"))
+    add(g, "Transport", read_str(dir .. "transport"))
+    add(g, "I/O queues", read_str(dir .. "queue_count"))
+    add(g, "PCIe link", pcie_link(dir .. "device/"))
+    for _, entry in ipairs(list_dir(dir) or {}) do
+        local temp_mc = entry:match("^hwmon%d+$") and read_num(dir .. entry .. "/temp1_input")
+        if temp_mc then
+            add_metric(g, "Temperature", string.format("%.1f °C", temp_mc / 1000),
+                name .. "/temp", temp_mc / 1000, "°C")
+        end
+    end
+    local smart, err = HW.read_nvme_smart("/dev/" .. name)
+    if smart then
+        add_smart_rows(g, smart)
+    else
+        add(g, "SMART", "N/A (" .. err .. ")")
+    end
+    return g
+end
+
+--- One group per NVMe controller: identity, link, temperature and SMART health.
 function HW.collect_nvme()
     local groups = {}
-    for _, name in ipairs(list_dir("/sys/class/nvme") or {}) do
-        local dir = "/sys/class/nvme/" .. name .. "/"
-        local g = new_group("NVMe Controller " .. name)
-        add(g, "Model", read_str(dir .. "model"))
-        add(g, "Firmware", read_str(dir .. "firmware_rev"))
-        add(g, "State", read_str(dir .. "state"))
-        add(g, "Transport", read_str(dir .. "transport"))
-        add(g, "I/O queues", read_str(dir .. "queue_count"))
-        add(g, "PCIe link", pcie_link(dir .. "device/"))
-        for _, hm in ipairs(list_dir(dir) or {}) do
-            if hm:match("^hwmon%d+$") then
-                local t = read_num(dir .. hm .. "/temp1_input")
-                if t then
-                    add(g, "Temperature", string.format("%.1f °C", t / 1000),
-                        name .. "/temp", t / 1000)
-                    g.items[#g.items].unit = "°C"
-                end
-            end
-        end
-        local smart, err = HW.read_nvme_smart("/dev/" .. name)
-        if smart then
-            local warn = smart.critical_warning == 0 and "OK"
-                or string.format("WARNING (flags 0x%02x)", smart.critical_warning)
-            add(g, "Health", warn)
-            add(g, "Wear", string.format("%d%% used", smart.used_pct))
-            add(g, "Spare", string.format("%d%% (threshold %d%%)", smart.spare_pct,
-                smart.spare_threshold))
-            add(g, "Data written", format_bytes(smart.written_bytes))
-            add(g, "Data read", format_bytes(smart.read_bytes))
-            add(g, "Power-on", string.format("%d h", smart.power_on_hours))
-            add(g, "Power cycles", smart.power_cycles)
-            add(g, "Unsafe shutdowns", smart.unsafe_shutdowns)
-            add(g, "Media errors", smart.media_errors)
-        else
-            add(g, "SMART", "N/A (" .. err .. ")")
-        end
-        groups[#groups + 1] = g
+    for _, name in ipairs(list_dir(NVME_DIR) or {}) do
+        groups[#groups + 1] = nvme_controller_group(name)
     end
     return groups
 end
 
-function HW.collect_gpu_pci()
-    local base = "/sys/bus/pci/devices"
-    local entries = list_dir(base)
-    local gpu = new_group("Graphics")
-    local pci = new_group("PCI Devices")
-    if not entries then
-        add(pci, "PCI", "N/A (cannot read " .. base .. ")")
-        return { pci }
+local function describe_block_device(name)
+    local dir = "/sys/block/" .. name .. "/"
+    local rotational = read_num(dir .. "queue/rotational")
+    local kind = "disk"
+    if name:match("^nvme") then
+        kind = "NVMe SSD"
+    elseif rotational == 1 then
+        kind = "HDD"
+    elseif rotational == 0 then
+        kind = "SSD"
     end
-    local devs = {}
-    local wanted = {}
-    for _, addr in ipairs(entries) do
-        local dir = base .. "/" .. addr .. "/"
-        local vendor = (read_str(dir .. "vendor") or ""):gsub("^0x", "")
-        local device = (read_str(dir .. "device") or ""):gsub("^0x", "")
-        local class = (read_str(dir .. "class") or ""):gsub("^0x", "")
-        devs[#devs + 1] = {
-            addr = addr, vendor = vendor, device = device, class4 = class:sub(1, 4),
-            driver = link_base(dir .. "driver"),
-        }
-        wanted[vendor] = true
-    end
-    local names = HW.load_pci_names(wanted)
-    for _, d in ipairs(devs) do
-        local vname = names.vendors[d.vendor] or ("vendor " .. d.vendor)
-        local dname = names.devices[d.vendor .. ":" .. d.device] or ("device " .. d.device)
-        local kind = PCI_CLASSES[d.class4] or PCI_BASE[d.class4:sub(1, 2)] or "Device"
-        local text = string.format("%s %s [%s:%s]", vname, dname, d.vendor, d.device)
-        if d.driver then
-            text = text .. "  driver: " .. d.driver
-        end
-        add(pci, d.addr .. " " .. kind, text)
-        if d.class4:sub(1, 2) == "03" then
-            add(gpu, d.addr .. " " .. kind, text)
-            local vram = read_num(base .. "/" .. d.addr .. "/mem_info_vram_total")
-            if vram then
-                add(gpu, "  VRAM", format_bytes(vram))
-            end
-        end
-    end
-    if #gpu.items == 0 then
-        add(gpu, "GPU", "N/A (no display-class PCI device)")
-    end
-    if #pci.items == 0 then
-        add(pci, "PCI", "N/A (no devices)")
-    end
-    local result = { gpu }
-    for _, g in ipairs(HW.collect_gpu_details()) do
-        result[#result + 1] = g
-    end
-    result[#result + 1] = HW.collect_displays()
-    result[#result + 1] = pci
-    return result
+    local scheduler = read_str(dir .. "queue/scheduler")
+    return join("  ",
+        format_bytes((read_num(dir .. "size") or 0) * SECTOR_BYTES),
+        kind,
+        read_str(dir .. "device/model"),
+        read_num(dir .. "removable") == 1 and "(removable)" or nil,
+        scheduler and ("sched: " .. (scheduler:match("%[([^%]]+)%]") or scheduler)))
 end
 
-function HW.collect_storage()
-    local groups = {}
-    local disks = new_group("Block Devices")
-    local entries = list_dir("/sys/block")
-    if not entries then
-        add(disks, "Disks", "N/A (cannot read /sys/block)")
-    else
-        for _, name in ipairs(entries) do
-            if not name:match("^loop") and not name:match("^ram") then
-                local dir = "/sys/block/" .. name .. "/"
-                local sectors = read_num(dir .. "size") or 0
-                local model = read_str(dir .. "device/model")
-                local rot = read_num(dir .. "queue/rotational")
-                local kind = name:match("^nvme") and "NVMe SSD"
-                    or (rot == 1 and "HDD" or (rot == 0 and "SSD" or "disk"))
-                local desc = string.format("%s  %s", format_bytes(sectors * 512), kind)
-                if model then
-                    desc = desc .. "  " .. model
-                end
-                if read_num(dir .. "removable") == 1 then
-                    desc = desc .. "  (removable)"
-                end
-                local sched = read_str(dir .. "queue/scheduler")
-                if sched then
-                    desc = desc .. "  sched: " .. (sched:match("%[([^%]]+)%]") or sched)
-                end
-                add(disks, name, desc)
-            end
-        end
-        if #disks.items == 0 then
-            add(disks, "Disks", "N/A (no block devices)")
+local function block_devices_group()
+    local g = new_group("Block Devices")
+    local names = list_dir("/sys/block")
+    if not names then
+        add(g, "Disks", "N/A (cannot read /sys/block)")
+        return g
+    end
+    for _, name in ipairs(names) do
+        if not name:match("^loop") and not name:match("^ram") then
+            add(g, name, describe_block_device(name))
         end
     end
-    groups[#groups + 1] = disks
+    if #g.items == 0 then
+        add(g, "Disks", "N/A (no block devices)")
+    end
+    return g
+end
+
+--- Group /proc/mounts lines by backing device (only device-backed mounts), keeping
+--- first-seen order. Returns a list of { dev, fs, mounts = { mountpoints } }.
+local function mounts_by_device(mounts_text)
+    local ordered, by_dev = {}, {}
+    for line in mounts_text:gmatch("[^\n]+") do
+        local dev, mountpoint, fs = line:match("^(%S+)%s+(%S+)%s+(%S+)")
+        if dev and dev:sub(1, 1) == "/" then
+            local entry = by_dev[dev]
+            if not entry then
+                entry = { dev = dev, fs = fs, mounts = {} }
+                by_dev[dev] = entry
+                ordered[#ordered + 1] = entry
+            end
+            -- /proc/mounts escapes spaces in paths as \040
+            entry.mounts[#entry.mounts + 1] = mountpoint:gsub("\\040", " ")
+        end
+    end
+    return ordered
+end
+
+local function describe_mount(entry)
+    local mountpoint = entry.mounts[1]
+    local extra
+    if #entry.mounts > 1 then
+        extra = string.format("(+%d more: %s)", #entry.mounts - 1,
+            table.concat(entry.mounts, ", ", 2))
+    end
+    local sv = ffi.new("struct hw_statvfs")
+    if ffi.C.statvfs(mountpoint, sv) ~= 0 or tonumber(sv.f_blocks) == 0 then
+        return mountpoint, join("  ", entry.dev, entry.fs, "(statvfs unavailable)", extra)
+    end
+    local block = tonumber(sv.f_frsize)
+    local total = tonumber(sv.f_blocks) * block
+    local used = total - tonumber(sv.f_bfree) * block
+    local free = tonumber(sv.f_bavail) * block
+    local usage = string.format("used %s / %s (%.0f%%)  free %s", format_bytes(used),
+        format_bytes(total), used * 100 / total, format_bytes(free))
+    return mountpoint, join("  ", entry.dev, entry.fs, usage, extra)
+end
+
+local function mounts_group()
+    local g = new_group("Mounted Filesystems")
+    local text = read_raw("/proc/mounts")
+    if not text then
+        add(g, "Mounts", "N/A (cannot read /proc/mounts)")
+        return g
+    end
+    for _, entry in ipairs(mounts_by_device(text)) do
+        add(g, describe_mount(entry))
+    end
+    if #g.items == 0 then
+        add(g, "Mounts", "N/A (no device-backed mounts)")
+    end
+    return g
+end
+
+--- Storage tab: block devices, NVMe controllers and mounted filesystems.
+function HW.collect_storage()
+    local groups = { block_devices_group() }
     for _, g in ipairs(HW.collect_nvme()) do
         groups[#groups + 1] = g
     end
-
-    local mounts = new_group("Mounted Filesystems")
-    local text = read_raw("/proc/mounts")
-    if not text then
-        add(mounts, "Mounts", "N/A (cannot read /proc/mounts)")
-    else
-        local order = {}
-        local by_dev = {}
-        for line in text:gmatch("[^\n]+") do
-            local dev, mp, fs = line:match("^(%S+)%s+(%S+)%s+(%S+)")
-            if dev and dev:sub(1, 1) == "/" then
-                mp = mp:gsub("\\040", " ")
-                local entry = by_dev[dev]
-                if not entry then
-                    entry = { dev = dev, fs = fs, mounts = {} }
-                    by_dev[dev] = entry
-                    order[#order + 1] = entry
-                end
-                entry.mounts[#entry.mounts + 1] = mp
-            end
-        end
-        for _, entry in ipairs(order) do
-            local mp = entry.mounts[1]
-            local extra = ""
-            if #entry.mounts > 1 then
-                extra = string.format("  (+%d more: %s)", #entry.mounts - 1,
-                    table.concat(entry.mounts, ", ", 2))
-            end
-            local sv = ffi.new("struct hw_statvfs")
-            if ffi.C.statvfs(mp, sv) == 0 and tonumber(sv.f_blocks) > 0 then
-                local frsize = tonumber(sv.f_frsize)
-                local total = tonumber(sv.f_blocks) * frsize
-                local free = tonumber(sv.f_bavail) * frsize
-                local used = total - tonumber(sv.f_bfree) * frsize
-                add(mounts, mp, string.format("%s  %s  used %s / %s (%.0f%%)  free %s%s",
-                    entry.dev, entry.fs, format_bytes(used), format_bytes(total),
-                    used * 100 / total, format_bytes(free), extra))
-            else
-                add(mounts, mp, string.format("%s  %s  (statvfs unavailable)%s", entry.dev,
-                    entry.fs, extra))
-            end
-        end
-        if #mounts.items == 0 then
-            add(mounts, "Mounts", "N/A (no device-backed mounts)")
-        end
-    end
-    groups[#groups + 1] = mounts
+    groups[#groups + 1] = mounts_group()
     return groups
 end
 
+-- Network -------------------------------------------------------------------
+local AF_INET = 2
+
+--- Map interface name -> dotted IPv4 address via getifaddrs.
+--- Returns the map, plus an error string when getifaddrs failed.
 local function ipv4_by_interface()
     local result = {}
     local head = ffi.new("struct hw_ifaddrs *[1]")
     if ffi.C.getifaddrs(head) ~= 0 then
         return result, "getifaddrs failed"
     end
-    local p = head[0]
-    while p ~= nil do
-        if p.ifa_addr ~= nil and p.ifa_addr.sa_family == 2 then
-            local d = p.ifa_addr.sa_data
-            local name = ffi.string(p.ifa_name)
-            result[name] = string.format("%d.%d.%d.%d", d[2], d[3], d[4], d[5])
+    local node = head[0]
+    while node ~= nil do
+        if node.ifa_addr ~= nil and node.ifa_addr.sa_family == AF_INET then
+            local d = node.ifa_addr.sa_data -- sockaddr_in: 2 port bytes, then the address
+            result[ffi.string(node.ifa_name)] = string.format("%d.%d.%d.%d", d[2], d[3], d[4], d[5])
         end
-        p = p.ifa_next
+        node = node.ifa_next
     end
     ffi.C.freeifaddrs(head[0])
     return result
 end
 
+local function describe_interface(name, ipv4)
+    local dir = "/sys/class/net/" .. name .. "/"
+    local speed = read_num(dir .. "speed")
+    local driver = link_base(dir .. "device/driver")
+    local mtu = read_str(dir .. "mtu")
+    return join("  ",
+        read_str(dir .. "operstate") or "unknown",
+        ipv4,
+        read_str(dir .. "address"),
+        speed and speed > 0 and (speed .. " Mb/s") or nil,
+        driver and ("driver: " .. driver),
+        mtu and ("mtu " .. mtu))
+end
+
+--- Network tab: interface state, IPv4, MAC, link speed, driver and MTU.
 function HW.collect_network()
     local g = new_group("Interfaces")
-    local entries = list_dir("/sys/class/net")
-    if not entries then
+    local names = list_dir("/sys/class/net")
+    if not names then
         add(g, "Network", "N/A (cannot read /sys/class/net)")
         return { g }
     end
-    local ips, ip_err = ipv4_by_interface()
-    for _, name in ipairs(entries) do
-        local dir = "/sys/class/net/" .. name .. "/"
-        local parts = {}
-        parts[#parts + 1] = read_str(dir .. "operstate") or "unknown"
-        if ips[name] then
-            parts[#parts + 1] = ips[name]
-        end
-        parts[#parts + 1] = read_str(dir .. "address")
-        local speed = read_num(dir .. "speed")
-        if speed and speed > 0 then
-            parts[#parts + 1] = speed .. " Mb/s"
-        end
-        local drv = link_base(dir .. "device/driver")
-        if drv then
-            parts[#parts + 1] = "driver: " .. drv
-        end
-        local mtu = read_str(dir .. "mtu")
-        if mtu then
-            parts[#parts + 1] = "mtu " .. mtu
-        end
-        add(g, name, table.concat(parts, "  "))
+    local ipv4, ip_err = ipv4_by_interface()
+    for _, name in ipairs(names) do
+        add(g, name, describe_interface(name, ipv4[name]))
     end
     if #g.items == 0 then
         add(g, "Network", "N/A (no interfaces)")
@@ -1047,99 +1205,95 @@ function HW.collect_network()
     return { g }
 end
 
+-- Sensors -------------------------------------------------------------------
+local HWMON_DIR = "/sys/class/hwmon"
+
+-- hwmon "<kind>N_input" attributes: `divisor` converts the raw sysfs integer to the
+-- displayed unit (millidegrees, millivolts, microwatts), `fmt` renders it.
+local HWMON_KINDS = {
+    temp = { divisor = 1000, unit = "°C", fmt = "%.1f °C" },
+    fan = { divisor = 1, unit = "RPM", fmt = "%d RPM" },
+    ["in"] = { divisor = 1000, unit = "V", fmt = "%.3f V" },
+    power = { divisor = 1000000, unit = "W", fmt = "%.2f W" },
+}
+
+local function hwmon_group(hwmon)
+    local dir = HWMON_DIR .. "/" .. hwmon .. "/"
+    local g = new_group((read_str(dir .. "name") or hwmon) .. " (" .. hwmon .. ")")
+    for _, file in ipairs(list_dir(HWMON_DIR .. "/" .. hwmon) or {}) do
+        local kind, index = file:match("^(%a+)(%d+)_input$")
+        local spec = kind and HWMON_KINDS[kind]
+        local raw = spec and read_num(dir .. file)
+        if raw then
+            local label = read_str(dir .. kind .. index .. "_label") or (kind .. index)
+            local value = raw / spec.divisor
+            add_metric(g, label, string.format(spec.fmt, value), hwmon .. "/" .. file, value,
+                spec.unit)
+        end
+    end
+    return g
+end
+
+local function describe_power_supply(name)
+    local dir = "/sys/class/power_supply/" .. name .. "/"
+    local kind = read_str(dir .. "type") or "?"
+    if kind == "Mains" then
+        return join("  ", kind, read_num(dir .. "online") == 1 and "online" or "offline")
+    elseif kind ~= "Battery" then
+        return kind
+    end
+    local capacity = read_str(dir .. "capacity")
+    local full = read_num(dir .. "energy_full") or read_num(dir .. "charge_full")
+    local design = read_num(dir .. "energy_full_design") or read_num(dir .. "charge_full_design")
+    local health = full and design and design > 0
+        and string.format("health %.0f%%", full * 100 / design)
+    local cycles = read_num(dir .. "cycle_count")
+    return join("  ", kind, read_str(dir .. "status"), capacity and (capacity .. "%"), health,
+        read_str(dir .. "model_name"), cycles and cycles > 0 and (cycles .. " cycles") or nil)
+end
+
+--- Sensors tab: every hwmon temperature/fan/voltage/power input, plus batteries and
+--- AC adapters from /sys/class/power_supply.
 function HW.collect_sensors()
     local groups = {}
-    local entries = list_dir("/sys/class/hwmon") or {}
-    for _, hm in ipairs(entries) do
-        local dir = "/sys/class/hwmon/" .. hm .. "/"
-        local g = new_group((read_str(dir .. "name") or hm) .. " (" .. hm .. ")")
-        local files = list_dir("/sys/class/hwmon/" .. hm) or {}
-        for _, f in ipairs(files) do
-            local kind, idx = f:match("^(%a+)(%d+)_input$")
-            if kind == "temp" or kind == "fan" or kind == "in" or kind == "power" then
-                local v = read_num(dir .. f)
-                local label = read_str(dir .. kind .. idx .. "_label") or (kind .. idx)
-                if v then
-                    local text, num, unit
-                    if kind == "temp" then
-                        num, unit = v / 1000, "°C"
-                        text = string.format("%.1f °C", num)
-                    elseif kind == "fan" then
-                        num, unit = v, "RPM"
-                        text = string.format("%d RPM", v)
-                    elseif kind == "in" then
-                        num, unit = v / 1000, "V"
-                        text = string.format("%.3f V", num)
-                    else
-                        num, unit = v / 1000000, "W"
-                        text = string.format("%.2f W", num)
-                    end
-                    add(g, label, text, hm .. "/" .. f, num)
-                    g.items[#g.items].unit = unit
-                end
-            end
-        end
+    for _, hwmon in ipairs(list_dir(HWMON_DIR) or {}) do
+        local g = hwmon_group(hwmon)
         if #g.items > 0 then
             groups[#groups + 1] = g
         end
     end
     if #groups == 0 then
         local g = new_group("Hardware Monitors")
-        add(g, "hwmon", "N/A (no sensors exposed in /sys/class/hwmon)")
-        groups[#groups + 1] = g
+        add(g, "hwmon", "N/A (no sensors exposed in " .. HWMON_DIR .. ")")
+        groups[1] = g
     end
-
-    local ps = list_dir("/sys/class/power_supply") or {}
-    local pg = new_group("Power Supplies")
-    for _, name in ipairs(ps) do
-        local dir = "/sys/class/power_supply/" .. name .. "/"
-        local kind = read_str(dir .. "type") or "?"
-        local parts = { kind }
-        if kind == "Battery" then
-            parts[#parts + 1] = read_str(dir .. "status")
-            local cap = read_str(dir .. "capacity")
-            parts[#parts + 1] = cap and (cap .. "%") or nil
-            local full = read_num(dir .. "energy_full") or read_num(dir .. "charge_full")
-            local design = read_num(dir .. "energy_full_design")
-                or read_num(dir .. "charge_full_design")
-            if full and design and design > 0 then
-                parts[#parts + 1] = string.format("health %.0f%%", full * 100 / design)
-            end
-            parts[#parts + 1] = read_str(dir .. "model_name")
-            local cycles = read_num(dir .. "cycle_count")
-            parts[#parts + 1] = cycles and cycles > 0 and (cycles .. " cycles") or nil
-        elseif kind == "Mains" then
-            local online = read_num(dir .. "online")
-            parts[#parts + 1] = online == 1 and "online" or "offline"
-        end
-        add(pg, name, table.concat(parts, "  "))
+    local supplies = new_group("Power Supplies")
+    for _, name in ipairs(list_dir("/sys/class/power_supply") or {}) do
+        add(supplies, name, describe_power_supply(name))
     end
-    if #pg.items > 0 then
-        groups[#groups + 1] = pg
+    if #supplies.items > 0 then
+        groups[#groups + 1] = supplies
     end
     return groups
 end
 
+-- USB -----------------------------------------------------------------------
+--- USB tab: devices and hubs (interface entries such as "1-1:1.0" are skipped).
 function HW.collect_usb()
     local g = new_group("USB Devices")
-    local entries = list_dir("/sys/bus/usb/devices")
-    if not entries then
+    local names = list_dir("/sys/bus/usb/devices")
+    if not names then
         add(g, "USB", "N/A (cannot read /sys/bus/usb/devices)")
         return { g }
     end
-    for _, name in ipairs(entries) do
-        if not name:find(":", 1, true) then
-            local dir = "/sys/bus/usb/devices/" .. name .. "/"
-            local vid, pid = read_str(dir .. "idVendor"), read_str(dir .. "idProduct")
-            if vid and pid then
-                local parts = {}
-                parts[#parts + 1] = string.format("[%s:%s]", vid, pid)
-                parts[#parts + 1] = read_str(dir .. "manufacturer")
-                parts[#parts + 1] = read_str(dir .. "product")
-                local speed = read_str(dir .. "speed")
-                parts[#parts + 1] = speed and (speed .. " Mb/s") or nil
-                add(g, name, table.concat(parts, " "))
-            end
+    for _, name in ipairs(names) do
+        local dir = "/sys/bus/usb/devices/" .. name .. "/"
+        local vendor, product = read_str(dir .. "idVendor"), read_str(dir .. "idProduct")
+        if not name:find(":", 1, true) and vendor and product then
+            local speed = read_str(dir .. "speed")
+            add(g, name, join(" ", string.format("[%s:%s]", vendor, product),
+                read_str(dir .. "manufacturer"), read_str(dir .. "product"),
+                speed and (speed .. " Mb/s")))
         end
     end
     if #g.items == 0 then
@@ -1148,6 +1302,7 @@ function HW.collect_usb()
     return { g }
 end
 
+-- Tab registry --------------------------------------------------------------
 HW.TABS = {
     { id = "system", title = "System", collect = HW.collect_system },
     { id = "cpu", title = "CPU", collect = HW.collect_cpu },
@@ -1170,6 +1325,7 @@ function HW.safe_collect(tab)
     return { g }
 end
 
+--- Collect every tab. Returns a list of { id, title, groups }.
 function HW.collect_all()
     local data = {}
     for i, tab in ipairs(HW.TABS) do
@@ -1181,52 +1337,64 @@ end
 -- =========================================================================
 -- 4. JSON export
 -- =========================================================================
+local JSON_ESCAPES = {
+    ['"'] = '\\"', ["\\"] = "\\\\", ["\n"] = "\\n", ["\r"] = "\\r", ["\t"] = "\\t",
+}
+
 local function json_str(s)
-    s = s:gsub('[%c"\\]', function(c)
-        local map = { ['"'] = '\\"', ["\\"] = "\\\\", ["\n"] = "\\n", ["\r"] = "\\r",
-            ["\t"] = "\\t" }
-        return map[c] or string.format("\\u%04x", c:byte())
+    local escaped = s:gsub('[%c"\\]', function(c)
+        return JSON_ESCAPES[c] or string.format("\\u%04x", c:byte())
     end)
-    return '"' .. s .. '"'
+    return '"' .. escaped .. '"'
 end
 
-function HW.to_json(data)
-    local out = {}
-    for _, tab in ipairs(data) do
-        local groups = {}
-        for _, g in ipairs(tab.groups) do
-            local items = {}
-            for _, it in ipairs(g.items) do
-                items[#items + 1] = string.format("{\"label\":%s,\"value\":%s}",
-                    json_str(it.label), json_str(it.value))
-            end
-            groups[#groups + 1] = string.format("{\"title\":%s,\"items\":[%s]}",
-                json_str(g.title), table.concat(items, ","))
-        end
-        out[#out + 1] = string.format("{\"id\":%s,\"title\":%s,\"groups\":[%s]}",
-            json_str(tab.id), json_str(tab.title), table.concat(groups, ","))
+--- Encode `list` as a JSON array, applying `encode` to every element.
+local function json_array(list, encode)
+    local parts = {}
+    for i, element in ipairs(list) do
+        parts[i] = encode(element)
     end
-    return "{\"tabs\":[" .. table.concat(out, ",") .. "]}\n"
+    return "[" .. table.concat(parts, ",") .. "]"
 end
 
---- Write the snapshot and verify it by reading it back. Returns ok, message.
+local function json_item(item)
+    return string.format('{"label":%s,"value":%s}', json_str(item.label), json_str(item.value))
+end
+
+local function json_group(group)
+    return string.format('{"title":%s,"items":%s}', json_str(group.title),
+        json_array(group.items, json_item))
+end
+
+local function json_tab(tab)
+    return string.format('{"id":%s,"title":%s,"groups":%s}', json_str(tab.id),
+        json_str(tab.title), json_array(tab.groups, json_group))
+end
+
+--- Serialize the collected tabs as {"tabs":[{id,title,groups:[{title,items}]}]}.
+function HW.to_json(data)
+    return '{"tabs":' .. json_array(data, json_tab) .. "}\n"
+end
+
+--- Write the snapshot to `path` and verify it by reading it back.
+--- Returns true plus a success message, or false plus the failure reason.
 function HW.export_json(data, path)
     local json = HW.to_json(data)
-    local f, err = io.open(path, "wb")
-    if not f then
-        return false, "cannot write " .. path .. ": " .. tostring(err)
+    local file, open_err = io.open(path, "wb")
+    if not file then
+        return false, "cannot write " .. path .. ": " .. tostring(open_err)
     end
-    local ok, werr = f:write(json)
-    f:close()
-    if not ok then
-        return false, "write failed for " .. path .. ": " .. tostring(werr)
+    local written, write_err = file:write(json)
+    file:close()
+    if not written then
+        return false, "write failed for " .. path .. ": " .. tostring(write_err)
     end
-    local back = io.open(path, "rb")
-    if not back then
+    local check = io.open(path, "rb")
+    if not check then
         return false, "verification failed: cannot reopen " .. path
     end
-    local content = back:read("*a")
-    back:close()
+    local content = check:read("*a")
+    check:close()
     if content ~= json then
         return false, "verification failed: content mismatch in " .. path
     end
@@ -1236,85 +1404,117 @@ end
 -- =========================================================================
 -- 5. Text layout helpers (UTF-8 aware)
 -- =========================================================================
-local function ulen(s)
-    local _, n = s:gsub("[^\128-\191]", "")
-    return n
+--- Number of bytes in the UTF-8 character that starts with byte `lead`.
+local function utf8_char_length(lead)
+    if lead >= 240 then
+        return 4
+    elseif lead >= 224 then
+        return 3
+    elseif lead >= 192 then
+        return 2
+    end
+    return 1
 end
 
---- Truncate to at most `w` display columns, appending an ellipsis when cut.
-local function truncate(s, w)
-    if w <= 0 then
+local function is_continuation_byte(byte)
+    return byte >= 128 and byte < 192
+end
+
+--- Display width of `s`, counting one column per UTF-8 character.
+local function ulen(s)
+    local _, count = s:gsub("[^\128-\191]", "")
+    return count
+end
+
+--- Truncate to at most `width` columns, appending an ellipsis when cut.
+local function truncate(s, width)
+    if width <= 0 then
         return ""
     end
-    if ulen(s) <= w then
+    if ulen(s) <= width then
         return s
     end
-    local count, i = 0, 1
-    while i <= #s and count < w - 1 do
-        local c = s:byte(i)
-        local step = c >= 240 and 4 or c >= 224 and 3 or c >= 192 and 2 or 1
-        i = i + step
-        count = count + 1
+    local chars, pos = 0, 1
+    while pos <= #s and chars < width - 1 do
+        pos = pos + utf8_char_length(s:byte(pos))
+        chars = chars + 1
     end
-    return s:sub(1, i - 1) .. "…"
+    return s:sub(1, pos - 1) .. "…"
 end
 
-local function wrap(text, width)
-    if width < 4 then
-        width = 4
+--- Longest prefix of `s` that is at most `max_bytes` long and ends on a character
+--- boundary.
+local function utf8_prefix(s, max_bytes)
+    if #s <= max_bytes then
+        return s
     end
-    local lines = {}
-    local cur = ""
+    local cut = max_bytes
+    -- Back up to the lead byte of the character the cut would split.
+    local lead = cut + 1
+    while lead > 1 and is_continuation_byte(s:byte(lead)) do
+        lead = lead - 1
+    end
+    if lead <= cut then
+        cut = lead - 1
+    end
+    return s:sub(1, cut)
+end
+
+--- Word-wrap `text` to `width` columns (minimum 4); over-long words are split.
+local function wrap(text, width)
+    width = math.max(width, 4)
+    local lines, current = {}, ""
     for word in text:gmatch("%S+") do
         while ulen(word) > width do
-            if cur ~= "" then
-                lines[#lines + 1] = cur
-                cur = ""
+            if current ~= "" then
+                lines[#lines + 1] = current
+                current = ""
             end
-            local piece = word:sub(1, width)
-            -- avoid splitting inside a UTF-8 sequence
-            while #piece > 1 and piece:byte(#piece) >= 128 and piece:byte(#piece) < 192 do
-                piece = piece:sub(1, -2)
-            end
+            local piece = utf8_prefix(word, width)
             lines[#lines + 1] = piece
             word = word:sub(#piece + 1)
         end
-        if cur == "" then
-            cur = word
-        elseif ulen(cur) + 1 + ulen(word) <= width then
-            cur = cur .. " " .. word
+        if current == "" then
+            current = word
+        elseif ulen(current) + 1 + ulen(word) <= width then
+            current = current .. " " .. word
         else
-            lines[#lines + 1] = cur
-            cur = word
+            lines[#lines + 1] = current
+            current = word
         end
     end
-    if cur ~= "" or #lines == 0 then
-        lines[#lines + 1] = cur
+    if current ~= "" or #lines == 0 then
+        lines[#lines + 1] = current
     end
     return lines
 end
 
 -- =========================================================================
--- 5b. Sensor history (sparklines)
+-- 6. Sensor history (sparklines) and display lines
 -- =========================================================================
 local SPARK_CHARS = { "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█" }
 local HISTORY_MAX = 30
+local LABEL_MIN_COLS, LABEL_MAX_COLS = 12, 34
 
---- Push the current numeric value of every keyed item into `history`.
+local function push_sample(history, key, value)
+    local samples = history[key]
+    if not samples then
+        samples = {}
+        history[key] = samples
+    end
+    samples[#samples + 1] = value
+    if #samples > HISTORY_MAX then
+        table.remove(samples, 1)
+    end
+end
+
+--- Append the current value of every metric row (rows with a `key`) to `history`.
 function HW.record_history(history, data)
     for _, tab in ipairs(data) do
-        for _, g in ipairs(tab.groups) do
-            for _, it in ipairs(g.items) do
-                if it.key and it.num then
-                    local list = history[it.key]
-                    if not list then
-                        list = {}
-                        history[it.key] = list
-                    end
-                    list[#list + 1] = it.num
-                    if #list > HISTORY_MAX then
-                        table.remove(list, 1)
-                    end
+        for _, group in ipairs(tab.groups) do
+            for _, item in ipairs(group.items) do
+                if item.key and item.num then
+                    push_sample(history, item.key, item.num)
                 end
             end
         end
@@ -1326,59 +1526,76 @@ function HW.sparkline(samples, unit)
     if not samples or #samples < 2 then
         return ""
     end
-    local lo, hi = math.huge, -math.huge
+    local low, high = math.huge, -math.huge
     for _, v in ipairs(samples) do
-        lo = math.min(lo, v)
-        hi = math.max(hi, v)
+        low = math.min(low, v)
+        high = math.max(high, v)
     end
-    local out = {}
-    for _, v in ipairs(samples) do
-        local idx = 4
-        if hi > lo then
-            idx = 1 + math.floor((v - lo) / (hi - lo) * 7 + 0.5)
+    local bars = {}
+    for i, v in ipairs(samples) do
+        local level = 4 -- a flat series is drawn at mid height
+        if high > low then
+            level = 1 + math.floor((v - low) / (high - low) * (#SPARK_CHARS - 1) + 0.5)
         end
-        out[#out + 1] = SPARK_CHARS[idx]
+        bars[i] = SPARK_CHARS[level]
     end
-    local fmt = unit == "RPM" and "%.0f" or "%.1f"
-    return string.format("%s min " .. fmt .. " max " .. fmt, table.concat(out), lo, hi)
+    local number = unit == "RPM" and "%.0f" or "%.1f"
+    return string.format("%s min " .. number .. " max " .. number, table.concat(bars), low, high)
 end
 
---- Flatten a tab's groups to display lines for the given width and filter.
---- `history` (optional) adds sparklines to keyed sensor rows.
-function HW.flatten(groups, width, filter, history)
-    local needle = filter and filter ~= "" and filter:lower() or nil
-    local label_w = 12
-    for _, g in ipairs(groups) do
-        for _, it in ipairs(g.items) do
-            label_w = math.max(label_w, math.min(ulen(it.label), 34))
+--- Width of the label column: widest label, clamped to a third of the screen.
+local function label_column_width(groups, width)
+    local label_w = LABEL_MIN_COLS
+    for _, group in ipairs(groups) do
+        for _, item in ipairs(group.items) do
+            label_w = math.max(label_w, math.min(ulen(item.label), LABEL_MAX_COLS))
         end
     end
-    label_w = math.min(label_w, math.max(8, math.floor(width / 3)))
+    return math.min(label_w, math.max(8, math.floor(width / 3)))
+end
+
+--- Items of `group` whose "label value" text contains `needle` (all when nil).
+local function matching_items(group, needle)
+    if not needle then
+        return group.items
+    end
+    local kept = {}
+    for _, item in ipairs(group.items) do
+        if (item.label .. " " .. item.value):lower():find(needle, 1, true) then
+            kept[#kept + 1] = item
+        end
+    end
+    return kept
+end
+
+local function item_text(item, history)
+    local spark = history and item.key and HW.sparkline(history[item.key], item.unit)
+    if spark and spark ~= "" then
+        return item.value .. "  " .. spark
+    end
+    return item.value
+end
+
+--- Flatten a tab's groups into display lines for the given width and filter.
+--- Lines are { kind = "hdr" | "kv" | "blank", ... }; long values wrap onto extra "kv"
+--- lines with an empty label. `history` (optional) adds sparklines to metric rows.
+function HW.flatten(groups, width, filter, history)
+    local needle = filter and filter ~= "" and filter:lower() or nil
+    local label_w = label_column_width(groups, width)
     local value_w = math.max(4, width - label_w - 4)
     local lines = {}
-    for _, g in ipairs(groups) do
-        local kept = {}
-        for _, it in ipairs(g.items) do
-            if not needle or (it.label .. " " .. it.value):lower():find(needle, 1, true) then
-                kept[#kept + 1] = it
-            end
-        end
+    for _, group in ipairs(groups) do
+        local kept = matching_items(group, needle)
         if #kept > 0 then
             if #lines > 0 then
                 lines[#lines + 1] = { kind = "blank" }
             end
-            lines[#lines + 1] = { kind = "hdr", text = g.title }
-            for _, it in ipairs(kept) do
-                local text = it.value
-                local spark = history and it.key and HW.sparkline(history[it.key], it.unit)
-                if spark and spark ~= "" then
-                    text = text .. "  " .. spark
-                end
-                local parts = wrap(text, value_w)
-                for i, part in ipairs(parts) do
+            lines[#lines + 1] = { kind = "hdr", text = group.title }
+            for _, item in ipairs(kept) do
+                for i, part in ipairs(wrap(item_text(item, history), value_w)) do
                     lines[#lines + 1] = {
                         kind = "kv",
-                        label = i == 1 and truncate(it.label, label_w) or "",
+                        label = i == 1 and truncate(item.label, label_w) or "",
                         value = part,
                         label_w = label_w,
                     }
@@ -1390,18 +1607,30 @@ function HW.flatten(groups, width, filter, history)
 end
 
 -- =========================================================================
--- 6. Pure frame generators
+-- 7. Pure frame generators
 -- =========================================================================
+local MIN_COLS, MIN_ROWS = 24, 7
+local CHROME_ROWS = 4 -- tab bar, two rules and the footer; the rest shows content
+
+-- SGR colour escapes (Tokyo Night palette).
 local C = {
-    reset = "\27[0m", bold = "\27[1m", dim = "\27[2m",
-    title = "\27[1;38;2;192;202;245m", accent = "\27[1;38;2;125;207;255m",
-    tab_on = "\27[1;48;2;41;46;66;38;2;255;255;255m", tab_off = "\27[38;2;130;140;180m",
-    hdr = "\27[1;38;2;122;162;247m", label = "\27[38;2;169;177;214m",
-    value = "\27[38;2;220;225;245m", rule = "\27[38;2;65;72;104m",
-    err = "\27[1;38;2;247;118;142m", ok = "\27[38;2;158;206;106m",
+    reset = "\27[0m",
+    dim = "\27[2m",
+    title = "\27[1;38;2;192;202;245m",
+    accent = "\27[1;38;2;125;207;255m",
+    tab_on = "\27[1;48;2;41;46;66;38;2;255;255;255m",
+    tab_off = "\27[38;2;130;140;180m",
+    hdr = "\27[1;38;2;122;162;247m",
+    label = "\27[38;2;169;177;214m",
+    value = "\27[38;2;220;225;245m",
+    rule = "\27[38;2;65;72;104m",
+    err = "\27[1;38;2;247;118;142m",
+    ok = "\27[38;2;158;206;106m",
     na = "\27[38;2;224;175;104m",
 }
 
+--- Create the UI state for collected `data`: active tab, per-tab scroll offsets,
+--- filter text, one-shot status message and the sensor history.
 local function new_state(data)
     local state = {
         data = data,
@@ -1420,43 +1649,38 @@ local function new_state(data)
     return state
 end
 
-local function body_height(h)
-    return math.max(1, h - 4)
+local function body_height(rows)
+    return math.max(1, rows - CHROME_ROWS)
 end
 
-local function visible_lines(state, w)
+local function visible_lines(state, width)
     local tab = state.data[state.tab]
-    return HW.flatten(tab.groups, w, state.filter, state.history)
+    return HW.flatten(tab.groups, width, state.filter, state.history)
 end
 
-local function clamp_scroll(state, w, h)
-    local lines = visible_lines(state, w)
-    local max_scroll = math.max(0, #lines - body_height(h))
-    local s = state.scroll[state.tab]
-    if s > max_scroll then
-        s = max_scroll
-    end
-    if s < 0 then
-        s = 0
-    end
-    state.scroll[state.tab] = s
-    return lines, s
+--- Clamp the active tab's scroll offset to the content. Returns lines, offset.
+local function clamp_scroll(state, width, rows)
+    local lines = visible_lines(state, width)
+    local max_scroll = math.max(0, #lines - body_height(rows))
+    local offset = math.min(math.max(state.scroll[state.tab], 0), max_scroll)
+    state.scroll[state.tab] = offset
+    return lines, offset
 end
 
 local function render_tabbar(state, width)
-    local plain = " HWINFO "
+    local labels = {}
     for i, tab in ipairs(state.data) do
-        plain = plain .. " " .. i .. ":" .. tab.title .. " "
+        labels[i] = string.format(" %d:%s ", i, tab.title)
     end
-    if ulen(plain) > width then
+    if ulen(" HWINFO " .. table.concat(labels)) > width then
+        -- Too narrow for every tab: show only the active one.
         local tab = state.data[state.tab]
-        return C.title .. truncate(string.format(" HWINFO  ‹ %s %d/%d ›", tab.title, state.tab,
-            #state.data), width) .. C.reset
+        local compact = string.format(" HWINFO  ‹ %s %d/%d ›", tab.title, state.tab, #state.data)
+        return C.title .. truncate(compact, width) .. C.reset
     end
     local out = { C.title, " HWINFO ", C.reset }
-    for i, tab in ipairs(state.data) do
-        local style = i == state.tab and C.tab_on or C.tab_off
-        out[#out + 1] = style .. " " .. i .. ":" .. tab.title .. " " .. C.reset
+    for i, label in ipairs(labels) do
+        out[#out + 1] = (i == state.tab and C.tab_on or C.tab_off) .. label .. C.reset
     end
     return table.concat(out)
 end
@@ -1469,63 +1693,78 @@ local function render_footer(state, width)
         local color = state.status_err and C.err or C.ok
         return color .. truncate(" " .. state.status, width) .. C.reset
     end
-    local text = " ←/→ tab  ↑/↓ PgUp/PgDn scroll  / filter  e export  r refresh  q quit"
+    local help = " ←/→ tab  ↑/↓ PgUp/PgDn scroll  / filter  e export  r refresh  q quit"
     if state.filter ~= "" then
-        text = " filter: " .. state.filter .. "  (Esc clears)  " .. text:sub(2)
+        help = " filter: " .. state.filter .. "  (Esc clears)  " .. help:sub(2)
     end
-    return C.dim .. truncate(text, width) .. C.reset
+    return C.dim .. truncate(help, width) .. C.reset
 end
 
---- Build the screen as an array of `h` row strings (each without cursor addressing).
+--- Footer row plus, when the content scrolls, a "first-last/total" position marker.
+local function render_footer_row(state, width, offset, body_h, total)
+    local position = ""
+    if total > body_h then
+        position = string.format(" %d-%d/%d ", offset + 1, math.min(total, offset + body_h), total)
+    end
+    local reserved = position ~= "" and ulen(position) + 2 or 0
+    local footer = render_footer(state, width - reserved)
+    if position ~= "" and not state.filter_mode then
+        return footer .. C.dim .. "  " .. position .. C.reset
+    end
+    return footer
+end
+
+local function render_body_row(line, width, show_empty_hint)
+    if line == nil then
+        if show_empty_hint then
+            return C.na .. truncate(" (no matching entries)", width) .. C.reset
+        end
+        return ""
+    elseif line.kind == "hdr" then
+        return " " .. C.hdr .. truncate(line.text, width - 1) .. C.reset
+    elseif line.kind == "kv" then
+        local pad = string.rep(" ", math.max(0, line.label_w - ulen(line.label)))
+        local value_color = line.value:find("^N/A") and C.na or C.value
+        local value = truncate(line.value, math.max(1, width - line.label_w - 5))
+        return "   " .. C.label .. line.label .. pad .. C.reset .. "  " .. value_color .. value
+            .. C.reset
+    end
+    return "" -- blank separator line
+end
+
+local function render_too_small(width, rows)
+    local screen = {}
+    for i = 1, rows do
+        screen[i] = ""
+    end
+    screen[1] = C.err .. truncate("Terminal too small", width) .. C.reset
+    if rows >= 2 then
+        screen[2] = truncate(string.format("need at least %dx%d", MIN_COLS, MIN_ROWS), width)
+    end
+    return screen
+end
+
+--- Build the whole screen as an array of `h` row strings (no cursor addressing).
+--- Rows are one column narrower than the terminal so nothing touches the last column.
 function HW.frame_rows(state, w, h)
     local width = math.max(1, w - 1)
-    local rows = {}
-    if w < 24 or h < 7 then
-        for i = 1, h do
-            rows[i] = ""
-        end
-        rows[1] = C.err .. truncate("Terminal too small", width) .. C.reset
-        if h >= 2 then
-            rows[2] = truncate("need at least 24x7", width)
-        end
-        return rows
+    if w < MIN_COLS or h < MIN_ROWS then
+        return render_too_small(width, h)
     end
-    local lines, scroll = clamp_scroll(state, width, h)
-    local bh = body_height(h)
+    local lines, offset = clamp_scroll(state, width, h)
+    local body_h = body_height(h)
     local rule = C.rule .. string.rep("─", width) .. C.reset
-    rows[1] = render_tabbar(state, width)
-    rows[2] = rule
-    for i = 1, bh do
-        local ln = lines[scroll + i]
-        local text = ""
-        if ln == nil then
-            if i == 1 and #lines == 0 then
-                text = C.na .. truncate(" (no matching entries)", width) .. C.reset
-            end
-        elseif ln.kind == "hdr" then
-            text = " " .. C.hdr .. truncate(ln.text, width - 1) .. C.reset
-        elseif ln.kind == "kv" then
-            local pad = string.rep(" ", math.max(0, ln.label_w - ulen(ln.label)))
-            local vcolor = ln.value:find("^N/A") and C.na or C.value
-            text = "   " .. C.label .. ln.label .. pad .. C.reset .. "  " .. vcolor
-                .. truncate(ln.value, math.max(1, width - ln.label_w - 5)) .. C.reset
-        end
-        rows[2 + i] = text
+    local rows = { render_tabbar(state, width), rule }
+    for i = 1, body_h do
+        rows[#rows + 1] = render_body_row(lines[offset + i], width, i == 1 and #lines == 0)
     end
-    rows[h - 1] = rule
-    local pos = ""
-    if #lines > bh then
-        pos = string.format(" %d-%d/%d ", scroll + 1, math.min(#lines, scroll + bh), #lines)
-    end
-    local footer = render_footer(state, width - (pos ~= "" and ulen(pos) + 2 or 0))
-    rows[h] = footer
-    if pos ~= "" and not state.filter_mode then
-        rows[h] = footer .. C.dim .. "  " .. pos .. C.reset
-    end
+    rows[#rows + 1] = rule
+    rows[#rows + 1] = render_footer_row(state, width, offset, body_h, #lines)
     return rows
 end
 
---- Emit only rows that differ from `prev` (cursor-addressed, each row cleared to EOL).
+--- Emit only the rows that differ from `prev` (cursor-addressed, each cleared to EOL),
+--- wrapped in synchronized-update escapes. Returns "" when nothing changed.
 function HW.diff_frame(prev, rows)
     local out = { "\27[?2026h" }
     for i, row in ipairs(rows) do
@@ -1533,10 +1772,10 @@ function HW.diff_frame(prev, rows)
             out[#out + 1] = string.format("\27[%d;1H%s\27[K", i, row)
         end
     end
-    out[#out + 1] = "\27[?2026l"
-    if #out == 2 then
+    if #out == 1 then
         return ""
     end
+    out[#out + 1] = "\27[?2026l"
     return table.concat(out)
 end
 
@@ -1546,73 +1785,96 @@ function HW.render_frame(state, w, h)
 end
 
 -- =========================================================================
--- 7. Input handling (pure state transitions)
+-- 8. Input handling (pure state transitions)
 -- =========================================================================
+--- Remove the last UTF-8 character from `s` (no-op on an empty string).
 local function utf8_pop(s)
     local i = #s
-    while i > 1 and s:byte(i) >= 128 and s:byte(i) < 192 do
+    while i > 1 and is_continuation_byte(s:byte(i)) do
         i = i - 1
     end
     return s:sub(1, i - 1)
 end
 
---- Apply one key token. Returns an action string ("quit", "refresh", "export") or nil.
+--- Apply a key to the filter prompt. ENTER keeps the filter, ESC discards it.
+local function edit_filter(state, key)
+    if key == "ENTER" then
+        state.filter_mode = false
+    elseif key == "ESC" then
+        state.filter_mode = false
+        state.filter = ""
+    elseif key == "BACKSPACE" then
+        state.filter = utf8_pop(state.filter)
+    else
+        if key == "SPACE" then
+            key = " "
+        end
+        local is_symbolic = key:match("^[A-Z][A-Z_]+$") ~= nil -- UP, TAB, PAGE_DOWN, ...
+        if not is_symbolic and key:byte(1) >= 32 then
+            state.filter = state.filter .. key
+        end
+    end
+    state.scroll[state.tab] = 0
+end
+
+--- Switch tabs for arrow/number keys. Returns true when the key was a tab key.
+local function change_tab(state, key)
+    local count = #state.data
+    if key == "RIGHT" or key == "l" or key == "TAB" then
+        state.tab = state.tab % count + 1
+    elseif key == "LEFT" or key == "h" or key == "SHIFT_TAB" then
+        state.tab = (state.tab - 2) % count + 1
+    elseif key:match("^[1-9]$") and tonumber(key) <= count then
+        state.tab = tonumber(key)
+    else
+        return false
+    end
+    return true
+end
+
+--- Scroll the active tab. Offsets are clamped later by clamp_scroll.
+local function scroll_view(state, key, page)
+    local offset = state.scroll[state.tab]
+    if key == "DOWN" or key == "j" then
+        offset = offset + 1
+    elseif key == "UP" or key == "k" then
+        offset = offset - 1
+    elseif key == "PAGE_DOWN" or key == "SPACE" then
+        offset = offset + page
+    elseif key == "PAGE_UP" then
+        offset = offset - page
+    elseif key == "HOME" or key == "g" then
+        offset = 0
+    elseif key == "END" or key == "G" then
+        offset = math.huge
+    end
+    state.scroll[state.tab] = offset
+end
+
+--- Apply one key token to `state`. Returns "quit", "refresh" or "export" when the
+--- caller must act, otherwise nil. `w`, `h` (optional) enable scroll clamping.
 function HW.handle_key(state, key, w, h)
     if type(key) ~= "string" then
         return nil
     end
     state.status = nil
     state.status_err = false
-    local count = #state.data
     if state.filter_mode then
-        if key == "ENTER" then
-            state.filter_mode = false
-        elseif key == "ESC" then
-            state.filter_mode = false
-            state.filter = ""
-        elseif key == "BACKSPACE" then
-            state.filter = utf8_pop(state.filter)
-        else
-            if key == "SPACE" then
-                key = " "
-            end
-            local is_symbolic = key:match("^[A-Z][A-Z_]+$") ~= nil
-            if not is_symbolic and key:byte(1) >= 32 then
-                state.filter = state.filter .. key
-            end
-        end
-        state.scroll[state.tab] = 0
+        edit_filter(state, key)
         return nil
     end
-    local page = body_height(h or 24)
     if key == "q" or key == "Q" then
         return "quit"
-    elseif key == "RIGHT" or key == "l" or key == "TAB" then
-        state.tab = state.tab % count + 1
-    elseif key == "LEFT" or key == "h" or key == "SHIFT_TAB" then
-        state.tab = (state.tab - 2) % count + 1
-    elseif key:match("^[1-9]$") and tonumber(key) <= count then
-        state.tab = tonumber(key)
-    elseif key == "DOWN" or key == "j" then
-        state.scroll[state.tab] = state.scroll[state.tab] + 1
-    elseif key == "UP" or key == "k" then
-        state.scroll[state.tab] = state.scroll[state.tab] - 1
-    elseif key == "PAGE_DOWN" or key == "SPACE" then
-        state.scroll[state.tab] = state.scroll[state.tab] + page
-    elseif key == "PAGE_UP" then
-        state.scroll[state.tab] = state.scroll[state.tab] - page
-    elseif key == "HOME" or key == "g" then
-        state.scroll[state.tab] = 0
-    elseif key == "END" or key == "G" then
-        state.scroll[state.tab] = math.huge
-    elseif key == "/" then
-        state.filter_mode = true
-    elseif key == "ESC" then
-        state.filter = ""
     elseif key == "r" then
         return "refresh"
     elseif key == "e" then
         return "export"
+    elseif key == "/" then
+        state.filter_mode = true
+    elseif key == "ESC" then
+        state.filter = ""
+    elseif not change_tab(state, key) then
+        scroll_view(state, key, body_height(h or 24))
     end
     if w and h then
         clamp_scroll(state, math.max(1, w - 1), h)
@@ -1621,207 +1883,244 @@ function HW.handle_key(state, key, w, h)
 end
 
 -- =========================================================================
--- 8. Terminal control
+-- 9. Terminal control
 -- =========================================================================
-local in_raw_mode = false
-local orig_termios = ffi.new("struct hw_termios")
-local sig_anchor = nil
+local STDIN_FD, STDOUT_FD = 0, 1
+local TCSANOW = 0
+local LFLAG_ICANON, LFLAG_ECHO = 2, 8 -- Linux termios c_lflag bits
+local TIOCGWINSZ = 0x5413
+local POLLIN = 1
+local RESTORE_SIGNALS = { 1, 2, 3, 15 } -- HUP, INT, QUIT, TERM
+local DEFAULT_COLS, DEFAULT_ROWS = 100, 30
+local KEY_READ_BYTES = 64
 
+-- Alternate screen + hidden cursor + no auto-wrap + one initial clear.
+local TERMINAL_ENTER = "\27[?1049h\27[?25l\27[?7l\27[2J"
+-- Restore wrap, leave the alternate screen, show the cursor, reset attributes.
+local TERMINAL_LEAVE = "\27[?7h\27[?1049l\27[?25h\27[0m"
+local CLEAR_SCREEN = "\27[2J"
+
+local in_raw_mode = false
+local original_termios = ffi.new("struct hw_termios")
+local signal_handler -- kept referenced so the FFI callback is not garbage collected
+
+--- Leave the alternate screen and restore the original terminal settings.
 local function disable_raw_mode()
-    if in_raw_mode then
-        io.write("\27[?7h\27[?1049l\27[?25h\27[0m")
-        io.flush()
-        ffi.C.tcsetattr(0, 0, orig_termios)
-        in_raw_mode = false
+    if not in_raw_mode then
+        return
     end
+    io.write(TERMINAL_LEAVE)
+    io.flush()
+    ffi.C.tcsetattr(STDIN_FD, TCSANOW, original_termios)
+    in_raw_mode = false
 end
 
+--- Switch to raw, no-echo input on the alternate screen and install signal traps
+--- that restore the terminal. Returns false when stdin/stdout is not a terminal.
 local function enable_raw_mode()
-    if ffi.C.isatty(0) ~= 1 or ffi.C.isatty(1) ~= 1 then
+    if ffi.C.isatty(STDIN_FD) ~= 1 or ffi.C.isatty(STDOUT_FD) ~= 1 then
         return false
     end
-    if ffi.C.tcgetattr(0, orig_termios) ~= 0 then
+    if ffi.C.tcgetattr(STDIN_FD, original_termios) ~= 0 then
         return false
     end
     local raw = ffi.new("struct hw_termios")
-    ffi.copy(raw, orig_termios, ffi.sizeof(raw))
-    raw.c_lflag = bit.band(raw.c_lflag, bit.bnot(bit.bor(2, 8)))
-    if ffi.C.tcsetattr(0, 0, raw) ~= 0 then
+    ffi.copy(raw, original_termios, ffi.sizeof(raw))
+    raw.c_lflag = bit.band(raw.c_lflag, bit.bnot(bit.bor(LFLAG_ICANON, LFLAG_ECHO)))
+    if ffi.C.tcsetattr(STDIN_FD, TCSANOW, raw) ~= 0 then
         return false
     end
     in_raw_mode = true
-    sig_anchor = ffi.cast("hw_sighandler_t", function(sig)
+    signal_handler = ffi.cast("hw_sighandler_t", function(sig)
         disable_raw_mode()
         os.exit(128 + sig)
     end)
-    for _, sig in ipairs({ 1, 2, 3, 15 }) do
-        ffi.C.signal(sig, sig_anchor)
+    for _, sig in ipairs(RESTORE_SIGNALS) do
+        ffi.C.signal(sig, signal_handler)
     end
-    io.write("\27[?1049h\27[?25l\27[?7l\27[2J")
+    io.write(TERMINAL_ENTER)
     io.flush()
     return true
 end
 
+--- Terminal size as cols, rows (defaults when the ioctl fails).
 local function terminal_size()
     local ws = ffi.new("struct hw_winsize")
-    if ffi.C.ioctl(1, 0x5413, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
+    if ffi.C.ioctl(STDOUT_FD, TIOCGWINSZ, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
         return tonumber(ws.ws_col), tonumber(ws.ws_row)
     end
-    return 100, 30
+    return DEFAULT_COLS, DEFAULT_ROWS
 end
 
-local pfd = ffi.new("struct hw_pollfd", { fd = 0, events = 1, revents = 0 })
-local key_buf = ffi.new("char[64]")
+local poll_stdin = ffi.new("struct hw_pollfd", { fd = STDIN_FD, events = POLLIN, revents = 0 })
+local read_buffer = ffi.new("char[?]", KEY_READ_BYTES)
 
---- Split the front key token off a byte string. Returns token, remainder.
---- Tokens: printable characters (UTF-8 aware) or UP/DOWN/LEFT/RIGHT/PAGE_UP/PAGE_DOWN/
---- HOME/END/SHIFT_TAB/ENTER/ESC/SPACE/TAB/BACKSPACE.
+-- Escape sequences (CSI) that map to named keys.
+local KEY_SEQUENCES = {
+    ["\27[A"] = "UP", ["\27[B"] = "DOWN", ["\27[C"] = "RIGHT", ["\27[D"] = "LEFT",
+    ["\27[H"] = "HOME", ["\27[F"] = "END", ["\27[Z"] = "SHIFT_TAB",
+    ["\27[1~"] = "HOME", ["\27[4~"] = "END", ["\27[5~"] = "PAGE_UP", ["\27[6~"] = "PAGE_DOWN",
+}
+-- Single control bytes that map to named keys.
+local CONTROL_KEYS = {
+    [9] = "TAB", [10] = "ENTER", [13] = "ENTER", [32] = "SPACE", [8] = "BACKSPACE",
+    [127] = "BACKSPACE",
+}
+
+--- Split the first key token off a byte string. Returns token, remainder.
+--- Tokens are printable UTF-8 characters or the names in KEY_SEQUENCES/CONTROL_KEYS,
+--- plus "ESC" for a lone escape.
 function HW.next_token(s)
     local first = s:byte(1)
     if first == 27 then
-        local seq = s:match("^\27%[[%d;]*[%a~]")
-        if seq then
-            local map = { ["\27[A"] = "UP", ["\27[B"] = "DOWN", ["\27[C"] = "RIGHT",
-                ["\27[D"] = "LEFT", ["\27[H"] = "HOME", ["\27[F"] = "END",
-                ["\27[Z"] = "SHIFT_TAB", ["\27[5~"] = "PAGE_UP", ["\27[6~"] = "PAGE_DOWN",
-                ["\27[1~"] = "HOME", ["\27[4~"] = "END" }
-            return map[seq] or "ESC", s:sub(#seq + 1)
+        local sequence = s:match("^\27%[[%d;]*[%a~]")
+        if sequence then
+            return KEY_SEQUENCES[sequence] or "ESC", s:sub(#sequence + 1)
         end
         return "ESC", s:sub(2)
-    elseif first == 10 or first == 13 then
-        return "ENTER", s:sub(2)
-    elseif first == 127 or first == 8 then
-        return "BACKSPACE", s:sub(2)
-    elseif first == 32 then
-        return "SPACE", s:sub(2)
-    elseif first == 9 then
-        return "TAB", s:sub(2)
     end
-    local len = first >= 240 and 4 or first >= 224 and 3 or first >= 192 and 2 or 1
-    return s:sub(1, len), s:sub(len + 1)
+    if CONTROL_KEYS[first] then
+        return CONTROL_KEYS[first], s:sub(2)
+    end
+    local length = utf8_char_length(first)
+    return s:sub(1, length), s:sub(length + 1)
 end
 
-local pending = ""
+local pending_input = "" -- bytes read from stdin but not yet consumed (burst input)
 
---- Read one key token, buffering burst input. Returns nil on timeout, "EOF" at end of
---- piped input.
+--- Read one key token, buffering bursts so no key is dropped. Returns nil on timeout
+--- and "EOF" at the end of piped input.
 local function read_key(timeout_ms)
-    if pending == "" then
-        if ffi.C.poll(pfd, 1, timeout_ms) <= 0 then
+    if pending_input == "" then
+        if ffi.C.poll(poll_stdin, 1, timeout_ms) <= 0 then
             return nil
         end
-        local n = tonumber(ffi.C.read(0, key_buf, 64))
-        if n <= 0 then
+        local count = tonumber(ffi.C.read(STDIN_FD, read_buffer, KEY_READ_BYTES))
+        if count <= 0 then
             return "EOF"
         end
-        pending = ffi.string(key_buf, n)
+        pending_input = ffi.string(read_buffer, count)
     end
     local token
-    token, pending = HW.next_token(pending)
+    token, pending_input = HW.next_token(pending_input)
     return token
 end
 
 -- =========================================================================
--- 9. TUI main loop
+-- 10. TUI main loop
 -- =========================================================================
-local REFRESH_MS = 2000
+local REFRESH_SECONDS = 2
+local KEY_POLL_MS = 250
+local DEFAULT_EXPORT_PATH = "hwinfo_snapshot.json"
 
-local function now_ms()
-    return os.clock() * 1000
+local function report(message)
+    io.stderr:write("hwinfo: " .. message .. "\n")
+    io.stderr:flush()
 end
 
 --- Re-collect the active tab and the sensors tab, recording sensor history.
 function HW.refresh_live(state)
-    local fresh = {}
-    fresh[state.tab] = true
+    local stale = { [state.tab] = true }
     for i, tab in ipairs(HW.TABS) do
         if tab.id == "sensors" then
-            fresh[i] = true
+            stale[i] = true
         end
     end
-    for i in pairs(fresh) do
+    for i in pairs(stale) do
         state.data[i].groups = HW.safe_collect(HW.TABS[i])
         HW.record_history(state.history, { state.data[i] })
     end
 end
 
-function HW.run_tui(opts)
-    opts = opts or {}
-    io.stderr:write("hwinfo: collecting hardware data...\n")
-    io.stderr:flush()
-    local data = HW.collect_all()
-    local state = new_state(data)
-    if opts.tab then
-        for i, tab in ipairs(data) do
-            if tab.id == opts.tab then
-                state.tab = i
+local function select_tab(state, tab_id)
+    for i, tab in ipairs(state.data) do
+        if tab.id == tab_id then
+            state.tab = i
+        end
+    end
+end
+
+--- Perform a "refresh" or "export" action requested by handle_key.
+local function run_action(state, action, opts)
+    if action == "refresh" then
+        state.data = HW.collect_all()
+        HW.record_history(state.history, state.data)
+        state.status = "Refreshed"
+    elseif action == "export" then
+        local saved, message = HW.export_json(state.data, opts.export_path or DEFAULT_EXPORT_PATH)
+        state.status = message
+        state.status_err = not saved
+    end
+end
+
+--- Draw the frame (only changed rows) and return it for the next diff.
+local function paint(state, w, h, previous)
+    local rows = HW.frame_rows(state, w, h)
+    local output = HW.diff_frame(previous, rows)
+    if output ~= "" then
+        io.write(output)
+        io.flush()
+    end
+    return rows
+end
+
+--- Paint, read keys and refresh until the user quits or input ends.
+local function event_loop(state, opts, interactive)
+    local w, h = DEFAULT_COLS, DEFAULT_ROWS
+    if interactive then
+        w, h = terminal_size()
+    end
+    local previous
+    local last_refresh = os.time()
+    while true do
+        if interactive then
+            local new_w, new_h = terminal_size()
+            if new_w ~= w or new_h ~= h then
+                w, h, previous = new_w, new_h, nil
+                io.write(CLEAR_SCREEN) -- resize is one of the few times a full clear is allowed
             end
         end
+        previous = paint(state, w, h, previous)
+        local key = read_key(KEY_POLL_MS)
+        if key == "EOF" then
+            return
+        elseif key then
+            local action = HW.handle_key(state, key, w, h)
+            if action == "quit" then
+                return
+            elseif action then
+                run_action(state, action, opts)
+            end
+        elseif os.time() - last_refresh >= REFRESH_SECONDS then
+            last_refresh = os.time()
+            HW.refresh_live(state)
+        end
+    end
+end
+
+--- Run the interactive viewer. Returns a process exit code.
+function HW.run_tui(opts)
+    opts = opts or {}
+    report("collecting hardware data...")
+    local state = new_state(HW.collect_all())
+    if opts.tab then
+        select_tab(state, opts.tab)
     end
     local interactive = enable_raw_mode()
     if not interactive then
-        io.stderr:write("hwinfo: stdin/stdout is not a terminal; "
-            .. "running headless (keys read from stdin, 100x30)\n")
-        io.stderr:flush()
+        report("stdin/stdout is not a terminal; running headless (keys read from stdin, 100x30)")
     end
-    local ok, err = pcall(function()
-        local w, h = 100, 30
-        if interactive then
-            w, h = terminal_size()
-        end
-        local prev = nil
-        local last_refresh = os.time()
-        while true do
-            local nw, nh = w, h
-            if interactive then
-                nw, nh = terminal_size()
-            end
-            if nw ~= w or nh ~= h then
-                w, h = nw, nh
-                prev = nil
-                io.write("\27[2J")
-            end
-            local rows = HW.frame_rows(state, w, h)
-            local out = HW.diff_frame(prev, rows)
-            if out ~= "" then
-                io.write(out)
-                io.flush()
-            end
-            prev = rows
-            local key = read_key(250)
-            if key == "EOF" then
-                break
-            end
-            if key then
-                local action = HW.handle_key(state, key, w, h)
-                if action == "quit" then
-                    break
-                elseif action == "refresh" then
-                    state.data = HW.collect_all()
-                    HW.record_history(state.history, state.data)
-                    state.status = "Refreshed"
-                elseif action == "export" then
-                    local path = opts.export_path or "hwinfo_snapshot.json"
-                    local saved, msg = HW.export_json(state.data, path)
-                    state.status = msg
-                    state.status_err = not saved
-                end
-            elseif os.time() - last_refresh >= REFRESH_MS / 1000 then
-                last_refresh = os.time()
-                HW.refresh_live(state)
-            end
-        end
-    end)
-    disable_raw_mode()
+    local ok, err = pcall(event_loop, state, opts, interactive)
+    disable_raw_mode() -- always restore the terminal, even after an error
     if not ok then
-        io.stderr:write("hwinfo: fatal error: " .. tostring(err) .. "\n")
+        report("fatal error: " .. tostring(err))
         return 1
     end
     return 0
 end
 
 -- =========================================================================
--- 10. CLI entry point
+-- 11. CLI entry point
 -- =========================================================================
 local function print_help()
     io.write([[
@@ -1838,6 +2137,7 @@ Keys: <-/-> or 1-8 tabs, Up/Down PgUp/PgDn scroll, / filter, e export JSON,
 ]])
 end
 
+--- Plain-text report of all tabs, wrapped to `width` columns.
 function HW.text_report(data, width)
     local out = {}
     for _, tab in ipairs(data) do
@@ -1857,60 +2157,77 @@ function HW.text_report(data, width)
     return table.concat(out, "\n") .. "\n"
 end
 
-function HW.main(args)
-    local opts = {}
-    local mode = "tui"
+local function is_tab_id(id)
+    for _, tab in ipairs(HW.TABS) do
+        if tab.id == id then
+            return true
+        end
+    end
+    return false
+end
+
+--- Parse command-line arguments into { mode = "tui"|"json"|"text", tab = id }.
+--- Returns nil plus an exit code when the program should stop (help or bad usage).
+local function parse_args(args)
+    local opts = { mode = "tui" }
     local i = 1
     while i <= #args do
-        local a = args[i]
-        if a == "--help" or a == "-h" then
+        local arg_i = args[i]
+        if arg_i == "--help" or arg_i == "-h" then
             print_help()
-            return 0
-        elseif a == "--json" then
-            mode = "json"
-        elseif a == "--text" then
-            mode = "text"
-        elseif a == "--tab" then
+            return nil, 0
+        elseif arg_i == "--json" then
+            opts.mode = "json"
+        elseif arg_i == "--text" then
+            opts.mode = "text"
+        elseif arg_i == "--tab" then
             i = i + 1
             opts.tab = args[i]
-            local valid = false
-            for _, tab in ipairs(HW.TABS) do
-                if tab.id == opts.tab then
-                    valid = true
-                end
-            end
-            if not valid then
-                io.stderr:write("hwinfo: invalid --tab value '" .. tostring(opts.tab)
-                    .. "' (use: system cpu memory gpu storage network sensors usb)\n")
-                return 2
+            if not is_tab_id(opts.tab) then
+                report("invalid --tab value '" .. tostring(opts.tab)
+                    .. "' (use: system cpu memory gpu storage network sensors usb)")
+                return nil, 2
             end
         else
-            io.stderr:write("hwinfo: unknown option '" .. tostring(a) .. "' (try --help)\n")
-            return 2
+            report("unknown option '" .. tostring(arg_i) .. "' (try --help)")
+            return nil, 2
         end
         i = i + 1
     end
+    return opts
+end
+
+--- Program entry point. Returns the process exit code.
+function HW.main(args)
+    local opts, exit_code = parse_args(args)
+    if not opts then
+        return exit_code
+    end
     if ffi.os ~= "Linux" then
-        io.stderr:write("hwinfo: only Linux is supported (detected " .. ffi.os .. ")\n")
+        report("only Linux is supported (detected " .. ffi.os .. ")")
         return 1
     end
-    if mode == "json" then
+    if opts.mode == "json" then
         io.write(HW.to_json(HW.collect_all()))
         return 0
-    elseif mode == "text" then
+    elseif opts.mode == "text" then
         io.write(HW.text_report(HW.collect_all(), 100))
         return 0
     end
     return HW.run_tui(opts)
 end
 
+-- Internals exposed for the test suite.
 HW.helpers = {
-    truncate = truncate, wrap = wrap, ulen = ulen, format_bytes = format_bytes,
+    truncate = truncate,
+    wrap = wrap,
+    ulen = ulen,
+    format_bytes = format_bytes,
     new_state = new_state,
 }
 
-if arg and arg[0]
-    and (arg[0] == "hwinfo_tui.lua" or arg[0]:match("/hwinfo_tui%.lua$")) then
+local script = arg and arg[0]
+if script and (script == "hwinfo_tui.lua" or script:match("/hwinfo_tui%.lua$")) then
     os.exit(HW.main(arg))
 end
 

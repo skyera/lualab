@@ -546,6 +546,35 @@ describe("3. Frame rendering across sizes and data", function()
         end
     end)
 
+    it("wrap never splits a multi-byte character", function()
+        local function is_valid_utf8(s)
+            local i = 1
+            while i <= #s do
+                local c = s:byte(i)
+                local len = c >= 240 and 4 or c >= 224 and 3 or c >= 192 and 2 or 1
+                if c >= 128 and c < 192 then
+                    return false
+                end
+                for j = 1, len - 1 do
+                    local cont = s:byte(i + j)
+                    if not cont or cont < 128 or cont >= 192 then
+                        return false
+                    end
+                end
+                i = i + len
+            end
+            return true
+        end
+        for width = 4, 9 do
+            local word = string.rep("中é日ü", 12)
+            local pieces = HW.helpers.wrap(word, width)
+            assert_eq(table.concat(pieces), word, "no text lost at width " .. width)
+            for _, piece in ipairs(pieces) do
+                assert_true(is_valid_utf8(piece), "invalid UTF-8 piece at width " .. width)
+            end
+        end
+    end)
+
     it("empty data renders an empty-state row", function()
         local state = HW.helpers.new_state({ { id = "e", title = "Empty", groups = {} } })
         local rows = HW.frame_rows(state, 80, 24)
