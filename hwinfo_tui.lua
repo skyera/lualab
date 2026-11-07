@@ -24,6 +24,13 @@
 local ffi = require("ffi")
 local bit = require("bit")
 
+-- Find termkit.lua next to this script even when launched from another directory.
+local script_dir = (arg and arg[0] or ""):match("^(.*)/[^/]*$")
+if script_dir then
+    package.path = script_dir .. "/?.lua;" .. package.path
+end
+local termkit = require("termkit")
+
 -- =========================================================================
 -- 1. C Declarations
 -- =========================================================================
@@ -81,35 +88,7 @@ ffi.cdef[[
     int getifaddrs(struct hw_ifaddrs **ifap);
     void freeifaddrs(struct hw_ifaddrs *ifa);
 
-    struct hw_winsize {
-        unsigned short ws_row;
-        unsigned short ws_col;
-        unsigned short ws_xpixel;
-        unsigned short ws_ypixel;
-    };
     int ioctl(int fd, unsigned long request, void *argp);
-    int isatty(int fd);
-
-    struct hw_termios {
-        unsigned int  c_iflag;
-        unsigned int  c_oflag;
-        unsigned int  c_cflag;
-        unsigned int  c_lflag;
-        unsigned char c_line;
-        unsigned char c_cc[32];
-        unsigned int  c_ispeed;
-        unsigned int  c_ospeed;
-    };
-    int tcgetattr(int fd, struct hw_termios *termios_p);
-    int tcsetattr(int fd, int optional_actions, const struct hw_termios *termios_p);
-
-    struct hw_pollfd {
-        int   fd;
-        short events;
-        short revents;
-    };
-    int poll(struct hw_pollfd *fds, unsigned long nfds, int timeout);
-    long read(int fd, void *buf, size_t count);
 
     int open(const char *pathname, int flags, ...);
     int close(int fd);
@@ -135,8 +114,6 @@ ffi.cdef[[
         uint32_t result;
     };
 
-    typedef void (*hw_sighandler_t)(int);
-    hw_sighandler_t signal(int signum, hw_sighandler_t handler);
 ]]
 
 local HW = {}
@@ -1883,128 +1860,13 @@ function HW.handle_key(state, key, w, h)
 end
 
 -- =========================================================================
--- 9. Terminal control
+-- 9. Terminal control (provided by termkit)
 -- =========================================================================
-local STDIN_FD, STDOUT_FD = 0, 1
-local TCSANOW = 0
-local LFLAG_ICANON, LFLAG_ECHO = 2, 8 -- Linux termios c_lflag bits
-local TIOCGWINSZ = 0x5413
-local POLLIN = 1
-local RESTORE_SIGNALS = { 1, 2, 3, 15 } -- HUP, INT, QUIT, TERM
-local DEFAULT_COLS, DEFAULT_ROWS = 100, 30
-local KEY_READ_BYTES = 64
-
--- Alternate screen + hidden cursor + no auto-wrap + one initial clear.
-local TERMINAL_ENTER = "\27[?1049h\27[?25l\27[?7l\27[2J"
--- Restore wrap, leave the alternate screen, show the cursor, reset attributes.
-local TERMINAL_LEAVE = "\27[?7h\27[?1049l\27[?25h\27[0m"
+local DEFAULT_COLS, DEFAULT_ROWS = 100, 30 -- size assumed when running headless
 local CLEAR_SCREEN = "\27[2J"
 
-local in_raw_mode = false
-local original_termios = ffi.new("struct hw_termios")
-local signal_handler -- kept referenced so the FFI callback is not garbage collected
-
---- Leave the alternate screen and restore the original terminal settings.
-local function disable_raw_mode()
-    if not in_raw_mode then
-        return
-    end
-    io.write(TERMINAL_LEAVE)
-    io.flush()
-    ffi.C.tcsetattr(STDIN_FD, TCSANOW, original_termios)
-    in_raw_mode = false
-end
-
---- Switch to raw, no-echo input on the alternate screen and install signal traps
---- that restore the terminal. Returns false when stdin/stdout is not a terminal.
-local function enable_raw_mode()
-    if ffi.C.isatty(STDIN_FD) ~= 1 or ffi.C.isatty(STDOUT_FD) ~= 1 then
-        return false
-    end
-    if ffi.C.tcgetattr(STDIN_FD, original_termios) ~= 0 then
-        return false
-    end
-    local raw = ffi.new("struct hw_termios")
-    ffi.copy(raw, original_termios, ffi.sizeof(raw))
-    raw.c_lflag = bit.band(raw.c_lflag, bit.bnot(bit.bor(LFLAG_ICANON, LFLAG_ECHO)))
-    if ffi.C.tcsetattr(STDIN_FD, TCSANOW, raw) ~= 0 then
-        return false
-    end
-    in_raw_mode = true
-    signal_handler = ffi.cast("hw_sighandler_t", function(sig)
-        disable_raw_mode()
-        os.exit(128 + sig)
-    end)
-    for _, sig in ipairs(RESTORE_SIGNALS) do
-        ffi.C.signal(sig, signal_handler)
-    end
-    io.write(TERMINAL_ENTER)
-    io.flush()
-    return true
-end
-
---- Terminal size as cols, rows (defaults when the ioctl fails).
-local function terminal_size()
-    local ws = ffi.new("struct hw_winsize")
-    if ffi.C.ioctl(STDOUT_FD, TIOCGWINSZ, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
-        return tonumber(ws.ws_col), tonumber(ws.ws_row)
-    end
-    return DEFAULT_COLS, DEFAULT_ROWS
-end
-
-local poll_stdin = ffi.new("struct hw_pollfd", { fd = STDIN_FD, events = POLLIN, revents = 0 })
-local read_buffer = ffi.new("char[?]", KEY_READ_BYTES)
-
--- Escape sequences (CSI) that map to named keys.
-local KEY_SEQUENCES = {
-    ["\27[A"] = "UP", ["\27[B"] = "DOWN", ["\27[C"] = "RIGHT", ["\27[D"] = "LEFT",
-    ["\27[H"] = "HOME", ["\27[F"] = "END", ["\27[Z"] = "SHIFT_TAB",
-    ["\27[1~"] = "HOME", ["\27[4~"] = "END", ["\27[5~"] = "PAGE_UP", ["\27[6~"] = "PAGE_DOWN",
-}
--- Single control bytes that map to named keys.
-local CONTROL_KEYS = {
-    [9] = "TAB", [10] = "ENTER", [13] = "ENTER", [32] = "SPACE", [8] = "BACKSPACE",
-    [127] = "BACKSPACE",
-}
-
---- Split the first key token off a byte string. Returns token, remainder.
---- Tokens are printable UTF-8 characters or the names in KEY_SEQUENCES/CONTROL_KEYS,
---- plus "ESC" for a lone escape.
-function HW.next_token(s)
-    local first = s:byte(1)
-    if first == 27 then
-        local sequence = s:match("^\27%[[%d;]*[%a~]")
-        if sequence then
-            return KEY_SEQUENCES[sequence] or "ESC", s:sub(#sequence + 1)
-        end
-        return "ESC", s:sub(2)
-    end
-    if CONTROL_KEYS[first] then
-        return CONTROL_KEYS[first], s:sub(2)
-    end
-    local length = utf8_char_length(first)
-    return s:sub(1, length), s:sub(length + 1)
-end
-
-local pending_input = "" -- bytes read from stdin but not yet consumed (burst input)
-
---- Read one key token, buffering bursts so no key is dropped. Returns nil on timeout
---- and "EOF" at the end of piped input.
-local function read_key(timeout_ms)
-    if pending_input == "" then
-        if ffi.C.poll(poll_stdin, 1, timeout_ms) <= 0 then
-            return nil
-        end
-        local count = tonumber(ffi.C.read(STDIN_FD, read_buffer, KEY_READ_BYTES))
-        if count <= 0 then
-            return "EOF"
-        end
-        pending_input = ffi.string(read_buffer, count)
-    end
-    local token
-    token, pending_input = HW.next_token(pending_input)
-    return token
-end
+-- Key tokenizer, exposed for the test suite.
+HW.next_token = termkit.next_token
 
 -- =========================================================================
 -- 10. TUI main loop
@@ -2068,20 +1930,20 @@ end
 local function event_loop(state, opts, interactive)
     local w, h = DEFAULT_COLS, DEFAULT_ROWS
     if interactive then
-        w, h = terminal_size()
+        w, h = termkit.size()
     end
     local previous
     local last_refresh = os.time()
     while true do
         if interactive then
-            local new_w, new_h = terminal_size()
+            local new_w, new_h = termkit.size()
             if new_w ~= w or new_h ~= h then
                 w, h, previous = new_w, new_h, nil
                 io.write(CLEAR_SCREEN) -- resize is one of the few times a full clear is allowed
             end
         end
         previous = paint(state, w, h, previous)
-        local key = read_key(KEY_POLL_MS)
+        local key = termkit.read_key(KEY_POLL_MS)
         if key == "EOF" then
             return
         elseif key then
@@ -2106,12 +1968,12 @@ function HW.run_tui(opts)
     if opts.tab then
         select_tab(state, opts.tab)
     end
-    local interactive = enable_raw_mode()
+    local interactive = termkit.enter()
     if not interactive then
         report("stdin/stdout is not a terminal; running headless (keys read from stdin, 100x30)")
     end
     local ok, err = pcall(event_loop, state, opts, interactive)
-    disable_raw_mode() -- always restore the terminal, even after an error
+    termkit.leave() -- always restore the terminal, even after an error
     if not ok then
         report("fatal error: " .. tostring(err))
         return 1

@@ -31,6 +31,16 @@ local bit = require("bit")
 
 local is_windows = (ffi.os == "Windows")
 
+-- Shared POSIX terminal toolkit (raw mode, key input); Windows uses the Win32 code below.
+local termkit
+if not is_windows then
+    local script_dir = (arg and arg[0] or ""):match("^(.*)/[^/]*$")
+    if script_dir then
+        package.path = script_dir .. "/?.lua;" .. package.path
+    end
+    termkit = require("termkit")
+end
+
 local enable_raw_mode, disable_raw_mode, suspend_raw_mode, resume_raw_mode, get_terminal_size, read_key
 local in_raw_mode = false
 local kernel32, psapi
@@ -359,56 +369,7 @@ if is_windows then
         return nil
     end
 else
-    -- macOS/BSD declare tcflag_t/speed_t as 64-bit and set NCCS to 20, while Linux
--- uses 32-bit and NCCS=32.  Picking the wrong layout shifts every field offset
--- and makes tcgetattr overrun the LuaJIT buffer, so select it at cdef time.
--- On Linux the definition below passes through byte-for-byte unchanged.
-local function posix_termios_cdef(def)
-    if ffi.os == "OSX" or ffi.os == "BSD" then
-        def = def:gsub("unsigned%s+int(%s+[%w_]*tcflag_t)", "unsigned long%1")
-        def = def:gsub("unsigned%s+int(%s+[%w_]*speed_t)", "unsigned long%1")
-        def = def:gsub("c_cc%[32%]", "c_cc[20]")
-    end
-    return def
-end
-
-ffi.cdef(posix_termios_cdef[[
-        struct winsize {
-            unsigned short ws_row;
-            unsigned short ws_col;
-            unsigned short ws_xpixel;
-            unsigned short ws_ypixel;
-        };
-        int ioctl(int fd, unsigned long request, void *argp);
-        int isatty(int fd);
-
-        typedef unsigned char cc_t;
-        typedef unsigned int  speed_t;
-        typedef unsigned int  tcflag_t;
-
-        struct termios {
-            tcflag_t c_iflag;
-            tcflag_t c_oflag;
-            tcflag_t c_cflag;
-            tcflag_t c_lflag;
-            cc_t     c_line;
-            cc_t     c_cc[32];
-            speed_t  c_ispeed;
-            speed_t  c_ospeed;
-        };
-
-        int tcgetattr(int fd, struct termios *termios_p);
-        int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
-        int tcflush(int fd, int queue_selector);
-
-        struct pollfd {
-            int   fd;
-            short events;
-            short revents;
-        };
-        int poll(struct pollfd *fds, unsigned long nfds, int timeout);
-        long read(int fd, void *buf, size_t count);
-
+    ffi.cdef[[
         typedef struct DIR DIR;
         struct dirent {
             unsigned long  d_ino;
@@ -439,7 +400,7 @@ ffi.cdef(posix_termios_cdef[[
         struct passwd *getpwuid(uid_t uid);
 
         struct timespec { long tv_sec; long tv_nsec; };
-]])
+    ]]
 
 
     if ffi.arch == "arm" then
@@ -524,154 +485,34 @@ ffi.cdef(posix_termios_cdef[[
         int stat(const char *pathname, struct stat *statbuf);
         int __xstat(int ver, const char *pathname, struct stat *statbuf);
 
-        typedef void (*sighandler_t)(int);
-        sighandler_t signal(int signum, sighandler_t handler);
-
         int getpriority(int which, int who);
         int setpriority(int which, int who, int prio);
         int usleep(unsigned int usec);
     ]]
 
-    local TIOCGWINSZ   = (ffi.os == "OSX" or ffi.os == "BSD") and 0x40087468 or 0x5413
-    local STDIN_FILENO = 0
-    local TCSANOW      = 0
-    local ICANON       = 2
-    local ECHO         = 8
-    local POLLIN       = 1
-
-    local orig_termios = ffi.new("struct termios")
-    local raw_termios  = ffi.new("struct termios")
-    local sig_cb_anchor = nil
+    -- Raw mode, size and key input come from the shared termkit module.
+    enable_raw_mode = function()
+        local entered = termkit.enter({ mouse = true })
+        in_raw_mode = termkit.is_raw()
+        return entered
+    end
 
     disable_raw_mode = function()
-        if in_raw_mode then
-            io.write("\27[?1006l\27[?1000l\27[?7h\27[?1049l\27[?25h\27[0m")
-            io.flush()
-            ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
-            in_raw_mode = false
-        end
+        termkit.leave()
+        in_raw_mode = termkit.is_raw()
     end
 
-    suspend_raw_mode = function()
-        if in_raw_mode then
-            ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, orig_termios)
-            pcall(function() ffi.C.tcflush(STDIN_FILENO, 0) end)
-            io.write("\27[?25h\27[?7h")
-            io.flush()
-        end
-    end
+    suspend_raw_mode = termkit.suspend
+    resume_raw_mode = termkit.resume
+    get_terminal_size = termkit.size
 
-    resume_raw_mode = function()
-        if in_raw_mode then
-            ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
-            pcall(function() ffi.C.tcflush(STDIN_FILENO, 0) end)
-            io.write("\27[?25l\27[?7l")
-            io.flush()
-        end
-    end
-
-    local function install_signal_cleanup()
-        if sig_cb_anchor then return end
-        sig_cb_anchor = ffi.cast("sighandler_t", function(sig)
-            disable_raw_mode()
-            os.exit(128 + sig)
-        end)
-        pcall(function()
-            ffi.C.signal(1, sig_cb_anchor)  -- SIGHUP
-            ffi.C.signal(2, sig_cb_anchor)  -- SIGINT
-            ffi.C.signal(3, sig_cb_anchor)  -- SIGQUIT
-            ffi.C.signal(15, sig_cb_anchor) -- SIGTERM
-        end)
-    end
-
-    enable_raw_mode = function()
-        if ffi.C.isatty(STDIN_FILENO) ~= 1 then return false end
-        ffi.C.tcgetattr(STDIN_FILENO, orig_termios)
-        ffi.C.tcgetattr(STDIN_FILENO, raw_termios)
-        raw_termios.c_lflag = bit.band(raw_termios.c_lflag, bit.bnot(bit.bor(ICANON, ECHO)))
-        ffi.C.tcsetattr(STDIN_FILENO, TCSANOW, raw_termios)
-        in_raw_mode = true
-
-        install_signal_cleanup()
-        io.write("\27[?1049h\27[?25l\27[?7l\27[?1000h\27[?1006h")
-        io.flush()
-        return true
-    end
-
-    get_terminal_size = function()
-        local ws = ffi.new("struct winsize")
-        if ffi.C.ioctl(1, TIOCGWINSZ, ws) == 0 and ws.ws_col > 0 and ws.ws_row > 0 then
-            return tonumber(ws.ws_col), tonumber(ws.ws_row)
-        end
-        return 100, 30
-    end
-
-    local pfd = ffi.new("struct pollfd", { fd = STDIN_FILENO, events = POLLIN, revents = 0 })
-    local key_buf = ffi.new("char[64]")
-    local function is_stdin_tty()
-        return ffi.C.isatty(STDIN_FILENO) == 1
-    end
-
+    -- Returns "q" at the end of piped input so a headless run exits cleanly.
     read_key = function(timeout_ms)
-        if not is_stdin_tty() then
-            local ch = io.read(1)
-            if not ch or ch == "" then return "q" end
-            if ch == "\27" then return "ESC"
-            elseif ch == "\n" or ch == "\r" then return "ENTER"
-            elseif ch == " " then return "SPACE"
-            elseif ch == "\t" then return "TAB"
-            else return ch end
+        local key = termkit.read_key(timeout_ms or 50)
+        if key == "EOF" then
+            return "q"
         end
-
-        timeout_ms = timeout_ms or 50
-        local ret = ffi.C.poll(pfd, 1, timeout_ms)
-        if ret > 0 and bit.band(pfd.revents, POLLIN) ~= 0 then
-            local n = ffi.C.read(STDIN_FILENO, key_buf, 64)
-            if n > 0 then
-                local c0 = key_buf[0]
-                if c0 == 27 then
-                    if n >= 3 and key_buf[1] == 91 then
-                        local c2 = key_buf[2]
-                        if c2 == 60 and n >= 6 then -- SGR mouse sequence \27[<btn;x;yM/m
-                            local s = ffi.string(key_buf, n)
-                            local b, x, y, act = s:match("^\27%[<(%d+);(%d+);(%d+)([Mm])")
-                            if b and x and y and act then
-                                return {
-                                    type = "mouse",
-                                    btn = tonumber(b),
-                                    x = tonumber(x),
-                                    y = tonumber(y),
-                                    release = (act == "m"),
-                                }
-                            end
-                        end
-                        if c2 == 65 then return "UP" end
-                        if c2 == 66 then return "DOWN" end
-                        if c2 == 67 then return "RIGHT" end
-                        if c2 == 68 then return "LEFT" end
-                        if c2 == 90 then return "SHIFT_TAB" end
-                        if c2 == 53 and n >= 4 and key_buf[3] == 126 then return "PAGE_UP" end
-                        if c2 == 54 and n >= 4 and key_buf[3] == 126 then return "PAGE_DOWN" end
-                        if c2 == 72 then return "HOME" end
-                        if c2 == 70 then return "END" end
-                        -- Function keys
-                        if c2 == 49 and n >= 4 and key_buf[3] == 53 and key_buf[4] == 126 then return "F5" end
-                    end
-                    return "ESC"
-                elseif c0 == 10 or c0 == 13 then
-                    return "ENTER"
-                elseif c0 == 127 or c0 == 8 then
-                    return "BACKSPACE"
-                elseif c0 == 32 then
-                    return "SPACE"
-                elseif c0 == 9 then
-                    return "TAB"
-                else
-                    return string.char(c0)
-                end
-            end
-        end
-        return nil
+        return key
     end
 end
 
@@ -3100,7 +2941,7 @@ local function execute_diagnostic_command(cmd_template, proc)
             kernel32.FlushConsoleInputBuffer(hIn)
         end)
     else
-        pcall(function() ffi.C.tcflush(0, 0) end)
+        termkit.flush_input()
     end
 
     pcall(function() io.read("*line") end)

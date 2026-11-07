@@ -878,7 +878,7 @@ describe("6. CLI behaviour (subprocess)", function()
         f:close()
         local allowed = { ipairs = 1, pairs = 1, pcall = 1, tostring = 1, tonumber = 1,
             type = 1, string = 1, table = 1, math = 1, io = 1, os = 1, require = 1,
-            arg = 1, error = 1, select = 1, assert = 1 }
+            arg = 1, error = 1, select = 1, assert = 1, package = 1 }
         for name in out:gmatch('GGET%s+%d+%s+%d+%s+;%s+"([^"]+)"') do
             assert_true(allowed[name], "undeclared global: " .. name)
         end
