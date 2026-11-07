@@ -143,6 +143,13 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
    * **Consistent Idioms**: Follow one error-handling convention per module (for example `value, err` returns, never silent `nil`), one naming style, and one way to build strings and tables. Match the conventions of the surrounding file when editing it.
    * **Review Before Finishing**: Re-read your own diff as a reviewer would. If a section takes effort to understand, simplify it or explain it with a comment before committing.
 
+## Deployment (`deploy.lua`)
+
+* **Local modules are discovered automatically**: `deploy.lua` scans each app's source for `require("name")` / `pcall(require, "name")` and installs the matching `name.lua` (transitively) next to the app. Adding a `require` of a repo module needs no registry edit.
+* **Register new apps**: add the app to `APPS` and `APP_ORDER` in `deploy.lua`. Use `deps` only for files loaded without a literal `require` (e.g. `dofile`, computed names) and `system_modules` for modules installed system-wide.
+* **Unresolvable requires fail the deploy** before anything is written. Never silence this by wrapping a hard dependency in `pcall`.
+* **Verify**: after adding an app, a `require` of a new module, or moving a module, run `python3 test_deploy_dependencies.py` and `python3 test_deploy_mdview.py`, and deploy to a temp directory and start the installed app from a different working directory.
+
 ## Commit Workflow
 
 *   **One commit per issue**: Each fix should be its own atomic commit with a descriptive message.

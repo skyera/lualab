@@ -17,8 +17,10 @@
       luajit deploy.lua --check             Report only, write nothing
       luajit deploy.lua -h                  Show usage
 
-    Apps that need shared modules (e.g. luatop and hwtui need termkit.lua) get them copied
-    next to the script; each app's `deps` list in the registry below names them.
+    Local modules an app requires (e.g. termkit.lua for luatop and hwtui, json.lua for the
+    web servers) are found by scanning its source for require("name") / pcall(require,
+    "name") and copied next to it, transitively. Files loaded any other way go in the
+    app's `deps` list in the registry below.
 
     The launcher prefers the `luajit` found on PATH ($<APP>_LUAJIT overrides it) and falls back to the
     absolute luajit that ran this deploy, so launchers keep working when luajit is not on PATH.
@@ -29,6 +31,11 @@ local ffi = require("ffi")
 -- =========================================================================
 -- 1. Options & Registry
 -- =========================================================================
+-- Registry fields: id, name, script, desc, env_var, aliases (extra launcher names) and
+-- deps (extra files the script loads WITHOUT a literal require, e.g. via dofile or a
+-- computed name) and system_modules (required modules installed system-wide, so no file
+-- is expected). Modules loaded with require("name") or pcall(require, "name") are
+-- discovered automatically from the script's source (see discover_dependencies).
 local APPS = {
     pix = {
         id = "pix",
@@ -66,7 +73,6 @@ local APPS = {
         desc = "Real-Time Terminal System & Hardware Monitor",
         env_var = "LUATOP_LUAJIT",
         aliases = { "ltop" },
-        deps = { "termkit.lua" },
     },
     hwtui = {
         id = "hwtui",
@@ -74,7 +80,6 @@ local APPS = {
         script = "hwinfo_tui.lua",
         desc = "Tabbed Hardware Inventory Viewer",
         env_var = "HWTUI_LUAJIT",
-        deps = { "termkit.lua" },
     },
     logexplorer = {
         id = "logexplorer",
@@ -104,7 +109,6 @@ local APPS = {
         desc = "Local Code & Document Search Engine Web Server",
         env_var = "CODEFIND_WEB_LUAJIT",
         aliases = { "cfweb" },
-        deps = { "codefind.lua", "json.lua" },
     },
     landrop = {
         id = "landrop",
@@ -113,7 +117,6 @@ local APPS = {
         desc = "LAN File Drop & Cross-Device Clipboard Web Server",
         env_var = "LANDROP_LUAJIT",
         aliases = { "ldrop" },
-        deps = { "json.lua" },
     },
     ytweb = {
         id = "ytweb",
@@ -122,7 +125,6 @@ local APPS = {
         desc = "YouTube & YouTube Music In-Browser Streaming Web Server",
         env_var = "YTWEB_LUAJIT",
         aliases = { "yt-web" },
-        deps = { "json.lua" },
     },
     pixweb = {
         id = "pixweb",
@@ -507,6 +509,92 @@ local function windows_cmd_launcher(app, luajit_path)
 end
 
 -- =========================================================================
+-- 3b. Dependency discovery
+-- =========================================================================
+local function read_file(path)
+    local f = io.open(path, "rb")
+    if not f then
+        return nil
+    end
+    local data = f:read("*a")
+    f:close()
+    return data
+end
+
+-- Modules provided by LuaJIT itself; a require of these never needs a file.
+local BUILTIN_MODULES = {
+    ffi = true, bit = true, jit = true, string = true, table = true, math = true,
+    io = true, os = true, coroutine = true, debug = true, package = true,
+}
+
+--- Remove comments and long strings ([[...]]) so text inside them is not mistaken for
+--- code (e.g. an embedded helper script that contains its own require calls).
+local function strip_non_code(source)
+    source = source:gsub("%-%-%[(=*)%[.-%]%1%]", "")
+    source = source:gsub("\n[ \t]*%-%-[^\n]*", "\n")
+    source = source:gsub("%[(=*)%[.-%]%1%]", "")
+    return source
+end
+
+--- Modules a Lua source loads with a literal name. Returns two lists: required ones,
+--- from require("name") / require "name", and optional ones, from pcall(require, "name").
+local function required_modules(source)
+    source = strip_non_code(source)
+    local required, optional = {}, {}
+    for name in source:gmatch("pcall%s*%(%s*require%s*,%s*[\"']([%w_%-]+)[\"']") do
+        optional[#optional + 1] = name
+    end
+    source = source:gsub("pcall%s*%(%s*require%s*,", "")
+    for name in source:gmatch("require%s*%(?%s*[\"']([%w_%-]+)[\"']") do
+        required[#required + 1] = name
+    end
+    return required, optional
+end
+
+--- Files an app needs next to its script: its registry `deps` plus every local module
+--- (a .lua file beside deploy.lua) that it or those modules load, transitively. Test
+--- modules (test_*.lua) are never installed. Returns the file list and a list of
+--- "module (required by file)" strings for required modules that cannot be found:
+--- neither builtin, nor listed in the app's `system_modules`, nor present as a file.
+local function discover_dependencies(app, source_dir)
+    local system_modules = {}
+    for _, name in ipairs(app.system_modules or {}) do
+        system_modules[name] = true
+    end
+    local found, ordered, missing, queue = {}, {}, {}, {}
+    local function add(file, path)
+        if not found[file] and file ~= app.script then
+            found[file] = true
+            ordered[#ordered + 1] = file
+            queue[#queue + 1] = path
+        end
+    end
+    for _, file in ipairs(app.deps or {}) do
+        add(file, source_dir .. SEP .. file)
+    end
+    local pending = { { path = app.source_path, file = app.script } }
+    while #pending > 0 or #queue > 0 do
+        local current = table.remove(pending) or { path = table.remove(queue) }
+        current.file = current.file or current.path:match("([^/\\]+)$")
+        local required, optional = required_modules(read_file(current.path) or "")
+        for _, group in ipairs({ { required, true }, { optional, false } }) do
+            for _, name in ipairs(group[1]) do
+                local file = name .. ".lua"
+                local candidate = source_dir .. SEP .. file
+                if file_exists(candidate) then
+                    if not name:match("^test_") then
+                        add(file, candidate)
+                    end
+                elseif group[2] and not BUILTIN_MODULES[name] and not system_modules[name] then
+                    missing[#missing + 1] = string.format("%s (required by %s)", name, current.file)
+                end
+            end
+        end
+    end
+    return ordered, missing
+end
+
+-- =========================================================================
 -- 4. Deploy
 -- =========================================================================
 local kind = target_is_windows and "Windows" or "Linux/POSIX"
@@ -534,6 +622,15 @@ for _, app in ipairs(apps_to_deploy) do
     app.source_path = script_dir .. SEP .. app.script
     app.installed_lua = target_dir .. SEP .. app.script
     if file_exists(app.source_path) then
+        local missing
+        app.dependencies, missing = discover_dependencies(app, script_dir)
+        if #missing > 0 then
+            io.stderr:write(string.format("deploy: %s cannot be installed - missing module(s): %s\n",
+                app.name, table.concat(missing, ", ")))
+            io.stderr:write("  Put the module's .lua file next to deploy.lua, or list it under"
+                .. " system_modules in the app registry if it is installed system-wide.\n")
+            os.exit(1)
+        end
         table.insert(available_apps, app)
     elseif opts.app == "all" then
         table.insert(skipped_apps, app)
@@ -566,7 +663,7 @@ if opts.check then
         local verb = existing and "overwrite" or "create"
         print(string.format("  [check] would %s %s (%s)", verb, display_path(app.installed_lua),
             existing and (format_size(existing) .. " -> " .. format_size(file_size(app.source_path))) or format_size(file_size(app.source_path))))
-        for _, dep in ipairs(app.deps or {}) do
+        for _, dep in ipairs(app.dependencies) do
             print(string.format("  [check] would copy      %s (dependency)",
                 display_path(target_dir .. SEP .. dep)))
         end
@@ -634,7 +731,7 @@ for _, app in ipairs(apps_to_deploy) do
     -- Dependencies are shared between apps: copy each once per run, always overwriting
     -- so a re-run refreshes stale copies. A missing or unwritable dependency is fatal
     -- because the installed app would fail at startup.
-    for _, dep in ipairs(app.deps or {}) do
+    for _, dep in ipairs(app.dependencies) do
         if not installed_deps[dep] then
             local dep_dst = target_dir .. SEP .. dep
             local copied, err = copy_file(script_dir .. SEP .. dep, dep_dst)
