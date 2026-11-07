@@ -18,7 +18,7 @@ BIN4 = demo_repl
 # Linking libraries (LuaJIT, libdl, libreadline)
 LIBS = $(LUAJIT_LIB) -ldl -lreadline
 
-.PHONY: all clean clean-all test
+.PHONY: all clean clean-all test check
 
 # Targets
 all: $(LUAJIT_LIB) $(BIN1) $(BIN2) $(BIN3) $(BIN4)
@@ -36,6 +36,27 @@ test: $(LUAJIT_LIB)
 	$(LUAJIT_DIR)/src/luajit test_ffi_dict.lua
 	luajit test_lan_dashboard.lua
 	-$(LUAJIT_DIR)/src/luajit test_ffi_suite.lua
+
+# Self-contained Python suites (terminal/PTY, deploy, local servers). The browser/Node UI
+# tests (*.js, test_mdview_browser.py) need extra tooling and are not included.
+LUAJIT ?= luajit
+PY_SUITES = test_hwinfo_tui_pty.py test_termkit_pty.py test_luatop_pty.py \
+    test_deploy_dependencies.py test_deploy_mdview.py test_battery_pty.py \
+    test_ffi_duplicates_tui_pty.py test_mdview_pty.py test_lazygit_lite.py \
+    test_lan_dashboard_scan.py test_landrop_web_http.py
+
+# Run every Lua suite (run_all_tests.lua) and every Python suite; keep going after a
+# failure and exit non-zero if anything failed. Uses `luajit` from PATH (LUAJIT=... to override).
+check:
+	@failed=""; \
+	$(LUAJIT) run_all_tests.lua || failed="$$failed run_all_tests.lua"; \
+	for suite in $(PY_SUITES); do \
+		echo "=== $$suite"; \
+		python3 $$suite || failed="$$failed $$suite"; \
+	done; \
+	echo; \
+	if [ -n "$$failed" ]; then echo "FAILED:$$failed"; exit 1; fi; \
+	echo "ALL SUITES PASSED"
 
 $(LUAJIT_LIB):
 	$(MAKE) -C $(LUAJIT_DIR)
