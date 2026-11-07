@@ -2,7 +2,7 @@
 --[[
     deploy.lua
     Installs lualab tools plus thin launchers, so they can be started by typing
-    `pix`, `lumina`, `yt`, `weblite` / `wl`, `luatop` / `ltop`, `codefind`,
+    `pix`, `lumina`, `yt`, `weblite` / `wl`, `luatop` / `ltop`, `hwtui`, `codefind`,
     `logexplorer`, or `mdview` (see --help for the full app list):
 
       Linux / macOS : ~/bin/<app>.lua  + ~/bin/<app>      (POSIX sh, made executable)
@@ -16,6 +16,9 @@
       luajit deploy.lua --os windows        Generate the Windows layout (e.g. from Linux/CI)
       luajit deploy.lua --check             Report only, write nothing
       luajit deploy.lua -h                  Show usage
+
+    Apps that need shared modules (e.g. luatop and hwtui need termkit.lua) get them copied
+    next to the script; each app's `deps` list in the registry below names them.
 
     The launcher prefers the `luajit` found on PATH ($<APP>_LUAJIT overrides it) and falls back to the
     absolute luajit that ran this deploy, so launchers keep working when luajit is not on PATH.
@@ -63,6 +66,15 @@ local APPS = {
         desc = "Real-Time Terminal System & Hardware Monitor",
         env_var = "LUATOP_LUAJIT",
         aliases = { "ltop" },
+        deps = { "termkit.lua" },
+    },
+    hwtui = {
+        id = "hwtui",
+        name = "hwtui",
+        script = "hwinfo_tui.lua",
+        desc = "Tabbed Hardware Inventory Viewer",
+        env_var = "HWTUI_LUAJIT",
+        deps = { "termkit.lua" },
     },
     logexplorer = {
         id = "logexplorer",
@@ -92,6 +104,7 @@ local APPS = {
         desc = "Local Code & Document Search Engine Web Server",
         env_var = "CODEFIND_WEB_LUAJIT",
         aliases = { "cfweb" },
+        deps = { "codefind.lua", "json.lua" },
     },
     landrop = {
         id = "landrop",
@@ -100,6 +113,7 @@ local APPS = {
         desc = "LAN File Drop & Cross-Device Clipboard Web Server",
         env_var = "LANDROP_LUAJIT",
         aliases = { "ldrop" },
+        deps = { "json.lua" },
     },
     ytweb = {
         id = "ytweb",
@@ -108,6 +122,7 @@ local APPS = {
         desc = "YouTube & YouTube Music In-Browser Streaming Web Server",
         env_var = "YTWEB_LUAJIT",
         aliases = { "yt-web" },
+        deps = { "json.lua" },
     },
     pixweb = {
         id = "pixweb",
@@ -119,6 +134,32 @@ local APPS = {
     },
 }
 
+-- Deployment order for `--app all`.
+local APP_ORDER = {
+    "pix", "lumina", "yt", "weblite", "luatop", "hwtui", "codefind", "codefind_web",
+    "landrop", "ytweb", "pixweb", "logexplorer", "mdview",
+}
+
+--- Find an app by its id or one of its launcher aliases; nil when unknown.
+local function find_app(name)
+    if APPS[name] then
+        return APPS[name]
+    end
+    for _, app in pairs(APPS) do
+        for _, alias in ipairs(app.aliases or {}) do
+            if alias == name then
+                return app
+            end
+        end
+    end
+    return nil
+end
+
+--- Comma-separated list of valid `--app` values for messages.
+local function app_choices()
+    return "all, " .. table.concat(APP_ORDER, ", ")
+end
+
 local opts = {
     app = "all",
     dir = nil,
@@ -129,11 +170,11 @@ local opts = {
 local function print_usage()
     print("lualab deploy — Cross-Platform Tools Deployer (LuaJIT FFI)")
     print("Usage:")
-    print("  luajit deploy.lua [--app all|pix|lumina|yt|weblite|luatop|codefind|codefind_web|landrop|ytweb|pixweb|logexplorer|mdview]"
+    print("  luajit deploy.lua [--app " .. app_choices():gsub(", ", "|") .. "]"
         .. " [--dir <path>] [--os linux|windows] [--check]")
     print("")
-    print("  --app <name>    App to deploy: all (default), pix, lumina, yt, weblite (wl), luatop (ltop),"
-        .. " codefind, codefind_web (cfweb), landrop (ldrop), ytweb (yt-web), pixweb (pix-web), logexplorer, or mdview")
+    print("  --app <name>    App to deploy (default: all): " .. app_choices())
+    print("                  aliases: wl, ltop, cfweb, ldrop, yt-web, pix-web")
     print("  --dir <path>    Target directory (default: C:\\app\\bin on Windows, ~/bin elsewhere)")
     print("  --os <name>     Force the target layout: linux (POSIX) or windows")
     print("  --check         Show what would be installed without writing anything")
@@ -173,9 +214,8 @@ do
     end
 end
 
-if opts.app ~= "all" and not APPS[opts.app] and opts.app ~= "wl" and opts.app ~= "ltop" and opts.app ~= "cfweb" and opts.app ~= "ldrop" and opts.app ~= "yt-web" and opts.app ~= "pix-web" then
-    io.stderr:write("deploy: unknown --app '" .. tostring(opts.app)
-        .. "' (use all, pix, lumina, yt, weblite, luatop, codefind, codefind_web, landrop, ytweb, pixweb, logexplorer, or mdview)\n")
+if opts.app ~= "all" and not find_app(opts.app) then
+    io.stderr:write("deploy: unknown --app '" .. tostring(opts.app) .. "' (use " .. app_choices() .. ")\n")
     os.exit(2)
 end
 
@@ -476,32 +516,11 @@ local luajit_path = resolve_luajit()
 
 local apps_to_deploy = {}
 if opts.app == "all" then
-    table.insert(apps_to_deploy, APPS.pix)
-    table.insert(apps_to_deploy, APPS.lumina)
-    table.insert(apps_to_deploy, APPS.yt)
-    table.insert(apps_to_deploy, APPS.weblite)
-    table.insert(apps_to_deploy, APPS.luatop)
-    table.insert(apps_to_deploy, APPS.codefind)
-    table.insert(apps_to_deploy, APPS.codefind_web)
-    table.insert(apps_to_deploy, APPS.landrop)
-    table.insert(apps_to_deploy, APPS.ytweb)
-    table.insert(apps_to_deploy, APPS.pixweb)
-    table.insert(apps_to_deploy, APPS.logexplorer)
-    table.insert(apps_to_deploy, APPS.mdview)
-elseif opts.app == "weblite" or opts.app == "wl" then
-    table.insert(apps_to_deploy, APPS.weblite)
-elseif opts.app == "luatop" or opts.app == "ltop" then
-    table.insert(apps_to_deploy, APPS.luatop)
-elseif opts.app == "codefind_web" or opts.app == "cfweb" then
-    table.insert(apps_to_deploy, APPS.codefind_web)
-elseif opts.app == "landrop" or opts.app == "ldrop" then
-    table.insert(apps_to_deploy, APPS.landrop)
-elseif opts.app == "ytweb" or opts.app == "yt-web" then
-    table.insert(apps_to_deploy, APPS.ytweb)
-elseif opts.app == "pixweb" or opts.app == "pix-web" then
-    table.insert(apps_to_deploy, APPS.pixweb)
-elseif APPS[opts.app] then
-    table.insert(apps_to_deploy, APPS[opts.app])
+    for _, id in ipairs(APP_ORDER) do
+        table.insert(apps_to_deploy, APPS[id])
+    end
+else
+    table.insert(apps_to_deploy, find_app(opts.app))
 end
 
 print("lualab deploy — Cross-Platform Suite (LuaJIT FFI)")
@@ -547,6 +566,10 @@ if opts.check then
         local verb = existing and "overwrite" or "create"
         print(string.format("  [check] would %s %s (%s)", verb, display_path(app.installed_lua),
             existing and (format_size(existing) .. " -> " .. format_size(file_size(app.source_path))) or format_size(file_size(app.source_path))))
+        for _, dep in ipairs(app.deps or {}) do
+            print(string.format("  [check] would copy      %s (dependency)",
+                display_path(target_dir .. SEP .. dep)))
+        end
         print(string.format("  [check] would write     %s", display_path(target_dir .. SEP .. app.name)))
         if target_is_windows then
             print(string.format("  [check] would write     %s", display_path(target_dir .. SEP .. app.name .. ".cmd")))
@@ -576,6 +599,7 @@ ensure_dir(target_dir)
 
 local written = 0
 local deployed_names = {}
+local installed_deps = {} -- dependency file names already copied during this run
 
 for _, app in ipairs(apps_to_deploy) do
     table.insert(deployed_names, app.name)
@@ -605,26 +629,24 @@ for _, app in ipairs(apps_to_deploy) do
             end
             written = written + 1
         end
-    elseif app.id == 'codefind_web' then
-        -- codefind_web requires json.lua and codefind.lua
-        for _, dep in ipairs({ "codefind.lua", "json.lua" }) do
+    end
+
+    -- Dependencies are shared between apps: copy each once per run, always overwriting
+    -- so a re-run refreshes stale copies. A missing or unwritable dependency is fatal
+    -- because the installed app would fail at startup.
+    for _, dep in ipairs(app.deps or {}) do
+        if not installed_deps[dep] then
             local dep_dst = target_dir .. SEP .. dep
-            if not file_exists(dep_dst) then
-                local copied, err = copy_file(script_dir .. SEP .. dep, dep_dst)
-                if copied then
-                    written = written + 1
-                    print(string.format("  [ok] copied  %s -> %s (dependency)", dep, display_path(dep_dst)))
-                end
+            local copied, err = copy_file(script_dir .. SEP .. dep, dep_dst)
+            if not copied then
+                io.stderr:write(string.format("deploy: failed to install dependency %s for %s: %s\n",
+                    dep, app.name, tostring(err)))
+                io.stderr:write("  Ensure " .. dep .. " is in the same directory as deploy.lua.\n")
+                os.exit(1)
             end
-        end
-    elseif app.id == 'landrop' or app.id == 'ytweb' then
-        local dep_dst = target_dir .. SEP .. "json.lua"
-        if not file_exists(dep_dst) then
-            local copied, err = copy_file(script_dir .. SEP .. "json.lua", dep_dst)
-            if copied then
-                written = written + 1
-                print(string.format("  [ok] copied  json.lua -> %s (dependency)", display_path(dep_dst)))
-            end
+            installed_deps[dep] = true
+            written = written + 1
+            print(string.format("  [ok] copied  %s -> %s (dependency)", dep, display_path(dep_dst)))
         end
     end
 
