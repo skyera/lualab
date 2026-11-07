@@ -83,6 +83,14 @@ ffi.cdef[[
     int ioctl(int fd, unsigned long request, ...);
     int poll(struct pollfd *fds, unsigned long nfds, int timeout);
     long read(int fd, void *buf, unsigned long count);
+
+    // POSIX signal masks (used to defer SIGINT/SIGTERM/SIGHUP until the terminal is restored)
+    typedef struct { unsigned long __val[16]; } sigset_t;
+    int sigemptyset(sigset_t *set);
+    int sigaddset(sigset_t *set, int signum);
+    int sigismember(const sigset_t *set, int signum);
+    int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
+    int sigpending(sigset_t *set);
 ]]
 
 local function load_sqlite()
@@ -123,6 +131,11 @@ local ECHO   = 0x0008
 local ICANON = 0x0002
 local IEXTEN = 0x8000
 local ISIG   = 0x0001
+
+local SIG_BLOCK   = 0
+local SIG_UNBLOCK = 1
+-- Linux signal numbers: SIGHUP, SIGINT, SIGTERM
+local DEFERRED_SIGNALS = { 1, 2, 15 }
 
 -- ============================================================================
 -- Section 2: Hardware Battery Reader (Linux /sys/class/power_supply)
@@ -378,7 +391,7 @@ end
 -- ============================================================================
 local Plotter = {}
 
-Plotter.BLOCKS = { " ", " ", "▂", "▃", "▄", "▅", "▆", "▇", "█" }
+Plotter.BLOCKS = { " ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█" }
 
 Plotter.RESET   = "\27[0m"
 Plotter.BOLD    = "\27[1m"
@@ -582,6 +595,46 @@ local Term = {
     in_raw_mode = false,
 }
 
+-- Block SIGHUP/SIGINT/SIGTERM while the TUI owns the terminal. They stay pending and are polled
+-- by Term.termination_requested(), so the main loop can exit and restore the screen first.
+-- (Running Lua code inside an async signal handler is unsafe, so we never install one.)
+function Term.block_signals()
+    local set = ffi.new("sigset_t[1]")
+    ffi.C.sigemptyset(set)
+    for _, sig in ipairs(DEFERRED_SIGNALS) do
+        ffi.C.sigaddset(set, sig)
+    end
+    Term.sigset = set
+    ffi.C.sigprocmask(SIG_BLOCK, set, nil)
+end
+
+function Term.termination_requested()
+    if not Term.sigset then
+        return false
+    end
+    local pending = ffi.new("sigset_t[1]")
+    if ffi.C.sigpending(pending) ~= 0 then
+        return false
+    end
+    for _, sig in ipairs(DEFERRED_SIGNALS) do
+        if ffi.C.sigismember(pending, sig) == 1 then
+            return true
+        end
+    end
+    return false
+end
+
+-- Unblock the deferred signals. A signal that arrived while blocked is delivered here and
+-- terminates the process with its default action, which is the correct exit status for
+-- `kill`. Call this only after the terminal is restored and the database is closed.
+function Term.release_signals()
+    if Term.sigset then
+        local set = Term.sigset
+        Term.sigset = nil
+        ffi.C.sigprocmask(SIG_UNBLOCK, set, nil)
+    end
+end
+
 function Term.enable_raw_mode()
     if Term.in_raw_mode then
         return true
@@ -596,8 +649,9 @@ function Term.enable_raw_mode()
     local raw = ffi.new("struct termios")
     ffi.copy(raw, orig, ffi.sizeof("struct termios"))
 
-    -- Disable canonical mode and echo; preserve OPOST so \n expands to \r\n properly
-    raw.c_lflag = bit.band(raw.c_lflag, bit.bnot(bit.bor(ICANON, ECHO)))
+    -- Disable canonical mode, echo and ISIG (so Ctrl+C arrives as "\3" and is handled by the
+    -- key dispatcher, letting us restore the terminal); preserve OPOST so \n expands to \r\n.
+    raw.c_lflag = bit.band(raw.c_lflag, bit.bnot(bit.bor(ICANON, ECHO, ISIG)))
     raw.c_cc[5] = 0 -- VTIME
     raw.c_cc[6] = 1 -- VMIN
 
@@ -605,6 +659,7 @@ function Term.enable_raw_mode()
         return false, "Failed to apply raw terminal mode"
     end
 
+    Term.block_signals()
     Term.in_raw_mode = true
     -- Switch to alternate screen, hide cursor, disable auto-wrap
     io.write("\27[?1049h\27[?25l\27[?7l")
@@ -640,6 +695,44 @@ function Term.get_size()
     return 80, 24
 end
 
+-- Pure decoder: raw byte sequence from the terminal -> symbolic key token.
+-- Unrecognised escape sequences return nil so they are ignored instead of being
+-- misread as a lone ESC (which quits the app).
+function Term.decode_sequence(seq)
+    if seq == "\27[A" or seq == "\27OA" then
+        return "UP"
+    elseif seq == "\27[B" or seq == "\27OB" then
+        return "DOWN"
+    elseif seq == "\27[C" or seq == "\27OC" then
+        return "RIGHT"
+    elseif seq == "\27[D" or seq == "\27OD" then
+        return "LEFT"
+    elseif seq == "\27[H" or seq == "\27[1~" then
+        return "HOME"
+    elseif seq == "\27[F" or seq == "\27[4~" then
+        return "END"
+    elseif seq == "\27[5~" then
+        return "PAGEUP"
+    elseif seq == "\27[6~" then
+        return "PAGEDOWN"
+    elseif seq == "\t" then
+        return "TAB"
+    elseif seq == "\r" or seq == "\n" then
+        return "ENTER"
+    elseif seq == "\27" then
+        return "ESC"
+    elseif seq == "\127" or seq == "\8" then
+        return "BACKSPACE"
+    elseif seq == " " then
+        return "SPACE"
+    elseif seq == "\3" then
+        return "CTRL_C"
+    elseif seq:sub(1, 1) == "\27" then
+        return nil
+    end
+    return seq:sub(1, 1)
+end
+
 function Term.read_key(timeout_ms)
     local pfd = ffi.new("struct pollfd[1]")
     pfd[0].fd = STDIN_FD
@@ -651,38 +744,7 @@ function Term.read_key(timeout_ms)
         local buf = ffi.new("char[32]")
         local r = ffi.C.read(STDIN_FD, buf, 32)
         if r > 0 then
-            local seq = ffi.string(buf, r)
-            if seq == "\27[A" or seq == "\27OA" then
-                return "UP"
-            elseif seq == "\27[B" or seq == "\27OB" then
-                return "DOWN"
-            elseif seq == "\27[C" or seq == "\27OC" then
-                return "RIGHT"
-            elseif seq == "\27[D" or seq == "\27OD" then
-                return "LEFT"
-            elseif seq == "\27[H" or seq == "\27[1~" then
-                return "HOME"
-            elseif seq == "\27[F" or seq == "\27[4~" then
-                return "END"
-            elseif seq == "\27[5~" then
-                return "PAGEUP"
-            elseif seq == "\27[6~" then
-                return "PAGEDOWN"
-            elseif seq == "\t" then
-                return "TAB"
-            elseif seq == "\r" or seq == "\n" then
-                return "ENTER"
-            elseif seq == "\27" then
-                return "ESC"
-            elseif seq == "\127" or seq == "\8" then
-                return "BACKSPACE"
-            elseif seq == " " then
-                return "SPACE"
-            elseif seq == "\3" then
-                return "CTRL_C"
-            else
-                return seq:sub(1, 1)
-            end
+            return Term.decode_sequence(ffi.string(buf, r))
         end
     end
     return nil
@@ -692,6 +754,10 @@ end
 -- Section 6: Pure Frame Generators & TUI Rendering Engine
 -- ============================================================================
 local TUI = {}
+
+TUI.MIN_COLS = 40
+TUI.MIN_ROWS = 12
+TUI.PLOT_WINDOWS = { 1, 6, 12, 24, 168 }
 
 local function visible_width(str)
     local clean = str:gsub("\27%[[%d;]*%a", "")
@@ -705,13 +771,53 @@ local function visible_width(str)
     return count
 end
 
-local function pad_box_row(inner_text, inner_width)
-    local vw = visible_width(inner_text)
-    local pad = inner_width - vw
-    if pad <= 0 then
-        return inner_text
+-- Truncate text to at most max_cols visible columns, keeping ANSI escapes intact and never
+-- splitting a multi-byte UTF-8 character. Appends a reset if anything was cut off.
+local function truncate_visible(text, max_cols)
+    if visible_width(text) <= max_cols then
+        return text
     end
-    return inner_text .. string.rep(" ", pad)
+
+    local out = {}
+    local cols = 0
+    local pos = 1
+    local len = #text
+    local kept_escape = false
+    while pos <= len and cols < max_cols do
+        local esc = text:match("^\27%[[%d;]*%a", pos)
+        if esc then
+            out[#out + 1] = esc
+            kept_escape = true
+            pos = pos + #esc
+        else
+            local b = text:byte(pos)
+            local char_len = 1
+            if b >= 0xF0 then
+                char_len = 4
+            elseif b >= 0xE0 then
+                char_len = 3
+            elseif b >= 0xC0 then
+                char_len = 2
+            end
+            out[#out + 1] = text:sub(pos, pos + char_len - 1)
+            pos = pos + char_len
+            cols = cols + 1
+        end
+    end
+    if kept_escape then
+        out[#out + 1] = "\27[0m"
+    end
+    return table.concat(out)
+end
+
+-- Fit text to exactly inner_width visible columns (truncating or right-padding).
+local function pad_box_row(inner_text, inner_width)
+    local fitted = truncate_visible(inner_text, math.max(0, inner_width))
+    local pad = inner_width - visible_width(fitted)
+    if pad <= 0 then
+        return fitted
+    end
+    return fitted .. string.rep(" ", pad)
 end
 
 function TUI.reload_data(state, db)
@@ -743,11 +849,11 @@ function TUI.render_dashboard(state, inner_w, inner_h)
     -- Status header line
     local status_badge = Plotter.CYAN .. "[" .. info.status .. "]" .. Plotter.RESET
     if info.status == "Charging" then
-        status_badge = Plotter.GREEN .. "[⚡ CHARGING]" .. Plotter.RESET
+        status_badge = Plotter.GREEN .. "[+ CHARGING]" .. Plotter.RESET
     elseif info.status == "Discharging" then
-        status_badge = Plotter.YELLOW .. "[🔋 DISCHARGING]" .. Plotter.RESET
+        status_badge = Plotter.YELLOW .. "[- DISCHARGING]" .. Plotter.RESET
     elseif info.status == "Full" then
-        status_badge = Plotter.GREEN .. "[✓ FULL (AC)]" .. Plotter.RESET
+        status_badge = Plotter.GREEN .. "[* FULL (AC)]" .. Plotter.RESET
     end
 
     local model_str = string.format("%s %s (%s)", info.manufacturer, info.model_name, info.technology)
@@ -821,7 +927,8 @@ function TUI.render_plot(state, inner_w, inner_h)
 
     state.chart_cols = chart_w
 
-    local hours_label = string.format("Time Window: %d Hours (%d snapshots in window) | Scale: [1] 1h  [2] 6h  [3] 12h  [4] 24h  [5] 7d",
+    local hours_label = string.format(
+        "Time Window: %d Hours (%d snapshots in window) | [ / ] change window: 1h 6h 12h 24h 7d",
         state.plot_hours, #state.records)
     lines[#lines + 1] = Plotter.BOLD .. hours_label .. Plotter.RESET
 
@@ -846,10 +953,10 @@ function TUI.render_plot(state, inner_w, inner_h)
             lines[#lines + 1] = string.format(" Scrub [%d/%d]: %s │ Cap: %s%3d%%%s │ Volt: %.2fV │ Power: %.2fW │ Status: %s",
                 scrub_col, chart_w, t_str, cap_color, r.capacity, Plotter.RESET, r.voltage_v, r.power_w, r.status)
         else
-            lines[#lines + 1] = string.format(" Scrub [%d/%d]: [←/→] Scrub timeline │ [0] Start │ [$] End", scrub_col, chart_w)
+            lines[#lines + 1] = string.format(" Scrub [%d/%d]: [←/→ h/l] Scrub timeline │ [0] Start │ [$] End", scrub_col, chart_w)
         end
     else
-        lines[#lines + 1] = " [←/→] Scrub timeline cursor │ [0] Start │ [$] End │ [r] Record snapshot"
+        lines[#lines + 1] = " [←/→ h/l] Scrub timeline cursor │ [0] Start │ [$] End │ [r] Record snapshot"
     end
 
     lines[#lines + 1] = ""
@@ -910,42 +1017,115 @@ function TUI.render_history(state, inner_w, inner_h)
     return lines
 end
 
+TUI.HELP_ENTRIES = {
+    { "[Tab] / [1-3]", "Switch views (Dashboard, Plot, Log)" },
+    { "[r]", "Record snapshot to SQLite database" },
+    { "[s]", "Seed 24h synthetic telemetry (press twice)" },
+    { "[+] / [-]", "Adjust telemetry polling rate" },
+    { "[←] [→] / h l", "Scrub timeline cursor (Plot view)" },
+    { "[ and ]", "Change history time window (Plot view)" },
+    { "[↑] [↓] / j k", "Scroll rows (Snapshot Log view)" },
+    { "[?] / [Esc]", "Close this help window" },
+    { "[q] / [Ctrl+C]", "Quit Battery Monitor" },
+}
+
+-- Pure generator: returns the help box as an array of strings, each exactly box_w visible
+-- columns wide. Degrades gracefully (drops spacer rows, then truncates the list) when the
+-- available height is small.
+function TUI.build_help_lines(box_w, avail_h)
+    local inner = box_w - 2
+    local entries = TUI.HELP_ENTRIES
+    if inner < 1 or avail_h < 3 then
+        return {}
+    end
+
+    local title = " BATTERY MONITOR HELP "
+    local fill = math.max(0, inner - visible_width(title))
+    local left_fill = math.floor(fill / 2)
+    local top = "┌" .. string.rep("─", left_fill) .. title .. string.rep("─", fill - left_fill) .. "┐"
+    local bottom = "└" .. string.rep("─", inner) .. "┘"
+
+    local function body_row(text)
+        return "│" .. pad_box_row(text, inner) .. "│"
+    end
+
+    local with_extras = avail_h >= #entries + 5
+    local shown = #entries
+    local truncated = false
+    if not with_extras and shown > avail_h - 2 then
+        shown = math.max(0, avail_h - 3)
+        truncated = true
+    end
+
+    local lines = { pad_box_row(top, box_w) }
+    if with_extras then
+        lines[#lines + 1] = body_row("")
+    end
+    for i = 1, shown do
+        local key_text = entries[i][1]
+        local gap = string.rep(" ", math.max(1, 16 - visible_width(key_text)))
+        lines[#lines + 1] = body_row("  " .. key_text .. gap .. entries[i][2])
+    end
+    if truncated then
+        lines[#lines + 1] = body_row("  ... (enlarge terminal for full help)")
+    end
+    if with_extras then
+        lines[#lines + 1] = body_row("")
+        lines[#lines + 1] = body_row("   Press [Esc] or [?] to close")
+    end
+    lines[#lines + 1] = bottom
+    return lines
+end
+
 function TUI.overlay_modal(lines, target_w, target_h)
-    local modal_lines = {
-        "┌────────────────── BATTERY MONITOR HELP ──────────────────┐",
-        "│                                                          │",
-        "│  [Tab] / [1-3]    Switch Views (Dashboard, Plot, Log)   │",
-        "│  [r]              Record Snapshot to SQLite Database     │",
-        "│  [s]              Seed 24h Synthetic Battery Telemetry   │",
-        "│  [+] / [-]        Adjust Telemetry Polling Rate          │",
-        "│  [←] / [→] / h,l  Scrub Timeline Cursor in Plot View     │",
-        "│  [↑] / [↓] / j,k  Scroll Rows in Snapshot Log View       │",
-        "│  [1-5] (in Plot)  Change History Time Window (1h to 7d)  │",
-        "│  [?] or [Esc]     Close this Help Window                 │",
-        "│  [q] / [Ctrl+C]   Quit Battery Monitor TUI               │",
-        "│                                                          │",
-        "│              Press [Esc] or [?] to close                 │",
-        "└──────────────────────────────────────────────────────────┘",
-    }
+    -- Rows 2 .. target_h-1 are available (top and bottom frame borders stay visible)
+    local avail_h = target_h - 2
+    local box_w = math.min(60, target_w - 4)
+    local modal_lines = TUI.build_help_lines(box_w, avail_h)
+    if #modal_lines == 0 then
+        return
+    end
 
-    local modal_w = visible_width(modal_lines[1])
-    local modal_h = #modal_lines
-    local start_row = math.floor((target_h - modal_h) / 2) + 1
-    local left_pad_len = math.floor((target_w - 4 - modal_w) / 2)
-    left_pad_len = math.max(0, left_pad_len)
-    local left_pad = string.rep(" ", left_pad_len)
+    local start_row = math.max(2, math.floor((target_h - #modal_lines) / 2) + 1)
+    local left_pad = string.rep(" ", math.max(0, math.floor((target_w - 4 - box_w) / 2)))
 
-    for i = 1, modal_h do
+    for i = 1, #modal_lines do
         local line_idx = start_row + i - 1
-        if line_idx >= 4 and line_idx <= target_h - 3 then
-            local m_text = left_pad .. modal_lines[i]
+        if line_idx <= target_h - 1 then
+            local m_text = Plotter.YELLOW .. left_pad .. modal_lines[i] .. Plotter.RESET
             lines[line_idx] = string.format("\27[%d;1H%s│ %s │%s\27[K",
-                line_idx, Plotter.CYAN, pad_box_row(Plotter.YELLOW .. m_text .. Plotter.RESET, target_w - 4), Plotter.RESET)
+                line_idx, Plotter.CYAN, pad_box_row(m_text, target_w - 4), Plotter.RESET)
         end
     end
 end
 
+-- Pure generator for terminals below the minimum supported size. Overwrites every row so
+-- no stale content from a previous (larger) layout remains.
+function TUI.render_too_small_frame(cols, rows)
+    local messages = {
+        "Terminal too small",
+        string.format("Need %dx%d, have %dx%d", TUI.MIN_COLS, TUI.MIN_ROWS, cols, rows),
+        "Resize, or press [q] to quit",
+    }
+    local width = math.max(1, cols - 1)
+    local out = {}
+    for row = 1, math.max(1, rows) do
+        local text = messages[row]
+        if text then
+            out[#out + 1] = string.format("\27[%d;1H%s%s%s\27[K",
+                row, Plotter.BOLD .. Plotter.YELLOW, text:sub(1, width), Plotter.RESET)
+        else
+            out[#out + 1] = string.format("\27[%d;1H\27[K", row)
+        end
+    end
+    return table.concat(out)
+end
+
 function TUI.render_frame(state, cols, rows)
+    if cols < TUI.MIN_COLS or rows < TUI.MIN_ROWS then
+        return TUI.render_too_small_frame(cols, rows)
+    end
+
     local target_w = math.max(40, cols - 1)
     local target_h = math.max(12, rows)
     local inner_w = target_w - 4
@@ -955,6 +1135,8 @@ function TUI.render_frame(state, cols, rows)
 
     local function add_row(content)
         if cur_row <= target_h then
+            -- Safety net: no row may ever exceed the frame width (auto-wrap is disabled)
+            content = truncate_visible(content, target_w)
             lines[#lines + 1] = string.format("\27[%d;1H%s\27[K", cur_row, content)
             cur_row = cur_row + 1
         end
@@ -964,9 +1146,20 @@ function TUI.render_frame(state, cols, rows)
     local title = " BATTERY MONITOR (LuaJIT FFI) "
     local interval_str = string.format(" [Live %.1fs] ", state.poll_interval)
     local now_str = " " .. os.date("%Y-%m-%d %H:%M:%S") .. " "
-    local fixed_w = 6 + visible_width(title) + visible_width(interval_str) + visible_width(now_str)
-    local top_fill = target_w - fixed_w
-    if top_fill < 0 then top_fill = 0 end
+    local function top_fixed_width()
+        return 6 + visible_width(title) + visible_width(interval_str) + visible_width(now_str)
+    end
+    -- Narrow terminals: drop the clock, then the poll rate, then shorten the title
+    if top_fixed_width() > target_w then
+        now_str = ""
+    end
+    if top_fixed_width() > target_w then
+        interval_str = ""
+    end
+    if top_fixed_width() > target_w then
+        title = " BATTERY MONITOR "
+    end
+    local top_fill = math.max(0, target_w - top_fixed_width())
     local top_dashes = string.rep("─", top_fill)
     add_row(Plotter.CYAN .. "┌─" .. Plotter.BOLD .. title .. Plotter.RESET .. Plotter.CYAN .. "─" .. interval_str .. "─" .. top_dashes .. now_str .. "─┐" .. Plotter.RESET)
 
@@ -1012,6 +1205,9 @@ function TUI.render_frame(state, cols, rows)
 
     -- Footer Row N: Hotkey Bar
     local hotkeys = "[Tab] View  [r] Record  [s] Seed  [+/-] Rate  [?] Help  [q] Quit"
+    if 7 + visible_width(hotkeys) > target_w then
+        hotkeys = "[Tab] [r] [s] [+/-] [?] [q]"
+    end
     local fixed_bot = 7 + visible_width(hotkeys)
     local bot_fill = target_w - fixed_bot
     if bot_fill < 0 then bot_fill = 0 end
@@ -1025,53 +1221,44 @@ function TUI.render_frame(state, cols, rows)
 end
 
 function TUI.handle_key(state, key, db)
+    if key == "CTRL_C" then
+        state.running = false
+        return true
+    end
+
     if state.show_help then
-        if key == "ESC" or key == "?" or key == "h" or key == "ENTER" or key == "q" then
+        if key == "ESC" or key == "?" or key == "ENTER" or key == "q" then
             state.show_help = false
             return true
         end
         return false
     end
 
-    if key == "q" or key == "CTRL_C" or (key == "ESC" and not state.show_help) then
+    if key == "q" or key == "ESC" then
         state.running = false
         return true
     elseif key == "TAB" then
         state.tab = (state.tab % 3) + 1
         return true
-    elseif key == "1" then
-        if state.tab == 2 then
-            state.plot_hours = 1
-            TUI.reload_data(state, db)
-        else
-            state.tab = 1
-        end
+    elseif key == "1" or key == "2" or key == "3" then
+        state.tab = tonumber(key)
         return true
-    elseif key == "2" then
-        if state.tab == 2 then
-            state.plot_hours = 6
-            TUI.reload_data(state, db)
-        else
-            state.tab = 2
+    elseif (key == "[" or key == "]") and state.tab == 2 then
+        local idx = 4
+        for i, hours in ipairs(TUI.PLOT_WINDOWS) do
+            if hours == state.plot_hours then
+                idx = i
+            end
         end
-        return true
-    elseif key == "3" then
-        if state.tab == 2 then
-            state.plot_hours = 12
-            TUI.reload_data(state, db)
+        if key == "[" then
+            idx = math.max(1, idx - 1)
         else
-            state.tab = 3
+            idx = math.min(#TUI.PLOT_WINDOWS, idx + 1)
         end
-        return true
-    elseif key == "4" and state.tab == 2 then
-        state.plot_hours = 24
+        state.plot_hours = TUI.PLOT_WINDOWS[idx]
         TUI.reload_data(state, db)
         return true
-    elseif key == "5" and state.tab == 2 then
-        state.plot_hours = 168
-        TUI.reload_data(state, db)
-        return true
-    elseif key == "?" or key == "h" then
+    elseif key == "?" then
         state.show_help = true
         return true
     elseif key == "r" or key == "R" then
@@ -1109,10 +1296,10 @@ function TUI.handle_key(state, key, db)
         return true
     elseif state.tab == 2 then
         local max_c = state.chart_cols or 60
-        if key == "LEFT" then
+        if key == "LEFT" or key == "h" then
             state.scrub_col = math.max(1, (state.scrub_col or max_c) - 1)
             return true
-        elseif key == "RIGHT" then
+        elseif key == "RIGHT" or key == "l" then
             state.scrub_col = math.min(max_c, (state.scrub_col or max_c) + 1)
             return true
         elseif key == "0" or key == "HOME" then
@@ -1185,6 +1372,11 @@ function TUI.run(db)
     local needs_redraw = false
 
     while state.running do
+        if Term.termination_requested() then
+            state.running = false
+            break
+        end
+
         local now = os.time()
         if now - state.last_poll_time >= state.poll_interval then
             TUI.reload_data(state, db)
@@ -1413,6 +1605,169 @@ local function run_self_tests(db)
     assert(state.running == false, "q key should signal quit")
     print("  [✓] Test 6 passed: Interactive key event state machine validated.")
 
+
+    -- ------------------------------------------------------------------------
+    -- Helpers for headless frame assertions
+    -- ------------------------------------------------------------------------
+    local function new_state(overrides)
+        local st = {
+            db = db,
+            tab = 1,
+            show_help = false,
+            info = state.info,
+            plot_hours = 24,
+            records = dummy_records,
+            total_db_count = count,
+            poll_interval = 1.0,
+            scrub_col = nil,
+            log_scroll = 1,
+            running = true,
+            chart_cols = 40,
+            toast_expire = 0,
+        }
+        for k, v in pairs(overrides or {}) do
+            st[k] = v
+        end
+        return st
+    end
+
+    -- Split a frame into { [row] = content } and assert the TUI invariants:
+    --   every row is cursor-addressed, ends with \27[K, and fits the terminal width.
+    local function assert_frame_invariants(frame, cols, rows, label)
+        local starts = {}
+        for pos, row in frame:gmatch("()\27%[(%d+);1H") do
+            starts[#starts + 1] = { pos = pos, row = tonumber(row) }
+        end
+        assert(#starts == rows, string.format("%s: expected %d rows, got %d", label, rows, #starts))
+        assert(not frame:find("\27%[2J"), label .. ": frame must never clear the screen")
+        for i, st in ipairs(starts) do
+            local stop = starts[i + 1] and (starts[i + 1].pos - 1) or #frame
+            local seg = frame:sub(st.pos, stop):gsub("^\27%[%d+;1H", "")
+            assert(st.row == i, string.format("%s: row %d out of order", label, i))
+            assert(seg:sub(-3) == "\27[K", string.format("%s: row %d lacks trailing \\27[K", label, i))
+            local width = visible_width(seg:sub(1, -4))
+            assert(width <= cols, string.format("%s: row %d is %d cols wide (> %d)", label, i, width, cols))
+        end
+    end
+
+    -- Test 7: Key decoding and symbolic-token dispatch
+    assert(Term.decode_sequence("\27[A") == "UP", "ESC [ A must decode to UP")
+    assert(Term.decode_sequence(" ") == "SPACE", "space must decode to SPACE")
+    assert(Term.decode_sequence("\3") == "CTRL_C", "0x03 must decode to CTRL_C")
+    assert(Term.decode_sequence("\27") == "ESC", "lone ESC must decode to ESC")
+    assert(Term.decode_sequence("\27[3~") == nil, "unknown escape sequences must be ignored")
+    assert(Term.decode_sequence("abc") == "a", "multi-byte bursts decode their first key")
+
+    local ks = new_state({ tab = 2, scrub_col = 10 })
+    TUI.handle_key(ks, "h", db)
+    assert(ks.show_help == false and ks.scrub_col == 9, "h must scrub left on the Plot tab")
+    TUI.handle_key(ks, "l", db)
+    assert(ks.scrub_col == 10, "l must scrub right on the Plot tab")
+    TUI.handle_key(ks, "LEFT", db)
+    assert(ks.scrub_col == 9, "LEFT must scrub left")
+    TUI.handle_key(ks, "3", db)
+    assert(ks.tab == 3, "3 must switch to the Log tab even from the Plot tab")
+    TUI.handle_key(ks, "1", db)
+    assert(ks.tab == 1, "1 must switch to the Dashboard tab")
+    ks.tab = 2
+    ks.plot_hours = 24
+    TUI.handle_key(ks, "]", db)
+    assert(ks.plot_hours == 168, "] must widen the window to 7d")
+    TUI.handle_key(ks, "]", db)
+    assert(ks.plot_hours == 168, "] must clamp at the widest window")
+    TUI.handle_key(ks, "[", db)
+    TUI.handle_key(ks, "[", db)
+    TUI.handle_key(ks, "[", db)
+    TUI.handle_key(ks, "[", db)
+    TUI.handle_key(ks, "[", db)
+    assert(ks.plot_hours == 1, "[ must clamp at the narrowest window")
+    ks.tab = 1
+    assert(TUI.handle_key(ks, "h", db) == false and ks.show_help == false, "h must not open help")
+    TUI.handle_key(ks, "?", db)
+    assert(ks.show_help == true, "? must open help")
+    TUI.handle_key(ks, "ESC", db)
+    assert(ks.show_help == false and ks.running == true, "ESC closes help without quitting")
+    TUI.handle_key(ks, "?", db)
+    TUI.handle_key(ks, "CTRL_C", db)
+    assert(ks.running == false, "Ctrl+C must quit even while help is open")
+    print("  [✓] Test 7 passed: key decoding, h/l scrub, tab/window keys, Ctrl+C in help.")
+
+    -- Test 8: Frame invariants across sizes, tabs, help and degenerate data
+    local long = string.rep("W", 300)
+    local long_info = {
+        capacity = 55, status = "Discharging", voltage_v = 11.1, power_w = 9.9, energy_wh = 20,
+        energy_full_wh = 40, energy_design_wh = 50, health_pct = 80, cycle_count = 7,
+        manufacturer = long, model_name = long, technology = long, path = "/sys/" .. long,
+    }
+    local long_records = {
+        { timestamp = 1000, capacity = 50, status = long, voltage_v = 12, power_w = 1, health_pct = 80 },
+        { timestamp = 2000, capacity = 60, status = long, voltage_v = 12, power_w = 1, health_pct = 80 },
+    }
+    local sizes = { { 40, 12 }, { 41, 13 }, { 80, 24 }, { 120, 40 }, { 200, 60 } }
+    local variants = {
+        { name = "normal", over = {} },
+        { name = "empty", over = { records = {}, total_db_count = 0 } },
+        { name = "no-battery", over = { info = false } },
+        { name = "long-strings", over = { info = long_info, records = long_records } },
+    }
+    local frames_checked = 0
+    for _, size in ipairs(sizes) do
+        for _, variant in ipairs(variants) do
+            for tab = 1, 3 do
+                for _, help in ipairs({ false, true }) do
+                    local over = {}
+                    for k, v in pairs(variant.over) do
+                        over[k] = v
+                    end
+                    over.tab = tab
+                    over.show_help = help
+                    local st = new_state(over)
+                    if st.info == false then
+                        st.info = nil
+                    end
+                    local label = string.format("%dx%d %s tab%d help=%s",
+                        size[1], size[2], variant.name, tab, tostring(help))
+                    local frame = TUI.render_frame(st, size[1], size[2])
+                    assert_frame_invariants(frame, size[1], size[2], label)
+                    frames_checked = frames_checked + 1
+                end
+            end
+        end
+    end
+    print(string.format("  [✓] Test 8 passed: %d frames satisfy row/width/clear invariants.", frames_checked))
+
+    -- Test 9: Terminals below the minimum size show a message and overwrite every row
+    local tiny = { { 39, 12 }, { 40, 11 }, { 30, 8 }, { 1, 1 }, { 80, 3 }, { 20, 40 } }
+    for _, size in ipairs(tiny) do
+        local frame = TUI.render_frame(new_state(), size[1], size[2])
+        assert_frame_invariants(frame, size[1], size[2], string.format("tiny %dx%d", size[1], size[2]))
+        if size[2] >= 1 and size[1] >= 20 then
+            assert(frame:find("Terminal too small", 1, true), "tiny terminal must explain itself")
+        end
+    end
+    print("  [✓] Test 9 passed: undersized terminals render a full-overwrite size warning.")
+
+    -- Test 10: Width helpers truncate by display columns, never splitting UTF-8
+    local fitted = pad_box_row(Plotter.RED .. "ábcdéfghij" .. Plotter.RESET, 5)
+    assert(visible_width(fitted) == 5, "pad_box_row must fit exactly 5 columns")
+    assert(fitted:find("^\27%[31má"), "pad_box_row must keep leading ANSI and multibyte chars intact")
+    assert(visible_width(pad_box_row("ab", 6)) == 6, "pad_box_row must right-pad short text")
+    assert(visible_width(pad_box_row("█████", 3)) == 3, "pad_box_row must cut block glyphs on a boundary")
+    assert(pad_box_row("abc", 0) == "", "zero width must yield empty text")
+    assert(Plotter.sparkline({ 15 }, 0, 100) == "▁", "15% must map to the lowest visible block glyph")
+    print("  [✓] Test 10 passed: truncation/padding preserves ANSI + UTF-8 and glyph set is complete.")
+
+    -- Test 11: Help modal degrades gracefully by available height
+    for avail = 3, 20 do
+        local help_lines = TUI.build_help_lines(60, avail)
+        assert(#help_lines <= avail, string.format("help overflowed %d rows with %d lines", avail, #help_lines))
+        for _, hl in ipairs(help_lines) do
+            assert(visible_width(hl) == 60, "every help row must be exactly box width")
+        end
+    end
+    assert(#TUI.build_help_lines(60, 2) == 0, "no room for help must yield no rows")
+    print("  [✓] Test 11 passed: help modal fits any viewport height with aligned borders.")
+
     print("=== All battery_monitor.lua self-tests passed successfully! ===")
     return true
 end
@@ -1487,6 +1842,11 @@ local function main(args)
         i = i + 1
     end
 
+    if mode == "test" then
+        -- Self-tests must never read or modify the user's real database
+        db_path = ":memory:"
+    end
+
     local db, dberr = BatteryDB:open(db_path)
     if not db then
         io.stderr:write(Plotter.RED .. "[DB ERROR] " .. tostring(dberr) .. Plotter.RESET .. "\n")
@@ -1504,6 +1864,8 @@ local function main(args)
         end)
         Term.restore()
         db:close()
+        -- Terminal restored and DB closed: now let any deferred SIGINT/SIGTERM/SIGHUP take effect
+        Term.release_signals()
         if not ok then
             io.stderr:write("[TUI ERROR] " .. tostring(run_result) .. "\n")
             os.exit(1)

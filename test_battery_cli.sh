@@ -64,5 +64,17 @@ check "--help succeeds" 0 "" -- luajit "$SCRIPT" --help
 check "--tui on non-tty exits non-zero" 1 "Could not start the interactive UI" -- \
     luajit "$SCRIPT" --tui
 
+# -- Live pseudo-terminal tests (Ctrl+C, SIGTERM, resize, help) -------------------
+if command -v python3 >/dev/null 2>&1; then
+    if python3 "$HERE/test_battery_pty.py"; then
+        PASS=$((PASS + 1))
+    else
+        echo "  [FAIL] pty test suite"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "  [SKIP] pty tests: python3 not found"
+fi
+
 echo "=== Passed: $PASS  Failed: $FAIL ==="
 [ "$FAIL" -eq 0 ]
