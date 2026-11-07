@@ -18,8 +18,6 @@ function Rect:describe()
     return string.format("Rect %dx%d", self.width, self.height)
 end
 
--- Metamethods are looked up on the metatable itself, not through __index,
--- so Square must receive its own copies.
 function Rect.__tostring(self)
     return self:describe()
 end
@@ -67,10 +65,14 @@ print(r:describe())
 print(s:describe())
 print(s:describe_full())
 
-print("-----")
+print("------")
 print(r)
 print(s)
+
 print(Rect.new(2, 8) == Rect.new(4, 4))
 print(Rect.new(4, 4) == Square.new(4))
+print(r == s)
 print(r < s)
 print(s <= r)
+print(r > s)
+print(s >= r)
