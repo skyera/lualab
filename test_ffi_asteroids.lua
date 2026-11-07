@@ -18,6 +18,18 @@ test('actual key decoding, including fragmented arrows and Space',function()
  eq(#g.bullets,1); assert(g.paused); assert(g.thrust>0)
  eq(decode('\27',true)[1],'ESC'); eq(decode('\3')[1],'CTRL_C')
 end)
+test('Win32 key events map to decoder tokens',function()
+ local decode=m.decoder()
+ local events={{0x26,0},{0x25,0},{0x27,0},{0x28,0},{0x20,32},{0x50,112},{0x1B,27},{0x03,3},{0x10,0}}
+ local bytes={}
+ for _,e in ipairs(events) do bytes[#bytes+1]=m.console_key_bytes(e[1],e[2]) end
+ eq(m.console_key_bytes(0x10,0),'')
+ local keys=decode(table.concat(bytes),true)
+ eq(table.concat(keys,','),'UP,LEFT,RIGHT,DOWN,SPACE,p,ESC,CTRL_C')
+ local g=Game.new(); local a=g.angle
+ for _,k in ipairs(keys) do if k=='LEFT' then g:key(k) end end
+ assert(g.angle<a)
+end)
 test('rotation and thrust',function()
  local g=Game.new(); local a=g.angle; g:key('LEFT'); assert(g.angle<a)
  g:key('RIGHT'); near(g.angle,a); g:key('UP'); g:update(0.1); assert(g.ship.vy<0)
