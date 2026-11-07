@@ -26,6 +26,7 @@ local setmetatable = setmetatable
 local arg = arg
 
 local cmd_seed
+local SEED_SAMPLE_COUNT = 144
 
 -- ============================================================================
 -- Section 1: SQLite3 & POSIX Terminal FFI C Bindings
@@ -49,6 +50,16 @@ ffi.cdef[[
                            sqlite3_stmt **ppStmt, const char **pzTail);
     int sqlite3_step(sqlite3_stmt *pStmt);
     int sqlite3_finalize(sqlite3_stmt *pStmt);
+    int sqlite3_reset(sqlite3_stmt *pStmt);
+    int sqlite3_clear_bindings(sqlite3_stmt *pStmt);
+    int sqlite3_busy_timeout(sqlite3 *db, int ms);
+
+    // Parameter binding
+    int sqlite3_bind_int(sqlite3_stmt *pStmt, int idx, int value);
+    int sqlite3_bind_int64(sqlite3_stmt *pStmt, int idx, int64_t value);
+    int sqlite3_bind_double(sqlite3_stmt *pStmt, int idx, double value);
+    int sqlite3_bind_text(sqlite3_stmt *pStmt, int idx, const char *text, int n,
+                          void (*destructor)(void *));
 
     // Column extractors
     int64_t sqlite3_column_int64(sqlite3_stmt *pStmt, int iCol);
@@ -225,10 +236,34 @@ end
 local BatteryDB = {}
 BatteryDB.__index = BatteryDB
 
-function BatteryDB:open(db_path)
-    local db_file = db_path or (os.getenv("BATTERY_DB") or ".battery_history.db")
-    local db_ptr = ffi.new("sqlite3*[1]")
+local SQLITE_TRANSIENT = ffi.cast("void (*)(void *)", -1)
+local DEFAULT_BUSY_TIMEOUT_MS = 3000
 
+local INSERT_SQL = [[
+    INSERT INTO battery_snapshots
+    (timestamp, capacity, status, voltage_v, power_w, energy_wh, health_pct, cycle_count)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);
+]]
+
+-- Open (and if needed create) the database. Returns the handle, or nil plus a message that
+-- names the file and the SQLite error. opts.busy_timeout_ms overrides the lock wait time.
+function BatteryDB.open(db_path, opts)
+    opts = opts or {}
+    local db_file = db_path or os.getenv("BATTERY_DB") or ".battery_history.db"
+    local is_memory = (db_file == ":memory:")
+
+    if not is_memory then
+        local probe, probe_err = io.open(db_file, "rb")
+        if probe then
+            probe:close()
+        elseif tostring(probe_err):find("No such file", 1, true) then
+            io.stderr:write(string.format(
+                "[INFO] Database '%s' does not exist; creating a new one (expected on first run)\n",
+                db_file))
+        end
+    end
+
+    local db_ptr = ffi.new("sqlite3*[1]")
     local rc = sqlite.sqlite3_open(db_file, db_ptr)
     if rc ~= SQLITE_OK then
         local err_text = "Unknown error"
@@ -239,22 +274,62 @@ function BatteryDB:open(db_path)
         return nil, string.format("Failed to open SQLite DB '%s': %s (code: %d)", db_file, err_text, rc)
     end
 
+    sqlite.sqlite3_busy_timeout(db_ptr[0], opts.busy_timeout_ms or DEFAULT_BUSY_TIMEOUT_MS)
+
     local self_inst = setmetatable({
         db = db_ptr[0],
-        db_file = db_file
+        db_file = db_file,
+        insert_stmt = nil,
     }, BatteryDB)
 
-    local ok_schema, schema_err = self_inst:init_schema()
-    if not ok_schema then
-        self_inst:close()
-        return nil, schema_err
+    local steps = {
+        function()
+            return self_inst:configure(is_memory)
+        end,
+        function()
+            return self_inst:init_schema()
+        end,
+        function()
+            return self_inst:prepare_insert()
+        end,
+    }
+    for _, step in ipairs(steps) do
+        local ok, step_err = step()
+        if not ok then
+            self_inst:close()
+            return nil, string.format("Database '%s': %s", db_file, step_err)
+        end
     end
 
     return self_inst
 end
 
+-- Run one or more SQL statements; returns true or false plus a descriptive message.
+function BatteryDB:exec(sql, what)
+    local rc = sqlite.sqlite3_exec(self.db, sql, nil, nil, nil)
+    if rc ~= SQLITE_OK then
+        return false, string.format("%s failed: %s (code %d)", what or "SQL", self:errmsg(), rc)
+    end
+    return true
+end
+
+-- WAL lets the TUI read while a cron `--record` writes; the busy timeout (set in open)
+-- makes concurrent writers wait instead of failing immediately.
+function BatteryDB:configure(is_memory)
+    if not is_memory then
+        local ok, err = self:exec("PRAGMA journal_mode=WAL;", "Enabling WAL journal mode")
+        if not ok then
+            -- Explicit, visible fallback (e.g. read-only or network filesystem); a truly
+            -- unusable file still fails in init_schema with a fatal error.
+            io.stderr:write(string.format(
+                "[WARN] %s; continuing with SQLite's default journal mode\n", err))
+        end
+    end
+    return self:exec("PRAGMA synchronous=NORMAL;", "Setting synchronous mode")
+end
+
 function BatteryDB:init_schema()
-    local sql = [[
+    return self:exec([[
         CREATE TABLE IF NOT EXISTS battery_snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp INTEGER NOT NULL,
@@ -267,11 +342,16 @@ function BatteryDB:init_schema()
             cycle_count INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_battery_timestamp ON battery_snapshots(timestamp);
-    ]]
-    local rc = sqlite.sqlite3_exec(self.db, sql, nil, nil, nil)
+    ]], "Initializing schema")
+end
+
+function BatteryDB:prepare_insert()
+    local stmt_ptr = ffi.new("sqlite3_stmt*[1]")
+    local rc = sqlite.sqlite3_prepare_v2(self.db, INSERT_SQL, #INSERT_SQL, stmt_ptr, nil)
     if rc ~= SQLITE_OK then
-        return false, "Failed to initialize schema: " .. self:errmsg()
+        return false, string.format("Preparing insert statement failed: %s (code %d)", self:errmsg(), rc)
     end
+    self.insert_stmt = stmt_ptr[0]
     return true
 end
 
@@ -285,17 +365,47 @@ function BatteryDB:errmsg()
     return "Unknown SQLite error"
 end
 
-function BatteryDB:insert_snapshot(info)
-    local sql = string.format([[
-        INSERT INTO battery_snapshots
-        (timestamp, capacity, status, voltage_v, power_w, energy_wh, health_pct, cycle_count)
-        VALUES (%d, %d, '%s', %.4f, %.4f, %.4f, %.2f, %d);
-    ]], info.timestamp, info.capacity, info.status, info.voltage_v, info.power_w,
-        info.energy_wh, info.health_pct, info.cycle_count)
+function BatteryDB:begin()
+    return self:exec("BEGIN IMMEDIATE;", "Beginning transaction")
+end
 
-    local rc = sqlite.sqlite3_exec(self.db, sql, nil, nil, nil)
-    if rc ~= SQLITE_OK then
-        return false, "Failed to insert snapshot: " .. self:errmsg()
+function BatteryDB:commit()
+    return self:exec("COMMIT;", "Committing transaction")
+end
+
+-- Best effort: a failed rollback must not mask the error that caused it.
+function BatteryDB:rollback()
+    return self:exec("ROLLBACK;", "Rolling back transaction")
+end
+
+-- Values are bound as parameters, so any status text (quotes, SQL, NULs) is stored verbatim.
+function BatteryDB:insert_snapshot(info)
+    local stmt = self.insert_stmt
+    if self.db == nil or stmt == nil then
+        return false, "Failed to insert snapshot: database is closed"
+    end
+
+    local status = tostring(info.status or "Unknown")
+    sqlite.sqlite3_bind_int64(stmt, 1, info.timestamp)
+    sqlite.sqlite3_bind_int(stmt, 2, info.capacity)
+    sqlite.sqlite3_bind_text(stmt, 3, status, #status, SQLITE_TRANSIENT)
+    sqlite.sqlite3_bind_double(stmt, 4, info.voltage_v)
+    sqlite.sqlite3_bind_double(stmt, 5, info.power_w)
+    sqlite.sqlite3_bind_double(stmt, 6, info.energy_wh or 0)
+    sqlite.sqlite3_bind_double(stmt, 7, info.health_pct or 0)
+    sqlite.sqlite3_bind_int(stmt, 8, info.cycle_count or 0)
+
+    local rc = sqlite.sqlite3_step(stmt)
+    local err_text = nil
+    if rc ~= SQLITE_DONE then
+        -- Capture the message before reset, which may clear it
+        err_text = string.format("Failed to insert snapshot: %s (code %d)", self:errmsg(), rc)
+    end
+    sqlite.sqlite3_reset(stmt)
+    sqlite.sqlite3_clear_bindings(stmt)
+
+    if err_text then
+        return false, err_text
     end
     return true
 end
@@ -325,13 +435,18 @@ function BatteryDB:get_history(since_timestamp, limit)
     local stmt_ptr = ffi.new("sqlite3_stmt*[1]")
     local rc = sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_ptr, nil)
     if rc ~= SQLITE_OK then
-        return nil, "Prepare failed: " .. self:errmsg()
+        return nil, string.format("History query prepare failed: %s (code %d)", self:errmsg(), rc)
     end
 
     local stmt = stmt_ptr[0]
     local records = {}
 
-    while sqlite.sqlite3_step(stmt) == SQLITE_ROW do
+    while true do
+        rc = sqlite.sqlite3_step(stmt)
+        if rc ~= SQLITE_ROW then
+            break
+        end
+
         local ts = tonumber(sqlite.sqlite3_column_int64(stmt, 0))
         local cap = tonumber(sqlite.sqlite3_column_int(stmt, 1))
 
@@ -359,27 +474,43 @@ function BatteryDB:get_history(since_timestamp, limit)
         }
     end
 
+    if rc ~= SQLITE_DONE then
+        -- Do not return a silently truncated result set
+        local err_text = string.format("History query failed: %s (code %d)", self:errmsg(), rc)
+        sqlite.sqlite3_finalize(stmt)
+        return nil, err_text
+    end
+
     sqlite.sqlite3_finalize(stmt)
     return records
 end
 
+-- Returns the row count, or nil plus an error message.
 function BatteryDB:count_records()
     local sql = "SELECT COUNT(*) FROM battery_snapshots;"
     local stmt_ptr = ffi.new("sqlite3_stmt*[1]")
     local rc = sqlite.sqlite3_prepare_v2(self.db, sql, #sql, stmt_ptr, nil)
     if rc ~= SQLITE_OK then
-        return 0
+        return nil, string.format("Count query prepare failed: %s (code %d)", self:errmsg(), rc)
     end
     local stmt = stmt_ptr[0]
-    local count = 0
-    if sqlite.sqlite3_step(stmt) == SQLITE_ROW then
+    local count = nil
+    local err_text = nil
+    rc = sqlite.sqlite3_step(stmt)
+    if rc == SQLITE_ROW then
         count = tonumber(sqlite.sqlite3_column_int64(stmt, 0))
+    else
+        err_text = string.format("Count query failed: %s (code %d)", self:errmsg(), rc)
     end
     sqlite.sqlite3_finalize(stmt)
-    return count
+    return count, err_text
 end
 
 function BatteryDB:close()
+    if self.insert_stmt ~= nil then
+        sqlite.sqlite3_finalize(self.insert_stmt)
+        self.insert_stmt = nil
+    end
     if self.db ~= nil then
         sqlite.sqlite3_close(self.db)
         self.db = nil
@@ -820,17 +951,42 @@ local function pad_box_row(inner_text, inner_width)
     return fitted .. string.rep(" ", pad)
 end
 
+function TUI.set_toast(state, message, seconds, is_error)
+    state.toast_msg = message
+    state.toast_expire = os.time() + seconds
+    state.toast_is_error = is_error and true or false
+end
+
 function TUI.reload_data(state, db)
-    state.info = BatteryReader.read_info()
-    state.total_db_count = db:count_records()
+    local info, hw_err = BatteryReader.read_info()
+    state.info = info
+    state.hw_error = (not info) and hw_err or nil
+
+    local problems = {}
+
+    local count, count_err = db:count_records()
+    if count then
+        state.total_db_count = count
+    else
+        state.total_db_count = state.total_db_count or 0
+        problems[#problems + 1] = count_err
+    end
 
     local hours = state.plot_hours or 24
     local since = os.time() - (hours * 3600)
     local records, err = db:get_history(since)
-    if not err and records then
+    if records then
         state.records = records
     else
         state.records = {}
+        problems[#problems + 1] = err
+    end
+
+    -- Surfaced in the footer so a database failure is never mistaken for "no data"
+    if #problems > 0 then
+        state.db_error = table.concat(problems, "; ")
+    else
+        state.db_error = nil
     end
 end
 
@@ -840,7 +996,8 @@ function TUI.render_dashboard(state, inner_w, inner_h)
 
     if not info then
         lines[#lines + 1] = ""
-        lines[#lines + 1] = Plotter.YELLOW .. "  [!] No hardware battery detected in /sys/class/power_supply" .. Plotter.RESET
+        lines[#lines + 1] = Plotter.YELLOW .. "  [!] "
+            .. (state.hw_error or "No hardware battery detected in /sys/class/power_supply") .. Plotter.RESET
         lines[#lines + 1] = Plotter.GRAY .. "      Press [s] to seed 24 hours of synthetic telemetry." .. Plotter.RESET
         lines[#lines + 1] = ""
         return lines
@@ -1196,7 +1353,10 @@ function TUI.render_frame(state, cols, rows)
     local now_sec = os.time()
     local toast
     if state.toast_msg and now_sec <= state.toast_expire then
-        toast = Plotter.BOLD .. Plotter.GREEN .. state.toast_msg .. Plotter.RESET
+        local toast_color = state.toast_is_error and Plotter.RED or Plotter.GREEN
+        toast = Plotter.BOLD .. toast_color .. state.toast_msg .. Plotter.RESET
+    elseif state.db_error then
+        toast = Plotter.BOLD .. Plotter.RED .. "[DB ERROR] " .. state.db_error .. Plotter.RESET
     else
         local db_name = state.db and state.db.db_file or ".battery_history.db"
         toast = Plotter.GRAY .. "Database: " .. db_name .. " (" .. state.total_db_count .. " snapshots recorded) │ Press [?] for keybindings" .. Plotter.RESET
@@ -1262,37 +1422,51 @@ function TUI.handle_key(state, key, db)
         state.show_help = true
         return true
     elseif key == "r" or key == "R" then
-        local info = BatteryReader.read_info()
-        if info then
-            db:insert_snapshot(info)
-            state.toast_msg = string.format("[Recorded snapshot at %s: %d%% (%s)]",
-                os.date("%H:%M:%S", info.timestamp), info.capacity, info.status)
-            state.toast_expire = os.time() + 3
+        local info, info_err = BatteryReader.read_info()
+        if not info then
+            TUI.set_toast(state, "[Failed to read battery: " .. tostring(info_err) .. "]", 4, true)
+            return true
+        end
+        local ok, insert_err = db:insert_snapshot(info)
+        if ok then
+            TUI.set_toast(state, string.format("[Recorded snapshot at %s: %d%% (%s)]",
+                os.date("%H:%M:%S", info.timestamp), info.capacity, info.status), 3, false)
             TUI.reload_data(state, db)
         else
-            state.toast_msg = "[Failed to query hardware battery info]"
-            state.toast_expire = os.time() + 3
+            TUI.set_toast(state, "[Record FAILED: " .. tostring(insert_err) .. "]", 5, true)
         end
         return true
     elseif key == "s" or key == "S" then
-        cmd_seed(db)
-        state.toast_msg = "[Successfully seeded 144 synthetic snapshots]"
-        state.toast_expire = os.time() + 3
+        -- Seeding pollutes the real history with synthetic rows, so require a second press
+        local now = os.time()
+        if not state.seed_confirm_until or now > state.seed_confirm_until then
+            state.seed_confirm_until = now + 5
+            TUI.set_toast(state, string.format(
+                "[Seed adds %d SYNTHETIC rows to %s - press [s] again within 5s to confirm]",
+                SEED_SAMPLE_COUNT, db.db_file or "database"), 5, true)
+            return true
+        end
+        state.seed_confirm_until = nil
+        local ok, seed_err = cmd_seed(db)
+        if ok then
+            TUI.set_toast(state,
+                string.format("[Seeded %d synthetic snapshots]", SEED_SAMPLE_COUNT), 3, false)
+        else
+            TUI.set_toast(state, "[Seed FAILED: " .. tostring(seed_err) .. "]", 5, true)
+        end
         TUI.reload_data(state, db)
         return true
     elseif key == "+" or key == "=" then
         if state.poll_interval > 0.5 then
             state.poll_interval = state.poll_interval / 2
         end
-        state.toast_msg = string.format("[Polling rate set to %.1fs]", state.poll_interval)
-        state.toast_expire = os.time() + 2
+        TUI.set_toast(state, string.format("[Polling rate set to %.1fs]", state.poll_interval), 2, false)
         return true
     elseif key == "-" or key == "_" then
         if state.poll_interval < 5.0 then
             state.poll_interval = state.poll_interval * 2
         end
-        state.toast_msg = string.format("[Polling rate set to %.1fs]", state.poll_interval)
-        state.toast_expire = os.time() + 2
+        TUI.set_toast(state, string.format("[Polling rate set to %.1fs]", state.poll_interval), 2, false)
         return true
     elseif state.tab == 2 then
         local max_c = state.chart_cols or 60
@@ -1491,7 +1665,11 @@ local function cmd_plot(db, hours)
     local since = os.time() - (hours * 3600)
     local records, err = db:get_history(since)
     if not err and records then
-        local total_in_db = db:count_records()
+        local total_in_db, count_err = db:count_records()
+        if not total_in_db then
+            io.stderr:write(Plotter.RED .. "Plot error: " .. tostring(count_err) .. Plotter.RESET .. "\n")
+            return false
+        end
         print(string.format("\nBattery Capacity History (Past %d Hours, %d samples in window):", hours, #records))
         print(Plotter.render_chart(records, 66, 8))
         print(string.format("\nDatabase: %s | Total Historical Records: %d", db.db_file, total_in_db))
@@ -1502,20 +1680,26 @@ local function cmd_plot(db, hours)
     end
 end
 
+-- Insert SEED_SAMPLE_COUNT synthetic snapshots in one transaction (one fsync, all-or-nothing).
+-- Returns true, or false plus an error message.
 cmd_seed = function(db)
     local now = os.time()
     local start = now - (24 * 3600)
-    local sample_count = 144
 
-    for i = 1, sample_count do
+    local ok_begin, begin_err = db:begin()
+    if not ok_begin then
+        return false, begin_err
+    end
+
+    for i = 1, SEED_SAMPLE_COUNT do
         local t = start + (i * 600)
-        local progress = (i / sample_count) * (math.pi * 2.5)
+        local progress = (i / SEED_SAMPLE_COUNT) * (math.pi * 2.5)
         local cap = math.floor(55 + 40 * math.sin(progress))
         cap = math.max(5, math.min(100, cap))
         local status = (cap > 80 and "Full") or (math.sin(progress) > 0 and "Charging" or "Discharging")
         local power = (status == "Charging" and 25.5) or (status == "Discharging" and 12.0) or 0.0
 
-        db:insert_snapshot({
+        local ok_ins, ins_err = db:insert_snapshot({
             timestamp = t,
             capacity = cap,
             status = status,
@@ -1525,7 +1709,18 @@ cmd_seed = function(db)
             health_pct = 72.5,
             cycle_count = 195
         })
+        if not ok_ins then
+            db:rollback()
+            return false, ins_err
+        end
     end
+
+    local ok_commit, commit_err = db:commit()
+    if not ok_commit then
+        db:rollback()
+        return false, commit_err
+    end
+    return true
 end
 
 local function run_self_tests(db)
@@ -1768,6 +1963,107 @@ local function run_self_tests(db)
     assert(#TUI.build_help_lines(60, 2) == 0, "no room for help must yield no rows")
     print("  [✓] Test 11 passed: help modal fits any viewport height with aligned borders.")
 
+
+    -- Test 12: Values are bound, not interpolated (quotes / SQL / unicode / newlines)
+    local tdb = assert(BatteryDB.open(":memory:"))
+    local nasty_values = {
+        "Dis'charging\"); DROP TABLE battery_snapshots;--",
+        "Zażółć\nstatus\t🔋",
+        "",
+    }
+    for idx, nasty in ipairs(nasty_values) do
+        local ok_ins, ins_err = tdb:insert_snapshot({
+            timestamp = 5000 + idx, capacity = 42, status = nasty, voltage_v = 11.1, power_w = 2.5,
+            energy_wh = 1.5, health_pct = 90, cycle_count = 3,
+        })
+        assert(ok_ins, "insert must accept any status text: " .. tostring(ins_err))
+    end
+    local stored = assert(tdb:get_history(nil, 10))
+    assert(#stored == #nasty_values, "all rows must be stored")
+    for idx, nasty in ipairs(nasty_values) do
+        assert(stored[idx].status == nasty, "status must round-trip byte-for-byte: " .. nasty)
+    end
+    assert(tdb:count_records() == #nasty_values, "table must survive injection attempts")
+    print("  [✓] Test 12 passed: parameter binding round-trips hostile and unicode status text.")
+
+    -- Test 13: Transactions and seeding
+    local before = tdb:count_records()
+    assert(tdb:begin())
+    assert(tdb:insert_snapshot({ timestamp = 9, capacity = 1, status = "x", voltage_v = 1, power_w = 1 }))
+    assert(tdb:rollback())
+    assert(tdb:count_records() == before, "rollback must discard rows")
+    local seeded, seed_err = cmd_seed(tdb)
+    assert(seeded, "seed must succeed: " .. tostring(seed_err))
+    assert(tdb:count_records() == before + SEED_SAMPLE_COUNT, "seed must insert exactly SEED_SAMPLE_COUNT rows")
+    print("  [✓] Test 13 passed: rollback discards rows; seed is one all-or-nothing transaction.")
+
+    -- Test 14: Failure paths are explicit (never silent) and leave data intact
+    local bad_db, bad_err = BatteryDB.open("/nonexistent_dir_for_bm_test/x.db")
+    assert(bad_db == nil, "opening an impossible path must fail")
+    assert(bad_err:find("/nonexistent_dir_for_bm_test/x.db", 1, true), "error must name the file: " .. tostring(bad_err))
+
+    local closed_db = assert(BatteryDB.open(":memory:"))
+    closed_db:close()
+    local closed_ok, closed_err = closed_db:insert_snapshot({ timestamp = 1, capacity = 1, status = "x",
+        voltage_v = 1, power_w = 1 })
+    assert(closed_ok == false and closed_err:find("closed", 1, true), "insert on closed DB must fail loudly")
+
+    local broken = assert(BatteryDB.open(":memory:"))
+    assert(broken:exec("DROP TABLE battery_snapshots;", "drop"))
+    local b_ok, b_err = broken:insert_snapshot({ timestamp = 1, capacity = 1, status = "x", voltage_v = 1, power_w = 1 })
+    assert(b_ok == false and b_err ~= nil, "insert into a missing table must report an error")
+    local b_count, b_count_err = broken:count_records()
+    assert(b_count == nil and b_count_err ~= nil, "count on a missing table must report an error, not 0")
+    local b_hist, b_hist_err = broken:get_history(nil, 5)
+    assert(b_hist == nil and b_hist_err ~= nil, "history on a missing table must report an error")
+
+    local broken_state = new_state({ db = broken, tab = 1 })
+    TUI.reload_data(broken_state, broken)
+    assert(broken_state.db_error ~= nil, "reload_data must record the database error")
+    local broken_frame = TUI.render_frame(broken_state, 100, 30)
+    assert(broken_frame:find("DB ERROR", 1, true), "the footer must show the database error")
+    assert_frame_invariants(broken_frame, 100, 30, "db-error frame")
+    TUI.handle_key(broken_state, "r", broken)
+    if info then
+        assert(broken_state.toast_is_error and broken_state.toast_msg:find("FAILED", 1, true),
+            "a failed record must surface an error toast")
+    end
+    broken:close()
+
+    -- Lock contention: a second writer waits, then fails with a clear message (no crash)
+    local lock_path = os.tmpname()
+    local writer_a = assert(BatteryDB.open(lock_path))
+    local writer_b = assert(BatteryDB.open(lock_path, { busy_timeout_ms = 100 }))
+    assert(writer_a:begin())
+    local started = os.clock()
+    local lock_ok, lock_err = writer_b:insert_snapshot({ timestamp = 1, capacity = 1, status = "x",
+        voltage_v = 1, power_w = 1 })
+    assert(lock_ok == false and tostring(lock_err):find("locked", 1, true), "busy DB must report 'locked'")
+    assert(os.clock() - started < 2.0, "busy timeout must be honoured")
+    assert(writer_a:rollback())
+    assert(writer_b:insert_snapshot({ timestamp = 2, capacity = 2, status = "y", voltage_v = 1, power_w = 1 }),
+        "writer must succeed once the lock is released")
+    writer_a:close()
+    writer_b:close()
+    os.remove(lock_path)
+    os.remove(lock_path .. "-wal")
+    os.remove(lock_path .. "-shm")
+    print("  [✓] Test 14 passed: open/closed/missing-table/locked failures are explicit and recoverable.")
+
+    -- Test 15: [s] requires confirmation before adding synthetic rows
+    local sdb = assert(BatteryDB.open(":memory:"))
+    local sst = new_state({ db = sdb, tab = 1 })
+    TUI.handle_key(sst, "s", sdb)
+    assert(sdb:count_records() == 0, "first [s] must not seed")
+    assert(sst.toast_is_error and sst.toast_msg:find("again", 1, true), "first [s] must ask for confirmation")
+    TUI.handle_key(sst, "s", sdb)
+    assert(sdb:count_records() == SEED_SAMPLE_COUNT, "second [s] must seed")
+    TUI.handle_key(sst, "s", sdb)
+    assert(sdb:count_records() == SEED_SAMPLE_COUNT, "confirmation must reset after seeding")
+    sdb:close()
+    tdb:close()
+    print("  [✓] Test 15 passed: seeding needs a confirming second keypress.")
+
     print("=== All battery_monitor.lua self-tests passed successfully! ===")
     return true
 end
@@ -1847,7 +2143,7 @@ local function main(args)
         db_path = ":memory:"
     end
 
-    local db, dberr = BatteryDB:open(db_path)
+    local db, dberr = BatteryDB.open(db_path)
     if not db then
         io.stderr:write(Plotter.RED .. "[DB ERROR] " .. tostring(dberr) .. Plotter.RESET .. "\n")
         os.exit(1)
@@ -1914,8 +2210,15 @@ local function main(args)
             os.exit(1)
         end
     elseif mode == "seed" then
-        print("Generating 24-hour synthetic charge/discharge curve (144 samples, every 10 mins)...")
-        cmd_seed(db)
+        print(string.format(
+            "Generating 24-hour synthetic charge/discharge curve (%d samples, every 10 mins) -> %s ...",
+            SEED_SAMPLE_COUNT, db.db_file))
+        local ok_seed, seed_err = cmd_seed(db)
+        if not ok_seed then
+            io.stderr:write(Plotter.RED .. "[ERROR] Seeding failed: " .. tostring(seed_err) .. Plotter.RESET .. "\n")
+            db:close()
+            os.exit(1)
+        end
         print("Successfully seeded synthetic data!")
         local ok = cmd_plot(db, 24)
         db:close()
