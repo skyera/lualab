@@ -5,8 +5,12 @@
 
     Features:
     - Raw-mode lifecycle: enter() switches to raw no-echo input on the alternate screen
-      (hidden cursor, line wrap off, optional SGR mouse reporting) and installs
-      SIGHUP/SIGINT/SIGQUIT/SIGTERM traps that restore the terminal; leave() undoes it.
+      (hidden cursor, line wrap off, optional SGR mouse reporting) and arranges for
+      SIGHUP/SIGINT/SIGQUIT/SIGTERM to restore the terminal before exiting; leave()
+      undoes it. On Linux the signals are blocked and read from a signalfd inside
+      read_key(), because LuaJIT cannot safely run Lua code in an asynchronous signal
+      handler (it panics with "bad callback" when the signal lands mid-operation).
+      Elsewhere an FFI-callback handler is used as a best-effort fallback.
     - suspend()/resume() hand the terminal to an inline subprocess without leaving the
       alternate screen buffer, flushing pending input around the handoff.
     - read_key() returns one key token at a time and buffers bursts (pasted text,
@@ -44,6 +48,10 @@ local LFLAG_ECHO = 0x8
 local TIOCGWINSZ = IS_BSD_LIKE and 0x40087468 or 0x5413
 local POLLIN = 1
 local RESTORE_SIGNALS = { 1, 2, 3, 15 } -- HUP, INT, QUIT, TERM
+local SIG_BLOCK, SIG_UNBLOCK, SIG_SETMASK = 0, 1, 2 -- Linux sigprocmask "how" values
+local SFD_NONBLOCK, SFD_CLOEXEC = 0x800, 0x80000
+local SIGSET_BYTES = 128 -- glibc sigset_t
+local SIGINFO_BYTES = 128 -- struct signalfd_siginfo; ssi_signo is its first uint32
 
 local DEFAULT_COLS, DEFAULT_ROWS = 100, 30
 local READ_CHUNK_BYTES = 256
@@ -97,8 +105,15 @@ ffi.cdef(platform_termios_cdef[[
     int poll(struct tk_pollfd *fds, unsigned long nfds, int timeout);
     long read(int fd, void *buf, size_t count);
 
+    int close(int fd);
+
     typedef void (*tk_sighandler_t)(int);
     tk_sighandler_t signal(int signum, tk_sighandler_t handler);
+
+    int sigemptyset(void *set);
+    int sigaddset(void *set, int signum);
+    int sigprocmask(int how, const void *set, void *oldset);
+    int signalfd(int fd, const void *mask, int flags);
 ]])
 
 -- Alternate screen + hidden cursor + no auto-wrap.
@@ -204,6 +219,8 @@ function Termkit.flush_input()
     end)
 end
 
+local close_signal_fd -- defined with the other signal helpers below
+
 --- Leave the alternate screen and restore the original terminal settings.
 --- Safe to call more than once.
 function Termkit.leave()
@@ -213,9 +230,13 @@ function Termkit.leave()
     io.write(mouse_enabled and MOUSE_LEAVE or "", SCREEN_LEAVE)
     io.flush()
     ffi.C.tcsetattr(STDIN_FD, TCSANOW, original_termios)
+    close_signal_fd()
     raw_active = false
 end
 
+--- Fallback: restore the terminal from an FFI-callback signal handler. Only safe when
+--- the process is waiting in a C call, so it is used where signalfd is unavailable and
+--- while suspended (blocked in a subprocess).
 local function install_signal_traps()
     if signal_handler then
         return
@@ -226,6 +247,59 @@ local function install_signal_traps()
     end)
     for _, sig in ipairs(RESTORE_SIGNALS) do
         ffi.C.signal(sig, signal_handler)
+    end
+end
+
+-- Linux signalfd delivery: the restore signals are blocked and queued on a file
+-- descriptor that read_key() polls, so all Lua code runs on the normal call stack.
+local signal_fd = -1
+local signal_set = ffi.new("unsigned char[?]", SIGSET_BYTES)
+local saved_signal_mask = ffi.new("unsigned char[?]", SIGSET_BYTES)
+local siginfo_buffer = ffi.new("uint8_t[?]", SIGINFO_BYTES)
+local signal_poll = ffi.new("struct tk_pollfd", { fd = -1, events = POLLIN, revents = 0 })
+
+--- Block the restore signals and open a signalfd for them. Returns false (leaving the
+--- signal mask untouched) when this platform or kernel does not support it.
+local function open_signal_fd()
+    if ffi.os ~= "Linux" then
+        return false
+    end
+    ffi.C.sigemptyset(signal_set)
+    for _, sig in ipairs(RESTORE_SIGNALS) do
+        ffi.C.sigaddset(signal_set, sig)
+    end
+    if ffi.C.sigprocmask(SIG_BLOCK, signal_set, saved_signal_mask) ~= 0 then
+        return false
+    end
+    signal_fd = ffi.C.signalfd(-1, signal_set, SFD_NONBLOCK + SFD_CLOEXEC)
+    if signal_fd < 0 then
+        ffi.C.sigprocmask(SIG_SETMASK, saved_signal_mask, nil)
+        return false
+    end
+    signal_poll.fd = signal_fd
+    return true
+end
+
+--- Undo open_signal_fd(): restore the original signal mask and close the descriptor.
+close_signal_fd = function()
+    if signal_fd < 0 then
+        return
+    end
+    ffi.C.sigprocmask(SIG_SETMASK, saved_signal_mask, nil)
+    ffi.C.close(signal_fd)
+    signal_fd = -1
+    signal_poll.fd = -1
+end
+
+--- If a restore signal is pending, restore the terminal and exit with 128 + signal.
+local function exit_on_pending_signal()
+    if signal_fd < 0 or ffi.C.poll(signal_poll, 1, 0) <= 0 then
+        return
+    end
+    if tonumber(ffi.C.read(signal_fd, siginfo_buffer, SIGINFO_BYTES)) >= 4 then
+        local signo = tonumber(ffi.cast("uint32_t *", siginfo_buffer)[0])
+        Termkit.leave()
+        os.exit(128 + signo)
     end
 end
 
@@ -250,7 +324,9 @@ function Termkit.enter(opts)
     end
     raw_active = true
     mouse_enabled = opts ~= nil and opts.mouse == true
-    install_signal_traps()
+    if not open_signal_fd() then
+        install_signal_traps()
+    end
     io.write(SCREEN_ENTER, mouse_enabled and MOUSE_ENTER or "")
     io.flush()
     return true
@@ -263,6 +339,12 @@ function Termkit.suspend()
         return
     end
     ffi.C.tcsetattr(STDIN_FD, TCSANOW, original_termios)
+    if signal_fd >= 0 then
+        -- A subprocess must not inherit blocked signals (Ctrl-C has to reach it); while
+        -- we wait for it in a C call the callback handler is safe.
+        install_signal_traps()
+        ffi.C.sigprocmask(SIG_UNBLOCK, signal_set, nil)
+    end
     Termkit.flush_input()
     io.write(SUSPEND_SEQUENCE)
     io.flush()
@@ -274,6 +356,9 @@ function Termkit.resume()
         return
     end
     ffi.C.tcsetattr(STDIN_FD, TCSANOW, raw_termios)
+    if signal_fd >= 0 then
+        ffi.C.sigprocmask(SIG_BLOCK, signal_set, nil)
+    end
     Termkit.flush_input()
     io.write(RESUME_SEQUENCE)
     io.flush()
@@ -293,14 +378,25 @@ end
 -- =========================================================================
 local stdin_poll = ffi.new("struct tk_pollfd", { fd = STDIN_FD, events = POLLIN, revents = 0 })
 local read_buffer = ffi.new("char[?]", READ_CHUNK_BYTES)
+local wait_poll = ffi.new("struct tk_pollfd[2]")
 local pending_input = "" -- bytes read from stdin but not yet turned into tokens
 
 --- Read one key token, waiting up to `timeout_ms`. Bytes read in one chunk are
 --- buffered and returned one token per call. Returns nil on timeout and "EOF" when
 --- input has ended (piped stdin closed). Works on terminals and pipes alike.
 function Termkit.read_key(timeout_ms)
+    exit_on_pending_signal()
     if pending_input == "" then
-        if ffi.C.poll(stdin_poll, 1, timeout_ms or 50) <= 0 then
+        if signal_fd >= 0 then
+            -- Wait on stdin and the signalfd together so a signal wakes us immediately.
+            wait_poll[0].fd, wait_poll[0].events, wait_poll[0].revents = STDIN_FD, POLLIN, 0
+            wait_poll[1].fd, wait_poll[1].events, wait_poll[1].revents = signal_fd, POLLIN, 0
+            ffi.C.poll(wait_poll, 2, timeout_ms or 50)
+            exit_on_pending_signal()
+            if wait_poll[0].revents == 0 then
+                return nil
+            end
+        elseif ffi.C.poll(stdin_poll, 1, timeout_ms or 50) <= 0 then
             return nil
         end
         local count = tonumber(ffi.C.read(STDIN_FD, read_buffer, READ_CHUNK_BYTES))

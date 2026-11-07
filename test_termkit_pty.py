@@ -23,6 +23,16 @@ local function icanon_state(label)
     io.write("STATE:", label, ":", text:find("%%-icanon") and "raw" or "cooked", "\n")
     io.flush()
 end
+local busy = %s
+local function sigblk(label)
+    for line in io.lines("/proc/self/status") do
+        local mask = line:match("^SigBlk:%%s*(%%x+)")
+        if mask then
+            io.write("SIGBLK:", label, ":", mask, "\n")
+        end
+    end
+    io.flush()
+end
 local entered = termkit.enter({ mouse = %s })
 io.write("ENTERED:", tostring(entered), " RAW:", tostring(termkit.is_raw()), "\n")
 icanon_state("entered")
@@ -35,8 +45,10 @@ while true do
     elseif key == "s" then
         termkit.suspend()
         icanon_state("suspended")
+        os.execute("grep '^SigBlk' /proc/self/status | sed 's/^/CHILD_/'")
         termkit.resume()
         icanon_state("resumed")
+        sigblk("resumed")
     elseif key == "z" then
         local cols, rows = termkit.size()
         io.write("SIZE:", cols, "x", rows, "\n")
@@ -44,6 +56,20 @@ while true do
         io.write("KEY:", key, "\n")
     end
     io.flush()
+    if busy then
+        -- Simulate a dashboard doing real work: string formatting, table churn, GC.
+        local deadline = os.clock() + 0.03
+        while os.clock() < deadline do
+            local rows = {}
+            for i = 1, 200 do
+                rows[i] = string.format("%%5d %%-12s %%6.2f", i, "process" .. i, i / 7)
+            end
+            local joined = table.concat(rows, "\n")
+            if #joined == 0 then
+                io.write("unreachable")
+            end
+        end
+    end
 end
 termkit.leave()
 termkit.leave()
@@ -60,8 +86,8 @@ def check(name, cond, detail=""):
 
 
 class Session:
-    def __init__(self, mouse=False, rows=24, cols=80):
-        code = DRIVER % (HERE, "true" if mouse else "false")
+    def __init__(self, mouse=False, rows=24, cols=80, busy=False):
+        code = DRIVER % (HERE, "true" if busy else "false", "true" if mouse else "false")
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.environ["TERM"] = "xterm"
@@ -178,11 +204,57 @@ def test_signals():
         check(name + " exits with 128+signal", code == 128 + int(sig), str(code))
 
 
+def test_signals_while_busy():
+    print("\n▶ Signals delivered while the program is busy (not waiting in poll)")
+    import random
+    rng = random.Random(7)
+    failures = []
+    for attempt in range(12):
+        s = Session(mouse=True, busy=True)
+        s.read(0.5 + rng.random())
+        os.kill(s.pid, signal.SIGTERM)
+        out = s.read(0.8)
+        code = s.finish()
+        restored = "\x1b[?1049l" in out and "\x1b[?25h" in out and "\x1b[?1000l" in out
+        if not restored or code != 143:
+            failures.append((attempt, restored, code))
+    check("12 random-timing SIGTERMs all restore the terminal and exit 143",
+          not failures, str(failures))
+    s = Session(busy=True)
+    s.read(0.6)
+    os.kill(s.pid, signal.SIGINT)
+    out = s.read(0.8)
+    check("SIGINT while busy restores the terminal", "\x1b[?1049l" in out)
+    check("SIGINT while busy exits 130", s.finish() == 130)
+
+
+def test_signal_mask_is_not_leaked_to_subprocesses():
+    print("\n▶ Blocked-signal mask and subprocesses")
+    s = Session()
+    s.read(0.6)
+    s.send("s")
+    out = s.read(1.2)
+    child = re.search(r"CHILD_SigBlk:\s*([0-9a-f]+)", out)
+    check("a subprocess started during suspend() inherits no blocked signals",
+          child is not None and (int(child.group(1), 16) & 0x4007) == 0,
+          child.group(0) if child else out[-200:])
+    resumed = re.search(r"SIGBLK:resumed:([0-9a-f]+)", out)
+    check("resume() blocks the signals again",
+          resumed is not None and (int(resumed.group(1), 16) & 0x4007) == 0x4007,
+          resumed.group(0) if resumed else "no SIGBLK line")
+    os.kill(s.pid, signal.SIGTERM)
+    out = s.read(0.8)
+    check("SIGTERM after resume still restores the terminal", "\x1b[?1049l" in out)
+    check("and exits 143", s.finish() == 143)
+
+
 def main():
     test_lifecycle()
     test_suspend_resume()
     test_input()
     test_signals()
+    test_signals_while_busy()
+    test_signal_mask_is_not_leaked_to_subprocesses()
     print("\n=== %d failed ===" % len(FAILURES))
     sys.exit(1 if FAILURES else 0)
 
