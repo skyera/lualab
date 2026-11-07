@@ -1455,16 +1455,16 @@ local function main(args)
             mode = "record"
         elseif a == "--status" then
             mode = "status"
-        elseif a == "--plot" then
-            mode = "plot"
-            if args[i + 1] and not args[i + 1]:match("^%-") then
-                opt_val = tonumber(args[i + 1])
-                i = i + 1
-            end
-        elseif a == "--history" then
-            mode = "history"
-            if args[i + 1] and not args[i + 1]:match("^%-") then
-                opt_val = tonumber(args[i + 1])
+        elseif a == "--plot" or a == "--history" then
+            mode = (a == "--plot") and "plot" or "history"
+            local next_arg = args[i + 1]
+            if next_arg and not next_arg:match("^%-") then
+                opt_val = tonumber(next_arg)
+                if not opt_val or opt_val <= 0 then
+                    io.stderr:write(string.format(
+                        "[ERROR] %s expects a positive number, got '%s'\n", a, next_arg))
+                    os.exit(2)
+                end
                 i = i + 1
             end
         elseif a == "--seed" then
@@ -1472,8 +1472,17 @@ local function main(args)
         elseif a == "--test" then
             mode = "test"
         elseif a == "--db" then
-            db_path = args[i + 1]
+            local next_arg = args[i + 1]
+            if not next_arg or next_arg:match("^%-%-") then
+                io.stderr:write("[ERROR] --db requires a database file path\n")
+                os.exit(2)
+            end
+            db_path = next_arg
             i = i + 1
+        else
+            io.stderr:write(string.format(
+                "[ERROR] Unknown option '%s' (run with --help for usage)\n", a))
+            os.exit(2)
         end
         i = i + 1
     end
@@ -1485,7 +1494,9 @@ local function main(args)
     end
 
     if mode == "tui" then
-        local ok, run_err = xpcall(function()
+        -- xpcall's first result only reports whether TUI.run raised an error; TUI.run itself
+        -- returns false for handled fatal failures (e.g. stdin is not a terminal).
+        local ok, run_result = xpcall(function()
             return TUI.run(db)
         end, function(err_msg)
             Term.restore()
@@ -1494,7 +1505,11 @@ local function main(args)
         Term.restore()
         db:close()
         if not ok then
-            io.stderr:write("[TUI ERROR] " .. tostring(run_err) .. "\n")
+            io.stderr:write("[TUI ERROR] " .. tostring(run_result) .. "\n")
+            os.exit(1)
+        elseif run_result == false then
+            io.stderr:write("[TUI ERROR] Could not start the interactive UI "
+                .. "(stdin/stdout must be a terminal; use --status or --plot instead)\n")
             os.exit(1)
         end
     elseif mode == "record" then
