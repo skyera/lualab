@@ -132,6 +132,17 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
    * **Clarity Over Compaction**: Never micro-compact or minify Lua code to reduce line counts. Code must be formatted for clarity, rapid comprehension, effortless debugging, and clean git diffs.
    * **Multi-line Tables & Arguments**: When table constructors or function calls contain multiple fields or exceed comfortable reading width, format them across multiple lines with clean indentation rather than sprawling horizontally.
 
+6. **Clean Code & Maintainability** (code is read far more often than it is written):
+   * **Keep Code Uncluttered**: Write the simplest code that solves the problem. Remove dead code, unused variables, leftover debug prints, commented-out blocks, and speculative features. Do not add abstractions, options, or fallbacks that nothing needs yet.
+   * **Small, Single-Purpose Functions**: Each function does one thing and has a name that says what it does (`parse_cpuinfo`, `render_footer`). Split a function when it needs section comments to be understood, mixes parsing with rendering, or grows beyond roughly one screen (about 50 lines). Prefer early returns over deep nesting (aim for 3 levels or fewer).
+   * **No Duplication**: Extract repeated logic into a shared local helper instead of copy-pasting it. Do not duplicate helpers that already exist elsewhere in the repository when they can be reused.
+   * **Descriptive Names**: Choose names that reveal intent (`visible_lines`, `scroll_offset`). Avoid cryptic abbreviations and one-letter names except for short loop indices (`i`, `k`, `v`) and conventional pairs (`w`/`h`). Name magic numbers and strings as `UPPER_SNAKE_CASE` constants (`HISTORY_MAX`, `REFRESH_MS`).
+   * **Comment the Why, Not the What**: Add a comment when the reason is not obvious from the code: a non-obvious constraint, a workaround, a kernel or protocol quirk, a unit conversion, an invariant, or a deliberate trade-off. Do not restate what the code plainly says (`-- increment i`).
+   * **Document Public Functions**: Give every module-level or exported function a short one-to-two line comment (`---`) describing what it does, its key arguments, and what it returns, including `nil, err` failure returns.
+   * **Group Related Code**: Order a file as banner, requires, constants, C declarations, helpers, core logic, entry point, using section dividers. Keep related functions adjacent, and define helpers before their first use.
+   * **Consistent Idioms**: Follow one error-handling convention per module (for example `value, err` returns, never silent `nil`), one naming style, and one way to build strings and tables. Match the conventions of the surrounding file when editing it.
+   * **Review Before Finishing**: Re-read your own diff as a reviewer would. If a section takes effort to understand, simplify it or explain it with a comment before committing.
+
 ## Commit Workflow
 
 *   **One commit per issue**: Each fix should be its own atomic commit with a descriptive message.
