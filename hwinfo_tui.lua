@@ -111,6 +111,30 @@ ffi.cdef[[
     int poll(struct hw_pollfd *fds, unsigned long nfds, int timeout);
     long read(int fd, void *buf, size_t count);
 
+    int open(const char *pathname, int flags, ...);
+    int close(int fd);
+
+    struct hw_nvme_admin_cmd {
+        uint8_t  opcode;
+        uint8_t  flags;
+        uint16_t rsvd1;
+        uint32_t nsid;
+        uint32_t cdw2;
+        uint32_t cdw3;
+        uint64_t metadata;
+        uint64_t addr;
+        uint32_t metadata_len;
+        uint32_t data_len;
+        uint32_t cdw10;
+        uint32_t cdw11;
+        uint32_t cdw12;
+        uint32_t cdw13;
+        uint32_t cdw14;
+        uint32_t cdw15;
+        uint32_t timeout_ms;
+        uint32_t result;
+    };
+
     typedef void (*hw_sighandler_t)(int);
     hw_sighandler_t signal(int signum, hw_sighandler_t handler);
 ]]
@@ -569,6 +593,260 @@ function HW.load_pci_names(wanted)
     return names
 end
 
+-- GPU details, displays (EDID) -------------------------------------------
+--- Parse the interesting fields of a 128-byte EDID block; nil when invalid.
+function HW.parse_edid(raw)
+    if #raw < 128 or raw:sub(1, 8) ~= "\0\255\255\255\255\255\255\0" then
+        return nil
+    end
+    local id = raw:byte(9) * 256 + raw:byte(10)
+    local function letter(shift)
+        return string.char(64 + bit.band(bit.rshift(id, shift), 31))
+    end
+    local info = {
+        mfr = letter(10) .. letter(5) .. letter(0),
+        product = raw:byte(11) + raw:byte(12) * 256,
+        width_cm = raw:byte(22),
+        height_cm = raw:byte(23),
+        year = 1990 + raw:byte(18),
+    }
+    for off = 55, 109, 18 do
+        if raw:byte(off) == 0 and raw:byte(off + 1) == 0 and raw:byte(off + 3) == 0xFC then
+            info.name = clean(raw:sub(off + 5, off + 17):match("^[^\n]*"))
+        end
+    end
+    return info
+end
+
+function HW.collect_displays()
+    local g = new_group("Displays")
+    local entries = list_dir("/sys/class/drm") or {}
+    for _, name in ipairs(entries) do
+        local conn = name:match("^card%d+%-(.+)$")
+        if conn then
+            local dir = "/sys/class/drm/" .. name .. "/"
+            if read_str(dir .. "status") == "connected" then
+                local parts = { "connected" }
+                local modes = read_raw(dir .. "modes")
+                local mode = modes and modes:match("^(%S+)")
+                parts[#parts + 1] = mode
+                local raw = read_raw(dir .. "edid")
+                local edid = raw and HW.parse_edid(raw)
+                if edid then
+                    parts[#parts + 1] = edid.name and (edid.name .. " (" .. edid.mfr .. ")")
+                        or edid.mfr
+                    if edid.width_cm > 0 and edid.height_cm > 0 then
+                        local diag = math.sqrt(edid.width_cm ^ 2 + edid.height_cm ^ 2) / 2.54
+                        parts[#parts + 1] = string.format("%dx%d cm (%.1f\")", edid.width_cm,
+                            edid.height_cm, diag)
+                    end
+                end
+                add(g, conn, table.concat(parts, "  "))
+            end
+        end
+    end
+    if #g.items == 0 then
+        add(g, "Displays", "N/A (no connected outputs in /sys/class/drm)")
+    end
+    return g
+end
+
+local function pcie_link(dir)
+    local cur, curw = read_str(dir .. "current_link_speed"), read_str(dir .. "current_link_width")
+    local max, maxw = read_str(dir .. "max_link_speed"), read_str(dir .. "max_link_width")
+    if not cur or not curw or cur:find("Unknown", 1, true) or curw == "0" then
+        return nil
+    end
+    local text = string.format("%s x%s", cur, curw)
+    if max and maxw and (max ~= cur or maxw ~= curw) then
+        text = text .. string.format(" (max %s x%s)", max, maxw)
+    end
+    return text
+end
+
+--- Per-GPU live details: PCIe link, clocks, utilization, VRAM, temperature.
+function HW.collect_gpu_details()
+    local groups = {}
+    local entries = list_dir("/sys/class/drm") or {}
+    for _, name in ipairs(entries) do
+        if name:match("^card%d+$") then
+            local dir = "/sys/class/drm/" .. name .. "/"
+            local dev = dir .. "device/"
+            local g = new_group("GPU Details (" .. name .. ")")
+            add(g, "Driver", link_base(dev .. "driver"))
+            add(g, "PCIe link", pcie_link(dev))
+            -- Intel i915/xe
+            local cur = read_num(dir .. "gt_cur_freq_mhz")
+            if cur then
+                local act = read_num(dir .. "gt_act_freq_mhz")
+                local lo, hi = read_num(dir .. "gt_min_freq_mhz"), read_num(dir .. "gt_max_freq_mhz")
+                add(g, "GT frequency", string.format("requested %d MHz%s  (range %s-%s MHz)", cur,
+                    act and (", actual " .. act .. " MHz") or "", tostring(lo or "?"),
+                    tostring(hi or "?")), name .. "/gt_freq", act or cur)
+                g.items[#g.items].unit = "MHz"
+            end
+            -- AMD amdgpu
+            local busy = read_num(dev .. "gpu_busy_percent")
+            if busy then
+                add(g, "Utilization", busy .. " %", name .. "/busy", busy)
+                g.items[#g.items].unit = "%"
+            end
+            local vram_used, vram_total = read_num(dev .. "mem_info_vram_used"),
+                read_num(dev .. "mem_info_vram_total")
+            if vram_used and vram_total then
+                add(g, "VRAM", string.format("%s / %s", format_bytes(vram_used),
+                    format_bytes(vram_total)))
+            end
+            local sclk = read_raw(dev .. "pp_dpm_sclk")
+            local mhz = sclk and sclk:match("(%d+)%s*[Mm][Hh][Zz]%s*%*")
+            if mhz then
+                add(g, "Core clock", mhz .. " MHz")
+            end
+            local mclk = read_raw(dev .. "pp_dpm_mclk")
+            mhz = mclk and mclk:match("(%d+)%s*[Mm][Hh][Zz]%s*%*")
+            if mhz then
+                add(g, "Memory clock", mhz .. " MHz")
+            end
+            -- hwmon under the device (amdgpu, i915 power, nouveau)
+            for _, hm in ipairs(list_dir(dev .. "hwmon") or {}) do
+                local hdir = dev .. "hwmon/" .. hm .. "/"
+                local t = read_num(hdir .. "temp1_input")
+                if t then
+                    add(g, "Temperature", string.format("%.1f °C", t / 1000),
+                        name .. "/temp", t / 1000)
+                    g.items[#g.items].unit = "°C"
+                end
+                local pw = read_num(hdir .. "power1_average") or read_num(hdir .. "power1_input")
+                if pw then
+                    add(g, "Power", string.format("%.1f W", pw / 1000000))
+                end
+                local fan = read_num(hdir .. "fan1_input")
+                if fan then
+                    add(g, "Fan", fan .. " RPM")
+                end
+            end
+            if #g.items > 0 then
+                groups[#groups + 1] = g
+            end
+        end
+    end
+    -- NVIDIA proprietary driver
+    for _, gpu_id in ipairs(list_dir("/proc/driver/nvidia/gpus") or {}) do
+        local info = read_raw("/proc/driver/nvidia/gpus/" .. gpu_id .. "/information")
+        if info then
+            local g = new_group("NVIDIA GPU (" .. gpu_id .. ")")
+            add(g, "Model", info:match("Model:%s*([^\n]+)"))
+            add(g, "Video BIOS", info:match("Video BIOS:%s*([^\n]+)"))
+            add(g, "Bus location", info:match("Bus Location:%s*([^\n]+)"))
+            add(g, "Live stats", "N/A (needs nvidia-smi; not read by this tool)")
+            groups[#groups + 1] = g
+        end
+    end
+    return groups
+end
+
+-- NVMe controllers and SMART health ---------------------------------------
+local function le64(buf, off)
+    local v = 0
+    for i = 7, 0, -1 do
+        v = v * 256 + buf:byte(off + i + 1)
+    end
+    return v
+end
+
+--- Parse a 512-byte NVMe SMART / Health log page.
+function HW.parse_nvme_smart(buf)
+    if #buf < 192 then
+        return nil
+    end
+    local kelvin = buf:byte(2) + buf:byte(3) * 256
+    return {
+        critical_warning = buf:byte(1),
+        temp_c = kelvin > 0 and kelvin - 273 or nil,
+        spare_pct = buf:byte(4),
+        spare_threshold = buf:byte(5),
+        used_pct = buf:byte(6),
+        read_bytes = le64(buf, 32) * 512000,
+        written_bytes = le64(buf, 48) * 512000,
+        power_cycles = le64(buf, 112),
+        power_on_hours = le64(buf, 128),
+        unsafe_shutdowns = le64(buf, 144),
+        media_errors = le64(buf, 160),
+    }
+end
+
+--- Query the SMART log via the NVMe admin passthrough ioctl (normally root only).
+function HW.read_nvme_smart(devpath)
+    local fd = ffi.C.open(devpath, 0)
+    if fd < 0 then
+        local errno = ffi.errno()
+        return nil, string.format("cannot open %s: %s", devpath,
+            errno == 13 and "permission denied (run as root)" or ("errno " .. errno))
+    end
+    local data = ffi.new("uint8_t[512]")
+    local cmd = ffi.new("struct hw_nvme_admin_cmd")
+    cmd.opcode = 0x02
+    cmd.nsid = 0xFFFFFFFF
+    cmd.addr = tonumber(ffi.cast("uintptr_t", data))
+    cmd.data_len = 512
+    cmd.cdw10 = bit.bor(bit.lshift(127, 16), 0x02)
+    local rc = ffi.C.ioctl(fd, 0xC0484E41, cmd)
+    local errno = ffi.errno()
+    ffi.C.close(fd)
+    if rc ~= 0 then
+        return nil, string.format("NVMe SMART ioctl on %s failed (rc=%d, errno %d)", devpath,
+            rc, errno)
+    end
+    local parsed = HW.parse_nvme_smart(ffi.string(data, 512))
+    if not parsed then
+        return nil, "NVMe SMART log too short"
+    end
+    return parsed
+end
+
+function HW.collect_nvme()
+    local groups = {}
+    for _, name in ipairs(list_dir("/sys/class/nvme") or {}) do
+        local dir = "/sys/class/nvme/" .. name .. "/"
+        local g = new_group("NVMe Controller " .. name)
+        add(g, "Model", read_str(dir .. "model"))
+        add(g, "Firmware", read_str(dir .. "firmware_rev"))
+        add(g, "State", read_str(dir .. "state"))
+        add(g, "Transport", read_str(dir .. "transport"))
+        add(g, "I/O queues", read_str(dir .. "queue_count"))
+        add(g, "PCIe link", pcie_link(dir .. "device/"))
+        for _, hm in ipairs(list_dir(dir) or {}) do
+            if hm:match("^hwmon%d+$") then
+                local t = read_num(dir .. hm .. "/temp1_input")
+                if t then
+                    add(g, "Temperature", string.format("%.1f °C", t / 1000),
+                        name .. "/temp", t / 1000)
+                    g.items[#g.items].unit = "°C"
+                end
+            end
+        end
+        local smart, err = HW.read_nvme_smart("/dev/" .. name)
+        if smart then
+            local warn = smart.critical_warning == 0 and "OK"
+                or string.format("WARNING (flags 0x%02x)", smart.critical_warning)
+            add(g, "Health", warn)
+            add(g, "Wear", string.format("%d%% used", smart.used_pct))
+            add(g, "Spare", string.format("%d%% (threshold %d%%)", smart.spare_pct,
+                smart.spare_threshold))
+            add(g, "Data written", format_bytes(smart.written_bytes))
+            add(g, "Data read", format_bytes(smart.read_bytes))
+            add(g, "Power-on", string.format("%d h", smart.power_on_hours))
+            add(g, "Power cycles", smart.power_cycles)
+            add(g, "Unsafe shutdowns", smart.unsafe_shutdowns)
+            add(g, "Media errors", smart.media_errors)
+        else
+            add(g, "SMART", "N/A (" .. err .. ")")
+        end
+        groups[#groups + 1] = g
+    end
+    return groups
+end
+
 function HW.collect_gpu_pci()
     local base = "/sys/bus/pci/devices"
     local entries = list_dir(base)
@@ -615,7 +893,13 @@ function HW.collect_gpu_pci()
     if #pci.items == 0 then
         add(pci, "PCI", "N/A (no devices)")
     end
-    return { gpu, pci }
+    local result = { gpu }
+    for _, g in ipairs(HW.collect_gpu_details()) do
+        result[#result + 1] = g
+    end
+    result[#result + 1] = HW.collect_displays()
+    result[#result + 1] = pci
+    return result
 end
 
 function HW.collect_storage()
@@ -652,6 +936,9 @@ function HW.collect_storage()
         end
     end
     groups[#groups + 1] = disks
+    for _, g in ipairs(HW.collect_nvme()) do
+        groups[#groups + 1] = g
+    end
 
     local mounts = new_group("Mounted Filesystems")
     local text = read_raw("/proc/mounts")

@@ -7,6 +7,7 @@
 ]]
 
 local HW = require("hwinfo_tui")
+local unpack = table.unpack or unpack
 
 local passed, failed = 0, 0
 
@@ -160,10 +161,76 @@ write_file("/sys/bus/usb/devices/1-1/product", "Receiver\n")
 write_file("/sys/bus/usb/devices/1-1/speed", "12\n")
 write_file("/sys/bus/usb/devices/1-1:1.0/bInterfaceClass", "03\n")
 
+
+-- DRM / displays / GPU details
+local function make_edid()
+    local b = {}
+    for i = 1, 128 do
+        b[i] = 0
+    end
+    local header = { 0, 255, 255, 255, 255, 255, 255, 0 }
+    for i, v in ipairs(header) do
+        b[i] = v
+    end
+    b[9], b[10] = 0x04, 0x43 -- "ABC"
+    b[11], b[12] = 0x34, 0x12
+    b[18] = 30 -- 2020
+    b[22], b[23] = 31, 17
+    local desc = { 0, 0, 0, 0xFC, 0 }
+    for c in ("TestPanel\n   "):gmatch(".") do
+        desc[#desc + 1] = c:byte()
+    end
+    for i, v in ipairs(desc) do
+        b[54 + i] = v
+    end
+    return string.char(unpack(b))
+end
+write_file("/sys/class/drm/card0/gt_cur_freq_mhz", "350\n")
+write_file("/sys/class/drm/card0/gt_act_freq_mhz", "300\n")
+write_file("/sys/class/drm/card0/gt_min_freq_mhz", "300\n")
+write_file("/sys/class/drm/card0/gt_max_freq_mhz", "1100\n")
+write_file("/sys/class/drm/card0/device/current_link_speed", "Unknown\n")
+write_file("/sys/class/drm/card0/device/current_link_width", "0\n")
+write_file("/sys/class/drm/card1/device/gpu_busy_percent", "42\n")
+write_file("/sys/class/drm/card1/device/mem_info_vram_used", "1073741824\n")
+write_file("/sys/class/drm/card1/device/mem_info_vram_total", "8589934592\n")
+write_file("/sys/class/drm/card1/device/pp_dpm_sclk", "0: 300Mhz\n1: 1800Mhz *\n2: 2400Mhz\n")
+write_file("/sys/class/drm/card1/device/current_link_speed", "16.0 GT/s PCIe\n")
+write_file("/sys/class/drm/card1/device/current_link_width", "8\n")
+write_file("/sys/class/drm/card1/device/max_link_speed", "16.0 GT/s PCIe\n")
+write_file("/sys/class/drm/card1/device/max_link_width", "16\n")
+write_file("/sys/class/drm/card1/device/hwmon/hwmon9/temp1_input", "67000\n")
+write_file("/sys/class/drm/card1/device/hwmon/hwmon9/power1_average", "85000000\n")
+write_file("/sys/class/drm/card1/device/hwmon/hwmon9/fan1_input", "1500\n")
+write_file("/sys/class/drm/card0-eDP-1/status", "connected\n")
+write_file("/sys/class/drm/card0-eDP-1/modes", "1920x1080\n1280x720\n")
+write_file("/sys/class/drm/card0-eDP-1/edid", make_edid())
+write_file("/sys/class/drm/card0-HDMI-A-1/status", "disconnected\n")
+
+-- NVMe controller
+write_file("/sys/class/nvme/nvme9/model", "FAKE NVME 2TB\n")
+write_file("/sys/class/nvme/nvme9/firmware_rev", "FW1.2\n")
+write_file("/sys/class/nvme/nvme9/state", "live\n")
+write_file("/sys/class/nvme/nvme9/transport", "pcie\n")
+write_file("/sys/class/nvme/nvme9/queue_count", "9\n")
+write_file("/sys/class/nvme/nvme9/serial", "SECRET-SERIAL\n")
+write_file("/sys/class/nvme/nvme9/hwmon4/temp1_input", "41000\n")
+write_file("/sys/class/nvme/nvme9/device/current_link_speed", "8.0 GT/s PCIe\n")
+write_file("/sys/class/nvme/nvme9/device/current_link_width", "4\n")
+write_file("/sys/class/nvme/nvme9/device/max_link_speed", "16.0 GT/s PCIe\n")
+write_file("/sys/class/nvme/nvme9/device/max_link_width", "4\n")
+
 local function find_item(groups, label)
     for _, g in ipairs(groups) do
         for _, it_ in ipairs(g.items) do
-            if it_.label == label or it_.label:find(label, 1, true) then
+            if it_.label == label then
+                return it_.value
+            end
+        end
+    end
+    for _, g in ipairs(groups) do
+        for _, it_ in ipairs(g.items) do
+            if it_.label:find(label, 1, true) then
                 return it_.value
             end
         end
@@ -220,7 +287,7 @@ describe("1. Collectors against a fixture tree", function()
         assert_true(gpu and gpu:find("Test Vendor Inc Test GPU X") and gpu:find("driver: testdrv"),
             tostring(gpu))
         assert_eq(find_item({ g[1] }, "VRAM"), "8.0 GiB")
-        local nic = find_item({ g[2] }, "Ethernet")
+        local nic = find_item({ g[#g] }, "Ethernet")
         assert_true(nic and nic:find("Test NIC"), "NIC resolved")
         assert_true(find_item({ g[1] }, "Ethernet") == nil, "NIC is not a GPU")
     end)
@@ -270,6 +337,109 @@ describe("1. Collectors against a fixture tree", function()
         assert_true(HW.parse_smbios_type17("") == nil, "empty")
         assert_true(HW.parse_smbios_type17(string.char(4) .. string.rep("\0", 40)) == nil,
             "wrong type")
+    end)
+end)
+
+describe("1b. GPU details, displays, NVMe health", function()
+    HW.root = ROOT
+
+    it("EDID parser extracts manufacturer, name, size and year", function()
+        local e = HW.parse_edid(make_edid())
+        assert_true(e ~= nil, "parsed")
+        assert_eq(e.mfr, "ABC")
+        assert_eq(e.name, "TestPanel")
+        assert_eq(e.product, 0x1234)
+        assert_eq(e.width_cm, 31)
+        assert_eq(e.year, 2020)
+        assert_true(HW.parse_edid("short") == nil, "short rejected")
+        assert_true(HW.parse_edid(string.rep("x", 128)) == nil, "bad header rejected")
+    end)
+
+    it("displays: connected outputs only, with mode, name and size", function()
+        local g = { HW.collect_displays() }
+        local v = find_item(g, "eDP-1")
+        assert_true(v and v:find("1920x1080") and v:find("TestPanel %(ABC%)")
+            and v:find("31x17 cm"), tostring(v))
+        assert_true(find_item(g, "HDMI-A-1") == nil, "disconnected output hidden")
+    end)
+
+    it("GPU details: Intel frequency, AMD busy/VRAM/clock/temp/power/fan/link", function()
+        local g = HW.collect_gpu_details()
+        local card0 = find_item({ g[1] }, "GT frequency")
+        assert_true(card0 and card0:find("actual 300 MHz") and card0:find("300%-1100"),
+            tostring(card0))
+        assert_true(find_item({ g[1] }, "PCIe link") == nil, "Unknown link suppressed")
+        assert_eq(find_item({ g[2] }, "Utilization"), "42 %")
+        assert_eq(find_item({ g[2] }, "VRAM"), "1.0 GiB / 8.0 GiB")
+        assert_eq(find_item({ g[2] }, "Core clock"), "1800 MHz")
+        assert_eq(find_item({ g[2] }, "Temperature"), "67.0 °C")
+        assert_eq(find_item({ g[2] }, "Power"), "85.0 W")
+        assert_eq(find_item({ g[2] }, "Fan"), "1500 RPM")
+        assert_eq(find_item({ g[2] }, "PCIe link"), "16.0 GT/s PCIe x8 (max 16.0 GT/s PCIe x16)")
+    end)
+
+    it("GPU tab places details and displays before the PCI list", function()
+        local g = HW.collect_gpu_pci()
+        assert_eq(g[1].title, "Graphics")
+        assert_eq(g[#g].title, "PCI Devices")
+        local titles = {}
+        for _, grp in ipairs(g) do
+            titles[#titles + 1] = grp.title
+        end
+        local joined = table.concat(titles, "|")
+        assert_true(joined:find("GPU Details %(card1%)") and joined:find("Displays"), joined)
+    end)
+
+    it("NVMe SMART parser decodes health fields", function()
+        local b = {}
+        for i = 1, 512 do
+            b[i] = 0
+        end
+        b[1] = 4
+        b[2], b[3] = 308 % 256, 1
+        b[4], b[5], b[6] = 95, 10, 7
+        b[49], b[50] = 1000 % 256, math.floor(1000 / 256) -- 1000 units written
+        b[113] = 20
+        b[129], b[130] = 1234 % 256, math.floor(1234 / 256)
+        b[145] = 5
+        b[161] = 2
+        local smart = HW.parse_nvme_smart(string.char(unpack(b)))
+        assert_eq(smart.critical_warning, 4)
+        assert_eq(smart.temp_c, 35)
+        assert_eq(smart.spare_pct, 95)
+        assert_eq(smart.used_pct, 7)
+        assert_eq(smart.written_bytes, 1000 * 512000)
+        assert_eq(smart.power_cycles, 20)
+        assert_eq(smart.power_on_hours, 1234)
+        assert_eq(smart.unsafe_shutdowns, 5)
+        assert_eq(smart.media_errors, 2)
+        assert_true(HW.parse_nvme_smart("short") == nil, "short log rejected")
+    end)
+
+    it("NVMe SMART open failure is reported, not hidden", function()
+        local smart, err = HW.read_nvme_smart("/dev/nvme_does_not_exist")
+        assert_true(smart == nil and err and err:find("cannot open /dev/nvme_does_not_exist"), err)
+    end)
+
+    it("NVMe controller: identity, link, temperature, SMART N/A, no serial leak", function()
+        local g = HW.collect_nvme()
+        assert_eq(#g, 1)
+        assert_eq(g[1].title, "NVMe Controller nvme9")
+        assert_eq(find_item(g, "Model"), "FAKE NVME 2TB")
+        assert_eq(find_item(g, "Firmware"), "FW1.2")
+        assert_eq(find_item(g, "Temperature"), "41.0 °C")
+        assert_eq(find_item(g, "PCIe link"), "8.0 GT/s PCIe x4 (max 16.0 GT/s PCIe x4)")
+        assert_true(find_item(g, "SMART"):find("^N/A"), "SMART N/A visible")
+        local json = HW.to_json({ { id = "s", title = "S", groups = g } })
+        assert_true(not json:find("SECRET%-SERIAL"), "serial number is not collected")
+    end)
+
+    it("storage tab includes NVMe controllers and GPU temp feeds history", function()
+        local g = HW.collect_storage()
+        assert_true(g[2] and g[2].title:find("NVMe Controller"), "nvme group after disks")
+        local history = {}
+        HW.record_history(history, { { groups = HW.collect_nvme() } })
+        assert_eq(#history["nvme9/temp"], 1)
     end)
 end)
 
