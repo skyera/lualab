@@ -89,6 +89,8 @@ if is_windows then
         BOOL ReadConsoleInputA(HANDLE hConsoleInput, INPUT_RECORD *lpBuffer, DWORD nLength, DWORD *lpNumberOfEventsRead);
         BOOL GetConsoleScreenBufferInfo(HANDLE hConsoleOutput, CONSOLE_SCREEN_BUFFER_INFO *lpConsoleScreenBufferInfo);
         void Sleep(DWORD dwMilliseconds);
+        unsigned int GetConsoleOutputCP(void);
+        BOOL SetConsoleOutputCP(unsigned int wCodePageID);
     ]]
 else
     -- macOS/BSD declare tcflag_t/speed_t as 64-bit and set NCCS to 20, while Linux
@@ -307,9 +309,52 @@ function Terminal.new()
     return self
 end
 
+--- Enable ANSI escape processing and UTF-8 output on the Windows console.
+--- Saves the original output mode and code page for restore_windows_output().
+--- Returns true on success, or false and an error message.
+function Terminal:setup_windows_output()
+    if not self.is_windows or self.out_saved then
+        return true
+    end
+    local mode = ffi.new("DWORD[1]")
+    if ffi.C.GetConsoleMode(self.hOut, mode) == 0 then
+        -- Output is redirected (pipe/file): nothing to configure.
+        return true
+    end
+    self.orig_out_mode = mode[0]
+    self.orig_out_cp = ffi.C.GetConsoleOutputCP()
+    self.out_saved = true
+    -- ENABLE_PROCESSED_OUTPUT (0x1) | ENABLE_VIRTUAL_TERMINAL_PROCESSING (0x4)
+    local new_mode = bit.bor(mode[0], 0x0001, 0x0004)
+    if ffi.C.SetConsoleMode(self.hOut, new_mode) == 0 then
+        self:restore_windows_output()
+        return false, "console does not support ANSI escapes (VT processing); "
+            .. "use Windows Terminal or run with --ascii"
+    end
+    if ffi.C.SetConsoleOutputCP(65001) == 0 then
+        io.stderr:write("[Falling Sand warning]: could not switch console to UTF-8 (CP 65001); "
+            .. "box characters may look garbled. Run `chcp 65001` or use --ascii.\n")
+    end
+    return true
+end
+
+--- Restore the console output mode and code page saved by setup_windows_output().
+function Terminal:restore_windows_output()
+    if not self.out_saved then
+        return
+    end
+    ffi.C.SetConsoleMode(self.hOut, self.orig_out_mode)
+    ffi.C.SetConsoleOutputCP(self.orig_out_cp)
+    self.out_saved = false
+end
+
 function Terminal:enable_raw_mode()
     if self.raw_enabled then return end
     if self.is_windows then
+        local ok, err = self:setup_windows_output()
+        if not ok then
+            io.stderr:write("[Falling Sand warning]: " .. err .. "\n")
+        end
         local mode = ffi.new("DWORD[1]")
         if ffi.C.GetConsoleMode(self.hIn, mode) ~= 0 then
             self.orig_mode = mode[0]
@@ -342,6 +387,7 @@ function Terminal:disable_raw_mode()
     io.flush()
     if self.is_windows then
         if self.orig_mode then ffi.C.SetConsoleMode(self.hIn, self.orig_mode) end
+        self:restore_windows_output()
     else
         if self.orig_termios then ffi.C.tcsetattr(0, 0, self.orig_termios) end
     end
@@ -1400,6 +1446,14 @@ local function main(args)
     sim.use_ascii = ascii_mode
     sim:load_preset(preset_to_load)
 
+    local out_term = Terminal.new()
+    if (demo_frames or snapshot_mode) and not ascii_mode then
+        local ok, err = out_term:setup_windows_output()
+        if not ok then
+            io.stderr:write("[Falling Sand warning]: " .. err .. "\n")
+        end
+    end
+
     if demo_frames then
         print(string.format("Running automated Falling Sand demo (%d steps)...", demo_frames))
         for step_i = 1, demo_frames do
@@ -1410,6 +1464,7 @@ local function main(args)
         local frame = sim:render_frame()
         print(frame)
         print("[Falling Sand Demo Complete]\n")
+        out_term:restore_windows_output()
         return 0
     end
 
@@ -1418,6 +1473,7 @@ local function main(args)
         for _ = 1, 20 do sim:step() end
         local frame = sim:render_frame()
         print(frame)
+        out_term:restore_windows_output()
         return 0
     end
 
