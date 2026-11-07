@@ -132,6 +132,7 @@ write_file("/sys/block/loop0/size", "100\n")
 write_file("/sys/block/nvme0n1/size", "1000215216\n")
 write_file("/sys/block/nvme0n1/queue/rotational", "0\n")
 write_file("/proc/mounts", "/dev/sda1 / ext4 rw 0 0\ntmpfs /run tmpfs rw 0 0\n"
+    .. "/dev/sda1 /tmp ext4 rw 0 0\n/dev/sda1 /var ext4 rw 0 0\n"
     .. "/dev/gone /nonexistent_mnt ext4 rw 0 0\n")
 
 write_file("/sys/class/net/eth0/operstate", "up\n")
@@ -236,6 +237,8 @@ describe("1. Collectors against a fixture tree", function()
         local gone = find_item(g, "/nonexistent_mnt")
         assert_true(gone and gone:find("statvfs unavailable"), "failed statvfs is visible")
         assert_true(find_item(g, "/run") == nil, "tmpfs skipped")
+        assert_true(root:find("%(%+2 more: /tmp, /var%)"), "extra mounts listed: " .. root)
+        assert_true(find_item(g, "/tmp") == nil, "duplicate device not shown as its own row")
     end)
 
     it("network: interface state, MAC, speed, MTU", function()
@@ -502,6 +505,63 @@ describe("4. Keystroke simulation & state machine", function()
                 assert_eq(strip_ansi(row):gsub(" ", ""), "", "row " .. i .. " blank")
             end
         end
+    end)
+end)
+
+describe("4b. Sensor history sparklines", function()
+    it("sparkline needs two samples and shows min/max", function()
+        assert_eq(HW.sparkline({ 40 }, "°C"), "")
+        assert_eq(HW.sparkline(nil, "°C"), "")
+        local s = HW.sparkline({ 40, 50, 60 }, "°C")
+        assert_true(s:find("▁") and s:find("█") and s:find("min 40.0 max 60.0"), s)
+        assert_true(HW.sparkline({ 30, 30 }, "°C"):find("▄▄"), "flat series is mid-height")
+        assert_true(HW.sparkline({ 1000, 2000 }, "RPM"):find("min 1000 max 2000"), "RPM format")
+    end)
+
+    it("record_history caps length and rows gain a sparkline", function()
+        HW.root = ROOT
+        local data = { { id = "sensors", title = "Sensors", groups = HW.collect_sensors() } }
+        local history = {}
+        for i = 1, 45 do
+            HW.record_history(history, data)
+        end
+        local key = "hwmon0/temp1_input"
+        assert_eq(#history[key], 30, "history capped")
+        history[key] = { 40, 45, 50 }
+        local lines = HW.flatten(data[1].groups, 100, "", history)
+        local found = false
+        for _, ln in ipairs(lines) do
+            if ln.kind == "kv" and ln.label == "Package id 0" then
+                found = ln.value:find("45.5 °C") and ln.value:find("min 40.0 max 50.0")
+            end
+        end
+        assert_true(found, "sparkline appended to temperature row")
+        local plain = HW.flatten(data[1].groups, 100, "")
+        for _, ln in ipairs(plain) do
+            assert_true(not (ln.value or ""):find("min "), "no history means no sparkline")
+        end
+    end)
+
+    it("history is rendered through the frame and survives a filter", function()
+        HW.root = ROOT
+        local d = HW.collect_all()
+        local state = HW.helpers.new_state(d)
+        state.tab = 7
+        state.history["hwmon0/temp1_input"] = { 40, 50 }
+        state.filter = "package"
+        local text = strip_ansi(table.concat(HW.frame_rows(state, 100, 24), "\n"))
+        assert_true(text:find("min 40.0 max 50.0"), "sparkline in frame")
+    end)
+
+    it("refresh_live updates the sensors tab and records a sample", function()
+        HW.root = ROOT
+        local state = HW.helpers.new_state(HW.collect_all())
+        local before = #(state.history["hwmon0/temp1_input"] or {})
+        write_file("/sys/class/hwmon/hwmon0/temp1_input", "60000\n")
+        HW.refresh_live(state)
+        assert_eq(#state.history["hwmon0/temp1_input"], before + 1, "sample recorded")
+        local g = state.data[7].groups
+        assert_eq(find_item(g, "Package id 0"), "60.0 °C", "value refreshed off-tab")
     end)
 end)
 

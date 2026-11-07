@@ -240,11 +240,16 @@ local function new_group(title)
 end
 
 --- Append a label/value row; rows with a nil value are skipped.
-local function add(group, label, value)
+local function add(group, label, value, key, num)
     if value == nil then
         return
     end
-    group.items[#group.items + 1] = { label = label, value = tostring(value) }
+    group.items[#group.items + 1] = {
+        label = label,
+        value = tostring(value),
+        key = key,
+        num = num,
+    }
 end
 
 --- Append a row using `fallback` when the value is missing (never silent).
@@ -653,23 +658,40 @@ function HW.collect_storage()
     if not text then
         add(mounts, "Mounts", "N/A (cannot read /proc/mounts)")
     else
-        local seen = {}
+        local order = {}
+        local by_dev = {}
         for line in text:gmatch("[^\n]+") do
             local dev, mp, fs = line:match("^(%S+)%s+(%S+)%s+(%S+)")
-            if dev and dev:sub(1, 1) == "/" and not seen[dev .. mp] then
-                seen[dev .. mp] = true
+            if dev and dev:sub(1, 1) == "/" then
                 mp = mp:gsub("\\040", " ")
-                local sv = ffi.new("struct hw_statvfs")
-                if ffi.C.statvfs(mp, sv) == 0 and tonumber(sv.f_blocks) > 0 then
-                    local total = tonumber(sv.f_blocks) * tonumber(sv.f_frsize)
-                    local free = tonumber(sv.f_bavail) * tonumber(sv.f_frsize)
-                    local used = total - tonumber(sv.f_bfree) * tonumber(sv.f_frsize)
-                    add(mounts, mp, string.format("%s  %s  used %s / %s (%.0f%%)  %s", dev, fs,
-                        format_bytes(used), format_bytes(total), used * 100 / total,
-                        "free " .. format_bytes(free)))
-                else
-                    add(mounts, mp, string.format("%s  %s  (statvfs unavailable)", dev, fs))
+                local entry = by_dev[dev]
+                if not entry then
+                    entry = { dev = dev, fs = fs, mounts = {} }
+                    by_dev[dev] = entry
+                    order[#order + 1] = entry
                 end
+                entry.mounts[#entry.mounts + 1] = mp
+            end
+        end
+        for _, entry in ipairs(order) do
+            local mp = entry.mounts[1]
+            local extra = ""
+            if #entry.mounts > 1 then
+                extra = string.format("  (+%d more: %s)", #entry.mounts - 1,
+                    table.concat(entry.mounts, ", ", 2))
+            end
+            local sv = ffi.new("struct hw_statvfs")
+            if ffi.C.statvfs(mp, sv) == 0 and tonumber(sv.f_blocks) > 0 then
+                local frsize = tonumber(sv.f_frsize)
+                local total = tonumber(sv.f_blocks) * frsize
+                local free = tonumber(sv.f_bavail) * frsize
+                local used = total - tonumber(sv.f_bfree) * frsize
+                add(mounts, mp, string.format("%s  %s  used %s / %s (%.0f%%)  free %s%s",
+                    entry.dev, entry.fs, format_bytes(used), format_bytes(total),
+                    used * 100 / total, format_bytes(free), extra))
+            else
+                add(mounts, mp, string.format("%s  %s  (statvfs unavailable)%s", entry.dev,
+                    entry.fs, extra))
             end
         end
         if #mounts.items == 0 then
@@ -751,17 +773,22 @@ function HW.collect_sensors()
                 local v = read_num(dir .. f)
                 local label = read_str(dir .. kind .. idx .. "_label") or (kind .. idx)
                 if v then
-                    local text
+                    local text, num, unit
                     if kind == "temp" then
-                        text = string.format("%.1f °C", v / 1000)
+                        num, unit = v / 1000, "°C"
+                        text = string.format("%.1f °C", num)
                     elseif kind == "fan" then
+                        num, unit = v, "RPM"
                         text = string.format("%d RPM", v)
                     elseif kind == "in" then
-                        text = string.format("%.3f V", v / 1000)
+                        num, unit = v / 1000, "V"
+                        text = string.format("%.3f V", num)
                     else
-                        text = string.format("%.2f W", v / 1000000)
+                        num, unit = v / 1000000, "W"
+                        text = string.format("%.2f W", num)
                     end
-                    add(g, label, text)
+                    add(g, label, text, hm .. "/" .. f, num)
+                    g.items[#g.items].unit = unit
                 end
             end
         end
@@ -980,8 +1007,58 @@ local function wrap(text, width)
     return lines
 end
 
+-- =========================================================================
+-- 5b. Sensor history (sparklines)
+-- =========================================================================
+local SPARK_CHARS = { "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█" }
+local HISTORY_MAX = 30
+
+--- Push the current numeric value of every keyed item into `history`.
+function HW.record_history(history, data)
+    for _, tab in ipairs(data) do
+        for _, g in ipairs(tab.groups) do
+            for _, it in ipairs(g.items) do
+                if it.key and it.num then
+                    local list = history[it.key]
+                    if not list then
+                        list = {}
+                        history[it.key] = list
+                    end
+                    list[#list + 1] = it.num
+                    if #list > HISTORY_MAX then
+                        table.remove(list, 1)
+                    end
+                end
+            end
+        end
+    end
+end
+
+--- Render samples as a sparkline plus min/max; "" when fewer than two samples.
+function HW.sparkline(samples, unit)
+    if not samples or #samples < 2 then
+        return ""
+    end
+    local lo, hi = math.huge, -math.huge
+    for _, v in ipairs(samples) do
+        lo = math.min(lo, v)
+        hi = math.max(hi, v)
+    end
+    local out = {}
+    for _, v in ipairs(samples) do
+        local idx = 4
+        if hi > lo then
+            idx = 1 + math.floor((v - lo) / (hi - lo) * 7 + 0.5)
+        end
+        out[#out + 1] = SPARK_CHARS[idx]
+    end
+    local fmt = unit == "RPM" and "%.0f" or "%.1f"
+    return string.format("%s min " .. fmt .. " max " .. fmt, table.concat(out), lo, hi)
+end
+
 --- Flatten a tab's groups to display lines for the given width and filter.
-function HW.flatten(groups, width, filter)
+--- `history` (optional) adds sparklines to keyed sensor rows.
+function HW.flatten(groups, width, filter, history)
     local needle = filter and filter ~= "" and filter:lower() or nil
     local label_w = 12
     for _, g in ipairs(groups) do
@@ -1005,7 +1082,12 @@ function HW.flatten(groups, width, filter)
             end
             lines[#lines + 1] = { kind = "hdr", text = g.title }
             for _, it in ipairs(kept) do
-                local parts = wrap(it.value, value_w)
+                local text = it.value
+                local spark = history and it.key and HW.sparkline(history[it.key], it.unit)
+                if spark and spark ~= "" then
+                    text = text .. "  " .. spark
+                end
+                local parts = wrap(text, value_w)
                 for i, part in ipairs(parts) do
                     lines[#lines + 1] = {
                         kind = "kv",
@@ -1042,7 +1124,9 @@ local function new_state(data)
         filter_mode = false,
         status = nil,
         status_err = false,
+        history = {},
     }
+    HW.record_history(state.history, data)
     for i = 1, #data do
         state.scroll[i] = 0
     end
@@ -1055,7 +1139,7 @@ end
 
 local function visible_lines(state, w)
     local tab = state.data[state.tab]
-    return HW.flatten(tab.groups, w, state.filter)
+    return HW.flatten(tab.groups, w, state.filter, state.history)
 end
 
 local function clamp_scroll(state, w, h)
@@ -1359,6 +1443,21 @@ local function now_ms()
     return os.clock() * 1000
 end
 
+--- Re-collect the active tab and the sensors tab, recording sensor history.
+function HW.refresh_live(state)
+    local fresh = {}
+    fresh[state.tab] = true
+    for i, tab in ipairs(HW.TABS) do
+        if tab.id == "sensors" then
+            fresh[i] = true
+        end
+    end
+    for i in pairs(fresh) do
+        state.data[i].groups = HW.safe_collect(HW.TABS[i])
+        HW.record_history(state.history, { state.data[i] })
+    end
+end
+
 function HW.run_tui(opts)
     opts = opts or {}
     io.stderr:write("hwinfo: collecting hardware data...\n")
@@ -1412,6 +1511,7 @@ function HW.run_tui(opts)
                     break
                 elseif action == "refresh" then
                     state.data = HW.collect_all()
+                    HW.record_history(state.history, state.data)
                     state.status = "Refreshed"
                 elseif action == "export" then
                     local path = opts.export_path or "hwinfo_snapshot.json"
@@ -1421,8 +1521,7 @@ function HW.run_tui(opts)
                 end
             elseif os.time() - last_refresh >= REFRESH_MS / 1000 then
                 last_refresh = os.time()
-                local tab = HW.TABS[state.tab]
-                state.data[state.tab].groups = HW.safe_collect(tab)
+                HW.refresh_live(state)
             end
         end
     end)
