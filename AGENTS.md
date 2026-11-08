@@ -104,45 +104,65 @@ For any TUI application or terminal utility in the repository, the agent MUST ad
 
 All Lua files created or modified in the repository MUST adhere to consistent, clean, and idiomatic formatting:
 
-1. **Indentation & Spacing**:
+1. **Readability-First Philosophy & Spacing**:
+   * **Code must be immediately readable**: Write code for humans first. Prioritize clear, uncluttered layout over compaction.
    * **4 spaces per indentation level** (never tabs, never 2-space or mixed indentation).
    * **Spaces around binary operators**: Use `a = b + c`, `x == y`, `key = value` (not `a=b+c`).
    * **Table spacing**: Space inside curly braces for single-line tables: `{ id = 1, name = "app" }`.
    * **Function arguments & commas**: Always place a single space after commas: `fn(a, b, c)`.
 
-2. **File Structure & Clean Headers**:
+2. **One Statement Per Line & Multi-Line Control Flow (No Clutter)**:
+   * **One statement per line**: Never pack multiple statements on a single line separated by semicolons (e.g., avoid `stmt1; stmt2`, `count = count + 1; print(...)`). Semicolons in Lua code are reserved strictly for `package.path` lists, C struct declarations in `ffi.cdef`, or string literals.
+   * **No single-line control structures**: `if ... then ... end`, `for ... do ... end`, and `while ... do ... end` MUST NEVER be written on a single line. Even simple guard clauses or early returns must be expanded across separate lines with standard 4-space indentation:
+     ```lua
+     -- Good:
+     if not success then
+         return nil, err
+     end
+
+     for index, item in ipairs(items) do
+         process_item(item)
+     end
+
+     -- Prohibited:
+     if not success then return nil, err end
+     for i, v in ipairs(t) do print(v) end
+     ```
+   * **Clarity over compaction**: Never micro-compact or minify Lua code to reduce line counts. Code must be structured for rapid comprehension, clean git diffs, and effortless debugging.
+   * **Multi-line tables & arguments**: Format complex table constructors and long argument lists across multiple lines with clean indentation rather than sprawling horizontally.
+
+3. **Small Functions & Clean Code**:
+   * **Small, single-purpose functions**: Each function must do one thing well. Aim for functions that fit within a single screen (<= 30–50 lines). If a function mixes parsing with rendering or needs multiple section comments, split it into focused local helpers.
+   * **Shallow nesting**: Prefer guard clauses and early returns over deeply nested blocks. Aim for at most 3 levels of indentation inside a function.
+   * **Keep code uncluttered**: Remove dead code, unused local variables, leftover debug prints, commented-out code blocks, and speculative features. Do not introduce abstractions or fallback layers that no active code path uses.
+   * **No duplicate logic**: Extract repeated patterns into shared local functions rather than copy-pasting.
+
+4. **Meaningful Variable & Function Names**:
+   * **Descriptive and intent-revealing**: Choose names that clearly convey purpose and semantics (e.g., `selected_index`, `line_count`, `parse_http_header`).
+   * **No cryptic abbreviations**: Avoid arbitrary short forms (e.g., use `connection` instead of `cn`, `buffer` instead of `buf_dat`).
+   * **Single-letter variables restricted**: Single-letter names are permitted ONLY for short loop counters (`i`, `j`, `k`) and conventional coordinate pairs (`x`, `y`, `w`, `h`).
+   * **Scoping & casing**:
+     * Variables and helper functions: `local` by default, `snake_case` (`load_config`, `process_event`). Never leak symbols into global `_G`.
+     * Constants: `UPPER_SNAKE_CASE` (`HISTORY_MAX`, `DEFAULT_TIMEOUT_MS`).
+     * Classes & metatables: `PascalCase` (`Database`, `Indexer`).
+
+5. **Cross-Platform Compatibility (Windows & POSIX)**:
+   * **Path separators**: Always use forward slashes `/` in file paths or path-joining helpers. Never hardcode Windows backslashes `\` or assume Unix-only `/` roots.
+   * **Line endings**: Handle both CRLF (`\r\n`) and LF (`\n`) gracefully when parsing files or subprocess output (e.g., strip trailing `\r`).
+   * **OS branching & FFI**: When utilizing native syscalls or FFI libraries, explicitly inspect `ffi.os` (`"Windows"`, `"Linux"`, `"OSX"`) and provide tested implementations or graceful fallbacks for each supported platform.
+   * **Subprocess execution**: Account for OS shell differences (e.g., Windows `cmd.exe`/PowerShell argument escaping vs. POSIX `/bin/sh`) and executable extensions (`.exe`).
+
+6. **Comments & Documentation**:
+   * **Comment the "why", not the "what"**: Add comments when rationale is not obvious: non-obvious constraints, workarounds, platform quirks, unit conversions, invariants, or deliberate trade-offs. Never restate self-evident code.
+   * **Document public and exported functions**: Precede every module-level or exported function with a concise doc comment (`---`) outlining purpose, key arguments, and return values (including `nil, err` failure returns).
+
+7. **File Structure, Headers & Whitespace Discipline**:
    * **Hashbang**: Executable scripts start with `#!/usr/bin/env luajit`.
-   * **Module / Script Banner**: Include a clear, top-of-file descriptive comment banner outlining the purpose and key features.
-   * **Section Dividers**: Use consistent 80-character comment dividers (e.g., `-- =========================================================================` or `--------------------------------------------------------------------------------`) between logical module sections.
-
-3. **Line Length & Whitespace Discipline**:
-   * **No Trailing Whitespace**: Strip all trailing whitespace from ends of lines.
-   * **Single Final Newline**: Ensure every file ends with exactly one newline (`\n`).
-   * **Max Line Width**: Keep code comfortably readable (aim for <= 100-120 columns where practical).
-   * **No Redundant Blank Lines**: Use at most 1-2 blank lines between major functions or sections; never consecutive runs of 3+ blank lines.
-
-4. **Naming & Scoping Conventions**:
-   * **Local by Default**: Always declare variables and helper functions as `local`. Never leak symbols into global `_G`.
-   * **Constants**: Use `UPPER_SNAKE_CASE` for file-level constants and static configuration tables.
-   * **Functions & Variables**: Use `snake_case` for functions and variables (`load_config`, `parse_args`).
-   * **Classes / Metatables**: Use `PascalCase` for OOP-like metatables or types (`Database`, `Indexer`).
-
-5. **Readability-First & Statement Separation**:
-   * **One statement per line**: Never pack multiple statements on a single line separated by semicolons (e.g. avoid `stmt1; stmt2`, `if not ok then release(); error(err) end`, `count = count + 1; print(...)`). Semicolons in Lua code are reserved strictly for `package.path` lists, C struct declarations in `ffi.cdef`, or string literals.
-   * **Structured Control Flow**: Avoid single-line `if ... then ... end` or compressed loops when statements involve side effects, error reporting, returns, or resource cleanup. Expand them into structured multi-line blocks with standard 4-space indentation.
-   * **Clarity Over Compaction**: Never micro-compact or minify Lua code to reduce line counts. Code must be formatted for clarity, rapid comprehension, effortless debugging, and clean git diffs.
-   * **Multi-line Tables & Arguments**: When table constructors or function calls contain multiple fields or exceed comfortable reading width, format them across multiple lines with clean indentation rather than sprawling horizontally.
-
-6. **Clean Code & Maintainability** (code is read far more often than it is written):
-   * **Keep Code Uncluttered**: Write the simplest code that solves the problem. Remove dead code, unused variables, leftover debug prints, commented-out blocks, and speculative features. Do not add abstractions, options, or fallbacks that nothing needs yet.
-   * **Small, Single-Purpose Functions**: Each function does one thing and has a name that says what it does (`parse_cpuinfo`, `render_footer`). Split a function when it needs section comments to be understood, mixes parsing with rendering, or grows beyond roughly one screen (about 50 lines). Prefer early returns over deep nesting (aim for 3 levels or fewer).
-   * **No Duplication**: Extract repeated logic into a shared local helper instead of copy-pasting it. Do not duplicate helpers that already exist elsewhere in the repository when they can be reused.
-   * **Descriptive Names**: Choose names that reveal intent (`visible_lines`, `scroll_offset`). Avoid cryptic abbreviations and one-letter names except for short loop indices (`i`, `k`, `v`) and conventional pairs (`w`/`h`). Name magic numbers and strings as `UPPER_SNAKE_CASE` constants (`HISTORY_MAX`, `REFRESH_MS`).
-   * **Comment the Why, Not the What**: Add a comment when the reason is not obvious from the code: a non-obvious constraint, a workaround, a kernel or protocol quirk, a unit conversion, an invariant, or a deliberate trade-off. Do not restate what the code plainly says (`-- increment i`).
-   * **Document Public Functions**: Give every module-level or exported function a short one-to-two line comment (`---`) describing what it does, its key arguments, and what it returns, including `nil, err` failure returns.
-   * **Group Related Code**: Order a file as banner, requires, constants, C declarations, helpers, core logic, entry point, using section dividers. Keep related functions adjacent, and define helpers before their first use.
-   * **Consistent Idioms**: Follow one error-handling convention per module (for example `value, err` returns, never silent `nil`), one naming style, and one way to build strings and tables. Match the conventions of the surrounding file when editing it.
-   * **Review Before Finishing**: Re-read your own diff as a reviewer would. If a section takes effort to understand, simplify it or explain it with a comment before committing.
+   * **Module / script banner**: Include a clear descriptive header comment at the top explaining the module's responsibility.
+   * **Section dividers**: Use consistent comment dividers (`-- =========================================================================` or `--------------------------------------------------------------------------------`) between logical module sections.
+   * **Group related code**: Order a file as banner, requires, constants, C declarations, helpers, core logic, entry point, using section dividers. Keep related functions adjacent, and define helpers before their first use.
+   * **Consistent idioms**: Follow one error-handling convention per module (e.g., `value, err` returns, never silent `nil`), one naming style, and one way to build strings and tables.
+   * **Whitespace discipline**: No trailing whitespace, single final newline (`\n`), max line width <= 100–120 columns, and at most 1–2 blank lines between major functions or sections.
 
 ## Deployment (`deploy.lua`)
 
