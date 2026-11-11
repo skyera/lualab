@@ -105,6 +105,7 @@ make
   ./LuaJIT/src/luajit ffi_wafer_d2d_inspector.lua # Semiconductor 300mm wafer Die-to-Die (D2D) inspection & KLARF exporter
   ./LuaJIT/src/luajit ffi_midi_keyboard.lua       # Real-time interactive synthesizer, visual piano keyboard & oscilloscope
   ./LuaJIT/src/luajit ffi_elf_inspector.lua <bin> # Interactive ELF binary analyzer, symbol inspector & disassembler
+  ./LuaJIT/src/luajit ffi_binscope.lua <file>     # Unknown-binary structure explorer: entropy regions, strings, record probe, C struct overlay
   ./LuaJIT/src/luajit codefind.lua index .        # High-performance local code & document search engine (SQLite FTS5)
   ./LuaJIT/src/luajit luatop.lua                  # Professional terminal system & process monitor (CPU, GPU, Net, Tree)
   ./LuaJIT/src/luajit enigma.lua                  # WWII Enigma cipher machine simulator & glowing lampboard TUI

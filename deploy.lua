@@ -89,6 +89,13 @@ local APPS = {
         desc = "Live Terminal Log Explorer",
         env_var = "LOGEXPLORER_LUAJIT",
     },
+    binscope = {
+        id = "binscope",
+        name = "binscope",
+        script = "ffi_binscope.lua",
+        desc = "Unknown-Binary Structure Explorer",
+        env_var = "BINSCOPE_LUAJIT",
+    },
     mdview = {
         id = "mdview",
         name = "mdview",
@@ -140,7 +147,7 @@ local APPS = {
 -- Deployment order for `--app all`.
 local APP_ORDER = {
     "pix", "lumina", "yt", "weblite", "luatop", "hwtui", "codefind", "codefind_web",
-    "landrop", "ytweb", "pixweb", "logexplorer", "mdview",
+    "landrop", "ytweb", "pixweb", "logexplorer", "mdview", "binscope",
 }
 
 --- Find an app by its id or one of its launcher aliases; nil when unknown.
