@@ -36,12 +36,32 @@ Verification is the only path to finality. Do not assume success. Always double 
 
 ## Verification & Validation Guidelines
 
-For every change, consider how to prove correctness before concluding:
+For every change, define how it will be proven correct *before* writing code,
+and choose the method that fits what changed:
+
+| Change type            | Minimum verification                                         |
+|------------------------|--------------------------------------------------------------|
+| Bug fix                | Reproduce the failure first; show it passes after the fix    |
+| New behavior / feature | Add a test; run the real command and inspect its output      |
+| Error handling         | Trigger the failure; confirm the exact message shown         |
+| TUI / rendering        | Run it in a terminal; check resize, shrink, and cleanup      |
+| Refactor / formatting  | Existing tests unchanged; `git diff --check`; no behavior diff |
+| Docs / config only     | Syntax or lint check; confirm the file is still parsed       |
+
 *   **Pre-Implementation Strategy**: Identify test commands, scripts, or reproduction steps *before* writing code.
-*   **Automated Tests**: Run test suites (`--test`, unit tests, integration tests). Add new test cases covering the change and edge cases.
+*   **Automated Tests**: Run the narrowest relevant test first, then the full suite (`--test`, unit tests, integration tests). Add new test cases covering the change and edge cases.
 *   **Live Verification**: Execute the actual command or utility in the environment to confirm the fix works in practice.
 *   **Edge Cases & Regressions**: Test boundary inputs, invalid parameters, error handling, and ensure existing behavior is preserved.
 *   **Verification is Mandatory**: Never assume a fix works without running verification commands and inspecting output.
+*   **Report Evidence**: End each task with a `Verified:` block listing the real commands run and their results, taken from actual output (never assumed).
+*   **If Something Cannot Be Verified** (e.g. Windows-only code on Linux), state exactly what was not verified and why. Never describe it as passing.
+
+    ```
+    Verified:     make check                -> all suites passed
+    Verified:     luajit app.lua /nonexistent -> "error: path not found: /nonexistent"
+    Not verified: Windows console path (no Windows host available)
+    ```
+
 *   **Full Regression Run**: `make check` runs every Lua suite (`run_all_tests.lua`) and the self-contained Python PTY/deploy/server suites, continues after failures, and exits non-zero if any failed (about 2 minutes). Run it before shipping changes to shared modules such as `termkit.lua` or `deploy.lua`.
 *   **TUI Render & Viewport Coverage**: Never leave UI/modal rendering functions uncalled in tests. Test suites must execute all view and modal renderers directly (or via headless harness) across boundary conditions (empty data, long strings, special characters, and terminal size boundaries) to catch format-string mismatches (`bad argument to 'format'`) and clipping bugs before release.
 *   **Keystroke Simulation Testing**: Never test text input using only pre-composed strings. Test interactive input loops by feeding actual token sequences emitted by the key reader (including symbolic tokens like `"SPACE"`, `"BACKSPACE"`, `"ENTER"`, `"ESC"`).
@@ -55,6 +75,7 @@ For every change, consider how to prove correctness before concluding:
 When the user asks about an issue, problem, feature, or modification, the agent MUST:
 
 1.  **Think & Analyze**: Explain the root cause or understand the requirement clearly.
+    *   **Show the Investigation Trail**: Before stating a root cause, list the decisive commands used to find it (reproduction, grep/search, log or state inspection), each with a one-line result. Keep them copy-pasteable and in order. Skip noise; keep dead ends only when they ruled out a likely suspect. Finish with a short "Troubleshoot it yourself" tip. If the cause is not confirmed, label it **Hypothesis** and give the command that would confirm it.
 2.  **Propose a Solution & Design**: Explain what needs to change, the plan of action, and why.
 3.  **Define Verification / Validation Plan**: Explicitly state how the change will be tested and validated (commands to run, expected results, edge cases).
 4.  **Show Mockup UI / Command Output**: If the request involves TUI, GUI, or command output, provide a realistic mockup or sample output preview.
