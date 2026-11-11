@@ -602,7 +602,275 @@ local function test_renderers()
 end
 
 --------------------------------------------------------------------------------
--- 8. Argument parsing
+-- 8. Automatic table discovery and the structure map
+--------------------------------------------------------------------------------
+local MAP_IMAGE_SIZE = 18432
+
+-- Like firmware_image(), but the header carries the file size and the table's
+-- offsets all point inside the file (into the text and packed parts).
+local function map_image()
+    local rows = {}
+    for i = 0, 15 do
+        rows[#rows + 1] = u32le(0x1000 + i * 0x300) .. u32le(0x700 + (i * 37) % 200)
+            .. u16le(1) .. u16le(i) .. u32le(0)
+    end
+    return table.concat({
+        "FWB1" .. u32le(2) .. u32le(16) .. u32le(MAP_IMAGE_SIZE) .. string.rep("\0", 48),
+        table.concat(rows),
+        string.rep("\0", 4096 - 64 - 256),
+        TEXT_LINE:rep(100):sub(1, 4096),
+        random_bytes(8192, 7),
+        string.rep("\255", 2048),
+    })
+end
+
+local function tagged_records(count)
+    local rows = {}
+    for i = 0, count - 1 do
+        rows[#rows + 1] = "\170\85" .. u16le(i * 3) .. u32le(0x20000 + i * 0x40) .. f32le(0.5 + i * 0.125)
+            .. u32be(i + 1000) .. random_bytes(4, 300 + i)
+    end
+    return table.concat(rows)
+end
+
+local function test_find_tables()
+    section("automatic table discovery")
+    local image = map_image():sub(1, 1024)
+    local tables = binscope.find_tables(image, 0x8000, 1000000)
+    check_equal(#tables, 1, "one table in the header block")
+    local found = tables[1] or { fields = {} }
+    check_equal(found.offset, 0x8000 + 64, "table start is exact and includes the base offset")
+    check_equal(found.stride, 16, "table record size")
+    check_equal(found.rows, 16, "table row count stops before the zero padding")
+    check_equal(found.approximate, false, "table bounds are exact")
+    check_equal(field_at(found.fields, 0).type, "u32 LE", "table field type")
+    check_equal(field_at(found.fields, 10).type, "u16 LE", "table id field")
+
+    -- 20-byte records with a constant tag, surrounded by unrelated bytes.
+    local data = random_bytes(100, 41) .. tagged_records(40) .. random_bytes(300, 42)
+    tables = binscope.find_tables(data, 0, 1000000)
+    check_equal(#tables, 1, "table between random data is found")
+    found = tables[1] or { fields = {} }
+    check_equal(found.offset, 100, "unaligned table start is exact")
+    check_equal(found.stride, 20, "20-byte record size")
+    check_equal(found.rows, 40, "all 40 records, none of the surrounding bytes")
+    check_equal(field_at(found.fields, 0).type, "const", "constant tag field")
+    check_equal(field_at(found.fields, 8).type, "f32", "float field")
+    check_equal(field_at(found.fields, 12).type, "u32 BE", "big-endian field")
+
+    local floats = {}
+    for i = 0, 99 do
+        floats[#floats + 1] = f32le(1.5 + i * 0.37) .. f32le(-20.25 + i * 1.1) .. f32le(300.5 - i * 2.3)
+    end
+    local float_data = table.concat(floats)
+    tables = binscope.find_tables(float_data, 0, 1000000)
+    check_equal(#tables, 1, "float-only table is found")
+    check_equal(tables[1] and tables[1].stride, 12, "float table record size")
+    check_equal(tables[1] and tables[1].approximate, true, "table without constant bytes is approximate")
+    check_equal(#binscope.find_tables(float_data, 0, 1000000, true), 0, "strict search rejects approximate tables")
+
+    check_equal(#binscope.find_tables(random_bytes(4096, 51), 0, 4096), 0, "random data has no tables")
+    check_equal(#binscope.find_tables(string.rep("\0", 4096), 0, 4096), 0, "zeros have no tables")
+    check_equal(#binscope.find_tables("abc", 0, 3), 0, "tiny data has no tables")
+    check_equal(#binscope.find_tables("", 0, 0), 0, "empty data has no tables")
+    check_equal(#binscope.find_tables(record_table(4), 0, 1000), 0, "four records are too few to call a table")
+end
+
+-- A NaN bit pattern loaded as a double becomes a corrupt Lua value in LuaJIT,
+-- so file bytes must never be loaded as floating point unchecked.
+local function test_nan_safety()
+    section("NaN bit patterns in file data")
+    local rows = {}
+    for i = 0, 63 do
+        rows[#rows + 1] = u32le(i) .. "\1\0\0\0" .. string.char(i % 251 + 1, 0, 0, 0, 0, 0, 0xF0 + i % 16, 0xFF)
+    end
+    local data = table.concat(rows)
+    local result = assert(binscope.probe(data, 100000, 16))
+    for _, field in ipairs(result.fields) do
+        check_equal(type(field.type), "string", "field type at +" .. field.offset .. " is a string")
+        check(field.type ~= "f64", "NaN column at +" .. field.offset .. " is not called a double")
+    end
+    local tables = binscope.find_tables(data, 0, 100000)
+    check_equal(tables[1] and tables[1].stride, 16, "table of NaN-bearing records is still found")
+
+    local ctype, size = binscope.load_struct_type(
+        "struct binscope_test_nan { double d; float f; double list[2]; float pair[2]; };")
+    assert(ctype, size)
+    local nan_double = string.char(1, 0, 0, 0, 0, 0, 0xF8, 0xFF)
+    local nan_float = string.char(1, 0, 0xC0, 0xFF)
+    local bytes = nan_double .. nan_float .. "\0\0\0\0" .. nan_double
+        .. ffi.string(ffi.new("double[1]", 2.5), 8) .. nan_float .. f32le(0.75)
+    local fields = binscope.overlay_struct(ctype, bytes, 0, 1)[1].fields
+    check_equal(value_of(fields, "d"), "nan or inf", "NaN double member")
+    check_equal(value_of(fields, "f"), "nan or inf", "NaN float member")
+    check_equal(value_of(fields, "list"), "nan or inf, 2.5", "double array with a NaN")
+    check_equal(value_of(fields, "pair"), "nan or inf, 0.75", "float array with a NaN")
+end
+
+local function test_decode_header()
+    section("header decoding")
+    local header = binscope.decode_header("FWB1" .. u32le(2) .. u32be(16) .. "\0\0\0\0"
+        .. "\222\173\190\239" .. u32le(18432))
+    check_equal(header.items[1], 'magic "FWB1"', "leading text is the magic")
+    check_equal(header.items[2], "u32 2", "little-endian integer")
+    check_equal(header.items[3], "u32 BE 16", "big-endian integer")
+    check_equal(header.items[4], "bytes de ad be ef", "large word shown as bytes")
+    check_equal(header.items[5], "u32 18432", "integer after a zero word")
+    check_equal(#header.items, 5, "zero word is skipped")
+    check_equal(header.values[1].offset, 4, "value offset")
+    check_equal(header.values[3].value, 18432, "value after the raw bytes")
+    check_equal(header.truncated, false, "whole header decoded")
+
+    local long = binscope.decode_header(string.rep(u32le(7), 20))
+    check_equal(#long.items, 8, "header items are capped")
+    check_equal(long.truncated, true, "capped header is marked")
+    check_equal(#binscope.decode_header("ab").items, 0, "header shorter than a word")
+    check_equal(binscope.decode_header("IDENTIFIER_NAME_LONGER_THAN_CAP" .. u32le(5)).items[1],
+        'magic "IDENTIFIER_NAME_"', "long text is cut at the cap")
+end
+
+local function build_map_of(name, data)
+    local path = write_fixture(name, data)
+    local file, size = binscope.open_input(path)
+    assert(file, size)
+    local map, map_err = binscope.build_map(file, size, {})
+    file:close()
+    assert(map, map_err)
+    return map
+end
+
+local function check_layout_covers(map)
+    local expected_offset = 0
+    for _, segment in ipairs(map.layout) do
+        check_equal(segment.offset, expected_offset, "layout is contiguous")
+        expected_offset = expected_offset + segment.size
+    end
+    check_equal(expected_offset, map.size, "layout covers the whole file")
+end
+
+local function test_build_map()
+    section("structure map")
+    local map = build_map_of("map.bin", map_image())
+    local expected = {
+        { "header", 0x0000, 0x0040 },
+        { "table", 0x0040, 0x0100 },
+        { "zeros", 0x0140, 0x0ec0 },
+        { "text", 0x1000, 0x1000 },
+        { "packed", 0x2000, 0x2000 },
+        { "fill", 0x4000, 0x0800 },
+    }
+    check_equal(#map.layout, #expected, "layout row count")
+    for index, want in ipairs(expected) do
+        local segment = map.layout[index] or {}
+        check_equal(segment.kind or segment.class, want[1], "layout row " .. index .. " kind")
+        check_equal(segment.offset, want[2], "layout row " .. index .. " offset")
+        check_equal(segment.size, want[3], "layout row " .. index .. " size")
+    end
+    check_layout_covers(map)
+    check_equal(#map.tables, 1, "one table in the map")
+    local found = map.tables[1]
+    check_equal(found.label, "T1", "table label")
+    check_equal(found.rows, 16, "map table rows")
+    check_equal(field_at(found.fields, 0).target, "offsets into: text, packed", "offset column is linked")
+    check_equal(field_at(found.fields, 4).target, nil, "size column is not an offset")
+    check_equal(map.layout[1].items[1], 'magic "FWB1"', "header magic")
+    check_equal(map.layout[4].sample.text, TEXT_LINE:sub(1, -2), "text row has a sample string")
+    local hints = table.concat(map.hints, "\n")
+    check_contains(hints, "header value 16 at +8 matches the record count of T1", "record count hint")
+    check_contains(hints, "header value 18432 at +12 equals the file size", "file size hint")
+    check(map.string_count > 90, "map counts the strings")
+    check_equal(map.unsearched, 0, "small file is searched completely")
+
+    local noise = build_map_of("noise.bin", random_bytes(8192, 61))
+    check_equal(#noise.tables, 0, "random file has no tables")
+    check_equal(#noise.layout, 1, "random file is one layout row")
+    check_equal(noise.layout[1].class, "packed", "random file is packed")
+    check_layout_covers(noise)
+
+    local text = build_map_of("text.bin", TEXT_LINE:rep(200))
+    check_equal(#text.tables, 0, "text file has no tables")
+    check_equal(text.layout[1].class, "text", "text file layout")
+    local zeros = build_map_of("zeros.bin", string.rep("\0", 5000))
+    check_equal(#zeros.layout, 1, "zero file is one layout row")
+    check_equal(zeros.layout[1].class, "zeros", "zero file layout")
+    local tiny = build_map_of("one.bin", "A")
+    check_equal(#tiny.layout, 1, "one-byte file layout")
+    check_layout_covers(tiny)
+
+    local headed = build_map_of("headed.bin", "HDR0" .. u32le(3) .. random_bytes(8, 71) .. string.rep("\0", 100))
+    check_equal(headed.layout[1].kind, "header", "binary file without a table still shows a header")
+    check_equal(headed.layout[1].items[1], 'magic "HDR0"', "header magic without a table")
+    check_layout_covers(headed)
+end
+
+local function test_render_map()
+    section("structure map renderer")
+    local text = binscope.render_map(build_map_of("map.bin", map_image()), "fw image %d.bin", 40)
+    check_contains(text, "fw image %d.bin  18432 bytes  type: unknown", "map heading")
+    check_contains(text, ' 0x00000000  0x00000040  header   magic "FWB1", u32 2, u32 16, u32 18432', "header row")
+    check_contains(text, " 0x00000040  0x00000100  table    16 records x 16 bytes (see T1)", "table row")
+    check_contains(text, " 0x00000140  0x00000ec0  padding  zeros", "padding row")
+    check_contains(text, ' 0x00001000  0x00001000  text     "Boot v1.2 starting', "text row")
+    check_contains(text, " 0x00002000  0x00002000  packed   compressed or encrypted (entropy 7.", "packed row")
+    check_contains(text, " 0x00004000  0x00000800  padding  fill 0xff", "fill row")
+    check_contains(text, "T1  table @0x00000040  16 records x 16 bytes, byte order: little-endian", "table heading")
+    check_contains(text, "sequence step +768  -> offsets into: text, packed", "offset target is shown")
+    check_contains(text, " struct t1_record {\n     uint32_t f0;\n     uint32_t f4;\n     uint8_t f8[2];\n"
+        .. "     uint16_t f10;\n     uint8_t f12[4];\n };", "struct guess")
+    check_contains(text, "Strings: ", "string summary")
+    check_contains(text, "Hint: header value 16 at +8 matches the record count of T1", "hint line")
+    check(not text:find("Note:", 1, true), "no search note for a small file")
+
+    local limited = binscope.render_map(build_map_of("map.bin", map_image()), "fw.bin", 2)
+    check_contains(limited, "... 4 more (raise --limit", "layout rows are limited")
+
+    local empty = binscope.render_map(build_map_of("zeros.bin", string.rep("\0", 5000)), "zeros.bin", 40)
+    check_contains(empty, "No repeating record tables were found.", "no-table message")
+    check_contains(empty, "Strings: none found", "no-string message")
+
+    local mixed = binscope.render_map(build_map_of("mixed.bin",
+        random_bytes(100, 41) .. tagged_records(40) .. random_bytes(300, 42)), "mixed.bin", 40)
+    check_contains(mixed, "float f8;", "float field in the struct guess")
+    check_contains(mixed, "uint32_t f12;  /* big-endian */", "big-endian field is flagged")
+
+    local many = { size = 10, layout = {}, tables = {}, hints = {}, string_count = 0, string_samples = {},
+        unsearched = 4096 }
+    for index = 1, 10 do
+        many.tables[index] = { label = "T" .. index, offset = index, rows = 8, stride = 4,
+            byte_order = "undetermined", approximate = true, fields = {} }
+    end
+    local capped = binscope.render_map(many, "many.bin", 40)
+    check_contains(capped, "... 2 more tables (use --limit 0 to show all)", "detailed tables are capped")
+    check_contains(capped, "(start and end are approximate)", "approximate tables are flagged")
+    check_contains(capped, "Note: 4096 bytes of binary data were not searched for tables", "search limit note")
+    check(not binscope.render_map(many, "many.bin", 0):find("more tables", 1, true), "limit 0 shows all tables")
+end
+
+local function test_cli_map()
+    section("command line: structure map")
+    local path = write_fixture("map.bin", map_image())
+    local code, out, err = run_cli(path)
+    check_equal(code, 0, "map exit code")
+    check_equal(err, "", "map writes nothing to stderr")
+    check_contains(out, "LAYOUT", "default output is the structure map")
+    check_contains(out, "16 records x 16 bytes (see T1)", "map finds the table without options")
+
+    code, out = run_cli(path .. " --json")
+    check_equal(code, 0, "map json exit code")
+    local decoded = json.decode(out)
+    check_equal(#decoded.layout, 6, "json layout rows")
+    check_equal(decoded.tables[1].stride, 16, "json table record size")
+    check_equal(decoded.tables[1].fields[1].target, "offsets into: text, packed", "json offset target")
+
+    code, out = run_cli(path .. " --full")
+    check_contains(out, "Regions (5, block size 1024):", "--full keeps the detailed report")
+    code, _, err = run_cli(path .. " --full --probe 0")
+    check_equal(code, 2, "--full with another mode is a usage error")
+    check_contains(err, "choose only one of --full, --probe, --hexdump, --struct", "mode conflict message")
+end
+
+--------------------------------------------------------------------------------
+-- 9. Argument parsing
 --------------------------------------------------------------------------------
 local function test_arguments()
     section("argument parsing")
@@ -636,12 +904,12 @@ local function test_arguments()
 end
 
 --------------------------------------------------------------------------------
--- 9. Command line, end to end
+-- 10. Command line, end to end
 --------------------------------------------------------------------------------
 local function test_cli_success()
     section("command line: success paths")
     local path = write_fixture("cli.bin", firmware_image())
-    local code, out, err = run_cli(path)
+    local code, out, err = run_cli(path .. " --full")
     check_equal(code, 0, "report exit code")
     check_equal(err, "", "report writes nothing to stderr")
     check_contains(out, "(18432 bytes)", "report shows the file size")
@@ -663,7 +931,7 @@ local function test_cli_success()
     check_contains(out, "6144 (0x00001800)", "struct field value")
     check_contains(out, "@0x00000060", "second struct instance")
 
-    code, out = run_cli(path .. " --json --limit 3")
+    code, out = run_cli(path .. " --full --json --limit 3")
     check_equal(code, 0, "json exit code")
     local decoded = json.decode(out)
     check_equal(decoded.size, 18432, "json size")
@@ -683,7 +951,7 @@ local function test_cli_success()
 
     code, out = run_cli(write_fixture("one.bin", "Z"))
     check_equal(code, 0, "one-byte file is analysed")
-    check_contains(out, "(1 bytes)", "one-byte file size")
+    check_contains(out, "  1 bytes  ", "one-byte file size")
 end
 
 local function test_cli_binary_safety()
@@ -694,7 +962,7 @@ local function test_cli_binary_safety()
     check_equal(code, 0, "CRLF/Ctrl-Z file exit code")
     check_contains(out, "41 0d 0a 42 1a 43 0d 0a", "CR, LF and 0x1A bytes are read unchanged")
     code, out = run_cli(FIXTURE_PREFIX .. "crlf.bin")
-    check_contains(out, string.format("(%d bytes)", #tricky), "CRLF/Ctrl-Z file is read to its full size")
+    check_contains(out, string.format("  %d bytes  ", #tricky), "CRLF/Ctrl-Z file is read to its full size")
 
     local spaced = write_fixture("with space.bin", firmware_image())
     code, out = run_cli('"' .. spaced .. '"')
@@ -708,7 +976,7 @@ local function test_cli_binary_safety()
     local unicode = write_fixture("数据 café.bin", firmware_image())
     code, out = run_cli('"' .. unicode .. '"')
     check_equal(code, 0, "path with non-ASCII characters")
-    check_contains(out, "(18432 bytes)", "non-ASCII path is read")
+    check_contains(out, "  18432 bytes  ", "non-ASCII path is read")
 end
 
 local function test_cli_failures()
@@ -763,7 +1031,7 @@ local function test_cli_failures()
 end
 
 --------------------------------------------------------------------------------
--- 10. Bytecode scoping
+-- 11. Bytecode scoping
 --------------------------------------------------------------------------------
 local STANDARD_GLOBALS = {
     require = true, io = true, os = true, string = true, math = true, table = true, debug = true,
@@ -796,30 +1064,41 @@ end
 -- A misspelt local silently becomes a nil global in Lua; the bytecode listing
 -- shows every global read (GGET) and write (GSET), so stray ones are caught
 -- even in branches no test executes.
-local function test_no_stray_globals()
-    section("bytecode scoping")
-    local listing, load_err = bytecode_listing("ffi_binscope.lua")
-    if not listing then
-        print("  [SKIP] jit.bc is not available to this interpreter: " .. tostring(load_err))
-        return
-    end
+local SOURCE_FILES = { "ffi_binscope.lua", "binscope_scan.lua", "binscope_records.lua", "binscope_struct.lua" }
+
+-- Names of the globals a bytecode listing writes, or reads outside the
+-- standard set, and how many global accesses it contains in total.
+local function stray_globals(listing)
     local stray = {}
-    local global_reads = 0
+    local access_count = 0
     for line in listing:gmatch("[^\n]+") do
         local name = line:match('G[GS]ET%s+%d+%s+%d+%s+;%s+"([^"]+)"')
         if name then
-            global_reads = global_reads + 1
+            access_count = access_count + 1
         end
         if name and (line:find("GSET", 1, true) or not STANDARD_GLOBALS[name]) then
             stray[#stray + 1] = name
         end
     end
-    check(global_reads > 20, "bytecode listing shows the global accesses")
-    check_equal(table.concat(stray, ", "), "", "no undeclared globals in ffi_binscope.lua")
+    return stray, access_count
+end
+
+local function test_no_stray_globals()
+    section("bytecode scoping")
+    for _, path in ipairs(SOURCE_FILES) do
+        local listing, load_err = bytecode_listing(path)
+        if not listing then
+            print("  [SKIP] jit.bc is not available to this interpreter: " .. tostring(load_err))
+            return
+        end
+        local stray, access_count = stray_globals(listing)
+        check(access_count > 5, "bytecode listing of " .. path .. " shows its global accesses")
+        check_equal(table.concat(stray, ", "), "", "no undeclared globals in " .. path)
+    end
 end
 
 --------------------------------------------------------------------------------
--- 11. Entry point
+-- 12. Entry point
 --------------------------------------------------------------------------------
 local TESTS = {
     test_entropy,
@@ -832,8 +1111,14 @@ local TESTS = {
     test_struct_overlay,
     test_struct_errors,
     test_renderers,
+    test_find_tables,
+    test_nan_safety,
+    test_decode_header,
+    test_build_map,
+    test_render_map,
     test_arguments,
     test_cli_success,
+    test_cli_map,
     test_cli_binary_safety,
     test_cli_failures,
     test_no_stray_globals,
