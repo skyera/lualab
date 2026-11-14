@@ -1181,6 +1181,153 @@ TestRunner.describe("Command-line argument validation", function()
     end)
 end)
 
+TestRunner.describe("Process table sorting and header clicks", function()
+    local HEADER_SORT_MODES = {
+        ["PID"] = "pid",
+        ["USER"] = "user",
+        ["%CPU"] = "cpu",
+        ["%MEM"] = "mem",
+        ["RES"] = "mem",
+        ["VIRT"] = "vsize",
+        ["TH"] = "threads",
+        ["NICE"] = "nice",
+        ["TIME+"] = "time",
+        ["DISK R"] = "ior",
+        ["DISK W"] = "iow",
+        ["COMMAND"] = "name",
+    }
+    -- Zoomed process pane thresholds: VIRT/NICE from 80 columns, I/O from 105.
+    local LAYOUTS = {
+        { width = 120, groups = { extended = true, io = true } },
+        { width = 90, groups = { extended = true, io = false } },
+        { width = 70, groups = { extended = false, io = false } },
+    }
+
+    local function make_process(pid, fields)
+        local process = {
+            pid = pid, ppid = 0, comm = "proc" .. pid, cmdline = "proc" .. pid,
+            username = "user", state = "S", cpu_pct = 0, mem_pct = 0,
+            res_kb = 1, vsize_kb = 1, threads = 1, nice = 0, cpu_time_sec = 0,
+        }
+        for key, value in pairs(fields or {}) do
+            process[key] = value
+        end
+        return process
+    end
+
+    local function sorted_pids(processes, sort_mode, sort_reverse)
+        local copy = {}
+        for index, process in ipairs(processes) do
+            copy[index] = process
+        end
+        table.sort(copy, btop.make_process_comparator(sort_mode, sort_reverse))
+        local pids = {}
+        for index, process in ipairs(copy) do
+            pids[index] = process.pid
+        end
+        return table.concat(pids, ",")
+    end
+
+    --- Returns the screen column where each header starts in a rendered frame.
+    local function header_columns(sort_mode, width)
+        local state = {
+            procs = { make_process(1) },
+            raw_total_procs = 1,
+            sort_mode = sort_mode,
+        }
+        local frame = btop.render_zoomed_pane_frame(4, state, width, 12)
+        local row = frame:match("\27%[4;2H(.-)\27%[%d+;%d+H")
+        local plain = row:gsub("\27%[[%d;]*m", "")
+        local columns = {}
+        for name in pairs(HEADER_SORT_MODES) do
+            local at = plain:find(name, 1, true)
+            if at then
+                -- The row is drawn from screen column 2.
+                columns[name] = btop.visual_len(plain:sub(1, at - 1)) + 2
+            end
+        end
+        return columns
+    end
+
+    TestRunner.it("should sort by virtual size and by nice value", function()
+        local processes = {
+            make_process(10, { vsize_kb = 300, nice = -5 }),
+            make_process(20, { vsize_kb = 900, nice = 10 }),
+            make_process(30, { vsize_kb = 100, nice = 0 }),
+        }
+        assert_eq(sorted_pids(processes, "vsize", false), "20,10,30", "vsize desc")
+        assert_eq(sorted_pids(processes, "vsize", true), "30,10,20", "vsize asc")
+        assert_eq(sorted_pids(processes, "nice", false), "20,30,10", "nice desc")
+        assert_eq(sorted_pids(processes, "nice", true), "10,30,20", "nice asc")
+    end)
+
+    TestRunner.it("should keep the existing sort modes and PID tie-break", function()
+        local processes = {
+            make_process(3, { cpu_pct = 5, comm = "beta", res_kb = 10 }),
+            make_process(1, { cpu_pct = 5, comm = "Alpha", res_kb = 30 }),
+            make_process(2, { cpu_pct = 9, comm = "gamma", res_kb = 20 }),
+        }
+        assert_eq(sorted_pids(processes, "cpu", false), "2,1,3", "cpu, ties by pid")
+        assert_eq(sorted_pids(processes, "mem", false), "1,2,3", "mem desc")
+        assert_eq(sorted_pids(processes, "pid", true), "1,2,3", "pid asc")
+        assert_eq(sorted_pids(processes, "name", true), "1,3,2", "name, case-blind")
+        assert_eq(sorted_pids(processes, "no_such_mode", false), "2,1,3",
+            "unknown mode falls back to cpu")
+    end)
+
+    TestRunner.it("should sort records with a missing name or field", function()
+        local processes = { make_process(2), make_process(1) }
+        processes[1].comm = nil
+        processes[2].vsize_kb = nil
+        assert_eq(sorted_pids(processes, "name", true), "2,1", "nil comm sorts first")
+        assert_eq(sorted_pids(processes, "vsize", false), "2,1", "nil vsize counts as 0")
+    end)
+
+    TestRunner.it("should map a click on each drawn header to its sort mode", function()
+        for _, layout in ipairs(LAYOUTS) do
+            local columns = header_columns("elapsed", layout.width)
+            for name, column in pairs(columns) do
+                local where = name .. " at width " .. layout.width
+                local mode = btop.process_sort_mode_at_x(column, layout.groups)
+                assert_eq(mode, HEADER_SORT_MODES[name], "first column of " .. where)
+                local last = column + #name - 1
+                mode = btop.process_sort_mode_at_x(last, layout.groups)
+                assert_eq(mode, HEADER_SORT_MODES[name], "last letter of " .. where)
+            end
+        end
+    end)
+
+    TestRunner.it("should draw only the headers that fit the width", function()
+        local wide = header_columns("elapsed", 120)
+        assert_true(wide["VIRT"] and wide["NICE"] and wide["DISK R"], "all at 120")
+        local medium = header_columns("elapsed", 90)
+        assert_true(medium["VIRT"] and not medium["DISK R"], "no I/O at 90")
+        local narrow = header_columns("elapsed", 70)
+        assert_true(not narrow["VIRT"] and not narrow["NICE"], "no VIRT/NICE at 70")
+        assert_eq(narrow["TH"], 47, "TH follows RES when VIRT is hidden")
+    end)
+
+    TestRunner.it("should not treat borders, gaps, or STAT as sortable", function()
+        local groups = { extended = true, io = true }
+        assert_eq(btop.process_sort_mode_at_x(1, groups), nil, "pane border")
+        assert_eq(btop.process_sort_mode_at_x(3, groups), nil, "selection marker")
+        assert_eq(btop.process_sort_mode_at_x(11, groups), nil, "gap after PID")
+        assert_eq(btop.process_sort_mode_at_x(68, groups), nil, "STAT column")
+        assert_eq(btop.process_sort_mode_at_x(150, groups), "name", "command area")
+    end)
+
+    TestRunner.it("should keep headers aligned whichever column is active", function()
+        local baseline = header_columns("elapsed", 120)
+        for _, sort_mode in ipairs({ "pid", "cpu", "mem", "vsize", "nice", "ior" }) do
+            local columns = header_columns(sort_mode, 120)
+            for name, column in pairs(baseline) do
+                assert_eq(columns[name], column,
+                    name .. " column while sorting by " .. sort_mode)
+            end
+        end
+    end)
+end)
+
 -- Summary
 print("\n--------------------------------------------------")
 local total = TestRunner.passed + TestRunner.failed

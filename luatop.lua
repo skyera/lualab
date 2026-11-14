@@ -2695,6 +2695,113 @@ local function match_smart_filter(pr, query)
 end
 
 -- =========================================================================
+-- 5.5 Process Sorting & Table Columns
+-- =========================================================================
+-- Numeric process field read by each sort mode.
+local NUMERIC_SORT_FIELDS = {
+    cpu = "cpu_pct",
+    mem = "res_kb",
+    pid = "pid",
+    threads = "threads",
+    io = "io_total_rate",
+    disk = "io_total_rate",
+    ior = "io_read_rate",
+    iow = "io_write_rate",
+    time = "cpu_time_sec",
+    elapsed = "elapsed_sec",
+    vsize = "vsize_kb",
+    virt = "vsize_kb",
+    nice = "nice",
+}
+
+-- Text process field read by each sort mode; compared without regard to case.
+local TEXT_SORT_FIELDS = {
+    name = "comm",
+    user = "username",
+}
+
+local function sort_key(process, sort_mode)
+    local text_field = TEXT_SORT_FIELDS[sort_mode]
+    if text_field then
+        return (process[text_field] or ""):lower()
+    end
+    local numeric_field = NUMERIC_SORT_FIELDS[sort_mode] or "cpu_pct"
+    return process[numeric_field] or 0
+end
+
+--- Returns a table.sort comparator for the given sort mode.
+-- Largest first unless sort_reverse is set; equal keys fall back to
+-- ascending PID so the order is stable between refreshes.
+local function make_process_comparator(sort_mode, sort_reverse)
+    return function(a, b)
+        local key_a = sort_key(a, sort_mode)
+        local key_b = sort_key(b, sort_mode)
+        if key_a == key_b then
+            return a.pid < b.pid
+        end
+        if sort_reverse then
+            return key_a < key_b
+        end
+        return key_a > key_b
+    end
+end
+
+-- Screen column of the first process-table cell: the pane border is column
+-- 1 and each row starts with a two-character selection marker.
+local PROCESS_TABLE_FIRST_COLUMN = 4
+
+-- Process table columns in display order, separated by one space. Columns
+-- with a group are only drawn when the pane is wide enough for that group.
+-- A column without a sort_mode (STAT) is not sortable.
+local PROCESS_COLUMNS = {
+    { width = 7, sort_mode = "pid" },
+    { width = 8, sort_mode = "user" },
+    { width = 7, sort_mode = "cpu" },
+    { width = 7, sort_mode = "mem" },
+    { width = 9, sort_mode = "mem" },
+    { width = 9, sort_mode = "vsize", group = "extended" },
+    { width = 4, sort_mode = "threads" },
+    { width = 5, sort_mode = "nice", group = "extended" },
+    { width = 5 },
+    { width = 9, sort_mode = "time" },
+    { width = 9, sort_mode = "ior", group = "io" },
+    { width = 9, sort_mode = "iow", group = "io" },
+}
+
+--- Returns the sort mode of the table header at screen column x, or nil.
+-- shown_groups says which optional column groups are drawn, for example
+-- { extended = true, io = false }. Past the last column is the command.
+local function process_sort_mode_at_x(x, shown_groups)
+    local column_start = PROCESS_TABLE_FIRST_COLUMN
+    for _, column in ipairs(PROCESS_COLUMNS) do
+        if not column.group or shown_groups[column.group] then
+            local column_end = column_start + column.width - 1
+            if x >= column_start and x <= column_end then
+                return column.sort_mode
+            end
+            column_start = column_end + 2
+        end
+    end
+    if x >= column_start then
+        return "name"
+    end
+    return nil
+end
+
+--- Formats one table header cell, padded to `width` screen columns.
+-- The active sort column gets a direction arrow and the focus colour.
+-- Padding uses the visible width: the arrow is three bytes but one column,
+-- and byte-based "%-7s" padding pulled every later header two columns left.
+local function format_sort_header(name, mode_key, width, sort_mode, sort_reverse)
+    if sort_mode ~= mode_key then
+        return name .. string.rep(" ", math.max(0, width - visual_len(name)))
+    end
+    local text = name .. (sort_reverse and "▲" or "▼")
+    local padding = string.rep(" ", math.max(0, width - visual_len(text)))
+    return C.border_focus .. text .. padding .. C.table_hdr
+end
+
+-- =========================================================================
 -- 6. Process Tree Construction Engine
 -- =========================================================================
 local function build_process_tree(procs, sort_mode, sort_reverse, collapsed_pids)
@@ -2746,39 +2853,7 @@ local function build_process_tree(procs, sort_mode, sort_reverse, collapsed_pids
         compute_subtotals(r)
     end
 
-    local comparator = function(a, b)
-        local val_a, val_b
-        if sort_mode == "cpu" then
-            val_a, val_b = a.cpu_pct, b.cpu_pct
-        elseif sort_mode == "mem" then
-            val_a, val_b = a.res_kb, b.res_kb
-        elseif sort_mode == "pid" then
-            val_a, val_b = a.pid, b.pid
-        elseif sort_mode == "name" then
-            val_a, val_b = a.comm:lower(), b.comm:lower()
-        elseif sort_mode == "user" then
-            val_a, val_b = a.username:lower(), b.username:lower()
-        elseif sort_mode == "threads" then
-            val_a, val_b = a.threads, b.threads
-        elseif sort_mode == "io" or sort_mode == "disk" then
-            val_a, val_b = (a.io_total_rate or 0), (b.io_total_rate or 0)
-        elseif sort_mode == "ior" then
-            val_a, val_b = (a.io_read_rate or 0), (b.io_read_rate or 0)
-        elseif sort_mode == "iow" then
-            val_a, val_b = (a.io_write_rate or 0), (b.io_write_rate or 0)
-        elseif sort_mode == "time" then
-            val_a, val_b = (a.cpu_time_sec or 0), (b.cpu_time_sec or 0)
-        elseif sort_mode == "elapsed" then
-            val_a, val_b = (a.elapsed_sec or 0), (b.elapsed_sec or 0)
-        else
-            val_a, val_b = a.cpu_pct, b.cpu_pct
-        end
-
-        if val_a ~= val_b then
-            if sort_reverse then return val_a < val_b else return val_a > val_b end
-        end
-        return a.pid < b.pid
-    end
+    local comparator = make_process_comparator(sort_mode, sort_reverse)
 
     table.sort(roots, comparator)
 
@@ -3346,22 +3421,15 @@ local function render_zoomed_pane(out, pane_idx, state, term_w, term_h)
         -- Row 4: Column Headers
         local table_header_y = 4
         local function col_hdr(name, mode_key, width)
-            local is_active = (sort_mode == mode_key)
-            local text = name
-            if is_active then text = text .. (sort_reverse and "▲" or "▼") end
-            if is_active then
-                return string.format("%s%-" .. width .. "s%s", C.border_focus, text, C.table_hdr)
-            else
-                return string.format("%-" .. width .. "s", text)
-            end
+            return format_sort_header(name, mode_key, width, sort_mode, sort_reverse)
         end
 
         local show_ext_cols = (zw >= 80)
         local h_virt_str = ""
         local h_nice_str = ""
         if show_ext_cols then
-            local h_virt = (sort_mode == "vsize" or sort_mode == "virt") and col_hdr("VIRT", "vsize", 9) or string.format("%-9s", "VIRT")
-            local h_nice = (sort_mode == "nice") and col_hdr("NICE", "nice", 5) or string.format("%-5s", "NICE")
+            local h_virt = col_hdr("VIRT", "vsize", 9)
+            local h_nice = col_hdr("NICE", "nice", 5)
             h_virt_str = string.format(" %s", h_virt)
             h_nice_str = string.format(" %s", h_nice)
         end
@@ -3760,21 +3828,10 @@ local function main(args)
                                     status_flash_expiry = monotonic_now() + 1.5
                                 end
                             elseif k.y == table_header_y then
-                                local new_mode = nil
-                                if k.x >= 3 and k.x <= 9 then new_mode = "pid"
-                                elseif k.x >= 11 and k.x <= 18 then new_mode = "user"
-                                elseif k.x >= 20 and k.x <= 26 then new_mode = "cpu"
-                                elseif k.x >= 28 and k.x <= 34 then new_mode = "mem"
-                                elseif k.x >= 36 and k.x <= 44 then new_mode = "mem"
-                                elseif k.x >= 46 and k.x <= 54 then new_mode = "vsize"
-                                elseif k.x >= 56 and k.x <= 59 then new_mode = "threads"
-                                elseif k.x >= 61 and k.x <= 65 then new_mode = "nice"
-                                elseif k.x >= 73 and k.x <= 81 then new_mode = "time"
-                                elseif show_io and k.x >= 83 and k.x <= 91 then new_mode = "ior"
-                                elseif show_io and k.x >= 93 and k.x <= 101 then new_mode = "iow"
-                                elseif (show_io and k.x >= 103) or (not show_io and k.x >= 83) then
-                                    new_mode = "name"
-                                end
+                                local new_mode = process_sort_mode_at_x(k.x, {
+                                    extended = (term_w >= 80),
+                                    io = show_io,
+                                })
 
                                 if new_mode then
                                     if sort_mode == new_mode then
@@ -3841,19 +3898,7 @@ local function main(args)
                             end
                         elseif k.y == table_header_y then
                             -- Clicked column header
-                            local new_mode = nil
-                            if k.x >= 3 and k.x <= 9 then new_mode = "pid"
-                            elseif k.x >= 11 and k.x <= 18 then new_mode = "user"
-                            elseif k.x >= 20 and k.x <= 26 then new_mode = "cpu"
-                            elseif k.x >= 28 and k.x <= 34 then new_mode = "mem"
-                            elseif k.x >= 36 and k.x <= 44 then new_mode = "mem"
-                            elseif k.x >= 46 and k.x <= 49 then new_mode = "threads"
-                            elseif k.x >= 57 and k.x <= 65 then new_mode = "time"
-                            elseif show_io and k.x >= 67 and k.x <= 75 then new_mode = "ior"
-                            elseif show_io and k.x >= 77 and k.x <= 85 then new_mode = "iow"
-                            elseif (show_io and k.x >= 87) or (not show_io and k.x >= 67) then
-                                new_mode = "name"
-                            end
+                            local new_mode = process_sort_mode_at_x(k.x, { io = show_io })
 
                             if new_mode then
                                 if sort_mode == new_mode then
@@ -4289,27 +4334,7 @@ local function main(args)
             if in_tree_mode then
                 procs = build_process_tree(procs, sort_mode, sort_reverse, collapsed_pids)
             else
-                local comparator = function(a, b)
-                    local val_a, val_b
-                    if sort_mode == "cpu" then val_a, val_b = a.cpu_pct, b.cpu_pct
-                    elseif sort_mode == "mem" then val_a, val_b = a.res_kb, b.res_kb
-                    elseif sort_mode == "pid" then val_a, val_b = a.pid, b.pid
-                    elseif sort_mode == "name" then val_a, val_b = a.comm:lower(), b.comm:lower()
-                    elseif sort_mode == "user" then val_a, val_b = a.username:lower(), b.username:lower()
-                    elseif sort_mode == "threads" then val_a, val_b = a.threads, b.threads
-                    elseif sort_mode == "io" or sort_mode == "disk" then val_a, val_b = (a.io_total_rate or 0), (b.io_total_rate or 0)
-                    elseif sort_mode == "ior" then val_a, val_b = (a.io_read_rate or 0), (b.io_read_rate or 0)
-                    elseif sort_mode == "iow" then val_a, val_b = (a.io_write_rate or 0), (b.io_write_rate or 0)
-                    elseif sort_mode == "time" then val_a, val_b = (a.cpu_time_sec or 0), (b.cpu_time_sec or 0)
-                    elseif sort_mode == "elapsed" then val_a, val_b = (a.elapsed_sec or 0), (b.elapsed_sec or 0)
-                    else val_a, val_b = a.cpu_pct, b.cpu_pct end
-
-                    if val_a ~= val_b then
-                        if sort_reverse then return val_a < val_b else return val_a > val_b end
-                    end
-                    return a.pid < b.pid
-                end
-                table.sort(procs, comparator)
+                table.sort(procs, make_process_comparator(sort_mode, sort_reverse))
             end
 
             sel_proc = math.max(1, math.min(sel_proc, math.max(1, #procs)))
@@ -4704,16 +4729,7 @@ local function main(args)
 
             -- Columns: PID (7), USER (8), %CPU (7), %MEM (7), RES (9), TH (4), STAT (5), COMMAND (rest)
             local function col_hdr(name, mode_key, width)
-                local is_active = (sort_mode == mode_key)
-                local text = name
-                if is_active then
-                    text = text .. (sort_reverse and "▲" or "▼")
-                end
-                if is_active then
-                    return string.format("%s%-" .. width .. "s%s", C.border_focus, text, C.table_hdr)
-                else
-                    return string.format("%-" .. width .. "s", text)
-                end
+                return format_sort_header(name, mode_key, width, sort_mode, sort_reverse)
             end
 
             local h_pid     = col_hdr("PID", "pid", 7)
@@ -5284,6 +5300,8 @@ local M = {
     read_process_table            = read_process_table,
     build_process_tree            = build_process_tree,
     match_smart_filter            = match_smart_filter,
+    make_process_comparator       = make_process_comparator,
+    process_sort_mode_at_x        = process_sort_mode_at_x,
     renice_process                = renice_process,
     send_signal_to_process        = send_signal_to_process,
     kill_process                  = kill_process,
