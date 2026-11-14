@@ -8,6 +8,7 @@ import pty
 import select
 import signal
 import struct
+import subprocess
 import sys
 import termios
 import time
@@ -105,9 +106,36 @@ def test_resize_and_signals():
     check("SIGTERM exits with 143", s.finish() == 143)
 
 
+def run_with_piped_input(keys, timeout=10):
+    """Runs luatop with `keys` on a pipe that then closes; None means it hung."""
+    try:
+        result = subprocess.run(["luajit", SCRIPT], input=keys, cwd=HERE,
+                                capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
+    return result.returncode
+
+
+def test_end_of_input_quits_from_every_mode():
+    print("\n▶ luatop end of piped input")
+    cases = [
+        ("normal mode", b""),
+        ("search mode", b"/"),
+        ("search mode with a query", b"/abc"),
+        ("diagnostic command editing", b": x"),
+        ("help dialog", b"?"),
+        ("signal dialog", b"k"),
+    ]
+    for name, keys in cases:
+        code = run_with_piped_input(keys)
+        check("EOF in %s exits with status 0" % name, code == 0,
+              "hung" if code is None else "status %s" % code)
+
+
 def main():
     test_startup_and_quit()
     test_resize_and_signals()
+    test_end_of_input_quits_from_every_mode()
     print("\n=== %d failed ===" % len(FAILURES))
     sys.exit(1 if FAILURES else 0)
 

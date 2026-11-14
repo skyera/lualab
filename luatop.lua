@@ -276,7 +276,12 @@ if is_windows then
         local mode = ffi.new("uint32_t[1]")
         if kernel32.GetConsoleMode(hIn, mode) == 0 then
             local ch = io.read(1)
-            if not ch or ch == "" then return nil end
+            if not ch then
+                return "EOF"
+            end
+            if ch == "" then
+                return nil
+            end
             if ch == "\27" then return "ESC"
             elseif ch == "\n" or ch == "\r" then return "ENTER"
             elseif ch == " " then return "SPACE"
@@ -531,13 +536,9 @@ else
     resume_raw_mode = termkit.resume
     get_terminal_size = termkit.size
 
-    -- Returns "q" at the end of piped input so a headless run exits cleanly.
+    -- Returns "EOF" at the end of piped input; the main loop quits on it.
     read_key = function(timeout_ms)
-        local key = termkit.read_key(timeout_ms or 50)
-        if key == "EOF" then
-            return "q"
-        end
-        return key
+        return termkit.read_key(timeout_ms or 50)
     end
 end
 
@@ -3609,6 +3610,12 @@ Keybindings:
 
         -- Poll keyboard input
         local k = read_key(60)
+
+        -- End of input must quit from every mode. Treating it as a "q" key
+        -- hung search and command editing, which append "q" as text.
+        if k == "EOF" then
+            break
+        end
 
         if k then
             needs_redraw = true
