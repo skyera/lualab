@@ -2920,6 +2920,7 @@ local function draw_pane(out, x, y, w, h, title, is_focused, header_right)
 end
 
 local function draw_modal_box(out, x, y, w, h, title)
+    title = truncate(title, math.max(0, w - 4))
     local bcol = C.border_focus
     local bg = C.modal_bg or "\27[48;2;26;27;38m"
     local title_str = string.format(" %s%s%s ", C.title_col, title, bcol)
@@ -2935,6 +2936,65 @@ local function draw_modal_box(out, x, y, w, h, title)
     table.insert(out, string.format("\27[%d;%dH%s%s╰%s╯%s", y + h - 1, x, bg, bcol, bot_fill, C.reset))
 end
 
+-- Columns kept clear on either side of a modal, and the smallest box that
+-- still has a border and one content row.
+local MODAL_SIDE_MARGIN = 4
+local MODAL_MIN_W = 4
+local MODAL_MIN_H = 3
+
+local function modal_width(wanted_w, term_w)
+    return math.max(MODAL_MIN_W, math.min(wanted_w, term_w - MODAL_SIDE_MARGIN))
+end
+
+--- Fits a centered box of the wanted size inside the terminal.
+-- The box never starts above row 1 or left of column 1, and it leaves the
+-- last terminal row free because the footer line is redrawn there.
+-- Returns x, y, w, h.
+local function place_modal(wanted_w, wanted_h, term_w, term_h)
+    local w = modal_width(wanted_w, term_w)
+    local h = math.max(MODAL_MIN_H, math.min(wanted_h, term_h - 1))
+    local x = math.max(1, math.floor((term_w - w) / 2))
+    local y = math.max(1, math.floor((term_h - h) / 2))
+    return x, y, w, h
+end
+
+--- Chooses the rows of a modal that fit in inner_h content rows.
+-- The footer says how to close the modal, so it is always kept: when space
+-- runs out the blank separator goes first, then body rows from the bottom.
+local function fit_modal_rows(body, footer, inner_h)
+    local rows = {}
+    if inner_h < 1 then
+        return rows
+    end
+    local body_shown = math.min(#body, inner_h - 1)
+    for index = 1, body_shown do
+        rows[index] = body[index]
+    end
+    if inner_h >= #body + 2 then
+        rows[#rows + 1] = ""
+    end
+    rows[#rows + 1] = footer
+    return rows
+end
+
+--- Draws a modal described as { title, width, body = { rows }, footer }.
+local function draw_modal(out, modal, term_w, term_h)
+    local wanted_h = #modal.body + 4
+    local x, y, w, h = place_modal(modal.width, wanted_h, term_w, term_h)
+    draw_modal_box(out, x, y, w, h, modal.title)
+    local rows = fit_modal_rows(modal.body, modal.footer, h - 2)
+    for index, row in ipairs(rows) do
+        table.insert(out, draw_box_row(x, y + index, w, row))
+    end
+end
+
+--- Renders a modal on its own, for headless tests.
+local function render_modal_frame(modal, term_w, term_h)
+    local out = {}
+    draw_modal(out, modal, term_w, term_h)
+    return table.concat(out)
+end
+
 -- =========================================================================
 -- 7. Signals & Modal Subsystems
 -- =========================================================================
@@ -2946,6 +3006,191 @@ local SIGNALS = {
     { sig = 19, name = "SIGSTOP", desc = "Pause / freeze process execution" },
     { sig = 18, name = "SIGCONT", desc = "Resume paused process execution" },
 }
+
+local INSPECTOR_MODAL_W = 74
+local SIGNAL_MODAL_W = 68
+local RENICE_MODAL_W = 64
+local HELP_MODAL_W = 74
+
+-- Columns of the renice modal not available to the slider: both borders,
+-- the "  Nice: nnn  [" label, the closing bracket, and one spare column.
+local RENICE_SLIDER_MARGIN = 18
+-- Visible width of the State value in the inspector, before "Threads:".
+local INSPECTOR_STATE_W = 24
+local NICE_MIN = -20
+local NICE_MAX = 19
+
+local function bold_label(label)
+    return C.bold .. label .. C.reset
+end
+
+--- Pads text to `width` screen columns. "%-24s" cannot do this for
+-- coloured text because it counts the escape sequences as characters.
+local function pad_visible(text, width)
+    return text .. string.rep(" ", math.max(0, width - visual_len(text)))
+end
+
+--- Builds the process inspector modal for one process record.
+local function build_inspector_modal(process)
+    local _, badge_symbol, badge_char, badge_name, badge_color =
+        get_state_badge(process.state, false, C)
+    local state_text = string.format("%s%s %s (%s)%s",
+        badge_color, badge_symbol, badge_char, badge_name, C.reset)
+    local read_total = math.floor((process.io_read_bytes or 0) / 1024)
+    local write_total = math.floor((process.io_write_bytes or 0) / 1024)
+    local body = {
+        string.format(" %s   %s", bold_label("Command:"), process.cmdline),
+        string.format(" %s    %s", bold_label("Binary:"), process.comm),
+        string.format(" %s      %-8s (UID: %d)",
+            bold_label("User:"), process.username, process.uid or 0),
+        string.format(" %s     %s %s  %d",
+            bold_label("State:"), pad_visible(state_text, INSPECTOR_STATE_W),
+            bold_label("Threads:"), process.threads or 1),
+        string.format(" %s      %-7d   %s     %d",
+            bold_label("PPID:"), process.ppid or 0,
+            bold_label("Nice:"), process.nice or 0),
+        string.format(" %s %-10s %s   %s",
+            bold_label("TIME+ (CPU):"),
+            format_time_plus(process.cpu_time_sec or 0),
+            bold_label("Elapsed:"), format_elapsed(process.elapsed_sec or 0)),
+        string.format(" %s     %-9s %s %.1f%%",
+            bold_label("CPU%:"), string.format("%.1f%%", process.cpu_pct or 0),
+            bold_label("Memory%:"), process.mem_pct or 0),
+        string.format(" %s    RES: %s │ VIRT: %s",
+            bold_label("Memory:"),
+            format_bytes(process.res_kb), format_bytes(process.vsize_kb or 0)),
+        string.format(" %s  Read: %s (Tot: %s) │ Write: %s (Tot: %s)",
+            bold_label("Disk I/O:"),
+            format_rate(process.io_read_rate or 0), format_bytes(read_total),
+            format_rate(process.io_write_rate or 0), format_bytes(write_total)),
+    }
+    return {
+        title = string.format("Process Inspector: PID %d", process.pid),
+        width = INSPECTOR_MODAL_W,
+        body = body,
+        footer = string.format(
+            "  %s[k] Kill   [R] Renice   [o/:] Diag   [Enter / Esc] Close Inspector%s",
+            C.title_col, C.reset),
+    }
+end
+
+local function signal_modal_row(signal, is_selected)
+    local windows_only_kill = is_windows and signal.sig ~= 9 and signal.sig ~= 15
+    local note = windows_only_kill and " (POSIX only)" or ""
+    local line = string.format("   [%2d] %-8s - %s%s",
+        signal.sig, signal.name, signal.desc, note)
+    if is_selected then
+        return C.sel_bg .. "▶" .. line:sub(2) .. C.reset
+    end
+    return line
+end
+
+--- Builds the signal picker modal for the pinned target process.
+local function build_signal_modal(pid, comm, selected_index)
+    local prompt = " Select a POSIX signal to send:"
+    if is_windows then
+        prompt = " Select a signal to dispatch (Win32):"
+    end
+    local body = { prompt, "" }
+    for index, signal in ipairs(SIGNALS) do
+        body[#body + 1] = signal_modal_row(signal, index == selected_index)
+    end
+    return {
+        title = string.format("Dispatch Signal to PID %d (%s)", pid, comm),
+        width = SIGNAL_MODAL_W,
+        body = body,
+        footer = string.format("  %s[↑/↓] Select   [Enter] Send   [Esc] Cancel%s",
+            C.dim, C.reset),
+    }
+end
+
+local function renice_level_label(nice_value)
+    if nice_value < -5 then
+        return "High Priority (Aggressive)"
+    elseif nice_value < 0 then
+        return "Above Normal Priority"
+    elseif nice_value == 0 then
+        return "Normal Priority (Default)"
+    elseif nice_value < 10 then
+        return "Below Normal Priority"
+    end
+    return "Idle / Background Priority"
+end
+
+local function renice_color(nice_value)
+    if nice_value < 0 then
+        return C.cpu_high
+    elseif nice_value == 0 then
+        return C.reset
+    end
+    return C.cpu_low
+end
+
+local function renice_slider(nice_value, slider_w)
+    local last_cell = math.max(0, slider_w - 1)
+    local ratio = (nice_value - NICE_MIN) / (NICE_MAX - NICE_MIN)
+    local position = math.max(0, math.min(last_cell, math.floor(ratio * last_cell)))
+    return string.rep("─", position) .. "█" .. string.rep("─", last_cell - position)
+end
+
+--- Builds the renice modal.
+-- target is { pid, comm, current_nice, new_nice }; term_w sizes the slider.
+local function build_renice_modal(target, term_w)
+    local slider_w = modal_width(RENICE_MODAL_W, term_w) - RENICE_SLIDER_MARGIN
+    local body = {
+        string.format(" Current Priority: %sNice %d%s",
+            C.bold, target.current_nice, C.reset),
+        " Adjust priority (-20 = Highest/Realtime, 19 = Lowest/Idle):",
+        "",
+        string.format("  Nice: %s%3d%s  [%s%s%s]",
+            renice_color(target.new_nice), target.new_nice, C.reset,
+            C.title_col, renice_slider(target.new_nice, slider_w), C.reset),
+        string.format("  Level: %s%s%s",
+            C.bold, renice_level_label(target.new_nice), C.reset),
+    }
+    return {
+        title = string.format("Renice Process: PID %d (%s)", target.pid, target.comm),
+        width = RENICE_MODAL_W,
+        body = body,
+        footer = string.format("  %s[←/→, +/-] Adjust   [Enter] Apply   [Esc] Cancel%s",
+            C.dim, C.reset),
+    }
+end
+
+local function help_heading(text)
+    return string.format(" %s%s%s", C.title_col, text, C.reset)
+end
+
+--- Builds the help and keybindings modal.
+local function build_help_modal()
+    local body = {
+        help_heading("Pane & Layout Controls:"),
+        "   Tab, Shift+Tab Cycle active pane focus ([1]-[4])",
+        "   1, 2, 3, 4     Jump directly to CPU, Mem, Net, Procs",
+        "   z, f           Toggle zoom / maximize focused pane",
+        help_heading("Navigation & Selection:"),
+        "   ↑/↓, k/j       Select process / scroll rows",
+        "   PgUp/PgDn      Jump 15 rows   Home/End Jump to ends",
+        help_heading("Process Controls:"),
+        "   /              Filter: text, u:<user>, s:<state>, cpu>X, m>XM",
+        "   [, ]           Cycle category tabs ([All], [User], [System], ...)",
+        "   t, F5          Toggle Process Tree view   Space Fold/Pause",
+        "   Enter, i       Inspect process details modal",
+        "   k, R           Open signal dispatcher, Renice modal",
+        "   o, :, !        Open process diagnostic runner (lsof, strace, etc.)",
+        help_heading("Display & Sorting:"),
+        "   c, m, p, n     Sort by CPU, Memory, PID, or Name",
+        "   u, s, d, e, r  Sort by User, Threads, I/O, TIME+, Reverse",
+        "   C, T           CPU view mode, Cycle color themes",
+    }
+    return {
+        title = "Help & Keybindings",
+        width = HELP_MODAL_W,
+        body = body,
+        footer = string.format("  %s[Esc / Enter / ?] Close Help Dialog%s",
+            C.dim, C.reset),
+    }
+end
 
 -- =========================================================================
 -- 7.2 Process Diagnostic Command Runner Engine (Proposal 3)
@@ -2996,67 +3241,90 @@ local function expand_diagnostic_cmd(template, proc)
     return res
 end
 
+local DIAGNOSTIC_MODAL_W = 84
+local DIAGNOSTIC_MODAL_H = 14
+local DIAGNOSTIC_COMPACT_H = 12
+-- Below this terminal height the blank spacer rows are dropped.
+local DIAGNOSTIC_COMPACT_BELOW_ROWS = 17
+-- Columns of the Command/Preview rows taken by their labels and borders.
+local DIAGNOSTIC_LABEL_MARGIN = 14
+
+--- Returns x, y, w, h, compact for the diagnostic modal.
+-- Drawing and mouse hit-testing both use this, so they cannot disagree.
+local function diagnostic_modal_geometry(term_w, term_h)
+    local compact = (term_h < DIAGNOSTIC_COMPACT_BELOW_ROWS)
+    local wanted_h = compact and DIAGNOSTIC_COMPACT_H or DIAGNOSTIC_MODAL_H
+    local x, y, w, h = place_modal(DIAGNOSTIC_MODAL_W, wanted_h, term_w, term_h)
+    return x, y, w, h, compact
+end
+
+local function diagnostic_preset_row(preset, is_selected, modal_w, theme)
+    local marker = is_selected and " ▶ " or "   "
+    local line = string.format("%s[%s] %-24s (%s)",
+        marker, preset.key, preset.name, preset.cmd)
+    local clipped = truncate(line, modal_w - 4)
+    if is_selected then
+        return theme.sel_bg .. clipped .. theme.reset
+    end
+    return clipped
+end
+
+--- Builds the content rows of the diagnostic modal, top to bottom.
+-- view is { template, preview, selected_index, modal_w, compact, theme }.
+local function diagnostic_modal_rows(view)
+    local tc = view.theme
+    local field_w = view.modal_w - DIAGNOSTIC_LABEL_MARGIN
+    local command = truncate(view.template, field_w)
+    local command_padding = string.rep(" ", math.max(0, field_w - visual_len(command)))
+    local rows = {
+        string.format(" %sCommand:%s [%s%s%s%s]",
+            tc.bold, tc.reset, tc.title_col, command, tc.reset, command_padding),
+        string.format(" %sPreview:%s %s$ %s%s",
+            tc.dim, tc.reset, tc.cpu_low, truncate(view.preview, field_w), tc.reset),
+    }
+    if not view.compact then
+        rows[#rows + 1] = ""
+    end
+    rows[#rows + 1] = string.format(" %sQuick Presets (%s):%s",
+        tc.title_col, is_windows and "Windows" or "Linux", tc.reset)
+    for index, preset in ipairs(get_diagnostic_presets()) do
+        local is_selected = (index == view.selected_index)
+        rows[#rows + 1] = diagnostic_preset_row(preset, is_selected, view.modal_w, tc)
+    end
+    if not view.compact then
+        rows[#rows + 1] = ""
+    end
+    rows[#rows + 1] = string.format(
+        " %sTokens: %%p (PID), %%c (Binary), %%u (User)%s", tc.dim, tc.reset)
+    rows[#rows + 1] = string.format(
+        "  %s[Enter] Execute   [1-5] Run Preset   [↑/↓] Select   [Esc] Cancel%s",
+        tc.bold, tc.reset)
+    return rows
+end
+
 local function draw_diagnostic_modal(out, pr, custom_cmd, sel_preset_idx, term_w, term_h, theme)
-    local tc = theme or C
     local presets = get_diagnostic_presets()
-    sel_preset_idx = math.max(1, math.min(#presets, sel_preset_idx or 1))
-    local active_template = (custom_cmd and #custom_cmd > 0) and custom_cmd or presets[sel_preset_idx].cmd
-    local preview_cmd = expand_diagnostic_cmd(active_template, pr)
-
-    local mw = math.min(84, term_w - 4)
-    local compact = (term_h < 17)
-    local mh = compact and 12 or 14
-    local mx = math.floor((term_w - mw) / 2)
-    local my = math.floor((term_h - mh) / 2)
-
-    local modal_title = string.format("Process Diagnostic Runner [PID %d: %s]", pr.pid or 0, pr.comm or "process")
-    draw_modal_box(out, mx, my, mw, mh, modal_title)
-
-    -- Row 1: Command Input Box
-    local cmd_disp = truncate(active_template, mw - 14)
-    table.insert(out, draw_box_row(mx, my + 1, mw, string.format(" %sCommand:%s [%s%s%s%s]",
-        tc.bold, tc.reset, tc.title_col, cmd_disp, tc.reset, string.rep(" ", math.max(0, mw - 14 - visual_len(cmd_disp))))))
-
-    -- Row 2: Live Preview
-    local prev_disp = truncate(preview_cmd, mw - 14)
-    table.insert(out, draw_box_row(mx, my + 2, mw, string.format(" %sPreview:%s %s$ %s%s",
-        tc.dim, tc.reset, tc.cpu_low, prev_disp, tc.reset)))
-
-    local cur_row = my + 3
-    if not compact then
-        table.insert(out, draw_box_row(mx, cur_row, mw, ""))
-        cur_row = cur_row + 1
+    local selected_index = math.max(1, math.min(#presets, sel_preset_idx or 1))
+    local template = presets[selected_index].cmd
+    if custom_cmd and #custom_cmd > 0 then
+        template = custom_cmd
     end
+    local x, y, w, h, compact = diagnostic_modal_geometry(term_w, term_h)
+    local rows = diagnostic_modal_rows({
+        template = template,
+        preview = expand_diagnostic_cmd(template, pr),
+        selected_index = selected_index,
+        modal_w = w,
+        compact = compact,
+        theme = theme or C,
+    })
 
-    -- Quick Presets Header
-    table.insert(out, draw_box_row(mx, cur_row, mw, string.format(" %sQuick Presets (%s):%s", tc.title_col, is_windows and "Windows" or "Linux", tc.reset)))
-    cur_row = cur_row + 1
-
-    -- Presets list
-    for i, p in ipairs(presets) do
-        local is_sel = (i == sel_preset_idx)
-        local key_tag = string.format("[%s]", p.key)
-        local line_text = string.format("   %s %-24s (%s)", key_tag, p.name, p.cmd)
-        if is_sel then
-            local sel_line = string.format(" ▶ %s %-24s (%s)", key_tag, p.name, p.cmd)
-            table.insert(out, draw_box_row(mx, cur_row, mw, tc.sel_bg .. truncate(sel_line, mw - 4) .. tc.reset))
-        else
-            table.insert(out, draw_box_row(mx, cur_row, mw, truncate(line_text, mw - 4)))
-        end
-        cur_row = cur_row + 1
+    local title = string.format("Process Diagnostic Runner [PID %d: %s]",
+        pr.pid or 0, pr.comm or "process")
+    draw_modal_box(out, x, y, w, h, title)
+    for index = 1, math.min(#rows, h - 2) do
+        table.insert(out, draw_box_row(x, y + index, w, rows[index]))
     end
-
-    if not compact then
-        table.insert(out, draw_box_row(mx, cur_row, mw, ""))
-        cur_row = cur_row + 1
-    end
-
-    -- Macro Tokens Hint
-    table.insert(out, draw_box_row(mx, cur_row, mw, string.format(" %sTokens: %%p (PID), %%c (Binary), %%u (User)%s", tc.dim, tc.reset)))
-    cur_row = cur_row + 1
-
-    -- Actions Footer
-    table.insert(out, draw_box_row(mx, cur_row, mw, string.format("  %s[Enter] Execute   [1-5] Run Preset   [↑/↓] Select   [Esc] Cancel%s", tc.bold, tc.reset)))
 end
 
 local function render_diagnostic_modal_frame(proc, custom_cmd, sel_preset_idx, term_w, term_h, theme)
@@ -3761,11 +4029,8 @@ local function main(args)
                 elseif k.btn == 0 and not k.release then
                     -- Left Click Press
                     if show_diagnostic_modal then
-                        local mw = math.min(84, term_w - 4)
-                        local compact = (term_h < 17)
-                        local mh = compact and 12 or 14
-                        local mx = math.floor((term_w - mw) / 2)
-                        local my = math.floor((term_h - mh) / 2)
+                        local mx, my, mw, mh, compact =
+                            diagnostic_modal_geometry(term_w, term_h)
                         local presets = get_diagnostic_presets()
                         local header_offset = compact and 3 or 4
                         local preset_clicked = false
@@ -4809,110 +5074,33 @@ local function main(args)
             end
 
             -- 5. Modal Overlays (Inspector, Signal Modal, Help)
-            if show_inspector and procs[sel_proc] then
-                local pr = procs[sel_proc]
-                local mw = math.min(74, term_w - 4)
-                local mh = 16
-                local mx = math.floor((term_w - mw) / 2)
-                local my = math.floor((term_h - mh) / 2)
-                draw_modal_box(out, mx, my, mw, mh, string.format("Process Inspector: PID %d", pr.pid))
-
-                table.insert(out, draw_box_row(mx, my + 1, mw, string.format(" %sCommand:%s   %s", C.bold, C.reset, pr.cmdline)))
-                table.insert(out, draw_box_row(mx, my + 2, mw, string.format(" %sBinary:%s    %s", C.bold, C.reset, pr.comm)))
-                table.insert(out, draw_box_row(mx, my + 3, mw, string.format(" %sUser:%s      %-8s (UID: %d)", C.bold, C.reset, pr.username, pr.uid or 0)))
-                local _, b_sym, b_char, b_name, b_col = get_state_badge(pr.state, false, C)
-                local state_desc = string.format("%s%s %s (%s)%s", b_col, b_sym, b_char, b_name, C.reset)
-                table.insert(out, draw_box_row(mx, my + 4, mw, string.format(" %sState:%s     %-24s %sThreads:%s  %d", C.bold, C.reset, state_desc, C.bold, C.reset, pr.threads or 1)))
-                table.insert(out, draw_box_row(mx, my + 5, mw, string.format(" %sPPID:%s      %-7d   %sNice:%s     %d", C.bold, C.reset, pr.ppid or 0, C.bold, C.reset, pr.nice or 0)))
-                table.insert(out, draw_box_row(mx, my + 6, mw, string.format(" %sTIME+ (CPU):%s %-10s %sElapsed:%s   %s", C.bold, C.reset, format_time_plus(pr.cpu_time_sec or 0), C.bold, C.reset, format_elapsed(pr.elapsed_sec or 0))))
-                table.insert(out, draw_box_row(mx, my + 7, mw, string.format(" %sCPU%%:%s     %-6.1f%%   %sMemory%%:%s %-6.1f%%", C.bold, C.reset, pr.cpu_pct, C.bold, C.reset, pr.mem_pct)))
-                table.insert(out, draw_box_row(mx, my + 8, mw, string.format(" %sMemory:%s    RES: %s │ VIRT: %s", C.bold, C.reset, format_bytes(pr.res_kb), format_bytes(pr.vsize_kb or 0))))
-                table.insert(out, draw_box_row(mx, my + 9, mw, string.format(" %sDisk I/O:%s  Read: %s (Tot: %s) │ Write: %s (Tot: %s)",
-                    C.bold, C.reset,
-                    format_rate(pr.io_read_rate or 0), format_bytes(math.floor((pr.io_read_bytes or 0) / 1024)),
-                    format_rate(pr.io_write_rate or 0), format_bytes(math.floor((pr.io_write_bytes or 0) / 1024)))))
-                table.insert(out, draw_box_row(mx, my + 11, mw, string.format("  %s[k] Kill   [R] Renice   [o/:] Diag   [Enter / Esc] Close Inspector%s", C.title_col, C.reset)))
-            elseif show_signal_modal and (target_signal_pid or procs[sel_proc]) then
-                local pr_pid = target_signal_pid or (procs[sel_proc] and procs[sel_proc].pid or 0)
-                local pr_comm = target_signal_comm or (procs[sel_proc] and procs[sel_proc].comm or "unknown")
-                local mw = math.min(68, term_w - 4)
-                local mh = #SIGNALS + 6
-                local mx = math.floor((term_w - mw) / 2)
-                local my = math.floor((term_h - mh) / 2)
-                draw_modal_box(out, mx, my, mw, mh, string.format("Dispatch Signal to PID %d (%s)", pr_pid, pr_comm))
-
-                local prompt_header = is_windows and " Select a signal to dispatch (Win32):" or " Select a POSIX signal to send:"
-                table.insert(out, draw_box_row(mx, my + 1, mw, prompt_header))
-                for s_i, s in ipairs(SIGNALS) do
-                    local is_sel = (s_i == sel_signal_idx)
-                    local extra = (is_windows and s.sig ~= 9 and s.sig ~= 15) and " (POSIX only)" or ""
-                    local line = string.format("   [%2d] %-8s - %s%s", s.sig, s.name, s.desc, extra)
-                    if is_sel then
-                        table.insert(out, draw_box_row(mx, my + 2 + s_i, mw, C.sel_bg .. "▶" .. line:sub(2) .. C.reset))
-                    else
-                        table.insert(out, draw_box_row(mx, my + 2 + s_i, mw, line))
-                    end
-                end
-                table.insert(out, draw_box_row(mx, my + mh - 2, mw, string.format("  %s[↑/↓] Select   [Enter] Send   [Esc] Cancel%s", C.dim, C.reset)))
-            elseif show_renice_modal and (target_renice_pid or procs[sel_proc]) then
-                local pr = procs[sel_proc]
-                local pr_pid = target_renice_pid or (pr and pr.pid or 0)
-                local pr_comm = target_renice_comm or (pr and pr.comm or "unknown")
-                local cur_nice = (pr and pr.nice) or renice_val or 0
-                local mw = math.min(64, term_w - 4)
-                local mh = 10
-                local mx = math.floor((term_w - mw) / 2)
-                local my = math.floor((term_h - mh) / 2)
-                draw_modal_box(out, mx, my, mw, mh, string.format("Renice Process: PID %d (%s)", pr_pid, pr_comm))
-
-                table.insert(out, draw_box_row(mx, my + 1, mw, string.format(" Current Priority: %sNice %d%s", C.bold, cur_nice, C.reset)))
-                table.insert(out, draw_box_row(mx, my + 2, mw, " Adjust priority (-20 = Highest/Realtime, 19 = Lowest/Idle):"))
-
-                local slider_w = mw - 16
-                local ratio = (renice_val + 20) / 39.0
-                local pos = math.max(0, math.min(slider_w - 1, math.floor(ratio * (slider_w - 1))))
-                local slider_str = string.rep("─", pos) .. "█" .. string.rep("─", slider_w - 1 - pos)
-                local prio_col = (renice_val < 0) and C.cpu_high or ((renice_val == 0) and C.reset or C.cpu_low)
-
-                table.insert(out, draw_box_row(mx, my + 4, mw, string.format("  Nice: %s%3d%s  [%s%s%s]",
-                    prio_col, renice_val, C.reset, C.title_col, slider_str, C.reset)))
-
-                local label = (renice_val < -5) and "High Priority (Aggressive)"
-                    or ((renice_val < 0) and "Above Normal Priority"
-                    or ((renice_val == 0) and "Normal Priority (Default)"
-                    or ((renice_val < 10) and "Below Normal Priority"
-                    or "Idle / Background Priority")))
-                table.insert(out, draw_box_row(mx, my + 5, mw, string.format("  Level: %s%s%s", C.bold, label, C.reset)))
-                table.insert(out, draw_box_row(mx, my + 7, mw, string.format("  %s[←/→, +/-] Adjust   [Enter] Apply   [Esc] Cancel%s", C.dim, C.reset)))
+            local selected_process = procs[sel_proc]
+            local modal = nil
+            if show_inspector and selected_process then
+                modal = build_inspector_modal(selected_process)
+            elseif show_signal_modal and (target_signal_pid or selected_process) then
+                modal = build_signal_modal(
+                    target_signal_pid or selected_process.pid,
+                    target_signal_comm or selected_process.comm or "unknown",
+                    sel_signal_idx)
+            elseif show_renice_modal and (target_renice_pid or selected_process) then
+                local shown = selected_process or {}
+                modal = build_renice_modal({
+                    pid = target_renice_pid or shown.pid or 0,
+                    comm = target_renice_comm or shown.comm or "unknown",
+                    current_nice = shown.nice or renice_val or 0,
+                    new_nice = renice_val,
+                }, term_w)
             elseif show_diagnostic_modal then
-                local pr = procs[sel_proc] or { pid = 0, comm = "process", username = "user" }
-                draw_diagnostic_modal(out, pr, diagnostic_custom_cmd, sel_diagnostic_preset, term_w, term_h, C)
+                local pr = selected_process
+                    or { pid = 0, comm = "process", username = "user" }
+                draw_diagnostic_modal(out, pr, diagnostic_custom_cmd,
+                    sel_diagnostic_preset, term_w, term_h, C)
             elseif show_help then
-                local mw = math.min(74, term_w - 4)
-                local mh = 21
-                local mx = math.floor((term_w - mw) / 2)
-                local my = math.floor((term_h - mh) / 2)
-                draw_modal_box(out, mx, my, mw, mh, "Help & Keybindings")
-
-                table.insert(out, draw_box_row(mx, my + 1, mw, string.format(" %sPane & Layout Controls:%s", C.title_col, C.reset)))
-                table.insert(out, draw_box_row(mx, my + 2, mw, "   Tab, Shift+Tab Cycle active pane focus ([1]-[4])"))
-                table.insert(out, draw_box_row(mx, my + 3, mw, "   1, 2, 3, 4     Jump directly to CPU, Mem, Net, Procs"))
-                table.insert(out, draw_box_row(mx, my + 4, mw, "   z, f           Toggle zoom / maximize focused pane"))
-                table.insert(out, draw_box_row(mx, my + 5, mw, string.format(" %sNavigation & Selection:%s", C.title_col, C.reset)))
-                table.insert(out, draw_box_row(mx, my + 6, mw, "   ↑/↓, k/j       Select process / scroll rows"))
-                table.insert(out, draw_box_row(mx, my + 7, mw, "   PgUp/PgDn      Jump 15 rows   Home/End Jump to ends"))
-                table.insert(out, draw_box_row(mx, my + 8, mw, string.format(" %sProcess Controls:%s", C.title_col, C.reset)))
-                table.insert(out, draw_box_row(mx, my + 9, mw, "   /              Filter: text, u:<user>, s:<state>, cpu>X, m>XM"))
-                table.insert(out, draw_box_row(mx, my + 10, mw, "   [, ]           Cycle category tabs ([All], [User], [System], ...)"))
-                table.insert(out, draw_box_row(mx, my + 11, mw, "   t, F5          Toggle Process Tree view   Space Fold/Pause"))
-                table.insert(out, draw_box_row(mx, my + 12, mw, "   Enter, i       Inspect process details modal"))
-                table.insert(out, draw_box_row(mx, my + 13, mw, "   k, R           Open signal dispatcher, Renice modal"))
-                table.insert(out, draw_box_row(mx, my + 14, mw, "   o, :, !        Open process diagnostic runner (lsof, strace, etc.)"))
-                table.insert(out, draw_box_row(mx, my + 15, mw, string.format(" %sDisplay & Sorting:%s", C.title_col, C.reset)))
-                table.insert(out, draw_box_row(mx, my + 16, mw, "   c, m, p, n     Sort by CPU, Memory, PID, or Name"))
-                table.insert(out, draw_box_row(mx, my + 17, mw, "   u, s, d, e, r  Sort by User, Threads, I/O, TIME+, Reverse"))
-                table.insert(out, draw_box_row(mx, my + 18, mw, "   C, T           CPU view mode, Cycle color themes"))
-                table.insert(out, draw_box_row(mx, my + 19, mw, string.format("  %s[Esc / Enter / ?] Close Help Dialog%s", C.dim, C.reset)))
+                modal = build_help_modal()
+            end
+            if modal then
+                draw_modal(out, modal, term_w, term_h)
             end
 
             -- 6. Footer Line & Search / Status
@@ -5333,6 +5521,13 @@ local M = {
     monotonic_now                 = monotonic_now,
     get_diagnostic_presets        = get_diagnostic_presets,
     render_diagnostic_modal_frame = render_diagnostic_modal_frame,
+    place_modal                   = place_modal,
+    fit_modal_rows                = fit_modal_rows,
+    render_modal_frame            = render_modal_frame,
+    build_inspector_modal         = build_inspector_modal,
+    build_signal_modal            = build_signal_modal,
+    build_renice_modal            = build_renice_modal,
+    build_help_modal              = build_help_modal,
     suspend_raw_mode              = suspend_raw_mode,
     resume_raw_mode               = resume_raw_mode,
     read_key                      = read_key,

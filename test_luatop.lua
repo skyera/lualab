@@ -1328,6 +1328,167 @@ TestRunner.describe("Process table sorting and header clicks", function()
     end)
 end)
 
+TestRunner.describe("Modal layout on small terminals", function()
+    local SIZES = {
+        { w = 200, h = 60 }, { w = 80, h = 24 }, { w = 80, h = 18 },
+        { w = 80, h = 12 }, { w = 60, h = 8 }, { w = 40, h = 6 },
+        { w = 20, h = 5 }, { w = 10, h = 4 },
+    }
+    local process = {
+        pid = 4242, ppid = 1, comm = "my_daemon", username = "alice", uid = 1000,
+        cmdline = "/usr/bin/my_daemon --serve " .. string.rep("x", 300),
+        state = "R", cpu_pct = 12.5, mem_pct = 3.1, res_kb = 64000,
+        vsize_kb = 900000, threads = 4, nice = 0, cpu_time_sec = 61.5,
+        elapsed_sec = 3700, io_read_rate = 2048, io_write_rate = 0,
+        io_read_bytes = 5e6, io_write_bytes = 1e6,
+    }
+    local sparse_process = { pid = 7, comm = "bare", cmdline = "bare", username = "u" }
+
+    local function build_renice(term_w, new_nice)
+        local target = { pid = 4242, comm = "my_daemon", current_nice = 0, new_nice = new_nice }
+        return btop.build_renice_modal(target, term_w)
+    end
+
+    --- Every modal renderer, as name -> function(term_w, term_h) -> frame.
+    local RENDERERS = {
+        help = function(w, h)
+            return btop.render_modal_frame(btop.build_help_modal(), w, h)
+        end,
+        inspector = function(w, h)
+            return btop.render_modal_frame(btop.build_inspector_modal(process), w, h)
+        end,
+        signal = function(w, h)
+            local modal = btop.build_signal_modal(4242, "my_daemon", 2)
+            return btop.render_modal_frame(modal, w, h)
+        end,
+        renice = function(w, h)
+            return btop.render_modal_frame(build_renice(w, 5), w, h)
+        end,
+        diagnostic = function(w, h)
+            return btop.render_diagnostic_modal_frame(process, nil, 2, w, h)
+        end,
+    }
+
+    --- Paints a cursor-addressed frame onto a grid and reports where it drew.
+    local function paint(frame, term_w, term_h)
+        local screen = { lines = {}, min_row = math.huge, max_row = 0, max_col = 0 }
+        local without_color = frame:gsub("\27%[[%d;]*m", "")
+        for row, col, text in without_color:gmatch("\27%[(%-?%d+);(%-?%d+)H([^\27]*)") do
+            row, col = tonumber(row), tonumber(col)
+            local last_col = col + btop.visual_len(text) - 1
+            screen.min_row = math.min(screen.min_row, row)
+            screen.max_row = math.max(screen.max_row, row)
+            screen.min_col = math.min(screen.min_col or col, col)
+            screen.max_col = math.max(screen.max_col, last_col)
+            screen.lines[row] = (screen.lines[row] or "") .. text
+        end
+        return screen
+    end
+
+    TestRunner.it("should keep every modal inside the terminal", function()
+        for name, render in pairs(RENDERERS) do
+            for _, size in ipairs(SIZES) do
+                local where = string.format("%s at %dx%d", name, size.w, size.h)
+                local frame = render(size.w, size.h)
+                assert_true(not frame:find("\27[-", 1, true), "negative escape: " .. where)
+                assert_true(not frame:find("\n", 1, true), "newline: " .. where)
+                local screen = paint(frame, size.w, size.h)
+                assert_true(screen.min_row >= 1, "row below 1: " .. where)
+                assert_true(screen.min_col >= 1, "column below 1: " .. where)
+                assert_true(screen.max_row <= size.h, "row past bottom: " .. where)
+                if size.w >= 20 then
+                    assert_true(screen.max_col <= size.w,
+                        "column " .. screen.max_col .. " past right edge: " .. where)
+                end
+            end
+        end
+    end)
+
+    TestRunner.it("should leave the footer row free on normal terminals", function()
+        for name, render in pairs(RENDERERS) do
+            for _, size in ipairs({ { w = 80, h = 24 }, { w = 80, h = 12 }, { w = 60, h = 8 } }) do
+                local screen = paint(render(size.w, size.h), size.w, size.h)
+                assert_true(screen.max_row <= size.h - 1,
+                    string.format("%s covers the last row at %dx%d", name, size.w, size.h))
+            end
+        end
+    end)
+
+    TestRunner.it("should always keep the close hint when rows are clipped", function()
+        local hints = {
+            help = "Close Help Dialog", inspector = "Close Inspector",
+            signal = "[Esc] Cancel", renice = "[Esc] Cancel",
+        }
+        for name, hint in pairs(hints) do
+            for _, height in ipairs({ 24, 12, 8, 6, 5 }) do
+                local frame = RENDERERS[name](100, height)
+                assert_true(frame:find(hint, 1, true) ~= nil,
+                    name .. " lost its close hint at height " .. height)
+            end
+        end
+    end)
+
+    TestRunner.it("should show the whole help text when it fits", function()
+        local modal = btop.build_help_modal()
+        local frame = btop.render_modal_frame(modal, 100, 30):gsub("\27%[[%d;]*m", "")
+        for _, row in ipairs(modal.body) do
+            local plain = row:gsub("\27%[[%d;]*m", "")
+            assert_true(frame:find(plain, 1, true) ~= nil, "missing help row: " .. plain)
+        end
+    end)
+
+    TestRunner.it("should clip body rows from the bottom and keep the footer", function()
+        local body = { "a", "b", "c" }
+        local function fit(inner_h)
+            return table.concat(btop.fit_modal_rows(body, "F", inner_h), "|")
+        end
+        assert_eq(fit(9), "a|b|c||F", "roomy: blank separator before footer")
+        assert_eq(fit(5), "a|b|c||F", "exact fit")
+        assert_eq(fit(4), "a|b|c|F", "separator dropped first")
+        assert_eq(fit(3), "a|b|F", "then body rows from the bottom")
+        assert_eq(fit(1), "F", "footer alone")
+        assert_eq(fit(0), "", "no room at all")
+    end)
+
+    TestRunner.it("should place boxes within bounds", function()
+        local x, y, w, h = btop.place_modal(74, 21, 80, 24)
+        assert_eq(table.concat({ x, y, w, h }, ","), "3,1,74,21", "fits: centered")
+        x, y, w, h = btop.place_modal(74, 21, 80, 18)
+        assert_eq(table.concat({ x, y, w, h }, ","), "3,1,74,17", "short: clipped")
+        x, y, w, h = btop.place_modal(74, 21, 30, 10)
+        assert_eq(table.concat({ x, y, w, h }, ","), "2,1,26,9", "narrow and short")
+        x, y, w, h = btop.place_modal(74, 21, 2, 1)
+        assert_true(x >= 1 and y >= 1 and w >= 1 and h >= 1, "degenerate terminal")
+    end)
+
+    TestRunner.it("should render the inspector for a sparse process record", function()
+        local frame = btop.render_modal_frame(
+            btop.build_inspector_modal(sparse_process), 80, 24)
+        assert_true(frame:find("PID 7", 1, true) ~= nil, "title shows the pid")
+    end)
+
+    TestRunner.it("should keep the renice slider inside its brackets", function()
+        for _, term_w in ipairs({ 200, 80, 60, 40 }) do
+            for _, nice_value in ipairs({ -20, 0, 19 }) do
+                local frame = btop.render_modal_frame(build_renice(term_w, nice_value), term_w, 24)
+                local plain = frame:gsub("\27%[[%d;]*m", "")
+                local where = string.format("nice %d at width %d", nice_value, term_w)
+                assert_true(plain:find("%[[─█]+%]") ~= nil, "slider clipped: " .. where)
+            end
+        end
+    end)
+
+    TestRunner.it("should mark the selected signal and diagnostic preset", function()
+        local signal_frame = RENDERERS.signal(80, 24)
+        assert_true(signal_frame:find("▶  [ 9] SIGKILL", 1, true) ~= nil, "signal row 2")
+        local diagnostic_frame = RENDERERS.diagnostic(120, 30):gsub("\27%[[%d;]*m", "")
+        assert_true(diagnostic_frame:find("▶ [2] Live Syscall Trace", 1, true) ~= nil,
+            "preset row 2")
+        assert_true(diagnostic_frame:find("[Enter] Execute", 1, true) ~= nil,
+            "diagnostic footer at full size")
+    end)
+end)
+
 -- Summary
 print("\n--------------------------------------------------")
 local total = TestRunner.passed + TestRunner.failed

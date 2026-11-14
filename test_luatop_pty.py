@@ -171,8 +171,35 @@ def test_runtime_error_restores_terminal():
     check("exit status 1", s.finish() == 1)
 
 
+def test_modals_on_short_terminals():
+    print("\n▶ luatop modals on short terminals")
+    cases = [
+        ("help", "?", 18, 80, "Close Help Dialog"),
+        ("help", "?", 10, 80, "Close Help Dialog"),
+        ("inspector", "i", 12, 80, "Close Inspector"),
+        # From the main view "k" moves the selection up, so go via the inspector.
+        ("signal picker", "ik", 9, 80, "[Esc] Cancel"),
+        ("renice", "R", 8, 60, "[Esc] Cancel"),
+        ("diagnostic runner", ":", 9, 80, "Diagnostic Runner"),
+    ]
+    for name, key, rows, cols, expected in cases:
+        s = Session(rows=rows, cols=cols)
+        s.read(1.5)
+        s.send(key)
+        out = s.read(1.0)
+        label = "%s at %dx%d" % (name, rows, cols)
+        check(label + " draws without invalid cursor escapes",
+              "\x1b[-" not in out and expected in out, repr(out[-200:]))
+        s.send("\x1b")
+        s.read(0.3)
+        s.send("q")
+        s.read(0.5)
+        check(label + " closes and quits with status 0", s.finish() == 0)
+
+
 def main():
     test_startup_and_quit()
+    test_modals_on_short_terminals()
     test_runtime_error_restores_terminal()
     test_resize_and_signals()
     test_end_of_input_quits_from_every_mode()
