@@ -2071,6 +2071,9 @@ else
     local linux_gpu_inited = false
     local linux_nvml_lib = nil
     local linux_nvml_cnt = 0
+    -- GPU display names by DRM card index, kept across refreshes so lspci runs
+    -- once per card. false = looked up before and unresolved.
+    local cached_drm_names = {}
 
     local function init_linux_gpu()
         if linux_gpu_inited then return end
@@ -2149,7 +2152,6 @@ else
         end
 
         -- Linux sysfs & DRM fallback (Intel iGPU / AMDGPU / Broadcom VideoCore / DRM Cards)
-        local cached_drm_names = {}
         for card_idx = 0, 7 do
             local card_base = "/sys/class/drm/card" .. card_idx
             local f_uevent = io.open(card_base .. "/device/uevent", "r")
@@ -2170,7 +2172,6 @@ else
                 end
                 f_uevent:close()
 
-                -- false = looked up before and unresolved; avoids re-running lspci every refresh.
                 local gpu_name = cached_drm_names[card_idx]
                 if gpu_name == nil then
                     if slot and slot:match("^%x+:%x+:%x+%.%x$") then

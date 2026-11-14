@@ -1103,6 +1103,48 @@ TestRunner.describe("Hostile process names", function()
     end)
 end)
 
+TestRunner.describe("GPU name lookup caching", function()
+    local ffi = require("ffi")
+    local REFRESH_COUNT = 5
+
+    TestRunner.it("should run lspci at most once across refreshes", function()
+        if ffi.os ~= "Linux" then
+            return
+        end
+        ffi.cdef("int setenv(const char *name, const char *value, int overwrite);")
+        local shim_dir = os.tmpname() .. "_luatop_shim"
+        local call_log = shim_dir .. "/calls.log"
+        assert_true(os.execute("mkdir -p '" .. shim_dir .. "'") == 0, "mkdir shim")
+        local shim = assert(io.open(shim_dir .. "/lspci", "w"))
+        shim:write("#!/bin/sh\necho call >> '" .. call_log .. "'\n")
+        shim:write("echo '00:02.0 VGA compatible controller: Test GPU (rev 01)'\n")
+        shim:close()
+        os.execute("chmod +x '" .. shim_dir .. "/lspci'")
+
+        local original_path = os.getenv("PATH")
+        ffi.C.setenv("PATH", shim_dir .. ":" .. original_path, 1)
+        local ok, err = pcall(function()
+            for _ = 1, REFRESH_COUNT do
+                btop.read_gpu_stats()
+            end
+        end)
+        ffi.C.setenv("PATH", original_path, 1)
+
+        local call_count = 0
+        local log = io.open(call_log, "r")
+        if log then
+            for _ in log:lines() do
+                call_count = call_count + 1
+            end
+            log:close()
+        end
+        os.execute("rm -rf '" .. shim_dir .. "'")
+        assert_true(ok, tostring(err))
+        assert_true(call_count <= 1,
+            "lspci ran " .. call_count .. " times in " .. REFRESH_COUNT .. " refreshes")
+    end)
+end)
+
 -- Summary
 print("\n--------------------------------------------------")
 local total = TestRunner.passed + TestRunner.failed
