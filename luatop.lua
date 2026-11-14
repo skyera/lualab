@@ -3799,6 +3799,39 @@ end
 local MIN_INTERVAL_MS = 250
 local MAX_INTERVAL_MS = 5000
 
+--- Reads every telemetry source once and returns the results as a snapshot.
+-- This is the expensive step (it scans all of /proc), so the main loop runs
+-- it on the refresh timer only and redraws from the snapshot in between.
+local function gather_snapshot(now_clock)
+    local cores, overall_cpu = read_cpu_stats()
+    local temp_c, freq_ghz = read_cpu_sensors()
+    local mem = read_memory_stats()
+    local procs = read_process_table(mem.total_kb or 1, now_clock)
+    local load_str, task_str = read_loadavg(overall_cpu, #procs)
+    return {
+        cores = cores,
+        overall_cpu = overall_cpu,
+        temp_c = temp_c,
+        freq_ghz = freq_ghz,
+        mem = mem,
+        net = read_network_stats(now_clock),
+        storage = read_storage_stats(now_clock),
+        gpus = read_gpu_stats(),
+        procs = procs,
+        load_str = load_str,
+        task_str = task_str,
+        category_counts = count_process_categories(procs),
+    }
+end
+
+--- Appends a sample to a sparkline history, dropping the oldest when full.
+local function push_history(history, value, max_length)
+    table.insert(history, value)
+    if #history > max_length then
+        table.remove(history, 1)
+    end
+end
+
 local HELP_TEXT = [[
 luatop.lua - High-Performance Linux & Windows System Monitor
 Usage:
@@ -3985,6 +4018,7 @@ local function main(args)
 
     local next_refresh_time = 0
     local procs = {}
+    local snapshot = nil
 
     -- Warm up telemetry (CPU and processes) so the very first frame renders realistic percentages
     pcall(function()
@@ -4536,40 +4570,38 @@ local function main(args)
         end
 
         local curr_clock = monotonic_now()
-        if (curr_clock >= next_refresh_time and not is_paused) or needs_redraw then
-            next_refresh_time = curr_clock + (refresh_interval_ms / 1000.0)
-
-            -- 1. Gather Telemetry
-            local cores, overall_cpu = read_cpu_stats()
-            local temp_c, freq_ghz = read_cpu_sensors()
-            local mem = read_memory_stats()
-            local net = read_network_stats(curr_clock)
-            local storage = read_storage_stats(curr_clock)
-            local gpus = read_gpu_stats and read_gpu_stats() or {}
-            procs = read_process_table(mem.total_kb or 1, curr_clock)
-            local load_str, task_str = read_loadavg(overall_cpu, #procs)
-
-            -- Sparklines history
-            table.insert(cpu_history, overall_cpu)
-            if #cpu_history > max_history then table.remove(cpu_history, 1) end
-
-            table.insert(mem_history, mem.used_pct)
-            if #mem_history > max_history then table.remove(mem_history, 1) end
-
-            if #gpus > 0 and gpus[1].mem_used_pct then
-                table.insert(gpu_history, gpus[1].mem_used_pct)
-                if #gpu_history > max_history then table.remove(gpu_history, 1) end
+        -- next_refresh_time == 0 asks for a refresh right now (first frame, or
+        -- after a signal, renice or diagnostic run) and applies even when paused.
+        local refresh_forced = (snapshot == nil) or (next_refresh_time == 0)
+        local refresh_due = not is_paused and curr_clock >= next_refresh_time
+        local gather_now = refresh_forced or refresh_due
+        if gather_now or needs_redraw then
+            -- 1. Gather Telemetry, on the timer only. A keypress redraws from
+            -- the last snapshot: re-reading /proc per key made pause useless,
+            -- delayed search echo, and gave noisy rates from tiny intervals.
+            if gather_now then
+                next_refresh_time = curr_clock + (refresh_interval_ms / 1000.0)
+                snapshot = gather_snapshot(curr_clock)
+                push_history(cpu_history, snapshot.overall_cpu, max_history)
+                push_history(mem_history, snapshot.mem.used_pct, max_history)
+                push_history(rx_history, snapshot.net.rx_rate, max_history)
+                push_history(tx_history, snapshot.net.tx_rate, max_history)
+                local first_gpu = snapshot.gpus[1]
+                if first_gpu and first_gpu.mem_used_pct then
+                    push_history(gpu_history, first_gpu.mem_used_pct, max_history)
+                end
             end
 
-            table.insert(rx_history, net.rx_rate)
-            if #rx_history > max_history then table.remove(rx_history, 1) end
-
-            table.insert(tx_history, net.tx_rate)
-            if #tx_history > max_history then table.remove(tx_history, 1) end
+            local cores, overall_cpu = snapshot.cores, snapshot.overall_cpu
+            local temp_c, freq_ghz = snapshot.temp_c, snapshot.freq_ghz
+            local mem, net = snapshot.mem, snapshot.net
+            local storage, gpus = snapshot.storage, snapshot.gpus
+            local load_str, task_str = snapshot.load_str, snapshot.task_str
+            procs = snapshot.procs
 
             -- Category metrics & counts across all discovered processes
             raw_total_procs = #procs
-            category_counts = count_process_categories(procs)
+            category_counts = snapshot.category_counts
             local zombie_count = category_counts.zombies
 
             -- Filter processes by active category tab
@@ -4741,7 +4773,7 @@ local function main(args)
                 local cpu_spark_w = math.min(14, math.max(6, math.floor(left_w * 0.18)))
                 local cpu_spark = make_sparkline(cpu_history, cpu_spark_w, C.cpu_low)
                 local cpu_title
-                local c_temp, c_freq = read_cpu_sensors()
+                local c_temp, c_freq = temp_c, freq_ghz
                 local sensor_str = ""
                 if c_temp or c_freq then
                     local parts = {}
@@ -5533,6 +5565,7 @@ local M = {
     read_key                      = read_key,
     main                          = main,
     run_protected                 = run_protected,
+    gather_snapshot               = gather_snapshot,
     run_self_test                 = run_self_test,
 }
 
