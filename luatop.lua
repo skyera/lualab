@@ -4880,6 +4880,21 @@ Keybindings:
     return 0
 end
 
+--- Runs main() and restores the terminal if it raises.
+-- An uncaught error would otherwise leave the shell in raw mode on the
+-- alternate screen with the cursor hidden. Returns the process exit code.
+local function run_protected(args)
+    local ok, result = xpcall(main, debug.traceback, args)
+    if ok then
+        return result or 0
+    end
+    pcall(disable_raw_mode)
+    io.stderr:write("luatop: fatal error: " .. tostring(result) .. "\n")
+    io.stderr:write("luatop: the terminal was restored; if it still looks "
+        .. "wrong, run 'reset'.\n")
+    return 1
+end
+
 -- =========================================================================
 -- 8.5 CPU & Disk Diagnostic Test Engines
 -- =========================================================================
@@ -5240,6 +5255,7 @@ local M = {
     resume_raw_mode               = resume_raw_mode,
     read_key                      = read_key,
     main                          = main,
+    run_protected                 = run_protected,
     run_self_test                 = run_self_test,
 }
 
@@ -5258,8 +5274,7 @@ if is_entry_point then
             os.exit(ok and 0 or 1)
         end
     end
-    local exit_code = main(arg)
-    os.exit(exit_code or 0)
+    os.exit(run_protected(arg))
 end
 
 return M

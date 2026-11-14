@@ -27,12 +27,12 @@ def check(name, cond, detail=""):
 
 
 class Session:
-    def __init__(self, rows=30, cols=110):
+    def __init__(self, rows=30, cols=110, argv=None):
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.environ["TERM"] = "xterm"
             os.chdir(HERE)
-            os.execvp("luajit", ["luajit", SCRIPT])
+            os.execvp("luajit", argv or ["luajit", SCRIPT])
         self.resize(rows, cols, notify=False)
 
     def resize(self, rows, cols, notify=True):
@@ -132,8 +132,48 @@ def test_end_of_input_quits_from_every_mode():
               "hung" if code is None else "status %s" % code)
 
 
+# Makes the first telemetry read inside luatop's main loop raise, then starts
+# luatop through its protected entry point.
+CRASH_DRIVER = """
+local luatop = require("luatop")
+local index = 1
+while true do
+    local name = debug.getupvalue(luatop.main, index)
+    if not name then
+        error("upvalue read_memory_stats not found")
+    end
+    if name == "read_memory_stats" then
+        debug.setupvalue(luatop.main, index, function()
+            error("injected telemetry failure")
+        end)
+        break
+    end
+    index = index + 1
+end
+os.exit(luatop.run_protected({}))
+"""
+
+
+def test_runtime_error_restores_terminal():
+    print("\n▶ luatop runtime error inside the main loop")
+    s = Session(argv=["luajit", "-e", CRASH_DRIVER])
+    out = s.read(2.5)
+    check("the dashboard had entered the alternate screen", "\x1b[?1049h" in out)
+    check("error restores screen, cursor, wrap and mouse",
+          "\x1b[?1049l" in out and "\x1b[?25h" in out and "\x1b[?7h" in out
+          and "\x1b[?1000l" in out)
+    restored_at = out.rfind("\x1b[?1049l")
+    reported_at = out.find("luatop: fatal error:")
+    check("the error is reported after the screen is restored",
+          0 <= restored_at < reported_at, out[-300:])
+    check("the report names the cause and includes a traceback",
+          "injected telemetry failure" in out and "stack traceback" in out)
+    check("exit status 1", s.finish() == 1)
+
+
 def main():
     test_startup_and_quit()
+    test_runtime_error_restores_terminal()
     test_resize_and_signals()
     test_end_of_input_quits_from_every_mode()
     print("\n=== %d failed ===" % len(FAILURES))
