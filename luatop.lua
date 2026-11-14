@@ -3463,15 +3463,7 @@ end
 local MIN_INTERVAL_MS = 250
 local MAX_INTERVAL_MS = 5000
 
-local function main(args)
-    args = args or {}
-    local arg_interval = nil
-    local arg_theme = nil
-    local arg_tree = false
-
-    for i, a in ipairs(args) do
-        if a == "--help" or a == "-h" then
-            print([[
+local HELP_TEXT = [[
 luatop.lua - High-Performance Linux & Windows System Monitor
 Usage:
   luajit luatop.lua [options]
@@ -3500,27 +3492,97 @@ Keybindings:
   +, -                  Adjust update interval
   ?, h                  Display interactive help dialog
   q, Esc                Quit / Close modal
-]])
-            return 0
-        elseif a == "--version" or a == "-v" then
-            print("luatop.lua v2.2.0 - High-Performance LuaJIT FFI System Monitor")
-            return 0
-        elseif a == "--interval" then
-            arg_interval = tonumber(args[i + 1])
-            if not arg_interval or arg_interval < MIN_INTERVAL_MS or arg_interval > MAX_INTERVAL_MS then
-                io.stderr:write(string.format(
-                    "luatop: --interval expects milliseconds between %d and %d (got %s)\n",
-                    MIN_INTERVAL_MS, MAX_INTERVAL_MS, tostring(args[i + 1])))
-                return 2
+]]
+
+local VERSION_TEXT = "luatop.lua v2.2.0 - High-Performance LuaJIT FFI System Monitor"
+
+local function parse_interval_option(value)
+    local interval = tonumber(value)
+    if interval and interval >= MIN_INTERVAL_MS and interval <= MAX_INTERVAL_MS then
+        return interval
+    end
+    return nil, string.format(
+        "--interval expects milliseconds between %d and %d (got %s)",
+        MIN_INTERVAL_MS, MAX_INTERVAL_MS, tostring(value))
+end
+
+local function parse_theme_option(value)
+    if value and THEMES[value] then
+        return value
+    end
+    return nil, string.format(
+        "--theme expects one of %s (got %s)",
+        table.concat(theme_order, ", "), tostring(value))
+end
+
+-- Options that take a value: the field they set and how the value is checked.
+local VALUE_OPTIONS = {
+    ["--interval"] = { field = "interval", parse = parse_interval_option },
+    ["--theme"] = { field = "theme", parse = parse_theme_option },
+}
+
+-- Options that take no value. --test is handled by the entry point before
+-- main() runs, so it is accepted here and has no further effect.
+local FLAG_OPTIONS = {
+    ["--help"] = { field = "action", value = "help" },
+    ["-h"] = { field = "action", value = "help" },
+    ["--version"] = { field = "action", value = "version" },
+    ["-v"] = { field = "action", value = "version" },
+    ["--tree"] = { field = "tree", value = true },
+    ["--test"] = { field = "test", value = true },
+}
+
+--- Parses command-line arguments into an options table.
+-- Returns nil and a message for an unknown option or an invalid value.
+-- Parsing stops at the first --help or --version, as before.
+local function parse_cli_args(args)
+    local options = { tree = false }
+    local index = 1
+    while index <= #args do
+        local name = args[index]
+        local flag = FLAG_OPTIONS[name]
+        local value_option = VALUE_OPTIONS[name]
+        if flag then
+            options[flag.field] = flag.value
+            if options.action then
+                return options
             end
-        elseif a == "--theme" and args[i + 1] then
-            arg_theme = args[i + 1]
-        elseif a == "--tree" then
-            arg_tree = true
+        elseif value_option then
+            local value, err = value_option.parse(args[index + 1])
+            if value == nil then
+                return nil, err
+            end
+            options[value_option.field] = value
+            index = index + 1
+        else
+            return nil, string.format("unknown option '%s'", tostring(name))
         end
+        index = index + 1
+    end
+    return options
+end
+
+local function main(args)
+    local options, usage_error = parse_cli_args(args or {})
+    if not options then
+        io.stderr:write("luatop: " .. usage_error .. "\n")
+        io.stderr:write("luatop: run 'luajit luatop.lua --help' for usage\n")
+        return 2
+    end
+    if options.action == "help" then
+        print(HELP_TEXT)
+        return 0
+    end
+    if options.action == "version" then
+        print(VERSION_TEXT)
+        return 0
     end
 
-    if arg_theme then set_theme(arg_theme) end
+    local arg_interval = options.interval
+    local arg_tree = options.tree
+    if options.theme then
+        set_theme(options.theme)
+    end
 
     enable_raw_mode()
 
@@ -5249,6 +5311,7 @@ local M = {
     get_category_tab_at_x         = get_category_tab_at_x,
     expand_diagnostic_cmd         = expand_diagnostic_cmd,
     parse_bytes_or_num            = parse_bytes_or_num,
+    parse_cli_args                = parse_cli_args,
     monotonic_now                 = monotonic_now,
     get_diagnostic_presets        = get_diagnostic_presets,
     render_diagnostic_modal_frame = render_diagnostic_modal_frame,

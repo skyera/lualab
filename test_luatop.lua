@@ -1145,6 +1145,42 @@ TestRunner.describe("GPU name lookup caching", function()
     end)
 end)
 
+TestRunner.describe("Command-line argument validation", function()
+    TestRunner.it("should parse valid options", function()
+        local options = btop.parse_cli_args(
+            { "--interval", "500", "--theme", "nord", "--tree" })
+        assert_eq(options.interval, 500, "interval")
+        assert_eq(options.theme, "nord", "theme")
+        assert_eq(options.tree, true, "tree")
+        assert_eq(btop.parse_cli_args({}).tree, false, "tree defaults to off")
+        assert_eq(btop.parse_cli_args({ "-h" }).action, "help", "-h")
+        assert_eq(btop.parse_cli_args({ "-v" }).action, "version", "-v")
+        assert_true(btop.parse_cli_args({ "--test" }) ~= nil, "--test accepted")
+    end)
+
+    TestRunner.it("should name the unknown theme and list the valid ones", function()
+        local options, err = btop.parse_cli_args({ "--theme", "bogus" })
+        assert_eq(options, nil, "no options on error")
+        assert_true(err:find("bogus", 1, true) ~= nil, "names the bad value: " .. err)
+        assert_true(err:find("tokyo_night", 1, true) ~= nil, "lists themes: " .. err)
+    end)
+
+    TestRunner.it("should reject a missing value and an unknown option", function()
+        local _, missing = btop.parse_cli_args({ "--theme" })
+        assert_true(missing:find("--theme", 1, true) ~= nil, missing)
+        local _, unknown = btop.parse_cli_args({ "--nonsense" })
+        assert_eq(unknown, "unknown option '--nonsense'", "unknown option message")
+        local _, stray = btop.parse_cli_args({ "--tree", "extra" })
+        assert_eq(stray, "unknown option 'extra'", "stray positional argument")
+    end)
+
+    TestRunner.it("should exit with status 2 before touching the terminal", function()
+        assert_eq(btop.main({ "--theme", "bogus" }), 2, "bad theme")
+        assert_eq(btop.main({ "--theme" }), 2, "theme without value")
+        assert_eq(btop.main({ "--nonsense" }), 2, "unknown option")
+    end)
+end)
+
 -- Summary
 print("\n--------------------------------------------------")
 local total = TestRunner.passed + TestRunner.failed
