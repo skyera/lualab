@@ -131,6 +131,21 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
    * **Spaces around binary operators**: Use `a = b + c`, `x == y`, `key = value` (not `a=b+c`).
    * **Table spacing**: Space inside curly braces for single-line tables: `{ id = 1, name = "app" }`.
    * **Function arguments & commas**: Always place a single space after commas: `fn(a, b, c)`.
+   * **Line length**: Aim for lines of at most 80 characters; 100 is the hard limit. Never exceed 100 except for a string literal or URL that cannot be split.
+   * **Wrap long lines, do not shorten names**: Break after a comma or before a binary operator (`and`, `or`, `..`, `+`), and indent continuation lines by 4 spaces. Put one argument or table field per line once a call or constructor no longer fits. Pull a long sub-expression into a named local instead of wrapping it three times:
+     ```lua
+     -- Good:
+     local is_busy = process.state == "R"
+         or process.cpu_percent > ACTIVE_CPU_THRESHOLD
+     local label = string.format(
+         "%s: %d processes",
+         category.label,
+         category_counts[category.id] or 0
+     )
+
+     -- Prohibited:
+     local label = string.format("%s: %d processes", category.label, category_counts[category.id] or 0)
+     ```
 
 2. **One Statement Per Line & Multi-Line Control Flow (No Clutter)**:
    * **One statement per line**: Never pack multiple statements on a single line separated by semicolons (e.g., avoid `stmt1; stmt2`, `count = count + 1; print(...)`). Semicolons in Lua code are reserved strictly for `package.path` lists, C struct declarations in `ffi.cdef`, or string literals.
@@ -153,8 +168,12 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
    * **Multi-line tables & arguments**: Format complex table constructors and long argument lists across multiple lines with clean indentation rather than sprawling horizontally.
 
 3. **Small Functions & Clean Code**:
-   * **Small, single-purpose functions**: Each function must do one thing well. Aim for functions that fit within a single screen (<= 30–50 lines). If a function mixes parsing with rendering or needs multiple section comments, split it into focused local helpers.
+   * **Small, single-purpose functions**: Each function must do one thing well and be describable in one sentence without "and". Aim for about 30 lines; 50 is the hard limit. If a function mixes parsing with rendering, needs section comments to navigate, or takes more than 5 parameters, split it into focused local helpers (group related parameters into one table).
+   * **Read top-down**: A function body should read as a short list of steps at one level of detail. Move the details of each step into a well-named helper rather than inlining them.
    * **Shallow nesting**: Prefer guard clauses and early returns over deeply nested blocks. Aim for at most 3 levels of indentation inside a function.
+   * **No nested `and`/`or` chains**: Use `cond and a or b` only for a single simple choice. Write two or more chained choices as `if`/`elseif`, or as a lookup table.
+   * **Named constants, not magic numbers**: Give thresholds, sizes, column widths, and key or signal codes an `UPPER_SNAKE_CASE` name at the top of the file.
+   * **Table-driven over long `elseif` ladders**: Map keys, modes, or names to values or handler functions in a table instead of repeating `elseif x == "..." then`.
    * **Keep code uncluttered**: Remove dead code, unused local variables, leftover debug prints, commented-out code blocks, and speculative features. Do not introduce abstractions or fallback layers that no active code path uses.
    * **No duplicate logic**: Extract repeated patterns into shared local functions rather than copy-pasting.
 
@@ -183,7 +202,7 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
    * **Section dividers**: Use consistent comment dividers (`-- =========================================================================` or `--------------------------------------------------------------------------------`) between logical module sections.
    * **Group related code**: Order a file as banner, requires, constants, C declarations, helpers, core logic, entry point, using section dividers. Keep related functions adjacent, and define helpers before their first use.
    * **Consistent idioms**: Follow one error-handling convention per module (e.g., `value, err` returns, never silent `nil`), one naming style, and one way to build strings and tables.
-   * **Whitespace discipline**: No trailing whitespace, single final newline (`\n`), max line width <= 100–120 columns, and at most 1–2 blank lines between major functions or sections.
+   * **Whitespace discipline**: No trailing whitespace, single final newline (`\n`), lines of at most 80 characters where practical and never more than 100, and at most 1–2 blank lines between major functions or sections.
 
 ## Deployment (`deploy.lua`)
 
