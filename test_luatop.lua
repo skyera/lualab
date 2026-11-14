@@ -1061,6 +1061,18 @@ TestRunner.describe("Hostile process names", function()
         end)
     end)
 
+    TestRunner.it("should list a process whose comm contains a newline", function()
+        if ffi.os ~= "Linux" then
+            return
+        end
+        with_own_comm("lt\nhidden", function()
+            local own = find_own_process()
+            assert_true(own ~= nil, "process must not be hidden by a newline")
+            assert_eq(own.comm, "lt?hidden", "sanitized comm")
+            assert_true(own.threads >= 1, "fields after comm still parse")
+        end)
+    end)
+
     TestRunner.it("should sanitize control bytes in a live cmdline", function()
         if ffi.os ~= "Linux" then
             return

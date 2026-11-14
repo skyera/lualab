@@ -2440,7 +2440,8 @@ else
 
                 local stat_f = io.open(proc_path .. "/stat", "r")
                 if stat_f then
-                    local stat_line = stat_f:read("*l")
+                    -- Whole file, not one line: comm may itself contain a newline.
+                    local stat_line = stat_f:read("*a")
                     stat_f:close()
 
                     if stat_line then
