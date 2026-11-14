@@ -1062,6 +1062,20 @@ local function resolve_username(uid)
     end
 end
 
+-- Bytes a terminal acts on instead of printing: C0 controls and DEL, plus the
+-- UTF-8 encoded C1 controls (U+0080-U+009F), which include CSI and OSC.
+local C0_CONTROL_PATTERN = "[%z\1-\31\127]"
+local C1_CONTROL_PATTERN = "\194[\128-\159]"
+
+--- Makes process-controlled text (comm, cmdline) safe to draw.
+-- Any process can put escape sequences or newlines in its own name, so each
+-- control character is replaced with "?" before the text reaches the terminal.
+local function sanitize_process_text(text)
+    local without_c1 = text:gsub(C1_CONTROL_PATTERN, "?")
+    local printable = without_c1:gsub(C0_CONTROL_PATTERN, "?")
+    return printable
+end
+
 if is_windows then
     kernel32 = kernel32 or ffi.load("kernel32")
     psapi = psapi or ffi.load("psapi")
@@ -1493,7 +1507,7 @@ if is_windows then
         while ok ~= 0 do
             local pid = pe.th32ProcessID
             local ppid = pe.th32ParentProcessID
-            local exe = ffi.string(pe.szExeFile)
+            local exe = sanitize_process_text(ffi.string(pe.szExeFile))
             local res_kb = 0
             local cpu_pct = 0
             local threads = tonumber(pe.cntThreads) or 1
@@ -2431,7 +2445,8 @@ else
 
                     if stat_line then
                         -- Correct greedy parsing of comm and rest to prevent shifts on spaces/parentheses
-                        local comm = stat_line:match("%((.*)%)") or ""
+                        local raw_comm = stat_line:match("%((.*)%)") or ""
+                        local comm = sanitize_process_text(raw_comm)
                         local rest = stat_line:match(".*%)%s+(.*)$")
 
                         if rest then
@@ -2483,7 +2498,9 @@ else
                                 local raw_cmd = cmd_f:read(512) or ""
                                 cmd_f:close()
                                 if #raw_cmd > 0 then
-                                    cmdline = raw_cmd:gsub("%z", " "):gsub("%s+$", "")
+                                    local arguments = raw_cmd:gsub("%z", " ")
+                                    arguments = arguments:gsub("%s+$", "")
+                                    cmdline = sanitize_process_text(arguments)
                                 end
                             end
 
@@ -5187,6 +5204,7 @@ local M = {
     terminate_process             = terminate_process,
     SIGNALS                       = SIGNALS,
     resolve_username              = resolve_username,
+    sanitize_process_text         = sanitize_process_text,
     set_theme                     = set_theme,
     cycle_theme                   = cycle_theme,
     get_themes                    = function() return THEMES end,

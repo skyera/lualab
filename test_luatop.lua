@@ -995,6 +995,102 @@ TestRunner.describe("11. Code review regressions", function()
     end)
 end)
 
+TestRunner.describe("Hostile process names", function()
+    local ffi = require("ffi")
+    local PR_SET_NAME = 15
+    local PR_GET_NAME = 16
+    local COMM_BUFFER_BYTES = 16
+
+    if ffi.os == "Linux" then
+        ffi.cdef([[
+            int prctl(int option, ...);
+            int getpid(void);
+        ]])
+    end
+
+    --- Runs check() while this test process is named `name`, then restores it.
+    local function with_own_comm(name, check)
+        local original = ffi.new("char[?]", COMM_BUFFER_BYTES)
+        ffi.C.prctl(PR_GET_NAME, original)
+        ffi.C.prctl(PR_SET_NAME, ffi.cast("const char *", name))
+        local ok, err = pcall(check)
+        ffi.C.prctl(PR_SET_NAME, original)
+        if not ok then
+            error(err, 0)
+        end
+    end
+
+    local function find_process(matches)
+        local procs = btop.read_process_table(1, btop.monotonic_now())
+        for _, process in ipairs(procs) do
+            if matches(process) then
+                return process
+            end
+        end
+        return nil
+    end
+
+    local function find_own_process()
+        local own_pid = ffi.C.getpid()
+        return find_process(function(process)
+            return process.pid == own_pid
+        end)
+    end
+
+    TestRunner.it("should replace control characters with '?'", function()
+        local sanitize = btop.sanitize_process_text
+        assert_eq(sanitize("plain name"), "plain name", "plain text")
+        assert_eq(sanitize("a\27[2Jb"), "a?[2Jb", "CSI escape")
+        assert_eq(sanitize("a\27]0;t\7b"), "a?]0;t?b", "OSC and BEL")
+        assert_eq(sanitize("a\nb\rc\td"), "a?b?c?d", "line breaks and tab")
+        assert_eq(sanitize("a\0b\127c"), "a?b?c", "NUL and DEL")
+        assert_eq(sanitize("a\194\155b"), "a?b", "UTF-8 encoded C1 CSI")
+        assert_eq(sanitize("caf\195\169 \226\150\136"), "caf\195\169 \226\150\136",
+            "printable UTF-8 is preserved")
+        assert_eq(sanitize(""), "", "empty string")
+    end)
+
+    TestRunner.it("should sanitize an escape sequence in a live comm", function()
+        if ffi.os ~= "Linux" then
+            return
+        end
+        with_own_comm("lt\27[2Jname", function()
+            local own = find_own_process()
+            assert_true(own ~= nil, "own process must be listed")
+            assert_eq(own.comm, "lt?[2Jname", "sanitized comm")
+        end)
+    end)
+
+    TestRunner.it("should sanitize control bytes in a live cmdline", function()
+        if ffi.os ~= "Linux" then
+            return
+        end
+        os.execute([[bash -c 'exec -a "$(printf "lt_marker\033[2J\nx")" sleep 3']]
+            .. " >/dev/null 2>&1 &")
+        ffi.C.usleep(400000)
+        local hostile = find_process(function(process)
+            return process.cmdline:find("lt_marker", 1, true) ~= nil
+        end)
+        assert_true(hostile ~= nil, "spawned process must be listed")
+        assert_eq(hostile.cmdline, "lt_marker?[2J?x 3", "sanitized cmdline")
+    end)
+
+    TestRunner.it("should keep control bytes out of every rendered row", function()
+        local hostile = {
+            pid = 4242, ppid = 1, username = "user", state = "S",
+            comm = btop.sanitize_process_text("evil\27[2J\nname"),
+            cmdline = btop.sanitize_process_text("evil\27]0;PWNED\7\27[2Jx\nline2"),
+            cpu_pct = 0, mem_pct = 0, res_kb = 1, vsize_kb = 1,
+            threads = 1, nice = 0, cpu_time_sec = 0,
+        }
+        local state = { procs = { hostile }, raw_total_procs = 1 }
+        local frame = btop.render_zoomed_pane_frame(4, state, 200, 12)
+        assert_true(not frame:find("\27]0;", 1, true), "no OSC in frame")
+        assert_true(not frame:find("\27[2J", 1, true), "no clear-screen in frame")
+        assert_true(not frame:find("\n", 1, true), "no newline in frame")
+    end)
+end)
+
 -- Summary
 print("\n--------------------------------------------------")
 local total = TestRunner.passed + TestRunner.failed
