@@ -1,6 +1,8 @@
 #!/usr/bin/env luajit
--- imgproc.lua: writes an RGB gradient test image as a binary PPM (P6).
+-- imgproc.lua: writes an RGB gradient test image as a binary PPM (P6), and
+-- reports on existing PPM files.
 -- Usage: luajit imgproc.lua [output_path]
+--        luajit imgproc.lua info <path>
 
 local ffi = require("ffi")
 
@@ -10,6 +12,9 @@ local CHANNEL_COUNT = 3
 local CHANNEL_MAX = 255
 local BLUE_LEVEL = 128
 local DEFAULT_OUTPUT_PATH = "gradient.ppm"
+local WRITE_HINT = "check that the directory exists and is writable"
+local READ_HINT = "check that the file exists and is readable"
+local INFO_USAGE_HINT = "usage: luajit imgproc.lua info <path>"
 
 --- Builds a width x height RGB buffer: red ramps along x, green along y.
 local function build_gradient(width, height)
@@ -63,14 +68,38 @@ local function verify_size(path, expected_bytes)
     return true
 end
 
-local function fail(message)
+--- Reads a whole file as bytes. Returns the content, or nil and an error.
+local function read_file(path)
+    local file, open_err = io.open(path, "rb")
+    if not file then
+        return nil, "cannot open for reading: " .. open_err
+    end
+    local content, read_err = file:read("*a")
+    file:close()
+    if not content then
+        return nil, "read failed for " .. path .. ": " .. read_err
+    end
+    return content
+end
+
+local function fail(message, hint)
     io.stderr:write("error: ", message, "\n")
-    io.stderr:write("hint: check that the directory exists and is writable\n")
+    io.stderr:write("hint: ", hint, "\n")
     os.exit(1)
 end
 
-local function main()
-    local path = arg[1] or DEFAULT_OUTPUT_PATH
+local function show_info(path)
+    if not path then
+        fail("info needs a file path", INFO_USAGE_HINT)
+    end
+    local content, read_err = read_file(path)
+    if not content then
+        fail(read_err, READ_HINT)
+    end
+    print(string.format("%s: %d bytes", path, #content))
+end
+
+local function write_gradient(path)
     local pixels = build_gradient(IMAGE_WIDTH, IMAGE_HEIGHT)
     local byte_count, write_err = write_ppm(
         path,
@@ -79,11 +108,11 @@ local function main()
         IMAGE_HEIGHT
     )
     if not byte_count then
-        fail(write_err)
+        fail(write_err, WRITE_HINT)
     end
     local verified, verify_err = verify_size(path, byte_count)
     if not verified then
-        fail(verify_err)
+        fail(verify_err, WRITE_HINT)
     end
     print(string.format(
         "wrote %s (%dx%d, %d bytes)",
@@ -92,6 +121,14 @@ local function main()
         IMAGE_HEIGHT,
         byte_count
     ))
+end
+
+local function main()
+    if arg[1] == "info" then
+        show_info(arg[2])
+    else
+        write_gradient(arg[1] or DEFAULT_OUTPUT_PATH)
+    end
 end
 
 main()
