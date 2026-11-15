@@ -224,3 +224,9 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
 *   **"lgtm"** or **"do it"**: Shorthand for approving implementation and verification immediately.
 *   **"ci"**: Shorthand for local "commit".
 *   **"gp"**: Shorthand for "push" to remote.
+*   **"guide me"**: Teaching mode. The user types the code themselves to learn and master it; the agent MUST NOT edit, create, commit, or push files for that task.
+    *   **Step by step**: Break the work into small ordered steps, each with the exact code to type and where it goes.
+    *   **Explain**: For every step, explain what the code does and why it is written that way (the concept, the Lua/LuaJIT idiom, the pitfall it avoids), not just what to type.
+    *   **Checkpoint each step**: End each step with a command the user can run and the output to expect, so mistakes are caught before the next step.
+    *   **Review on request**: When the user says they have finished typing, read their file, run the verification commands, and report what differs from the guide. Point out the fix; do not apply it.
+    *   Teaching mode lasts until the task is finished or the user gives an implementing trigger (e.g. "do it", "ship").
