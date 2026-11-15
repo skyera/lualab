@@ -121,6 +121,21 @@ For any TUI application or terminal utility in the repository, the agent MUST ad
    *   **Buffer Flash & Overwrite Prevention**: Never flip screen buffers (`\27[?1049h` / `\27[?1049l`) around an inline subprocess, as switching buffers instantly hides command stdout/stderr.
    *   **Input Drainage Before Confirmation**: Always flush the terminal input buffer (`tcflush` or OS equivalent) before prompting `Press Enter to continue...`, preventing queued or burst keystrokes from unintentionally skipping command output.
 
+## Source Line Length (All Languages)
+
+Applies to every source file and script in the repository: Lua, Python, C/C++, JavaScript, shell, SQL, and the `Makefile`. Markdown, data files, and vendored or generated code are exempt.
+
+* **Target 80, hard limit 100**: Aim for lines of at most 80 characters. Never exceed 100.
+* **Only exception**: a string literal, URL, or file path that cannot be split may exceed 100. Keep a greppable error message intact rather than splitting it.
+* **Wrap, do not shorten names**: Fix a long line by wrapping it or by pulling a sub-expression into a named local, never by abbreviating identifiers.
+* **Applies to lines you add or modify**: Older files contain longer lines. Do not reformat untouched code only to meet the limit; that buries the real change in the diff. Bring a function within the limit when you are already modifying it.
+* **Check before shipping**: The command below lists added lines over 100 characters and must print nothing (the threshold is 101 because each diff line starts with `+`):
+
+    ```
+    git diff -U0 HEAD -- '*.lua' '*.py' '*.sh' '*.js' '*.cpp' Makefile \
+        | grep '^+' | grep -v '^+++' | awk 'length($0) > 101'
+    ```
+
 ## Lua Code Formatting & Style Standards
 
 All Lua files created or modified in the repository MUST adhere to consistent, clean, and idiomatic formatting:
@@ -131,7 +146,7 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
    * **Spaces around binary operators**: Use `a = b + c`, `x == y`, `key = value` (not `a=b+c`).
    * **Table spacing**: Space inside curly braces for single-line tables: `{ id = 1, name = "app" }`.
    * **Function arguments & commas**: Always place a single space after commas: `fn(a, b, c)`.
-   * **Line length**: Aim for lines of at most 80 characters; 100 is the hard limit. Never exceed 100 except for a string literal or URL that cannot be split.
+   * **Line length**: Follow "Source Line Length (All Languages)" above: aim for at most 80 characters; 100 is the hard limit.
    * **Wrap long lines, do not shorten names**: Break after a comma or before a binary operator (`and`, `or`, `..`, `+`), and indent continuation lines by 4 spaces. Put one argument or table field per line once a call or constructor no longer fits. Pull a long sub-expression into a named local instead of wrapping it three times:
      ```lua
      -- Good:
