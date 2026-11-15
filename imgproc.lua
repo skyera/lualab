@@ -44,8 +44,54 @@ local function write_ppm(path, pixels, width, height)
     return #header + #body
 end
 
-local w, h = IMAGE_WIDTH, IMAGE_HEIGHT
-local data = build_gradient(w, h)
+--- Confirms the file on disk has the expected size. Returns true or nil, err.
+local function verify_size(path, expected_bytes)
+    local file, open_err = io.open(path, "rb")
+    if not file then
+        return nil, "cannot reopen to verify: " .. open_err
+    end
+    local actual_bytes = file:seek("end")
+    file:close()
+    if actual_bytes ~= expected_bytes then
+        return nil, string.format(
+            "%s is %d bytes, expected %d",
+            path,
+            actual_bytes,
+            expected_bytes
+        )
+    end
+    return true
+end
 
-assert(write_ppm("gradient.ppm", data, w, h))
-print("wrote gradient.ppm")
+local function fail(message)
+    io.stderr:write("error: ", message, "\n")
+    io.stderr:write("hint: check that the directory exists and is writable\n")
+    os.exit(1)
+end
+
+local function main()
+    local path = arg[1] or DEFAULT_OUTPUT_PATH
+    local pixels = build_gradient(IMAGE_WIDTH, IMAGE_HEIGHT)
+    local byte_count, write_err = write_ppm(
+        path,
+        pixels,
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT
+    )
+    if not byte_count then
+        fail(write_err)
+    end
+    local verified, verify_err = verify_size(path, byte_count)
+    if not verified then
+        fail(verify_err)
+    end
+    print(string.format(
+        "wrote %s (%dx%d, %d bytes)",
+        path,
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+        byte_count
+    ))
+end
+
+main()
