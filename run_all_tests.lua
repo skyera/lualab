@@ -52,6 +52,7 @@ local test_suites = {
     { file = "test_lan_inventory_features.lua", description = "LAN change timeline, trust, and tags" },
     { file = "test_lan_ports.lua", description = "Complete TCP port range parsing" },
     { file = "test_lan_scan_job.lua", description = "LAN background scan worker lifecycle" },
+    { file = "test_imgproc.lua", description = "imgproc - PPM gradient writer and error paths" },
 }
 
 local luajit_bin = "luajit"
