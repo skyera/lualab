@@ -15,6 +15,8 @@ local DEFAULT_OUTPUT_PATH = "gradient.ppm"
 local WRITE_HINT = "check that the directory exists and is writable"
 local READ_HINT = "check that the file exists and is readable"
 local INFO_USAGE_HINT = "usage: luajit imgproc.lua info <path>"
+local FORMAT_HINT = "expected a binary PPM (P6) file without comments"
+local PPM_HEADER_PATTERN = "^P6%s+(%d+)%s+(%d+)%s+(%d+)%s()"
 
 --- Builds a width x height RGB buffer: red ramps along x, green along y.
 local function build_gradient(width, height)
@@ -82,6 +84,22 @@ local function read_file(path)
     return content
 end
 
+--- Parses a P6 header. Returns a table with width, height, max_value and
+--- data_start (position of the first pixel byte), or nil and an error.
+local function parse_ppm_header(content)
+    local width, height, max_value, data_start =
+        content:match(PPM_HEADER_PATTERN)
+    if not width then
+        return nil, "no binary PPM (P6) header found"
+    end
+    return {
+        width = tonumber(width),
+        height = tonumber(height),
+        max_value = tonumber(max_value),
+        data_start = data_start,
+    }
+end
+
 local function fail(message, hint)
     io.stderr:write("error: ", message, "\n")
     io.stderr:write("hint: ", hint, "\n")
@@ -96,7 +114,19 @@ local function show_info(path)
     if not content then
         fail(read_err, READ_HINT)
     end
-    print(string.format("%s: %d bytes", path, #content))
+
+    local header, header_err = parse_ppm_header(content)
+    if not header then
+        fail(path .. ": " .. header_err, FORMAT_HINT)
+    end
+    print(string.format(
+        "%s: %dx%d, max value %d, pixels start at byte %d",
+        path,
+        header.width,
+        header.height,
+        header.max_value,
+        header.data_start
+    ))
 end
 
 local function write_gradient(path)
