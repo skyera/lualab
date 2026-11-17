@@ -158,6 +158,50 @@ Account.deposit(acc, 100)
 -- CAUTION: acc.deposit(100) passes ONLY 100 -> self becomes 100, amount becomes nil!
 ```
 
+### C. Adapting to `:` as a C/C++ Programmer
+
+`obj:method(a, b)` looks odd until you see it is only a different spelling of
+a C-style call that takes the object as its first argument:
+
+```c
+// C: function first, object as an explicit argument
+Dog *dog = dog_new("Rex");
+dog_speak(dog);
+```
+```lua
+-- Lua: the same call, written object-first so it reads left to right
+local dog = Dog.new("Rex")
+dog:speak()          -- exactly Dog.speak(dog)
+```
+
+**Why it differs from C++:**
+- C++ hides `this` and binds methods to the class at compile time.
+- Lua has no methods, only functions stored in tables. `Dog.speak` is a table
+  field holding a function, and `self` is an ordinary, visible parameter. The
+  `:` only fills it in for you.
+- The function is looked up when the call runs: first in `dog`, then through
+  the metatable's `__index` to `Dog`. That lookup chain is what inheritance is.
+
+**The one pitfall: `.` vs `:` must match the definition.**
+
+| Definition | Call it with | Wrong call and its symptom |
+| :--- | :--- | :--- |
+| `function Dog:speak()` | `dog:speak()` | `dog.speak()` -> `attempt to index local 'self' (a nil value)` |
+| `function Dog.new(name)` | `Dog.new("Rex")` | `Dog:new("Rex")` -> `name` receives `Dog`, not `"Rex"` |
+
+**Habits that make it automatic:**
+1. Read `a:b(c)` as `b(a, c)`.
+2. Read `function X:m()` as "a member function with `this` made visible and
+   named `self`".
+3. Pick one constructor style per module: `Class.new(...)` (a plain function,
+   closest to C) or `Class:new(...)` (lets `self` be a subclass). Both appear
+   in the `oop_*.lua` examples.
+4. Check in the REPL that methods are shared, not copied:
+   `print(Dog.speak == dog.speak)` prints `true`. One function serves every
+   instance, like a C++ vtable entry made visible.
+5. To confirm the equivalence yourself, rewrite one `oop_*.lua` example using
+   only `.` and an explicit `self`, then convert it back to `:`.
+
 ---
 
 ## 4. Method Lookup Chain: `rawget` and `__index`
