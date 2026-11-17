@@ -83,7 +83,12 @@ function Entity:move(dx, dy)
 end
 
 function Entity:__tostring()
-    return string.format("Entity('%s', pos: <%d, %d>)", self.name, self.x, self.y)
+    return string.format(
+        "Entity('%s', pos: <%d, %d>)",
+        self.name,
+        self.x,
+        self.y
+    )
 end
 
 -- Subclassing Entitty: Player
@@ -93,7 +98,13 @@ local Player = setmetatable({}, {
 })
 Player.__index = Player
 Player.__tostring = function(self)
-    return string.format("Player('%s', pos: <%d, %d>, hp: %d)", self.name, self.x, self.y, self.hp)
+    return string.format(
+        "Player('%s', pos: <%d, %d>, hp: %d)",
+        self.name,
+        self.x,
+        self.y,
+        self.hp
+    )
 end
 
 function Player:_init(name, x, y, hp)
@@ -140,12 +151,22 @@ end
 
 function Character:take_damage(amount)
     self.health = math.max(0, self.health - amount)
-    print(string.format("%s took %d damage. Health is now %d", self.name, amount, self.health))
+    print(string.format(
+        "%s took %d damage. Health is now %d",
+        self.name,
+        amount,
+        self.health
+    ))
     return self.health
 end
 
 function Character:display_status()
-    print(string.format("Name: %-8s | Level: %d | Health: %3d", self.name, self.level, self.health))
+    print(string.format(
+        "Name: %-8s | Level: %d | Health: %3d",
+        self.name,
+        self.level,
+        self.health
+    ))
 end
 
 -- Subclass: Warrior
@@ -166,13 +187,22 @@ end
 
 function Warrior:take_damage(amount)
     local effective_damage = math.max(1, amount - self.armor)
-    print(string.format("%s's armor (%d) absorbed damage! Incoming: %d -> Effective: %d",
-        self.name, self.armor, amount, effective_damage))
+    print(string.format(
+        "%s's armor (%d) absorbed damage! Incoming: %d -> Effective: %d",
+        self.name,
+        self.armor,
+        amount,
+        effective_damage
+    ))
     return Character.take_damage(self, effective_damage)
 end
 
 function Warrior:shield_bash()
-    print(string.format("%s performs a shield bash with armor rating %d!", self.name, self.armor))
+    print(string.format(
+        "%s performs a shield bash with armor rating %d!",
+        self.name,
+        self.armor
+    ))
 end
 
 -- Chapter 3 Demo

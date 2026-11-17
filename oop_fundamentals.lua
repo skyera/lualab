@@ -1,3 +1,4 @@
+#!/usr/bin/env luajit
 -- http://lua-users.org/wiki/ObjectOrientationTutorial
 -- : syntax sugar
 --      call function
@@ -128,7 +129,7 @@ end
 local mrDog = Dog:new()
 mrDog:makeSound()
 
--- 
+--
 local LoudDog = Dog:new()
 LoudDog.__index = LoudDog
 
@@ -163,7 +164,12 @@ function Rectangle:printArea()
 end
 
 function Rectangle:__tostring()
-    return string.format("length: %d, width: %d, area: %d", self.length, self.width, self.area)
+    return string.format(
+        "length: %d, width: %d, area: %d",
+        self.length,
+        self.width,
+        self.area
+    )
 end
 
 local r1 = Rectangle:new(nil, 10, 20)
@@ -231,11 +237,17 @@ end
 
 function Character:takeDemage(amount)
     self.health = self.health - amount
-    print(self.name .. " took " .. amount .. " demage. Health is now " .. self.health)
+    print(self.name .. " took " .. amount
+        .. " demage. Health is now " .. self.health)
 end
 
 function Character:displayStatus()
-    print(string.format("Name: %s | Level: %d | Health: %d", self.name, self.level, self.health))
+    print(string.format(
+        "Name: %s | Level: %d | Health: %d",
+        self.name,
+        self.level,
+        self.health
+    ))
 end
 
 local Warrior = {}
@@ -251,7 +263,8 @@ function Warrior:new(name, health, armor)
 end
 
 function Warrior:shieldBash()
-    print(self.name .. " performs a shield bash, using armor rating " .. self.armor)
+    print(self.name .. " performs a shield bash, using armor rating "
+        .. self.armor)
 end
 
 local my_warrior = Warrior:new("Thorin", 150, 25)

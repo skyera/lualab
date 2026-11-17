@@ -22,7 +22,9 @@ function Account:new(initial_balance, id)
     if not id then
         next_account_id = next_account_id + 1
     end
-    instance.balance = (type(initial_balance) == "number" and initial_balance >= 0) and initial_balance or 0
+    local is_valid_balance = type(initial_balance) == "number"
+        and initial_balance >= 0
+    instance.balance = is_valid_balance and initial_balance or 0
     return instance
 end
 
@@ -48,7 +50,11 @@ function Account:withdraw(amount)
     end
 
     if amount > self.balance then
-        return false, string_format("Insufficient funds (balance: %.2f, requested: %.2f)", self.balance, amount)
+        return false, string_format(
+            "Insufficient funds (balance: %.2f, requested: %.2f)",
+            self.balance,
+            amount
+        )
     end
 
     self.balance = self.balance - amount
@@ -97,7 +103,8 @@ SavingAccount.__lt = Account.__lt
 local next_saving_id = 2001
 
 function SavingAccount:new(initial_balance, interest_rate, overdraft_limit, id)
-    local instance = Account.new(self, initial_balance, id or ("SAV-" .. next_saving_id))
+    local default_id = "SAV-" .. next_saving_id
+    local instance = Account.new(self, initial_balance, id or default_id)
     if not id then
         next_saving_id = next_saving_id + 1
     end
@@ -120,22 +127,39 @@ function SavingAccount:withdraw(amount)
     end
     local available = self.balance + self.overdraft_limit
     if amount > available then
-        return false, string_format("Exceeds overdraft limit (available: %.2f, request: %.2f)", available, amount)
+        return false, string_format(
+            "Exceeds overdraft limit (available: %.2f, request: %.2f)",
+            available,
+            amount
+        )
     end
     self.balance = self.balance - amount
     return true, self.balance
 end
 
 function SavingAccount:__tostring()
-    return string_format("SavingAccount(%s, balance: %.2f, limit: %.2f)", self.id, self.balance, self.overdraft_limit)
+    return string_format(
+        "SavingAccount(%s, balance: %.2f, limit: %.2f)",
+        self.id,
+        self.balance,
+        self.overdraft_limit
+    )
 end
 
 local is_standalone = false
-if not pcall(debug.getlocal, 4, 1) and arg and arg[0] and arg[0]:match("oop_account%.?l?u?a?$") then
+local script_name = arg and arg[0]
+if not pcall(debug.getlocal, 4, 1)
+    and script_name
+    and script_name:match("oop_account%.?l?u?a?$")
+then
     is_standalone = true
 end
 
 if is_standalone then
+    local function money(value)
+        return string_format("%.2f", value)
+    end
+
     local acc = Account:new(9000)
     acc:withdraw(200)
     acc:report()
@@ -144,24 +168,27 @@ if is_standalone then
     local sav = SavingAccount:new(1000, 0.05, 500)
     print(sav)
     sav:deposit(200)
-    print("Deposited $200 -> New balance: $" .. string_format("%.2f", sav:get_balance()))
+    print("Deposited $200 -> New balance: $" .. money(sav:get_balance()))
 
     local interest = sav:accure_interest()
-    print("Accrued 5% interest: +$" .. string_format("%.2f", interest))
-    print("Balance after interest: $" .. string_format("%.2f", sav:get_balance()))
+    print("Accrued 5% interest: +$" .. money(interest))
+    print("Balance after interest: $" .. money(sav:get_balance()))
 
-    print("Attempting to withdraw $1,400 (Current balance is $" .. string_format("%.2f", sav:get_balance()) .. ")...")
+    print("Attempting to withdraw $1,400 (Current balance is $"
+        .. money(sav:get_balance()) .. ")...")
     local ok1, err1 = sav:withdraw(1400)
     if ok1 then
-        print("[Approved] Balance went negative: $" .. string_format("%.2f", sav:get_balance()))
+        print("[Approved] Balance went negative: $"
+            .. money(sav:get_balance()))
     else
         print("[Rejected] " .. err1)
     end
 
-    print("Attempting to withdraw $400.00 (Available limit is $" .. string_format("%.2f", sav.balance + sav.overdraft_limit) .. ")...")
+    print("Attempting to withdraw $400.00 (Available limit is $"
+        .. money(sav.balance + sav.overdraft_limit) .. ")...")
     local ok2, err2 = sav:withdraw(400)
     if ok2 then
-        print("[Approved] Balance: $" .. string_format("%.2f", sav:get_balance()))
+        print("[Approved] Balance: $" .. money(sav:get_balance()))
     else
         print("[Rejected] as expected: " .. err2)
     end

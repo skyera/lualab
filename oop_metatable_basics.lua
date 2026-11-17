@@ -1,3 +1,4 @@
+#!/usr/bin/env luajit
 -- __index
 --      * if a key does not exist in a table
 --      * run a function or use a table

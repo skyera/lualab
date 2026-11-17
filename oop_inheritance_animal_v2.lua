@@ -1,3 +1,6 @@
+#!/usr/bin/env luajit
+-- oop_inheritance_animal_v2.lua: Animal/Dog inheritance with :new and breed.
+
 local Animal = {}
 Animal.__index = Animal
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env luajit
--- oop_shapes_manual.lua: Rect/Square OOP in Lua with hand-written metatables and metamethods
+-- oop_shapes_manual.lua: Rect/Square OOP in Lua with hand-written metatables
+-- and metamethods
 
 local Rect = {}
 Rect.__index = Rect

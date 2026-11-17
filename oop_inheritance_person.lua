@@ -1,4 +1,7 @@
-Person = {}
+#!/usr/bin/env luajit
+-- oop_inheritance_person.lua: Person/Student inheritance via setmetatable.
+
+local Person = {}
 Person.__index = Person
 
 function Person:new(name, age)
@@ -9,10 +12,11 @@ function Person:new(name, age)
 end
 
 function Person:greet()
-    print("Hello, my name is " .. self.name .. " and I'm " .. self.age .. " years old.")
+    print("Hello, my name is " .. self.name
+        .. " and I'm " .. self.age .. " years old.")
 end
 
-Student = setmetatable({}, Person)
+local Student = setmetatable({}, Person)
 Student.__index = Student
 
 function Student:new(name, age, grade)

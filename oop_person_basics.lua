@@ -1,4 +1,7 @@
-Person = {}
+#!/usr/bin/env luajit
+-- oop_person_basics.lua: a minimal class built from a table and a metatable.
+
+local Person = {}
 Person.__index = Person
 
 function Person.new(name, age)
@@ -9,7 +12,8 @@ function Person.new(name, age)
 end
 
 function Person:sayHello()
-    print("Hello, my name is " .. self.name .. " and I am " .. self.age .. " years old.")
+    print("Hello, my name is " .. self.name
+        .. " and I am " .. self.age .. " years old.")
 end
 
 local person = Person.new("Alice", 25)

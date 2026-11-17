@@ -1,4 +1,7 @@
-Animal = {}
+#!/usr/bin/env luajit
+-- oop_inheritance_animal.lua: Animal/Dog inheritance, four variations.
+
+local Animal = {}
 Animal.__index = Animal
 
 function Animal.new(name)
@@ -12,7 +15,7 @@ function Animal:makeSound()
     print(self.name .. " says " .. self.sound)
 end
 
-Dog = {}
+local Dog = {}
 Dog.__index = Dog
 setmetatable(Dog, {__index = Animal})
 

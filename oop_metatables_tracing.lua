@@ -1,4 +1,7 @@
-MyClass = {}
+#!/usr/bin/env luajit
+-- oop_metatables_tracing.lua: traces calls to a class using debug.sethook.
+
+local MyClass = {}
 MyClass.__index = MyClass
 
 setmetatable(MyClass, {
@@ -35,8 +38,8 @@ end
 
 debug.sethook(trace, "cr")
 
-obj1 = MyClass(3)
+local obj1 = MyClass(3)
 print(obj1:get_value())
 
-obj3 = MyClass.new(5)
+local obj3 = MyClass.new(5)
 print(obj3:get_value())

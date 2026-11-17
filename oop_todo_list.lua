@@ -1,3 +1,4 @@
+#!/usr/bin/env luajit
 -- Simple todo list manager
 local Todo = {}
 Todo.__index = Todo
@@ -43,7 +44,9 @@ end
 
 function Todo:load()
     local f = io.open(self.filename, "r")
-    if not f then return end
+    if not f then
+        return
+    end
     for line in f:lines() do
         local done, text = line:match("^(%d);%s*(.+)$")
         if done and text then
@@ -58,7 +61,9 @@ local todo = Todo:new()
 while true do
     io.write("\nCommands: add <task>, done <num>, list, quit\n> ")
     local input = io.read()
-    if not input then break end
+    if not input then
+        break
+    end
     local cmd, arg = input:match("^(%S+)%s*(.*)$")
 
     if cmd == "add" then
