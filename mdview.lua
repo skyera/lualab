@@ -6124,10 +6124,8 @@ function M.gui_capture(state, path)
 end
 
 local function run_gui(options)
-    if not IS_WINDOWS then
-        io.stderr:write("mdview: --gui requires Windows (Win32); use the terminal pager instead\n")
-        return 1
-    end
+    -- Report invalid option combinations first, on every platform, so the
+    -- message does not depend on where the command happens to run.
     if options.file == "-" then
         io.stderr:write("mdview: --gui cannot read from stdin; pass a Markdown file or a folder\n")
         return 1
@@ -6135,6 +6133,10 @@ local function run_gui(options)
     if options.theme_set then
         io.stderr:write("mdview: --gui always follows the Windows theme; "
             .. "--theme applies to the terminal pager only\n")
+        return 1
+    end
+    if not IS_WINDOWS then
+        io.stderr:write("mdview: --gui requires Windows (Win32); use the terminal pager instead\n")
         return 1
     end
     local state, state_error = gui_create_state(options)

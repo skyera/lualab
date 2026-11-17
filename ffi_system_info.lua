@@ -254,7 +254,34 @@ else
             time_t tv_sec;
             long   tv_nsec;
         };
+    ]]
 
+    -- glibc's struct stat has a different field order and widths on AArch64
+    -- than on x86-64. A wrong layout does not crash: it silently returns
+    -- garbage for mode, uid, size and times.
+    if ffi.arch == "arm64" then
+        ffi.cdef([[
+        struct stat {
+            unsigned long  st_dev;
+            unsigned long  st_ino;
+            unsigned int   st_mode;
+            unsigned int   st_nlink;
+            unsigned int   st_uid;
+            unsigned int   st_gid;
+            unsigned long  st_rdev;
+            unsigned long  __pad1;
+            long           st_size;
+            int            st_blksize;
+            int            __pad2;
+            long           st_blocks;
+            struct timespec st_atim;
+            struct timespec st_mtim;
+            struct timespec st_ctim;
+            unsigned int   __glibc_reserved[2];
+        };
+        ]])
+    else
+        ffi.cdef([[
         struct stat {
             unsigned long  st_dev;
             unsigned long  st_ino;
@@ -272,9 +299,12 @@ else
             struct timespec st_ctim;
             long           __glibc_reserved[3];
         };
+        ]])
+    end
+    ffi.cdef([[
         int stat(const char *pathname, struct stat *statbuf);
         int __xstat(int ver, const char *pathname, struct stat *statbuf);
-    ]]
+    ]])
 
     if pcall(function() return ffi.C.stat end) then
         posix_stat = function(path, st) return ffi.C.stat(path, st) end

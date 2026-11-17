@@ -8,6 +8,39 @@ print("=========================================================================
 print("  Running Unit & Integration Tests for ffi_elf_inspector.lua")
 print("================================================================================")
 
+local interpreter = arg[-1] or "luajit"
+
+-- Build outputs that are not in git. Cases that analyze one of them are
+-- skipped, with the reason shown, when it has not been built.
+local BUILT_ARTIFACTS = {
+    "./libtermbox2.so",
+    "./demo_luabridge",
+    "./LuaJIT/src/luajit",
+}
+
+local function file_exists(path)
+    local file = io.open(path, "rb")
+    if file then
+        file:close()
+        return true
+    end
+    return false
+end
+
+--- Returns the first unbuilt artifact the case analyzes, or nil.
+local function missing_artifact(test)
+    if test.needs and not file_exists(test.needs) then
+        return test.needs
+    end
+    for _, artifact in ipairs(BUILT_ARTIFACTS) do
+        local target = "ffi_elf_inspector.lua " .. artifact
+        if test.cmd:find(target, 1, true) and not file_exists(artifact) then
+            return artifact
+        end
+    end
+    return nil
+end
+
 local tests = {
     {
         name = "CLI Help flag (--help)",
@@ -17,6 +50,7 @@ local tests = {
     {
         name = "Self-test validation mode (--test)",
         cmd = "./LuaJIT/src/luajit ffi_elf_inspector.lua --test",
+        needs = "./libtermbox2.so",
         expect = "Successfully verified"
     },
     {
@@ -87,8 +121,19 @@ local tests = {
 }
 
 local passed = 0
+local skipped = 0
 for i, t in ipairs(tests) do
-    local p = io.popen(t.cmd .. " 2>&1")
+    local missing = missing_artifact(t)
+    if missing then
+        skipped = skipped + 1
+        print(string.format("  \27[33m[SKIP %2d/%2d]\27[0m %s (%s not built)",
+            i, #tests, t.name, missing))
+        goto continue
+    end
+    local command = t.cmd:gsub("%./LuaJIT/src/luajit", function()
+        return interpreter
+    end)
+    local p = io.popen(command .. " 2>&1")
     local out = p:read("*a")
     p:close()
 
@@ -100,13 +145,15 @@ for i, t in ipairs(tests) do
         print("    Expected substring: " .. t.expect)
         print("    Output received: " .. out:sub(1, 200))
     end
+    ::continue::
 end
 
 print("--------------------------------------------------------------------------------")
-print(string.format("  Results: %d/%d tests passed (%.1f%% success)",
-    passed, #tests, (passed / #tests) * 100))
+local ran = #tests - skipped
+print(string.format("  Results: %d/%d tests passed, %d skipped",
+    passed, ran, skipped))
 print("================================================================================")
 
-if passed ~= #tests then
+if passed ~= ran then
     os.exit(1)
 end

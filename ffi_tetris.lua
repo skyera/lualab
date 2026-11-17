@@ -1132,9 +1132,6 @@ function TetrisGame:lock_active_piece()
             if cell and cell.locked == 1 then
                 self.game_over = true
                 self.dirty = true
-                if self.stats.score > self.stats.high_score then
-                    save_high_score(self.stats.score)
-                end
                 self:record_session()
                 return
             end
@@ -1230,7 +1227,6 @@ function TetrisGame:collapse_lines(full_lines)
 
     if self.stats.score > self.stats.high_score then
         self.stats.high_score = self.stats.score
-        save_high_score(self.stats.high_score)
     end
 
     -- Shift lines down in C memory

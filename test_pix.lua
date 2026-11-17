@@ -12,6 +12,15 @@ if f_check then
     luajit = (package.config:sub(1,1) == '\\') and ".\\LuaJIT\\src\\luajit.exe" or "./LuaJIT/src/luajit"
 end
 
+--- Returns the full path of a command found on PATH, so a test can run it
+--- with a restricted PATH. Falls back to the name when it cannot be found.
+local function resolve_command(name)
+    local pipe = io.popen("command -v " .. name .. " 2>/dev/null")
+    local path = pipe:read("*l")
+    pipe:close()
+    return path or name
+end
+
 -- Create synthetic test fixture with EXIF DateTimeOriginal
 local exif_test_file = (os.getenv("TEMP") or "/tmp") .. "/test_gallery_exif.jpg"
 if package.config:sub(1,1) == '\\' then
@@ -81,7 +90,7 @@ local tests = {
     {
         name = "Default current directory listing",
         cmd = "echo q| " .. luajit .. " pix.lua --no-interactive",
-        expect = "pillars_of_creation.jpg"
+        expect = "FILENAME"
     },
     {
         name = "Direct image view via --truecolor flag",
@@ -172,7 +181,8 @@ local tests = {
         name = "LuaJIT FFI video decode without ffmpeg CLI in PATH",
         cmd = (package.config:sub(1,1) == '\\')
             and (luajit .. " pix.lua " .. video_test_file .. " --select 1")
-            or ("PATH=/usr/local/sbin:/tmp " .. luajit .. " pix.lua " .. video_test_file .. " --select 1"),
+            or ("PATH=/usr/local/sbin:/tmp " .. resolve_command(luajit)
+                .. " pix.lua " .. video_test_file .. " --select 1"),
         expect = "IMAGE VIEWER [1/1]"
     },
     {

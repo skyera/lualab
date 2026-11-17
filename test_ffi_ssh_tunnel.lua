@@ -12,7 +12,7 @@ local test_cfg = "/tmp/_test_ssh_tunnels_" .. os.time() .. ".json"
 os.remove(test_cfg)
 
 local env_prefix = string.format("SSH_TUNNEL_CONFIG='%s' ", test_cfg)
-local luajit_bin = "./LuaJIT/src/luajit"
+local luajit_bin = arg[-1] or "luajit"
 
 local tests = {
     {

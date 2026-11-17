@@ -5,6 +5,7 @@
 ]]
 
 local ffi = require("ffi")
+local interpreter = arg[-1] or "luajit"
 
 print("=== Running Unit Tests for ffi_wafer_d2d_inspector.lua ===")
 
@@ -35,7 +36,10 @@ local passed = 0
 local total_cli = #tests
 
 for i, t in ipairs(tests) do
-    local p = io.popen(t.cmd .. " 2>&1")
+    local command = t.cmd:gsub("%./LuaJIT/src/luajit", function()
+        return interpreter
+    end)
+    local p = io.popen(command .. " 2>&1")
     local out = p:read("*a")
     p:close()
 
