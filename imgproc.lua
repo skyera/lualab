@@ -16,6 +16,8 @@ local DEFAULT_OUTPUT_PATH = "gradient.ppm"
 local WRITE_HINT = "check that the directory exists and is writable"
 local READ_HINT = "check that the file exists and is readable"
 local INFO_USAGE_HINT = "usage: luajit imgproc.lua info <path>"
+local USAGE_HINT = "usage: luajit imgproc.lua [output_path] | info <path>;"
+    .. " prefix a path starting with '-' with ./"
 local FORMAT_HINT = "expected an 8-bit binary PPM (P6) file without comments"
 local PPM_HEADER_PATTERN = "^P6%s+(%d+)%s+(%d+)%s+(%d+)%s()"
 
@@ -232,7 +234,17 @@ local function write_gradient(path)
     ))
 end
 
+--- Exits with an error when a path looks like an option (starts with "-"),
+--- so a mistyped flag such as -h is not silently used as a file name.
+local function reject_option(value)
+    if value and value:sub(1, 1) == "-" then
+        fail("unknown option: " .. value, USAGE_HINT)
+    end
+end
+
 local function main()
+    reject_option(arg[1])
+    reject_option(arg[2])
     if arg[1] == "info" then
         show_info(arg[2])
     else

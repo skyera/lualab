@@ -106,9 +106,22 @@ local function test_info_missing_file()
     assert_contains(printed, "hint: check that the file exists")
 end
 
+local function test_rejects_options()
+    local cases = { "-h", "info -x" }
+    for _, arguments in ipairs(cases) do
+        local succeeded, printed = run_command(arguments)
+        assert(not succeeded, "expected a nonzero exit: " .. printed)
+        assert_contains(printed, "error: unknown option: -")
+        assert_contains(printed, "hint: usage:")
+    end
+    local created = io.open("-h", "rb")
+    assert(not created, "a file named -h was created")
+end
+
 test_success_run()
 test_missing_directory()
 test_info_round_trip()
 test_info_rejects_bad_files()
 test_info_missing_file()
+test_rejects_options()
 print("test_imgproc: all tests passed")
