@@ -125,15 +125,15 @@ For any TUI application or terminal utility in the repository, the agent MUST ad
 
 Applies to every source file and script in the repository: Lua, Python, C/C++, JavaScript, shell, SQL, and the `Makefile`. Markdown, data files, and vendored or generated code are exempt.
 
-* **Target 80, hard limit 100**: Aim for lines of at most 80 characters. Never exceed 100.
-* **Only exception**: a string literal, URL, or file path that cannot be split may exceed 100. Keep a greppable error message intact rather than splitting it.
+* **Hard limit 80**: Never exceed 80 characters per line.
+* **Only exception**: a string literal, URL, or file path that cannot be split may exceed 80. Keep a greppable error message intact rather than splitting it.
 * **Wrap, do not shorten names**: Fix a long line by wrapping it or by pulling a sub-expression into a named local, never by abbreviating identifiers.
 * **Applies to lines you add or modify**: Older files contain longer lines. Do not reformat untouched code only to meet the limit; that buries the real change in the diff. Bring a function within the limit when you are already modifying it.
-* **Check before shipping**: The command below lists added lines over 100 characters and must print nothing (the threshold is 101 because each diff line starts with `+`):
+* **Check before shipping**: The command below lists added lines over 80 characters and must print nothing (the threshold is 81 because each diff line starts with `+`):
 
     ```
     git diff -U0 HEAD -- '*.lua' '*.py' '*.sh' '*.js' '*.cpp' Makefile \
-        | grep '^+' | grep -v '^+++' | awk 'length($0) > 101'
+        | grep '^+' | grep -v '^+++' | awk 'length($0) > 81'
     ```
 
 ## Lua Code Formatting & Style Standards
@@ -146,7 +146,7 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
    * **Spaces around binary operators**: Use `a = b + c`, `x == y`, `key = value` (not `a=b+c`).
    * **Table spacing**: Space inside curly braces for single-line tables: `{ id = 1, name = "app" }`.
    * **Function arguments & commas**: Always place a single space after commas: `fn(a, b, c)`.
-   * **Line length**: Follow "Source Line Length (All Languages)" above: aim for at most 80 characters; 100 is the hard limit.
+   * **Line length**: Follow "Source Line Length (All Languages)" above: 80 characters is the hard limit.
    * **Wrap long lines, do not shorten names**: Break after a comma or before a binary operator (`and`, `or`, `..`, `+`), and indent continuation lines by 4 spaces. Put one argument or table field per line once a call or constructor no longer fits. Pull a long sub-expression into a named local instead of wrapping it three times:
      ```lua
      -- Good:
@@ -217,7 +217,7 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
    * **Section dividers**: Use consistent comment dividers (`-- =========================================================================` or `--------------------------------------------------------------------------------`) between logical module sections.
    * **Group related code**: Order a file as banner, requires, constants, C declarations, helpers, core logic, entry point, using section dividers. Keep related functions adjacent, and define helpers before their first use.
    * **Consistent idioms**: Follow one error-handling convention per module (e.g., `value, err` returns, never silent `nil`), one naming style, and one way to build strings and tables.
-   * **Whitespace discipline**: No trailing whitespace, single final newline (`\n`), lines of at most 80 characters where practical and never more than 100, and at most 1–2 blank lines between major functions or sections.
+   * **Whitespace discipline**: No trailing whitespace, single final newline (`\n`), lines of at most 80 characters, and at most 1–2 blank lines between major functions or sections.
 
 ## Deployment (`deploy.lua`)
 
