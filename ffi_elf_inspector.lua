@@ -126,10 +126,23 @@ typedef struct {
 ]])
 
 
--- Dynamic demangler loader
+-- Dynamic demangler loader. "stdc++" only resolves where the development
+-- symlink libstdc++.so exists, so also try the runtime name libstdc++.so.6.
+local LIBSTDCPP_NAMES = { "stdc++", "libstdc++.so.6" }
+
+local function load_libstdcpp()
+    for _, name in ipairs(LIBSTDCPP_NAMES) do
+        local loaded, library = pcall(ffi.load, name)
+        if loaded and library then
+            return library
+        end
+    end
+    return nil
+end
+
 local demangle_fn = nil
-local ok_demangle, libcpp = pcall(ffi.load, "stdc++")
-if ok_demangle and libcpp then
+local libcpp = load_libstdcpp()
+if libcpp then
     local status_buf = ffi.new("int[1]")
     demangle_fn = function(mangled)
         if not mangled or not mangled:match("^__?Z") then return mangled end
