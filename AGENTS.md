@@ -239,6 +239,10 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
 *   **"lgtm"** or **"do it"**: Shorthand for approving implementation and verification immediately.
 *   **"ci"**: Shorthand for local "commit".
 *   **"gp"**: Shorthand for "push" to remote.
+*   **"list"**: List the remaining issues, ordered by priority. Do not change any files.
+    *   **Order**: Most important first: broken behavior or failing tests, then correctness and safety risks, then rule violations and style, then cleanup and nice-to-haves.
+    *   **Each item**: One line with the priority, a short title, the file or command that shows it, and the suggested next step.
+    *   **Source**: Re-check the current repo state (`git status`, failing tests, open findings from this session) rather than relying on memory, and drop items that are already fixed.
 *   **"guide me"**: Teaching mode. The user types the code themselves to learn and master it; the agent MUST NOT edit, create, commit, or push files for that task.
     *   **Review first**: Start by reviewing the code and listing the findings, then give a short numbered outline of the steps (titles only, no code yet).
     *   **One step at a time**: Show only the current step: the exact code to type and where it goes. Never show later steps' code in advance.
