@@ -136,6 +136,52 @@ local function validate_ppm(header, content_length)
     return true
 end
 
+--- Copies the pixel bytes that follow the header into a new FFI buffer.
+local function copy_pixels(content, header)
+    local byte_count = header.width * header.height * CHANNEL_COUNT
+    local pixels = ffi.new("uint8_t[?]", byte_count)
+    local content_start = ffi.cast("const uint8_t *", content)
+    ffi.copy(pixels, content_start + header.data_start - 1, byte_count)
+    return pixels
+end
+
+--- Loads an 8-bit P6 file. Returns an image table (width, height, pixels),
+--- or nil, an error message and a hint.
+local function load_ppm(path)
+    local content, read_err = read_file(path)
+    if not content then
+        return nil, read_err, READ_HINT
+    end
+    local header, header_err = parse_ppm_header(content)
+    if not header then
+        return nil, path .. ": " .. header_err, FORMAT_HINT
+    end
+    local valid, validation_err = validate_ppm(header, #content)
+    if not valid then
+        return nil, path .. ": " .. validation_err, FORMAT_HINT
+    end
+    return {
+        width = header.width,
+        height = header.height,
+        pixels = copy_pixels(content, header),
+    }
+end
+
+--- Returns the mean red, green and blue values of an image.
+local function average_color(image)
+    local pixel_count = image.width * image.height
+    local red_sum, green_sum, blue_sum = 0, 0, 0
+    for pixel_index = 0, pixel_count - 1 do
+        local offset = pixel_index * CHANNEL_COUNT
+        red_sum = red_sum + image.pixels[offset]
+        green_sum = green_sum + image.pixels[offset + 1]
+        blue_sum = blue_sum + image.pixels[offset + 2]
+    end
+    return red_sum / pixel_count,
+        green_sum / pixel_count,
+        blue_sum / pixel_count
+end
+
 local function fail(message, hint)
     io.stderr:write("error: ", message, "\n")
     io.stderr:write("hint: ", hint, "\n")
@@ -146,26 +192,19 @@ local function show_info(path)
     if not path then
         fail("info needs a file path", INFO_USAGE_HINT)
     end
-    local content, read_err = read_file(path)
-    if not content then
-        fail(read_err, READ_HINT)
+    local image, load_err, load_hint = load_ppm(path)
+    if not image then
+        fail(load_err, load_hint)
     end
-
-    local header, header_err = parse_ppm_header(content)
-    if not header then
-        fail(path .. ": " .. header_err, FORMAT_HINT)
-    end
-    local valid, validation_err = validate_ppm(header, #content)
-    if not valid then
-        fail(path .. ": " .. validation_err, FORMAT_HINT)
-    end
+    local red, green, blue = average_color(image)
     print(string.format(
-        "%s: %dx%d, max value %d, pixels start at byte %d",
+        "%s: %dx%d, average color %.1f %.1f %.1f",
         path,
-        header.width,
-        header.height,
-        header.max_value,
-        header.data_start
+        image.width,
+        image.height,
+        red,
+        green,
+        blue
     ))
 end
 
