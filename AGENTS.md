@@ -243,6 +243,12 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
     *   **Order**: Most important first: broken behavior or failing tests, then correctness and safety risks, then rule violations and style, then cleanup and nice-to-haves.
     *   **Each item**: One line with the priority, a short title, the file or command that shows it, and the suggested next step.
     *   **Source**: Re-check the current repo state (`git status`, failing tests, open findings from this session) rather than relying on memory, and drop items that are already fixed.
+*   **"next"**: Take the top remaining issue (the first item "list" would show) and present it for approval. Do not change any files until the user approves.
+    *   **Problem**: Explain what is wrong and why it matters, with the command or file that shows it.
+    *   **Fix / Solution / Recommendation**: State the proposed fix and why it is the right one, with alternatives only when they change the decision.
+    *   **Code changes**: Show before and after for each change, one block per file.
+    *   **Test plan**: List the exact commands and expected results that will prove the fix, including failure paths and the full-suite run.
+    *   **Ask for approval**: End by asking the user to approve ("do it", "lgtm", or "ship"), then stop and wait.
 *   **"guide me"**: Teaching mode. The user types the code themselves to learn and master it; the agent MUST NOT edit, create, commit, or push files for that task.
     *   **Review first**: Start by reviewing the code and listing the findings, then give a short numbered outline of the steps (titles only, no code yet).
     *   **One step at a time**: Show only the current step: the exact code to type and where it goes. Never show later steps' code in advance.
