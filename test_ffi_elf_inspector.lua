@@ -37,7 +37,8 @@ local function shared_library_source()
     local lines = {
         'static const char *const NAMES[] = { "bold", "dim", "reverse" };',
         "int tb_init(void) { return NAMES[0][0]; }",
-        "int tb_present(void) { return NAMES[1][0]; }",
+        "static int hidden_helper(int value) { return value + NAMES[2][0]; }",
+        "int tb_present(void) { return hidden_helper(NAMES[1][0]); }",
         "int send_attr(int attr) {",
         "    volatile int total = attr;",
     }
@@ -132,27 +133,31 @@ local tests = {
     {
         name = "Parse Section Headers on shared object",
         cmd = inspect_command("{SHARED} --sections"),
-        expect = ".text"
+        expect = "[SECTION HEADERS]"
     },
     {
         name = "Verify .rodata and .symtab in section table",
         cmd = inspect_command("{SHARED} --sections"),
-        expect = ".rodata"
+        expect = ".rodata",
+        require = "[SECTION HEADERS]"
     },
     {
         name = "Exported functions on shared object (--exports)",
         cmd = inspect_command("{SHARED} --exports"),
-        expect = "tb_init"
+        expect = "[EXPORTED FUNCTIONS]",
+        reject = "hidden_helper"
     },
     {
         name = "Verify tb_present in exported list",
         cmd = inspect_command("{SHARED} --exports"),
-        expect = "tb_present"
+        expect = "tb_present",
+        require = "[EXPORTED FUNCTIONS]"
     },
     {
         name = "Top bloat / largest functions (--top 5)",
         cmd = inspect_command("{SHARED} --top 5"),
-        expect = "send_attr"
+        expect = "send_attr",
+        require = "[TOP 5 LARGEST FUNCTIONS"
     },
     {
         name = "Function disassembly on tb_init (--disasm)",
@@ -209,6 +214,27 @@ local function expand(text, fixtures)
     return (text:gsub("{(%u+)}", values))
 end
 
+--- Returns nil when out satisfies the case, or a message saying why not.
+--- A case needs its expect text and optional require text, and must not
+--- contain its optional reject text. The require/reject text separates a
+--- flag's own output from the default listing, which shares most names.
+local function check_output(out, test, fixtures)
+    local expected = expand(test.expect, fixtures)
+    if not out:find(expected, 1, true) then
+        return "Expected substring: " .. expected
+    end
+    if test.require then
+        local required = expand(test.require, fixtures)
+        if not out:find(required, 1, true) then
+            return "Expected substring: " .. required
+        end
+    end
+    if test.reject and out:find(test.reject, 1, true) then
+        return "Unexpected substring: " .. test.reject
+    end
+    return nil
+end
+
 local function needs_fixtures(test)
     return test.cmd:find("{SHARED}", 1, true) ~= nil
         or test.cmd:find("{CPP}", 1, true) ~= nil
@@ -233,8 +259,8 @@ local function run_cases(fixtures, fixture_problem)
             local p = io.popen(expand(t.cmd, fixtures) .. " 2>&1")
             local out = p:read("*a")
             p:close()
-            local expected = expand(t.expect, fixtures)
-            if out:find(expected, 1, true) then
+            local problem = check_output(out, t, fixtures)
+            if not problem then
                 print(string.format(
                     "  \27[32m[PASS %2d/%2d]\27[0m %s",
                     i,
@@ -249,7 +275,7 @@ local function run_cases(fixtures, fixture_problem)
                     #tests,
                     t.name
                 ))
-                print("    Expected substring: " .. expected)
+                print("    " .. problem)
                 print("    Output received: " .. out:sub(1, 200))
             end
         end
