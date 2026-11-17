@@ -238,7 +238,7 @@ end
 function Character:take_damage(amount)
     self.health = self.health - amount
     print(self.name .. " took " .. amount
-        .. " demage. Health is now " .. self.health)
+        .. " damage. Health is now " .. self.health)
 end
 
 function Character:display_status()
