@@ -1112,7 +1112,9 @@ TestRunner.describe("GPU name lookup caching", function()
             return
         end
         ffi.cdef("int setenv(const char *name, const char *value, int overwrite);")
-        local shim_dir = os.tmpname() .. "_luatop_shim"
+        local shim_base = os.tmpname()
+        os.remove(shim_base)
+        local shim_dir = shim_base .. "_luatop_shim"
         local call_log = shim_dir .. "/calls.log"
         assert_true(os.execute("mkdir -p '" .. shim_dir .. "'") == 0, "mkdir shim")
         local shim = assert(io.open(shim_dir .. "/lspci", "w"))

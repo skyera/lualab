@@ -89,6 +89,14 @@ local function assert_widths(lines, width, label)
     end
 end
 
+--- Returns a unique temp path ending in suffix. os.tmpname() creates an
+--- empty file, so that placeholder is removed; only the suffixed path is used.
+local function temp_path(suffix)
+    local base = os.tmpname()
+    os.remove(base)
+    return base .. suffix
+end
+
 local function write_ppm(path, width, height, pixel)
     local file = assert(io.open(path, "wb"))
     file:write(string.format("P6\n%d %d\n255\n", width, height))
@@ -847,7 +855,7 @@ test("standalone image syntax parses alt text and source", function()
 end)
 
 test("image blocks render half-block art from native PPM", function()
-    local path = os.tmpname() .. ".ppm"
+    local path = temp_path(".ppm")
     write_ppm(path, 4, 4, function(x)
         if x < 2 then
             return 255, 0, 0
@@ -905,7 +913,7 @@ test("missing, remote and disabled images show visible placeholders", function()
 end)
 
 test("wide images are capped and fit the requested width", function()
-    local path = os.tmpname() .. ".ppm"
+    local path = temp_path(".ppm")
     write_ppm(path, 100, 10, function()
         return 200, 200, 200
     end)
@@ -922,8 +930,8 @@ test("wide images are capped and fit the requested width", function()
 end)
 
 test("PNG images decode through ImageMagick or ffmpeg", function()
-    local ppm = os.tmpname() .. ".ppm"
-    local png = os.tmpname() .. ".png"
+    local ppm = temp_path(".ppm")
+    local png = temp_path(".png")
     write_ppm(ppm, 4, 4, function()
         return 255, 128, 0
     end)
