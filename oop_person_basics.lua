@@ -11,10 +11,10 @@ function Person.new(name, age)
     return instance
 end
 
-function Person:sayHello()
+function Person:say_hello()
     print("Hello, my name is " .. self.name
         .. " and I am " .. self.age .. " years old.")
 end
 
 local person = Person.new("Alice", 25)
-person:sayHello()
+person:say_hello()

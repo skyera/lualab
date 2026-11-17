@@ -11,7 +11,7 @@ function Animal.new(name)
     return o
 end
 
-function Animal:makeSound()
+function Animal:make_sound()
     print(self.name .. " says " .. self.sound)
 end
 
@@ -25,14 +25,14 @@ function Dog.new(name)
     return o
 end
 
-function Dog:makeSound()
+function Dog:make_sound()
     print(self.name .. " says " .. self.sound)
 end
 
 local animal = Animal.new("Animal")
 local dog = Dog.new("Dog")
-animal:makeSound()
-dog:makeSound()
+animal:make_sound()
+dog:make_sound()
 
 -- version 2
 local Animal = {}

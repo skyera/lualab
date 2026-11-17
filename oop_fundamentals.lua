@@ -121,13 +121,13 @@ function Dog:new()
     return setmetatable(obj, self)
 end
 
-function Dog:makeSound()
+function Dog:make_sound()
     print('I say '..self.sound)
 end
 -------------------------------------------
 -- create object
-local mrDog = Dog:new()
-mrDog:makeSound()
+local mr_dog = Dog:new()
+mr_dog:make_sound()
 
 --
 local LoudDog = Dog:new()
@@ -138,13 +138,13 @@ function LoudDog:new()
     return setmetatable(obj, self)
 end
 
-function LoudDog:makeSound()
+function LoudDog:make_sound()
     local s = self.sound .. ' '
     print(s .. s .. s)
 end
 
 local seymour = LoudDog:new()
-seymour:makeSound()
+seymour:make_sound()
 
 -- Rectangle
 local Rectangle = {area=0, length=0, width=0}
@@ -159,7 +159,7 @@ function Rectangle:new(o, length, width)
     return o
 end
 
-function Rectangle:printArea()
+function Rectangle:print_area()
     print("Area:", self.area)
 end
 
@@ -173,11 +173,11 @@ function Rectangle:__tostring()
 end
 
 local r1 = Rectangle:new(nil, 10, 20)
-r1:printArea()
+r1:print_area()
 
 local r2 = Rectangle:new(nil, 3, 4)
-r2:printArea()
-r1:printArea()
+r2:print_area()
+r1:print_area()
 print(r1)
 print(r2)
 
@@ -193,7 +193,7 @@ function Shape:new(o, side)
     return o
 end
 
-function Shape:printArea()
+function Shape:print_area()
     print("Area: ", self.area)
 end
 
@@ -207,7 +207,7 @@ function Square:new(o, side)
     return o
 end
 
-function Square:printArea()
+function Square:print_area()
     print("Area of Square: ", self.area)
 end
 
@@ -216,10 +216,10 @@ local myshape = Shape:new(nil, 10)
 local myshape2 = Shape:new(nil, 3)
 local mysquare = Square:new(nil, 20)
 local mysquare2 = Square:new(nil, 2)
-myshape:printArea()
-mysquare:printArea()
-myshape2:printArea()
-mysquare2:printArea()
+myshape:print_area()
+mysquare:print_area()
+myshape2:print_area()
+mysquare2:print_area()
 
 
 local Character = {}
@@ -235,13 +235,13 @@ function Character:new(name, health)
     return instance
 end
 
-function Character:takeDemage(amount)
+function Character:take_damage(amount)
     self.health = self.health - amount
     print(self.name .. " took " .. amount
         .. " demage. Health is now " .. self.health)
 end
 
-function Character:displayStatus()
+function Character:display_status()
     print(string.format(
         "Name: %s | Level: %d | Health: %d",
         self.name,
@@ -262,12 +262,12 @@ function Warrior:new(name, health, armor)
     return instance
 end
 
-function Warrior:shieldBash()
+function Warrior:shield_bash()
     print(self.name .. " performs a shield bash, using armor rating "
         .. self.armor)
 end
 
 local my_warrior = Warrior:new("Thorin", 150, 25)
-my_warrior:displayStatus()
-my_warrior:takeDemage(30)
-my_warrior:shieldBash()
+my_warrior:display_status()
+my_warrior:take_damage(30)
+my_warrior:shield_bash()
