@@ -194,6 +194,9 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
 
 4. **Meaningful Variable & Function Names**:
    * **Descriptive and intent-revealing**: Choose names that clearly convey purpose and semantics (e.g., `selected_index`, `line_count`, `parse_http_header`).
+   * **Self-explaining function names**: A function's name must tell a reader what it does without opening its body. Start with a verb and name the object and, when it matters, the result (`parse_http_header`, `build_status_line`, `is_valid_port`, `remove_stale_sessions`). Avoid vague names such as `process`, `handle`, `do_work`, `run2`, `helper`, `util`, or `misc`.
+   * **Name matches behavior**: If a function does more than its name says (writes a file, mutates its argument, spawns a process), either rename it or split it. Use `is_`/`has_` for boolean results and `find_`/`get_` only when the failure case (`nil`, `nil, err`) is clear.
+   * **Comment when the name cannot carry it**: Add a `---` doc comment when behavior is not obvious from the name and signature: side effects, units, ownership of arguments, error returns, ordering requirements, or why it exists. Do not add a comment that only repeats the name.
    * **No cryptic abbreviations**: Avoid arbitrary short forms (e.g., use `connection` instead of `cn`, `buffer` instead of `buf_dat`).
    * **Single-letter variables restricted**: Single-letter names are permitted ONLY for short loop counters (`i`, `j`, `k`) and conventional coordinate pairs (`x`, `y`, `w`, `h`).
    * **Scoping & casing**:
