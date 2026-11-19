@@ -18,7 +18,7 @@ BIN4 = demo_repl
 # Linking libraries (LuaJIT, libdl, libreadline)
 LIBS = $(LUAJIT_LIB) -ldl -lreadline
 
-.PHONY: all clean clean-all test check
+.PHONY: all clean clean-all test check lint lint-all
 
 # Targets
 all: $(LUAJIT_LIB) $(BIN1) $(BIN2) $(BIN3) $(BIN4)
@@ -79,3 +79,11 @@ clean:
 
 clean-all: clean
 	$(MAKE) -C $(LUAJIT_DIR) clean
+
+# Fail if an added or modified Lua file gained luacheck warnings (.luacheckrc).
+lint:
+	sh lint_changed.sh
+
+# Report every luacheck warning in the repo, including legacy code.
+lint-all:
+	luacheck .

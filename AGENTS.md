@@ -67,7 +67,7 @@ and choose the method that fits what changed:
 *   **Keystroke Simulation Testing**: Never test text input using only pre-composed strings. Test interactive input loops by feeding actual token sequences emitted by the key reader (including symbolic tokens like `"SPACE"`, `"BACKSPACE"`, `"ENTER"`, `"ESC"`).
 *   **Subprocess & External Command Validation**: Any feature invoking shell commands or external tools must be verified end-to-end to ensure standard output/error is visible to the user and terminal state (raw mode, screen buffer) transitions correctly.
 *   **Headless Pipeline Sanity Checks**: For interactive terminal utilities, run a non-interactive pipeline test (e.g. `printf ":\x1b" | luajit app.lua`) or mock driver to verify that invocation, key dispatch, and clean exit complete without runtime crashes.
-*   **Bytecode Scoping & Undeclared Global Check**: Always run LuaJIT bytecode analysis (`luajit -bl <script.lua>`) or the scoping test suite (`test_yt.lua` Test 12) to assert 0 undeclared globals (`GGET`). In Lua, undefined variable typos (like `term` instead of `query`) silently evaluate to `nil` and can hide undetected in unexercised fallback branches.
+*   **Bytecode Scoping & Undeclared Global Check**: Always run `make lint` (luacheck `W111`/`W113`, see "Static Analysis (luacheck)"), LuaJIT bytecode analysis (`luajit -bl <script.lua>`), or the scoping test suite (`test_yt.lua` Test 12) to assert 0 undeclared globals (`GGET`). In Lua, undefined variable typos (like `term` instead of `query`) silently evaluate to `nil` and can hide undetected in unexercised fallback branches.
 *   **State-Machine Round-Trip Testing**: Test interactive utilities through multi-step view transitions (e.g. `Empty State -> History [h] -> Exit History [h]`, `Search Results -> History [h] -> Restore Search Results`). Verify that transitioning from a populated view to a shorter or empty view cleanly overwrites all rows with zero visual ghosting.
 
 ## Request & Issue Workflow
@@ -221,6 +221,16 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
    * **Group related code**: Order a file as banner, requires, constants, C declarations, helpers, core logic, entry point, using section dividers. Keep related functions adjacent, and define helpers before their first use.
    * **Consistent idioms**: Follow one error-handling convention per module (e.g., `value, err` returns, never silent `nil`), one naming style, and one way to build strings and tables.
    * **Whitespace discipline**: No trailing whitespace, single final newline (`\n`), lines of at most 80 characters, and at most 1–2 blank lines between major functions or sections.
+
+## Static Analysis (luacheck)
+
+Luacheck enforces the scoping and clean-code rules above mechanically: leaked or undefined globals, unused variables and arguments, shadowing, unreachable code, and syntax errors.
+
+* **Config**: `.luacheckrc` at the repo root sets `std = "luajit"`, excludes the vendored `LuaJIT/` and `LuaBridge/` submodules, and ignores unused `self`. Line length is not checked there; the diff check in "Source Line Length" owns it so legacy long lines are not reported.
+* **No new warnings**: Run `make lint` before shipping any Lua change. It compares every added or modified Lua file with its `HEAD` version and fails if the luacheck issue count grew. New files must have zero issues. Exit status: 0 clean, 1 new issues, 2 luacheck missing or failed.
+* **Legacy warnings**: `make lint-all` reports the whole repo (761 warnings when adopted). Fix legacy warnings in their own commits, never mixed into an unrelated change.
+* **Silence only on purpose**: Prefer fixing the code. When a warning is intentional (e.g. a tutorial that demonstrates globals), add an inline `-- luacheck: ignore <code>` on that line with the reason. Never add file-wide or config-wide ignores to make `make lint` pass.
+* **Install**: Linux: distro package or `luarocks install luacheck`. Windows: standalone `luacheck.exe` from https://github.com/lunarmodules/luacheck/releases, or `luarocks install luacheck`. Check with `luacheck --version`.
 
 ## Deployment (`deploy.lua`)
 
