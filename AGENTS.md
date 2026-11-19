@@ -227,7 +227,16 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
 
 6. **Comments & Documentation**:
    * **Comment the "why", not the "what"**: Add comments when rationale is not obvious: non-obvious constraints, workarounds, platform quirks, unit conversions, invariants, or deliberate trade-offs. Never restate self-evident code.
-   * **Document public and exported functions**: Precede every module-level or exported function with a concise doc comment (`---`) outlining purpose, key arguments, and return values (including `nil, err` failure returns).
+   * **Document public and exported functions**: Precede every module-level or exported function with a concise doc comment. Use `---` (not `--`) on every line so tools and `grep '^---'` find it:
+     * First line: one sentence saying what the function does, starting with a verb.
+     * Then, only what the name and signature do not already say: arguments by name in backticks, units, side effects, and every return value, including the failure return (`nil, err`).
+     * LuaLS tags (`---@param name type`, `---@return type`) are optional; use them when a type is not obvious (FFI cdata, callbacks, option tables).
+     ```lua
+     --- Parse an SGR mouse report at the start of `s`.
+     --- Returns the event table and the remaining bytes, or nil when `s`
+     --- does not start with a mouse report.
+     local function parse_mouse(s)
+     ```
 
 7. **File Structure, Headers & Whitespace Discipline**:
    * **Hashbang**: Executable scripts start with `#!/usr/bin/env luajit`.
