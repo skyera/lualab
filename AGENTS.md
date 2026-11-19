@@ -274,6 +274,7 @@ Luacheck enforces the scoping and clean-code rules above mechanically: leaked or
 * **Legacy warnings**: `make lint-all` reports the whole repo (761 warnings when adopted). Fix legacy warnings in their own commits, never mixed into an unrelated change.
 * **Silence only on purpose**: Prefer fixing the code. When a warning is intentional (e.g. a tutorial that demonstrates globals), add `-- luacheck: ignore <code>` on that line with the reason. For a short block (a few lines, such as stubbing and restoring `os.execute` in a test), wrap it in `-- luacheck: push ignore <code>` … `-- luacheck: pop` with the reason above it. Never add file-wide or config-wide ignores to make `make lint` pass.
 * **Install**: Linux: distro package or `luarocks install luacheck`. Windows: standalone `luacheck.exe` from https://github.com/lunarmodules/luacheck/releases, or `luarocks install luacheck`. Check with `luacheck --version`.
+* **Windows**: `lint_changed.sh` is POSIX `sh`, and Git Bash (installed with Git for Windows) does not include `make`. Run the gate directly from Git Bash with `sh lint_changed.sh`; it is exactly what `make lint` runs. `luacheck.exe` must be on the Git Bash `PATH`.
 
 ## Deployment (`deploy.lua`)
 
