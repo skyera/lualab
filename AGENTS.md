@@ -240,7 +240,7 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
      * Raise with `error(message, 2)` or `assert` for programmer errors: wrong argument types, broken invariants, impossible states. Level `2` points the message at the caller.
      * Catch with `pcall`/`xpcall` only at boundaries (entry point, one event-loop iteration, a request handler, a native or FFI load) and report it per "Error Handling & Diagnostics". Never use `pcall` to hide an error.
      * Check every `nil, err` return: pass it up with context (`return nil, "load config: " .. err`) or handle it. `assert(f())` is acceptable only in tests and one-off scripts.
-   * **Whitespace discipline**: No trailing whitespace, single final newline (`\n`), lines of at most 80 characters, and at most 1–2 blank lines between major functions or sections.
+   * **Whitespace discipline**: No trailing whitespace, single final newline (`\n`), and at most 1–2 blank lines between major functions or sections.
 
 ## Static Analysis (luacheck)
 
