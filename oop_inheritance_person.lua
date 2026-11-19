@@ -5,10 +5,10 @@ local Person = {}
 Person.__index = Person
 
 function Person:new(name, age)
-    local self = setmetatable({}, Person)
-    self.name = name or "Unknown"
-    self.age = age or 0
-    return self
+    local instance = setmetatable({}, self)
+    instance.name = name or "Unknown"
+    instance.age = age or 0
+    return instance
 end
 
 function Person:greet()
@@ -20,9 +20,9 @@ local Student = setmetatable({}, Person)
 Student.__index = Student
 
 function Student:new(name, age, grade)
-    local self = setmetatable(Person.new(self, name, age), Student)
-    self.grade = grade or "NA"
-    return self
+    local instance = Person.new(self, name, age)
+    instance.grade = grade or "NA"
+    return instance
 end
 
 function Student:study()
