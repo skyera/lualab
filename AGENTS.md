@@ -199,7 +199,7 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
      Never use it when `a` can be `false` or `nil`: the expression then returns `b` even though `cond` is true (`enabled and false or true` is always `true`). Use `if`/`else` instead.
    * **Named constants, not magic numbers**: Give thresholds, sizes, column widths, and key or signal codes an `UPPER_SNAKE_CASE` name at the top of the file.
    * **Table-driven over long `elseif` ladders**: Map keys, modes, or names to values or handler functions in a table instead of repeating `elseif x == "..." then`.
-   * **Keep code uncluttered**: Remove dead code, unused local variables, leftover debug prints, commented-out code blocks, and speculative features. Do not introduce abstractions or fallback layers that no active code path uses.
+   * **Keep code uncluttered**: Remove dead code, unused local variables, leftover debug prints, commented-out code blocks, and speculative features. Do not introduce abstractions or fallback layers that no active code path uses. This does not cover the reported fallbacks required by "Explicit Fallbacks" or per-platform implementations required by "OS branching & FFI".
    * **No duplicate logic**: Extract repeated patterns into shared local functions rather than copy-pasting.
 
 4. **Meaningful Variable & Function Names**:
