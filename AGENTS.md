@@ -220,7 +220,7 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
      * Classes & metatables: `PascalCase` (`Database`, `Indexer`).
 
 5. **Cross-Platform Compatibility (Windows & POSIX)**:
-   * **Path separators**: Always use forward slashes `/` in file paths or path-joining helpers. Never hardcode Windows backslashes `\` or assume Unix-only `/` roots.
+   * **Path separators**: Build and join paths with `/`; Windows file APIs accept it. Do not assume an absolute path starts with `/` (`C:/x` and `\\server\share` are absolute too). Convert to `\` only when passing a path to a Windows shell command (`cmd.exe`, `start`, `dir`).
    * **Line endings**: Handle both CRLF (`\r\n`) and LF (`\n`) gracefully when parsing files or subprocess output (e.g., strip trailing `\r`).
    * **OS branching & FFI**: When utilizing native syscalls or FFI libraries, explicitly inspect `ffi.os` (`"Windows"`, `"Linux"`, `"OSX"`) and provide tested implementations or graceful fallbacks for each supported platform.
    * **Subprocess execution**: Account for OS shell differences (e.g., Windows `cmd.exe`/PowerShell argument escaping vs. POSIX `/bin/sh`) and executable extensions (`.exe`).
