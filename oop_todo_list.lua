@@ -15,24 +15,27 @@ end
 
 function Todo:add(task)
     table.insert(self.tasks, {text=task, done=false})
-    self:save()
+    return self:save()
 end
 
 function Todo:done(index)
-    if self.tasks[index] then
-        self.tasks[index].done = true
-        self:save()
-    else
-        print("No such task:", index)
+    if not self.tasks[index] then
+        return nil, "no such task: " .. tostring(index)
     end
+    self.tasks[index].done = true
+    return self:save()
 end
 
 function Todo:save()
-    local f = io.open(self.filename, "w")
+    local f, err = io.open(self.filename, "w")
+    if not f then
+        return nil, "save tasks: " .. err
+    end
     for _, task in ipairs(self.tasks) do
         f:write((task.done and "1" or "0") .. "; " .. task.text .. "\n")
     end
     f:close()
+    return true
 end
 
 function Todo:list()
@@ -56,6 +59,12 @@ function Todo:load()
     f:close()
 end
 
+local function print_error_if_failed(ok, err)
+    if not ok then
+        io.stderr:write("error: ", err, "\n")
+    end
+end
+
 -- main
 local todo = Todo:new()
 while true do
@@ -67,9 +76,9 @@ while true do
     local cmd, arg = input:match("^(%S+)%s*(.*)$")
 
     if cmd == "add" then
-        todo:add(arg)
+        print_error_if_failed(todo:add(arg))
     elseif cmd == "done" then
-        todo:done(tonumber(arg))
+        print_error_if_failed(todo:done(tonumber(arg)))
     elseif cmd == "list" then
         todo:list()
     elseif cmd == "quit" then
