@@ -252,16 +252,20 @@ Luacheck enforces the scoping and clean-code rules above mechanically: leaked or
 *   **"lgtm"** or **"do it"**: Shorthand for approving implementation and verification immediately.
 *   **"ci"**: Shorthand for local "commit".
 *   **"gp"**: Shorthand for "push" to remote.
-*   **"list"**: List the remaining issues, ordered by priority. Do not change any files.
-    *   **Order**: Most important first: broken behavior or failing tests, then correctness and safety risks, then rule violations and style, then cleanup and nice-to-haves.
-    *   **Each item**: One line with the priority, a short title, the file or command that shows it, and the suggested next step.
-    *   **Source**: Re-check the current repo state (`git status`, failing tests, open findings from this session) rather than relying on memory, and drop items that are already fixed.
-*   **"next"**: Take the top remaining issue (the first item "list" would show) and present it for approval. Do not change any files until the user approves.
-    *   **Problem**: Explain what is wrong and why it matters, with the command or file that shows it.
-    *   **Fix / Solution / Recommendation**: State the proposed fix and why it is the right one, with alternatives only when they change the decision.
+*   **"list"** (or **"list issues"**, optionally scoped, e.g. "list issues for AGENTS.md"): List the remaining issues, ordered by priority. Do not change any files.
+    *   **Numbered for reference**: Give every issue a number the user can cite (`#1`, `#2`, ...). Format each item as one line: `#N [P0-P3] short title — file:line or command that shows it — suggested next step`.
+    *   **Stable numbers**: Within a session, an issue keeps its number across repeated lists, and numbers are never reused. Fixed issues are dropped (not renumbered); newly found issues get the next unused number. If the scope changes (e.g. from the repo to one file), start a new numbering and say so.
+    *   **Order**: Most important first: P0 broken behavior or failing tests, P1 correctness and safety risks, P2 rule violations and style, P3 cleanup and nice-to-haves.
+    *   **Source**: Re-check the current repo state (`git status`, failing tests, linters, open findings from this session) rather than relying on memory, and drop items that are already fixed.
+*   **"next"**, **"next #N"**, **"explain #N"**, or just **"#N"**: Present one issue for approval. "next" means the top remaining issue; the others mean issue `#N` from the latest list. Do not change any files until the user approves.
+    *   **Header**: Start with `#N [priority] title` so the issue is unambiguous.
+    *   **Problem**: Explain what is wrong and why it matters, with the investigation trail (commands and one-line results) that shows it.
+    *   **Solution**: State the proposed fix and how it works.
+    *   **Recommendation**: Say which option you recommend and why, with alternatives only when they change the decision.
     *   **Code changes**: Show before and after for each change, one block per file.
     *   **Test plan**: List the exact commands and expected results that will prove the fix, including failure paths and the full-suite run.
     *   **Ask for approval**: End by asking the user to approve ("do it", "lgtm", or "ship"), then stop and wait.
+    *   **On approval**: Implement, verify, commit, and push that one issue without further prompts (one commit per issue; mention `#N` only in the chat report, not in the commit message, since numbers are session-local). Finish with the `Verified:` block and `#N shipped as <short sha>`.
 *   **"guide me"**: Teaching mode. The user types the code themselves to learn and master it; the agent MUST NOT edit, create, commit, or push files for that task.
     *   **Review first**: Start by reviewing the code and listing the findings, then give a short numbered outline of the steps (titles only, no code yet).
     *   **One step at a time**: Show only the current step: the exact code to type and where it goes. Never show later steps' code in advance.
