@@ -233,6 +233,11 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
    * **Section dividers**: Use consistent comment dividers (`-- =========================================================================` or `--------------------------------------------------------------------------------`) between logical module sections.
    * **Group related code**: Order a file as banner, requires, constants, C declarations, helpers, core logic, entry point, using section dividers. Keep related functions adjacent, and define helpers before their first use.
    * **Consistent idioms**: Follow one error-handling convention per module (e.g., `value, err` returns, never silent `nil`), one naming style, and one way to build strings and tables.
+   * **Raise vs return**: Decide by who caused the failure:
+     * Return `nil, err` for expected runtime failures: I/O, missing files or libraries, parse errors, network, subprocesses, and user input. `err` names the operation and the resource (`"open config: /path: No such file"`).
+     * Raise with `error(message, 2)` or `assert` for programmer errors: wrong argument types, broken invariants, impossible states. Level `2` points the message at the caller.
+     * Catch with `pcall`/`xpcall` only at boundaries (entry point, one event-loop iteration, a request handler, a native or FFI load) and report it per "Error Handling & Diagnostics". Never use `pcall` to hide an error.
+     * Check every `nil, err` return: pass it up with context (`return nil, "load config: " .. err`) or handle it. `assert(f())` is acceptable only in tests and one-off scripts.
    * **Whitespace discipline**: No trailing whitespace, single final newline (`\n`), lines of at most 80 characters, and at most 1–2 blank lines between major functions or sections.
 
 ## Static Analysis (luacheck)
