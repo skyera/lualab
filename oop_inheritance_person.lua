@@ -6,7 +6,7 @@ Person.__index = Person
 
 function Person:new(name, age)
     local self = setmetatable({}, Person)
-    self.name = name or "Unkown"
+    self.name = name or "Unknown"
     self.age = age or 0
     return self
 end
