@@ -172,7 +172,7 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
      ```
 
 2. **One Statement Per Line & Multi-Line Control Flow (No Clutter)**:
-   * **One statement per line**: Never pack multiple statements on a single line separated by semicolons (e.g., avoid `stmt1; stmt2`, `count = count + 1; print(...)`). Semicolons in Lua code are reserved strictly for `package.path` lists, C struct declarations in `ffi.cdef`, or string literals.
+   * **One statement per line**: Never pack multiple statements on a single line separated by semicolons (e.g., avoid `stmt1; stmt2`, `count = count + 1; print(...)`). Use `,` to separate table fields, never `;`. Semicolons belong only inside strings (such as `package.path` lists and `ffi.cdef` declarations).
    * **No single-line control structures**: `if ... then ... end`, `for ... do ... end`, and `while ... do ... end` MUST NEVER be written on a single line. Even simple guard clauses or early returns must be expanded across separate lines with standard 4-space indentation:
      ```lua
      -- Good:
