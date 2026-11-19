@@ -194,6 +194,7 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
    * **Read top-down**: A function body should read as a short list of steps at one level of detail. Move the details of each step into a well-named helper rather than inlining them.
    * **Shallow nesting**: Prefer guard clauses and early returns over deeply nested blocks. Aim for at most 3 levels of indentation inside a function.
    * **No nested `and`/`or` chains**: Use `cond and a or b` only for a single simple choice. Write two or more chained choices as `if`/`elseif`, or as a lookup table.
+     Never use it when `a` can be `false` or `nil`: the expression then returns `b` even though `cond` is true (`enabled and false or true` is always `true`). Use `if`/`else` instead.
    * **Named constants, not magic numbers**: Give thresholds, sizes, column widths, and key or signal codes an `UPPER_SNAKE_CASE` name at the top of the file.
    * **Table-driven over long `elseif` ladders**: Map keys, modes, or names to values or handler functions in a table instead of repeating `elseif x == "..." then`.
    * **Keep code uncluttered**: Remove dead code, unused local variables, leftover debug prints, commented-out code blocks, and speculative features. Do not introduce abstractions or fallback layers that no active code path uses.
