@@ -111,7 +111,7 @@ For any TUI application or terminal utility in the repository, the agent MUST ad
    *   **Format String Invariants**: In format strings (`string.format`), ensure placeholder counts strictly match argument counts. Never construct multi-line templates with variable numbers of arguments without parameter parity checks or programmatic line joining.
 
 4. **Text Input & Keystroke Normalization**:
-   *   **Symbolic Token Translation**: Key readers often return symbolic strings (e.g., `"SPACE"`, `"ENTER"`, `"UP"`). Text-entry loops must never assume all printable characters satisfy `#k == 1`. Always normalize symbolic tokens (e.g., map `"SPACE"` to `" "`) before length or printable checks.
+   *   **Symbolic Token Translation**: Key readers often return symbolic strings (e.g., `"SPACE"`, `"ENTER"`, `"UP"`). Text-entry loops must never assume all printable characters satisfy `#key == 1`. Always normalize symbolic tokens (e.g., map `"SPACE"` to `" "`) before length or printable checks.
    *   **Cursor & Buffer Bounds**: Support multi-byte characters, backspace at index 0, and clamped cursor positions when editing text buffers.
 
 5. **Subprocess Execution & Screen Buffer Discipline**:
@@ -198,7 +198,12 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
    * **Name matches behavior**: If a function does more than its name says (writes a file, mutates its argument, spawns a process), either rename it or split it. Use `is_`/`has_` for boolean results and `find_`/`get_` only when the failure case (`nil`, `nil, err`) is clear.
    * **Comment when the name cannot carry it**: Add a `---` doc comment when behavior is not obvious from the name and signature: side effects, units, ownership of arguments, error returns, ordering requirements, or why it exists. Do not add a comment that only repeats the name.
    * **No cryptic abbreviations**: Avoid arbitrary short forms (e.g., use `connection` instead of `cn`, `buffer` instead of `buf_dat`).
-   * **Single-letter variables restricted**: Single-letter names are permitted ONLY for short loop counters (`i`, `j`, `k`) and conventional coordinate pairs (`x`, `y`, `w`, `h`).
+   * **Single-letter variables restricted**: Single-letter names are permitted ONLY for:
+     * numeric loop counters `i`, `j` in short loops;
+     * `k, v` in a short generic loop where the key and value have no domain meaning (copying, merging, or serializing a table). When they mean something, name them: `for name, app in pairs(APPS)`, not `for k, v in pairs(APPS)`;
+     * `_` for a value that is deliberately ignored: `for _, item in ipairs(items)`, `local _, err = f()`;
+     * `M` as the table a module returns (`local M = {}` … `return M`), and nowhere else;
+     * coordinate and size pairs `x`, `y`, `w`, `h`.
    * **Scoping & casing**:
      * Variables and helper functions: `local` by default, `snake_case` (`load_config`, `process_event`). Never leak symbols into global `_G`.
      * Constants: `UPPER_SNAKE_CASE` (`HISTORY_MAX`, `DEFAULT_TIMEOUT_MS`).
