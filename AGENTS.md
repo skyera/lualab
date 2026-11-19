@@ -249,6 +249,13 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
      * Check every `nil, err` return: pass it up with context (`return nil, "load config: " .. err`) or handle it. `assert(f())` is acceptable only in tests and one-off scripts.
    * **Whitespace discipline**: No trailing whitespace, single final newline (`\n`), and at most 1–2 blank lines between major functions or sections.
 
+8. **Idioms**:
+   * **Methods use `:`**: Define and call methods with `:` (`function Account:deposit(amount)`, `account:deposit(10)`); use `.` for constructors and module functions (`Account.new`, `string.format`). Calling a `:` method with `.` shifts every argument and leaves `self` as the first real argument. See `notes.md` §3.
+   * **Build strings in loops with `table.concat`**: Collect pieces in a table and join once. `s = s .. piece` inside a loop copies the whole string each time (about 100× slower for 20,000 pieces). A single concatenation outside a loop is fine.
+   * **Keep arrays without holes**: `#t` and `ipairs` are only reliable on sequences `1..n` with no `nil` gaps; after `t[2] = nil` on four items, `#t` can still be 4 while `ipairs` stops after 1. Remove items with `table.remove`; for sparse data keep an explicit count or iterate with `pairs`.
+   * **`continue` is `goto continue`**: Lua has no `continue`. Prefer a guard clause or a helper function; when the loop body is long, jump to a `::continue::` label at the end of the body. Never emulate it with `repeat ... until true`.
+   * **Double quotes by default**: Use `"..."` for strings; use `'...'` only when the text contains `"` to avoid escaping. Use `[[...]]` for multi-line text.
+
 ## Static Analysis (luacheck)
 
 Luacheck enforces the scoping and clean-code rules above mechanically: leaked or undefined globals, unused variables and arguments, shadowing, unreachable code, and syntax errors.
