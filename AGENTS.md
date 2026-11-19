@@ -58,11 +58,18 @@ and choose the method that fits what changed:
 
     ```
     Verified:     make check                -> all suites passed
+    Verified:     make lint                 -> no new luacheck issues
     Verified:     luajit app.lua /nonexistent -> "error: path not found: /nonexistent"
     Not verified: Windows console path (no Windows host available)
     ```
 
 *   **Full Regression Run**: `make check` runs every Lua suite (`run_all_tests.lua`) and the self-contained Python PTY/deploy/server suites, continues after failures, and exits non-zero if any failed (about 2 minutes). Run it before shipping changes to shared modules such as `termkit.lua` or `deploy.lua`.
+*   **Pre-Ship Checklist**: Before every commit, run each gate that applies and report it in the `Verified:` block:
+    1. `git diff --check` (always).
+    2. The 80-column diff check from "Source Line Length" (any source file changed).
+    3. `make lint` (any `.lua` file added or modified; see "Static Analysis (luacheck)").
+    4. The narrowest relevant test, then `make check` (code changed; always for shared modules).
+    5. Docs or config only: steps 1–2 suffice; say that `make check` was not run and why.
 *   **TUI Render & Viewport Coverage**: Never leave UI/modal rendering functions uncalled in tests. Test suites must execute all view and modal renderers directly (or via headless harness) across boundary conditions (empty data, long strings, special characters, and terminal size boundaries) to catch format-string mismatches (`bad argument to 'format'`) and clipping bugs before release.
 *   **Keystroke Simulation Testing**: Never test text input using only pre-composed strings. Test interactive input loops by feeding actual token sequences emitted by the key reader (including symbolic tokens like `"SPACE"`, `"BACKSPACE"`, `"ENTER"`, `"ESC"`).
 *   **Subprocess & External Command Validation**: Any feature invoking shell commands or external tools must be verified end-to-end to ensure standard output/error is visible to the user and terminal state (raw mode, screen buffer) transitions correctly.
@@ -253,7 +260,7 @@ Luacheck enforces the scoping and clean-code rules above mechanically: leaked or
 
 ## Shorthand Triggers
 
-*   **"ship"** or **"avcp"**: Shorthand for **"apply verify commit push"**. The agent MUST immediately implement the proposed changes, run all verification/test suites, create the atomic commit locally, and push to the remote repository without stopping for intermediate prompts.
+*   **"ship"** or **"avcp"**: Shorthand for **"apply verify commit push"**. The agent MUST immediately implement the proposed changes, run the "Pre-Ship Checklist" and the change's verification/test suites, create the atomic commit locally, and push to the remote repository without stopping for intermediate prompts.
 *   **"lgtm"** or **"do it"**: Shorthand for approving implementation and verification immediately.
 *   **"ci"**: Shorthand for local "commit".
 *   **"gp"**: Shorthand for "push" to remote.
