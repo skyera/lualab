@@ -33,4 +33,30 @@ assert_equal(loaded.height, 1, "saved PPM height")
 assert_equal(tonumber(loaded.pixels[0].r), 128, "saved PPM red channel")
 os.remove(path)
 
+--- Calls open_in_viewer with os.execute stubbed (nothing is launched) and
+--- checks the POSIX command quotes a path with a quote and a space.
+local function check_open_in_viewer_quotes_path()
+    -- Stubbing os.execute is the point of this test.
+    -- luacheck: push ignore 122
+    local original_execute = os.execute
+    local executed_command
+    os.execute = function(command)
+        executed_command = command
+        return 0
+    end
+    local ok, err = pcall(thumbnailer.open_in_viewer, "/tmp/it's a.ppm")
+    os.execute = original_execute
+    -- luacheck: pop
+    assert(ok, "open_in_viewer raised: " .. tostring(err))
+    local quoted = "'/tmp/it'\"'\"'s a.ppm'"
+    assert(
+        executed_command:find(quoted, 1, true),
+        "path not shell-quoted: " .. executed_command
+    )
+end
+
+if ffi.os ~= "Windows" then
+    check_open_in_viewer_quotes_path()
+end
+
 print("ffi_thumbnailer: all tests passed")

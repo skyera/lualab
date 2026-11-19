@@ -303,6 +303,13 @@ local function format_bytes(bytes)
     return string.format("%.2f GB", bytes / (1024 * 1024 * 1024))
 end
 
+local function shell_quote(value)
+    if IS_WIN then
+        return '"' .. value:gsub('"', '\\"') .. '"'
+    end
+    return "'" .. value:gsub("'", "'\"'\"'") .. "'"
+end
+
 local function open_in_viewer(path)
     local cmd
     if IS_WIN then
@@ -386,13 +393,8 @@ do
 end
 
 -- ============================================================
--- 3. Shell quoting · PPM reader · Universal image loader
+-- 3. PPM reader · Universal image loader
 -- ============================================================
-local function shell_quote(v)
-    if IS_WIN then return '"' .. v:gsub('"', '\\"') .. '"' end
-    return "'" .. v:gsub("'", "'\"'\"'") .. "'"
-end
-
 local function read_ppm(stream)
     local function token()
         local chars, c = {}, nil
@@ -1211,6 +1213,7 @@ local module = {
     resize_bilinear = resize_bilinear,
     load_ppm        = load_ppm,
     save_ppm        = save_ppm,
+    open_in_viewer  = open_in_viewer,
 }
 if ... == "ffi_thumbnailer" then return module end
 
