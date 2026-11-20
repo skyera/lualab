@@ -216,13 +216,45 @@ any working directory. To stop at a specific line instead, add
 | `c` | continue to the next breakpoint |
 | `p expr` / `e stmt` | print an expression / run a statement |
 | `l` / `w` / `t` | locals / source around the line / backtrace |
-| `u` / `d` | move up / down a stack frame |
+| `d` / `u` | inspect the caller's frame / go back toward the current one |
 | `h` / `q` | help / quit |
 
-Set `DBG_NOCOLOR=1` for plain output. With `--on-error` the script runs
-inside `xpcall`, so scripts that detect "am I main?" by stack depth
-(`pcall(debug.getlocal, 4, 1)`, e.g. `oop_todo.lua`) see themselves as
-required and skip their main block; use the default mode for those.
+Set `DBG_NOCOLOR=1` for plain output. With `--on-error` or `--tui` the
+script runs inside `xpcall`, so scripts that detect "am I main?" by stack
+depth (`pcall(debug.getlocal, 4, 1)`, e.g. `codefind.lua`) see themselves
+as required and skip their main block; use the default mode for those.
+
+### Two-pane TUI (`--tui`)
+
+```bash
+luajit luadbg.lua --tui script.lua [args...]
+```
+
+```
+ oop_todo.lua:103  in method 'done'                     [stopped]
+ 101    function Todo:done(index)
+ 102        local position, err = find_task_position(self, index)
+ 103 ▶      if not position then
+─ output ─────────────────────────────────────────────────────────
+ dbg> p position
+ position => 9
+──────────────────────────────────────────────────────────────────
+ dbg> █
+ Enter run (empty = repeat)  Up/Down history  PgUp/PgDn scroll source
+```
+
+The top pane follows the current line (and `d`/`u`, but not `t`); the
+log below holds debugger output and the program's `print`/`io.write`
+output; commands are typed on the input line, with Up/Down history. When
+the program calls `io.read()`, the prompt changes to `input>` and the line
+goes to the program. After the program ends, press a key to leave; its
+output is printed again on the normal screen. `q` or Ctrl-C quits.
+
+Limits: POSIX terminals only (uses `termkit.lua`; refused on Windows and
+when stdin/stdout is not a TTY). Only `print`, `io.write` and line reads
+with `io.read()` are routed through the TUI; direct `io.stdout:write` /
+`io.stdin:read` bypass it, and scripts that are TUIs themselves cannot run
+inside it.
 
 ## 🧹 Maintenance
 

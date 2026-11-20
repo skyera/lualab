@@ -2,19 +2,20 @@
 -- luadbg.lua: run any LuaJIT script under debugger.lua (vendored).
 --
 -- Usage:
---   luajit luadbg.lua [--on-error] [--where N] <script.lua> [args...]
+--   luajit luadbg.lua [--on-error] [--where N] [--tui] <script.lua> [args...]
 --
 -- Default mode stops at the script's first line. --on-error runs the
 -- script normally and stops at the line that raised an error.
 -- Every stop shows N source lines around the current line (default 2;
--- --where 0 turns it off). The JIT is turned off so line stepping is
--- reliable.
+-- --where 0 turns it off). --tui shows the source in a top pane and
+-- takes commands in a bottom pane instead (see luadbg_tui.lua). The JIT
+-- is turned off so line stepping is reliable.
 
 -- =========================================================================
 -- Constants
 -- =========================================================================
 
-local USAGE = "usage: luajit luadbg.lua [--on-error] [--where N] "
+local USAGE = "usage: luajit luadbg.lua [--on-error] [--where N] [--tui] "
     .. "<script.lua> [args...]"
 local DEFAULT_WHERE_LINES = 2
 local EXIT_USAGE = 2
@@ -60,6 +61,9 @@ local function parse_options(argv, options)
                 return nil, "invalid --where value: " .. (value or "(missing)")
             end
             position = position + 2
+        elseif option == "--tui" then
+            options.tui = true
+            position = position + 1
         else
             return position
         end
@@ -130,6 +134,15 @@ package.path = get_directory(arg[0]) .. "/?.lua;"
     .. script_dir .. "/?.lua;"
     .. package.path
 
+local tui
+if options.tui then
+    tui = require("luadbg_tui")
+    local supported, tui_err = tui.check_terminal()
+    if not supported then
+        fail(tui_err, EXIT_USAGE)
+    end
+end
+
 local dbg = require("debugger")
 require("jit").off()
 if options.where_lines > 0 then
@@ -150,6 +163,16 @@ io.stderr:write(
 
 -- The script sees its own path in arg[0], as if run directly.
 arg = options.script_args -- luacheck: ignore 121 (scripts read global arg)
+
+if tui then
+    -- The TUI always runs the script inside dbg.call, so a script error
+    -- stops in the debugger instead of leaving the terminal in raw mode.
+    local status, run_err = tui.run(dbg, chunk, options.script_args)
+    if not status then
+        fail(run_err, EXIT_SCRIPT_ERROR)
+    end
+    os.exit(status)
+end
 
 if not options.on_error then
     -- Tail call keeps the stack as shallow as a direct run, which
