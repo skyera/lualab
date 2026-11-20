@@ -55,6 +55,7 @@ local test_suites = {
     { file = "test_imgproc.lua", description = "imgproc - PPM gradient writer and error paths" },
     { file = "test_luadbg.lua", description = "luadbg - debugger wrapper" },
     { file = "test_luadbg_tui.lua", description = "luadbg --tui rendering" },
+    { file = "test_oop_todo.lua", description = "oop_todo index lookup" },
 }
 
 local luajit_bin = "luajit"

@@ -69,6 +69,20 @@ function Todo:new(filename)
     return instance
 end
 
+--- Convert index (a number or numeric string) to a valid task position.
+--- Returns the position, or nil and an error message when no task exists
+--- at that index.
+local function find_task_position(todo, index)
+    local position = tonumber(index)
+    if not position or not todo.tasks[position] then
+        return nil, string_format(
+            "No such task at index: %s",
+            tostring(index)
+        )
+    end
+    return position
+end
+
 function Todo:count()
     return #self.tasks
 end
@@ -87,40 +101,29 @@ function Todo:add(text)
 end
 
 function Todo:done(index)
-    local idx = tonumber(index)
-    local task = idx and self.tasks[idx]
-    if not task then
-        return false, string_format(
-            "No such task at index: %s",
-            tostring(index)
-        )
+    local position, err = find_task_position(self, index)
+    if not position then
+        return false, err
     end
-    task:complete()
+    self.tasks[position]:complete()
     return self:save()
 end
 
 function Todo:toggle(index)
-    local idx = tonumber(index)
-    local task = idx and self.tasks[idx]
-    if not task then
-        return false, string_format(
-            "No such task at index: %s",
-            tostring(index)
-        )
+    local position, err = find_task_position(self, index)
+    if not position then
+        return false, err
     end
-    task:toggle()
+    self.tasks[position]:toggle()
     return self:save()
 end
 
 function Todo:remove(index)
-    local idx = tonumber(index)
-    if not idx or not self.tasks[idx] then
-        return false, string_format(
-            "No such task at index: %s",
-            tostring(index)
-        )
+    local position, find_err = find_task_position(self, index)
+    if not position then
+        return false, find_err
     end
-    local removed = table_remove(self.tasks, idx)
+    local removed = table_remove(self.tasks, position)
     local ok, err = self:save()
     if not ok then
         return false, err
