@@ -2,21 +2,23 @@
 -- luadbg.lua: run any LuaJIT script under debugger.lua (vendored).
 --
 -- Usage:
---   luajit luadbg.lua [--on-error] [--where N] [--tui] <script.lua> [args...]
+--   luajit luadbg.lua [--on-error] [--where N] [--tui [--theme NAME]]
+--                     <script.lua> [args...]
 --
 -- Default mode stops at the script's first line. --on-error runs the
 -- script normally and stops at the line that raised an error.
 -- Every stop shows N source lines around the current line (default 2;
 -- --where 0 turns it off). --tui shows the source in a top pane and
--- takes commands in a bottom pane instead (see luadbg_tui.lua). The JIT
--- is turned off so line stepping is reliable.
+-- takes commands in a bottom pane instead (see luadbg_tui.lua); --theme
+-- picks its colors (dark, light, plain; LUADBG_THEME sets a default).
+-- The JIT is turned off so line stepping is reliable.
 
 -- =========================================================================
 -- Constants
 -- =========================================================================
 
-local USAGE = "usage: luajit luadbg.lua [--on-error] [--where N] [--tui] "
-    .. "<script.lua> [args...]"
+local USAGE = "usage: luajit luadbg.lua [--on-error] [--where N] "
+    .. "[--tui [--theme NAME]] <script.lua> [args...]"
 local DEFAULT_WHERE_LINES = 2
 local EXIT_USAGE = 2
 local EXIT_SCRIPT_ERROR = 1
@@ -64,6 +66,12 @@ local function parse_options(argv, options)
         elseif option == "--tui" then
             options.tui = true
             position = position + 1
+        elseif option == "--theme" then
+            options.theme = argv[position + 1]
+            if not options.theme then
+                return nil, "missing value for --theme"
+            end
+            position = position + 2
         else
             return position
         end
@@ -134,13 +142,24 @@ package.path = get_directory(arg[0]) .. "/?.lua;"
     .. script_dir .. "/?.lua;"
     .. package.path
 
-local tui
+local tui, tui_options
 if options.tui then
     tui = require("luadbg_tui")
+    -- Check the theme before the terminal so a typo is reported first.
+    local theme, message = tui.resolve_theme(options.theme, os.getenv)
+    if not theme then
+        fail(message, EXIT_USAGE)
+    end
+    if message then
+        io.stderr:write("luadbg: ", message, "\n")
+    end
+    tui_options = { theme = theme, warning = message }
     local supported, tui_err = tui.check_terminal()
     if not supported then
         fail(tui_err, EXIT_USAGE)
     end
+elseif options.theme then
+    fail("--theme only applies with --tui", EXIT_USAGE)
 end
 
 local dbg = require("debugger")
@@ -167,7 +186,9 @@ arg = options.script_args -- luacheck: ignore 121 (scripts read global arg)
 if tui then
     -- The TUI always runs the script inside dbg.call, so a script error
     -- stops in the debugger instead of leaving the terminal in raw mode.
-    local status, run_err = tui.run(dbg, chunk, options.script_args)
+    local status, run_err = tui.run(
+        dbg, chunk, options.script_args, tui_options
+    )
     if not status then
         fail(run_err, EXIT_SCRIPT_ERROR)
     end

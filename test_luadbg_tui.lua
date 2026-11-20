@@ -180,7 +180,8 @@ do
     local rows = split_frame_rows(frame)
     check(contains(rows[1], source_path .. ":2  in local 'add'"),
         "header shows path, line and function")
-    check(contains(rows[1], "[stopped]"), "header shows the status")
+    check(contains(rows[1], "[stopped \194\183 plain]"),
+        "header shows the status and theme")
     check(contains(frame, "\27[7m   2 \226\150\182     local sum"),
         "current line is reversed, marked and tab-expanded")
     check(contains(rows[3], "héllo wörld"), "UTF-8 source is kept")
@@ -362,8 +363,10 @@ end
 -- Tests: syntax highlighting
 -- =========================================================================
 
-local function new_located_state(color)
-    local state = tui.new_state({ color = color })
+local THEME_NAMES = { "dark", "light", "plain" }
+
+local function new_located_state(theme)
+    local state = tui.new_state({ theme = theme })
     state.location = { path = source_path, line = 2, label = "in local 'add'" }
     return state
 end
@@ -377,21 +380,28 @@ local function split_raw_rows(frame)
     return rows
 end
 
-print("Test 12: colored frames show the same text as plain frames")
-for _, size in ipairs(SIZES) do
-    local cols, rows = size[1], size[2]
-    local label = string.format("%dx%d", cols, rows)
-    local colored = tui.render_frame(new_located_state(true), cols, rows)
-    local plain = tui.render_frame(new_located_state(false), cols, rows)
-    local colored_rows = split_frame_rows(colored)
-    local plain_rows = split_frame_rows(plain)
-    local same = true
-    for row = 1, rows do
-        if colored_rows[row] ~= plain_rows[row] then
-            same = false
+--- Return true when rows 2..`rows` show the same text in both frames
+--- (row 1, the header, names the theme and so differs).
+local function have_same_body_text(frame_a, frame_b, rows)
+    local rows_a = split_frame_rows(frame_a)
+    local rows_b = split_frame_rows(frame_b)
+    for row = 2, rows do
+        if rows_a[row] ~= rows_b[row] then
+            return false
         end
     end
-    check(same, label .. ": visible text matches plain (tabs, cuts, pad)")
+    return true
+end
+
+print("Test 12: colored frames show the same text as plain frames")
+for _, theme in ipairs({ "dark", "light" }) do
+for _, size in ipairs(SIZES) do
+    local cols, rows = size[1], size[2]
+    local label = string.format("%s %dx%d", theme, cols, rows)
+    local colored = tui.render_frame(new_located_state(theme), cols, rows)
+    local plain = tui.render_frame(new_located_state("plain"), cols, rows)
+    check(have_same_body_text(colored, plain, rows),
+        label .. ": visible text matches plain (tabs, cuts, pad)")
     local layout = tui.compute_layout(rows)
     local raw_rows = split_raw_rows(colored)
     local reset_before_clear = true
@@ -403,15 +413,21 @@ for _, size in ipairs(SIZES) do
     end
     check(reset_before_clear, label .. ": styled rows reset before \\27[K")
 end
+end
 
 print("Test 13: colors, current line and NO_COLOR")
 do
-    local state = new_located_state(true)
+    local state = new_located_state("dark")
     local frame = tui.render_frame(state, 80, 24)
     local raw_rows = split_raw_rows(frame)
-    check(contains(raw_rows[2], "\27[35mlocal")
-        and contains(raw_rows[2], "\27[35mfunction"),
-        "keywords are colored")
+    check(contains(raw_rows[2], "\27[95mlocal")
+        and contains(raw_rows[2], "\27[95mfunction"),
+        "dark: keywords are bright magenta")
+    -- Row 8 shows source line 7: print(total). Standard blue (34) was
+    -- hard to read on dark backgrounds, so builtins use bright cyan.
+    check(contains(raw_rows[8], "\27[96mprint")
+        and not contains(frame, "\27[34m"),
+        "dark: builtins are bright cyan, never standard blue")
     check(contains(raw_rows[3], "\27[48;5;237m")
         and contains(raw_rows[3], "\226\150\182"),
         "current line has the background and the marker")
@@ -422,11 +438,12 @@ do
     check(first_spans ~= nil and state.highlight_cache[source_path]
         == first_spans, "a file is tokenized once and cached")
 
-    local plain = tui.render_frame(new_located_state(false), 80, 24)
-    check(not contains(plain, "\27[35m") and not contains(plain, "48;5;237"),
-        "color off: no syntax colors or background")
+    local plain = tui.render_frame(new_located_state("plain"), 80, 24)
+    check(not plain:find("\27%[9%dm") and not plain:find("\27%[3%dm")
+        and not contains(plain, "48;5;"),
+        "plain: no syntax colors or background")
     check(contains(split_raw_rows(plain)[3], "\27[7m"),
-        "color off: current line uses reverse video")
+        "plain: current line uses reverse video")
 
     local function env(values)
         return function(name)
@@ -440,6 +457,79 @@ do
         "empty NO_COLOR is ignored")
     check(not tui.is_color_enabled(env({ DBG_NOCOLOR = "1" })),
         "DBG_NOCOLOR=1 turns color off")
+end
+
+-- =========================================================================
+-- Tests: themes
+-- =========================================================================
+
+local function env_from(values)
+    return function(name)
+        return values[name]
+    end
+end
+
+print("Test 14: light theme and the header")
+do
+    local raw_rows = split_raw_rows(
+        tui.render_frame(new_located_state("light"), 80, 24)
+    )
+    check(contains(raw_rows[2], "\27[35mlocal")
+        and contains(raw_rows[3], "\27[48;5;254m"),
+        "light: standard magenta keywords and a light grey current line")
+    -- Row 7 shows source line 6: local total = add(1, 2)
+    check(contains(raw_rows[7], "\27[36m1")
+        and not contains(raw_rows[7], "\27[33m"),
+        "light: numbers are cyan, not yellow")
+    for _, theme in ipairs(THEME_NAMES) do
+        local header = split_frame_rows(
+            tui.render_frame(new_located_state(theme), 80, 24)
+        )[1]
+        check(contains(header, "[stopped \194\183 " .. theme .. "]"),
+            "header names the " .. theme .. " theme")
+    end
+    local ok = pcall(tui.new_state, { theme = "neon" })
+    check(not ok, "new_state rejects an unknown theme")
+end
+
+print("Test 15: theme precedence")
+do
+    local resolve = tui.resolve_theme
+    check(resolve(nil, env_from({})) == "dark", "default is dark")
+    check(resolve(nil, env_from({ LUADBG_THEME = "light" })) == "light",
+        "LUADBG_THEME selects a theme")
+    check(resolve(nil, env_from({ LUADBG_THEME = "light", NO_COLOR = "1" }))
+        == "plain", "NO_COLOR wins over LUADBG_THEME")
+    check(resolve("light", env_from({ NO_COLOR = "1" })) == "light",
+        "--theme wins over NO_COLOR")
+    local name, warning = resolve(nil, env_from({ LUADBG_THEME = "neon" }))
+    check(name == "dark" and contains(warning or "", "LUADBG_THEME='neon'")
+        and contains(warning, "using dark"),
+        "unknown LUADBG_THEME falls back to dark with a warning")
+    local bad, err = resolve("neon", env_from({}))
+    check(bad == nil
+        and err == "unknown theme 'neon' (choose dark, light, plain)",
+        "unknown --theme is an error")
+end
+
+print("Test 16: Ctrl-T cycles the theme without a full clear")
+do
+    check(tui.get_next_theme("dark") == "light"
+        and tui.get_next_theme("light") == "plain"
+        and tui.get_next_theme("plain") == "dark",
+        "cycle order is dark, light, plain")
+    local stdout = new_fake_stdout()
+    local session = tui.new_session(
+        new_fake_termkit({}), new_fake_debugger(), stdout, "dark"
+    )
+    session.state.location = { path = source_path, line = 2, label = "x" }
+    local line, finished = session:handle_key("\20")
+    local frame = stdout.take()
+    check(session.state.theme == "light" and line == nil and not finished,
+        "Ctrl-T switches to the next theme and keeps reading")
+    check(contains(frame, "\27[48;5;254m") and not contains(frame, "\27[2J"),
+        "the switch redraws in the new theme without clearing")
+    check(#session.state.editor.chars == 0, "Ctrl-T types nothing")
 end
 
 os.remove(source_path)

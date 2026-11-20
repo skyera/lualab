@@ -247,6 +247,43 @@ do
         "--where without a value is rejected, exit 2")
 end
 
+print("Test 6: --theme is validated before the terminal check")
+do
+    local script = shell_quote(sample_path)
+    local cases = {
+        {
+            arguments = "--tui --theme neon " .. script,
+            message = "luadbg: unknown theme 'neon' (choose dark, light, "
+                .. "plain)",
+            label = "unknown --theme",
+        },
+        {
+            arguments = "--theme neon --tui " .. script,
+            message = "luadbg: unknown theme 'neon'",
+            label = "unknown --theme before --tui",
+        },
+        {
+            arguments = "--theme dark " .. script,
+            message = "luadbg: --theme only applies with --tui",
+            label = "--theme without --tui",
+        },
+        {
+            arguments = "--tui --theme",
+            message = "luadbg: missing value for --theme",
+            label = "--theme without a value",
+        },
+    }
+    for _, case in ipairs(cases) do
+        local output, status = run_luadbg(other_dir, "", case.arguments)
+        check(contains(output, case.message) and status == 2,
+            case.label .. " is rejected with a message, exit 2")
+    end
+    local output, status = run_luadbg(other_dir, "",
+        "--tui --theme light " .. script)
+    check(contains(output, "--tui needs an interactive terminal")
+        and status == 2, "a valid --theme reaches the terminal check")
+end
+
 os.execute("rm -rf " .. shell_quote(fixture_dir) .. " "
     .. shell_quote(other_dir))
 print(string.format("%d / %d passed", tests_passed, tests_run))

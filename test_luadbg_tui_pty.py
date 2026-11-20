@@ -104,6 +104,7 @@ class Session:
         # Colors are on unless a test asks otherwise.
         env.pop("NO_COLOR", None)
         env.pop("DBG_NOCOLOR", None)
+        env.pop("LUADBG_THEME", None)
         env.update(extra_env or {})
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
@@ -165,7 +166,7 @@ def test_layout_and_stepping(sample):
     # The first stop is line 5: the end of the `local function add` statement.
     check("header shows location and status",
           "sample.lua:5  in main chunk" in s.screen.line(1)
-          and "[stopped]" in s.screen.line(1), s.screen.line(1))
+          and "[stopped · dark]" in s.screen.line(1), s.screen.line(1))
     check("current line is marked", "   5 ▶ end" in s.screen.text())
     s.send("s\r")
     check("output rule and help row are drawn",
@@ -294,10 +295,33 @@ def test_highlighting(sample):
     print("\n▶ Syntax highlighting")
     s = Session([sample])
     out = s.read(1.5)
-    check("keywords are colored", "\x1b[35mlocal" in out)
+    check("dark theme by default: bright magenta keywords",
+          "\x1b[95mlocal" in out)
     check("current line has the grey background", "\x1b[48;5;237m" in out)
+    out = s.send("\x14", 0.6)
+    check("Ctrl-T switches to the light theme",
+          "· light]" in s.screen.line(1) and "\x1b[48;5;254m" in out
+          and "\x1b[2J" not in out, s.screen.line(1))
+    s.send("\x14\x14", 0.6)
+    check("Ctrl-T cycles through plain back to dark",
+          "· dark]" in s.screen.line(1), s.screen.line(1))
     s.send("q\r")
     s.finish()
+
+    s = Session(["--theme", "light", sample])
+    out = s.read(1.5)
+    check("--theme light uses the light background",
+          "\x1b[48;5;254m" in out and "· light]" in s.screen.line(1))
+    s.send("q\r")
+    s.finish()
+
+    s = Session([sample], extra_env={"LUADBG_THEME": "neon"})
+    s.read(1.5)
+    check("unknown LUADBG_THEME warns in the log and starts with dark",
+          "LUADBG_THEME='neon' is not a theme" in s.screen.text()
+          and "· dark]" in s.screen.line(1), s.screen.text())
+    s.send("q\r")
+    check("session with a theme warning exits 0", s.finish() == 0)
 
     s = Session([sample], extra_env={"NO_COLOR": "1"})
     out = s.read(1.5)

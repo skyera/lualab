@@ -26,12 +26,13 @@ local TAB_WIDTH = 4
 local LOG_MAX_LINES = 5000
 local LINE_NUMBER_WIDTH = 4
 local CTRL_D = "\4"
+local CTRL_T = "\20"
 
 local DEBUGGER_PROMPT = "dbg> "
 local PROGRAM_PROMPT = "input> "
 local EXIT_PROMPT = "Program finished. Press any key to leave. "
-local HELP_TEXT = "Enter run (empty = repeat)  Up/Down history  "
-    .. "PgUp/PgDn scroll source  h help  q quit"
+local HELP_TEXT = "Enter run/repeat  Up/Down history  PgUp/PgDn source  "
+    .. "^T theme  h help  q quit"
 local CURRENT_LINE_MARKER = "\226\150\182" -- U+25B6, one column wide
 local RULE_CHAR = "\226\148\128" -- U+2500 box-drawing horizontal line
 
@@ -46,19 +47,41 @@ local STYLE_RESET = CSI .. "0m"
 local STYLE_REVERSE = CSI .. "7m"
 local STYLE_BOLD = CSI .. "1m"
 local STYLE_DIM = CSI .. "2m"
--- 256-color grey: a background that keeps syntax colors readable.
-local CURRENT_LINE_BACKGROUND = CSI .. "48;5;237m"
 
--- Basic ANSI colors so highlighting follows the terminal's theme.
-local SYNTAX_STYLES = {
-    keyword = CSI .. "35m",
-    constant = CSI .. "36m",
-    builtin = CSI .. "34m",
-    string = CSI .. "32m",
-    number = CSI .. "33m",
-    comment = CSI .. "90m",
-    plain = "",
+-- Color themes for the source pane. Syntax colors come from the
+-- terminal's 16-color palette so they follow its theme: `dark` uses the
+-- bright variants (readable on dark backgrounds), `light` the standard
+-- ones (with cyan instead of yellow, which is faint on white). The
+-- current line gets a 256-color grey background. `plain` has no syntax
+-- colors and shows the current line in reverse video.
+local THEMES = {
+    dark = {
+        current_line = CSI .. "48;5;237m",
+        syntax = {
+            keyword = CSI .. "95m",
+            builtin = CSI .. "96m",
+            constant = CSI .. "91m",
+            string = CSI .. "92m",
+            number = CSI .. "93m",
+            comment = CSI .. "90m",
+        },
+    },
+    light = {
+        current_line = CSI .. "48;5;254m",
+        syntax = {
+            keyword = CSI .. "35m",
+            builtin = CSI .. "34m",
+            constant = CSI .. "31m",
+            string = CSI .. "32m",
+            number = CSI .. "36m",
+            comment = CSI .. "90m",
+        },
+    },
+    plain = {},
 }
+local THEME_ORDER = { "dark", "light", "plain" }
+local DEFAULT_THEME = "dark"
+local THEME_CHOICES = table.concat(THEME_ORDER, ", ")
 
 local STATUS_LABELS = {
     stopped = "stopped",
@@ -143,11 +166,12 @@ local function display_width(text)
     return #to_display_chars(text)
 end
 
---- Render highlighted `spans` into at most `width` columns. Every span
---- starts from STYLE_RESET plus `base_style` (e.g. the current-line
---- background) plus its syntax color. Tabs expand from the first span.
+--- Render highlighted `spans` into at most `width` columns using the
+--- `syntax` styles of a theme. Every span starts from STYLE_RESET plus
+--- `base_style` (e.g. the current-line background) plus its syntax color.
+--- Tabs expand from the first span.
 --- Returns the styled text and the number of columns used.
-local function fit_spans(spans, width, base_style)
+local function fit_spans(spans, width, base_style, syntax)
     local out = {}
     local column = 0
     for _, span in ipairs(spans) do
@@ -157,7 +181,7 @@ local function fit_spans(spans, width, base_style)
         local cells = to_display_chars(span.text, column)
         local count = math.min(#cells, width - column)
         out[#out + 1] = STYLE_RESET .. base_style
-            .. (SYNTAX_STYLES[span.kind] or "")
+            .. (syntax[span.kind] or "")
             .. table.concat(cells, "", 1, count)
         column = column + count
     end
@@ -176,6 +200,43 @@ function M.is_color_enabled(getenv)
     return true
 end
 
+--- Choose the theme name. Precedence: `cli_name` (from --theme), then
+--- NO_COLOR/DBG_NOCOLOR (plain), then LUADBG_THEME, then "dark".
+--- Returns the name and an optional warning, or nil and an error for an
+--- unknown `cli_name`. An unknown LUADBG_THEME falls back with a warning.
+function M.resolve_theme(cli_name, getenv)
+    if cli_name then
+        if THEMES[cli_name] then
+            return cli_name
+        end
+        return nil, string.format("unknown theme '%s' (choose %s)",
+            cli_name, THEME_CHOICES)
+    end
+    if not M.is_color_enabled(getenv) then
+        return "plain"
+    end
+    local env_name = getenv("LUADBG_THEME")
+    if env_name == nil or env_name == "" then
+        return DEFAULT_THEME
+    end
+    if THEMES[env_name] then
+        return env_name
+    end
+    return DEFAULT_THEME, string.format(
+        "LUADBG_THEME='%s' is not a theme (choose %s); using %s",
+        env_name, THEME_CHOICES, DEFAULT_THEME)
+end
+
+--- Return the theme name that follows `name` in the Ctrl-T cycle.
+function M.get_next_theme(name)
+    for index, candidate in ipairs(THEME_ORDER) do
+        if candidate == name then
+            return THEME_ORDER[index % #THEME_ORDER + 1]
+        end
+    end
+    return DEFAULT_THEME
+end
+
 -- =========================================================================
 -- State, log and source
 -- =========================================================================
@@ -186,11 +247,13 @@ function M.new_editor()
 end
 
 --- Create the UI state shared by the renderer and the input loop.
---- `options.color` turns on syntax highlighting (default off).
+--- `options.theme` names the color theme (default "plain": no colors).
 function M.new_state(options)
     local command_editor = M.new_editor()
+    local theme = (options and options.theme) or "plain"
+    assert(THEMES[theme], "unknown theme: " .. tostring(theme))
     return {
-        color = (options and options.color) == true,
+        theme = theme,
         location = nil, -- { path, line, label } of the inspected frame
         status = "stopped",
         exit_message = nil,
@@ -367,7 +430,7 @@ local function render_header(state, width)
     if state.status == "exited" and state.exit_message then
         status = state.exit_message
     end
-    local right = "[" .. status .. "] "
+    local right = "[" .. status .. " \194\183 " .. state.theme .. "] "
     local room = width - display_width(right)
     local location = state.location
     local left = " (starting)"
@@ -405,16 +468,19 @@ local function render_plain_source_line(number, text, is_current, width)
     return fit_row(row, width)
 end
 
---- Render one source line from highlighted `spans`; the current line
---- gets a grey background across the whole row.
-local function render_colored_source_line(number, spans, is_current, width)
+--- Render one source line from highlighted `spans` in `theme`; the
+--- current line gets the theme's background across the whole row.
+local function render_colored_source_line(number, spans, is_current, width,
+        theme)
     local base_style = ""
     if is_current then
-        base_style = CURRENT_LINE_BACKGROUND
+        base_style = theme.current_line
     end
     local prefix = fit_row(format_line_prefix(number, is_current), width)
     local prefix_width = display_width(prefix)
-    local body, used = fit_spans(spans, width - prefix_width, base_style)
+    local body, used = fit_spans(
+        spans, width - prefix_width, base_style, theme.syntax
+    )
     local padding = ""
     if is_current then
         padding = string.rep(" ", width - prefix_width - used)
@@ -446,13 +512,15 @@ local function render_source_rows(state, width, height)
     local first = M.get_source_window_start(
         location.line, #lines, height, state.source_offset
     )
-    local spans = state.color and get_source_spans(state, location.path, lines)
+    local theme = THEMES[state.theme]
+    local spans = theme.syntax
+        and get_source_spans(state, location.path, lines)
     local rows = {}
     for number = first, math.min(#lines, first + height - 1) do
         local is_current = number == location.line
         if spans then
             rows[#rows + 1] = render_colored_source_line(
-                number, spans[number], is_current, width
+                number, spans[number], is_current, width, theme
             )
         else
             rows[#rows + 1] = render_plain_source_line(
@@ -573,12 +641,13 @@ Session.__index = Session
 
 --- Create a session around `termkit` and the debugger table `dbg`.
 --- `stdout` defaults to io.stdout; tests pass a fake with write/flush.
-function M.new_session(termkit, dbg, stdout)
+--- `theme` is a theme name (default "dark"; see resolve_theme).
+function M.new_session(termkit, dbg, stdout, theme)
     local session = setmetatable({}, Session)
     session.termkit = termkit
     session.dbg = dbg
     session.stdout = stdout or io.stdout
-    session.state = M.new_state({ color = M.is_color_enabled(os.getenv) })
+    session.state = M.new_state({ theme = theme or DEFAULT_THEME })
     session.cols, session.rows = termkit.size()
     session.saved_io = { print = print, write = io.write, read = io.read }
     session.program_io_installed = false
@@ -638,6 +707,11 @@ function Session:handle_key(key)
     local editor = self.state.editor
     if key == CTRL_D and #editor.chars == 0 then
         return nil, true
+    end
+    if key == CTRL_T then
+        self.state.theme = M.get_next_theme(self.state.theme)
+        self:draw()
+        return nil, false
     end
     if key == "PAGE_UP" or key == "PAGE_DOWN" then
         local direction = 1
@@ -919,13 +993,18 @@ function M.check_terminal()
 end
 
 --- Run `chunk` with `script_args` under debugger `dbg` inside the TUI.
+--- `options.theme` names the theme; `options.warning`, if set, is shown
+--- in the log (e.g. an invalid LUADBG_THEME).
 --- Returns the exit status (0 finished, 1 script error), or nil and an
 --- error message when the terminal could not be set up.
-function M.run(dbg, chunk, script_args)
+function M.run(dbg, chunk, script_args, options)
     local termkit = require("termkit")
-    local session = M.new_session(termkit, dbg)
+    local session = M.new_session(termkit, dbg, nil, options.theme)
     if not termkit.enter() then
         return nil, "--tui could not switch the terminal to raw mode"
+    end
+    if options.warning then
+        M.append_log(session.state, "luadbg: " .. options.warning .. "\n")
     end
     session:attach_debugger()
     session:draw(true)

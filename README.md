@@ -267,8 +267,19 @@ The source pane is syntax highlighted by `lua_highlight.lua` (keywords,
 strings, numbers, comments, `nil`/`true`/`false`/`self`, standard
 globals; long strings and `--[[ ]]` comments across lines) in the
 terminal's own 16-color palette, with a grey background on the current
-line. Set `NO_COLOR=1` (or `DBG_NOCOLOR=1`) for plain text; the current
-line is then shown in reverse video.
+line. Three themes are built in:
+
+| Theme | For | Colors |
+|---|---|---|
+| `dark` (default) | dark backgrounds | bright variants: keywords magenta, builtins cyan, strings green, numbers yellow, constants red |
+| `light` | light backgrounds | standard colors (numbers cyan instead of yellow), light grey current line |
+| `plain` | no color | current line in reverse video |
+
+Choose one with `--theme NAME`, or set a default with `LUADBG_THEME`.
+Precedence: `--theme`, then `NO_COLOR` / `DBG_NOCOLOR` (plain), then
+`LUADBG_THEME`, then `dark`. An unknown `LUADBG_THEME` is reported and
+`dark` is used. Press Ctrl-T in the TUI to cycle the themes; the header
+shows the active one (`[stopped · dark]`).
 
 Limits: POSIX terminals only (uses `termkit.lua`; refused on Windows and
 when stdin/stdout is not a TTY). Only `print`, `io.write` and line reads
