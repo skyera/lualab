@@ -189,6 +189,41 @@ make
   ./LuaJIT/src/luajit test_ffi_suite.lua
   ```
 
+## 🐞 Debugging
+
+`luadbg.lua` runs any LuaJIT script under the vendored
+[debugger.lua](https://github.com/slembcke/debugger.lua) (MIT), with no
+changes to the script:
+
+```bash
+luajit luadbg.lua script.lua [args...]             # stop at the first line
+luajit luadbg.lua --on-error script.lua [args...]  # stop where an error is raised
+luajit luadbg.lua --where 5 script.lua             # 5 lines of context per stop
+```
+
+Every stop prints the location and the source around it, with `=>` on
+the line about to run (2 lines of context by default; `--where 0` turns
+it off, and `w N` shows N lines on demand).
+
+The wrapper turns the JIT off (stepping needs it), sets `arg[0]` to the
+script, and puts the script's directory on `package.path`, so it works from
+any working directory. To stop at a specific line instead, add
+`require("debugger")()` there (remove it before committing).
+
+| Command | Action |
+|---|---|
+| `n` / `s` / `f` | next line (step over) / step into / finish function |
+| `c` | continue to the next breakpoint |
+| `p expr` / `e stmt` | print an expression / run a statement |
+| `l` / `w` / `t` | locals / source around the line / backtrace |
+| `u` / `d` | move up / down a stack frame |
+| `h` / `q` | help / quit |
+
+Set `DBG_NOCOLOR=1` for plain output. With `--on-error` the script runs
+inside `xpcall`, so scripts that detect "am I main?" by stack depth
+(`pcall(debug.getlocal, 4, 1)`, e.g. `oop_todo.lua`) see themselves as
+required and skip their main block; use the default mode for those.
+
 ## 🧹 Maintenance
 
 - **Remove binaries:** `make clean`

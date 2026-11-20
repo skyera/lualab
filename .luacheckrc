@@ -15,4 +15,6 @@ self = false
 exclude_files = {
     "LuaJIT/**",
     "LuaBridge/**",
+    -- Vendored single-file debugger (MIT); used by luadbg.lua.
+    "debugger.lua",
 }

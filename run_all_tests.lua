@@ -53,6 +53,7 @@ local test_suites = {
     { file = "test_lan_ports.lua", description = "Complete TCP port range parsing" },
     { file = "test_lan_scan_job.lua", description = "LAN background scan worker lifecycle" },
     { file = "test_imgproc.lua", description = "imgproc - PPM gradient writer and error paths" },
+    { file = "test_luadbg.lua", description = "luadbg - debugger wrapper" },
 }
 
 local luajit_bin = "luajit"
