@@ -177,15 +177,13 @@ end
 
 -- ============================================================================
 -- Step 3: Standalone Interactive CLI & Module Export
-local is_standalone = false
-
-local script_name = arg and arg[0]
-if not pcall(debug.getlocal, 4, 1)
-    and script_name
-    and script_name:match("oop_todo%.?l?u?a?$")
-then
-    is_standalone = true
-end
+-- Run the CLI only when this file is the script being run. When it is
+-- loaded with require, arg[0] names the requiring script instead. The
+-- file name is compared exactly, so test_oop_todo.lua does not match, and
+-- no stack-depth check is needed (it breaks under debugger wrappers).
+local script_name = arg and arg[0] and arg[0]:match("[^/\\]+$")
+local is_standalone = script_name == "oop_todo.lua"
+    or script_name == "oop_todo"
 
 if is_standalone then
     local filename = (arg and arg[1]) or "tasks.txt"
