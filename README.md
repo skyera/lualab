@@ -210,6 +210,19 @@ script, and puts the script's directory on `package.path`, so it works from
 any working directory. To stop at a specific line instead, add
 `require("debugger")()` there (remove it before committing).
 
+**Install as a command** (Linux/macOS `~/bin`, Windows `C:\app\bin`):
+
+```bash
+luajit deploy.lua --app luadbg     # copies debugger.lua, luadbg_tui.lua, termkit.lua
+luadbg script.lua [args...]        # then from any directory
+```
+
+On Windows the plain and `--on-error` modes are pure Lua and need no
+extra setup; `--tui` is refused there (it needs a POSIX terminal), script
+paths must use characters from the system code page (LuaJIT opens files
+through the ANSI API), and colors appear only when `TERM` is set (e.g.
+Git Bash). `LUADBG_LUAJIT` selects the luajit the launcher runs.
+
 | Command | Action |
 |---|---|
 | `n` / `s` / `f` | next line (step over) / step into / finish function |

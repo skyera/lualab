@@ -142,12 +142,20 @@ local APPS = {
         env_var = "PIXWEB_LUAJIT",
         aliases = { "pix-web" },
     },
+    luadbg = {
+        id = "luadbg",
+        name = "luadbg",
+        script = "luadbg.lua",
+        desc = "Step Debugger for LuaJIT Scripts (CLI and --tui)",
+        env_var = "LUADBG_LUAJIT",
+    },
 }
 
 -- Deployment order for `--app all`.
 local APP_ORDER = {
     "pix", "lumina", "yt", "weblite", "luatop", "hwtui", "codefind", "codefind_web",
     "landrop", "ytweb", "pixweb", "logexplorer", "mdview", "binscope",
+    "luadbg",
 }
 
 --- Find an app by its id or one of its launcher aliases; nil when unknown.
