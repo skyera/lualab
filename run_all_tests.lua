@@ -56,6 +56,7 @@ local test_suites = {
     { file = "test_luadbg.lua", description = "luadbg - debugger wrapper" },
     { file = "test_luadbg_tui.lua", description = "luadbg --tui rendering" },
     { file = "test_oop_todo.lua", description = "oop_todo index lookup" },
+    { file = "test_lua_highlight.lua", description = "Lua syntax spans" },
 }
 
 local luajit_bin = "luajit"

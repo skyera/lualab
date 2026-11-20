@@ -99,8 +99,12 @@ class Screen:
 
 
 class Session:
-    def __init__(self, args, rows=24, cols=80):
+    def __init__(self, args, rows=24, cols=80, extra_env=None):
         env = dict(os.environ, TERM="xterm")
+        # Colors are on unless a test asks otherwise.
+        env.pop("NO_COLOR", None)
+        env.pop("DBG_NOCOLOR", None)
+        env.update(extra_env or {})
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.chdir(HERE)
@@ -286,6 +290,37 @@ def test_not_a_tty(sample):
     check("non-TTY exits 2", result.returncode == 2)
 
 
+def test_highlighting(sample):
+    print("\n▶ Syntax highlighting")
+    s = Session([sample])
+    out = s.read(1.5)
+    check("keywords are colored", "\x1b[35mlocal" in out)
+    check("current line has the grey background", "\x1b[48;5;237m" in out)
+    s.send("q\r")
+    s.finish()
+
+    s = Session([sample], extra_env={"NO_COLOR": "1"})
+    out = s.read(1.5)
+    check("NO_COLOR=1 turns colors off",
+          "\x1b[35m" not in out and "48;5;237" not in out
+          and "\x1b[7m" in out)
+    s.send("q\r")
+    s.finish()
+
+    started = time.time()
+    s = Session([os.path.join(HERE, "codefind.lua")])
+    out = ""
+    while "codefind.lua:" not in s.screen.line(1) \
+            and time.time() - started < 5:
+        out += s.read(0.1)
+    seconds = time.time() - started
+    check("large file (codefind.lua) shows its first frame in < 2s",
+          "codefind.lua:" in s.screen.line(1) and seconds < 2,
+          "%.2fs" % seconds)
+    s.send("q\r")
+    check("large file session exits 0", s.finish() == 0)
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="luadbg_tui_pty_")
     try:
@@ -301,6 +336,7 @@ def main():
         test_script_error(boom)
         test_signal_and_oop_todo(tmp)
         test_not_a_tty(sample)
+        test_highlighting(sample)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if FAILURES:

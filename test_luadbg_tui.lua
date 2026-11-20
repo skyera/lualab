@@ -18,6 +18,7 @@ local SOURCE_TEXT = table.concat({
     "",
     "local total = add(1, 2)",
     "print(total)",
+    "local x =\t1 -- tab after other spans",
 }, "\n") .. "\n"
 
 -- =========================================================================
@@ -355,6 +356,90 @@ do
         "resize clears once and draws the new last row")
     session:refresh_size()
     check(stdout.take() == "", "no redraw when the size is unchanged")
+end
+
+-- =========================================================================
+-- Tests: syntax highlighting
+-- =========================================================================
+
+local function new_located_state(color)
+    local state = tui.new_state({ color = color })
+    state.location = { path = source_path, line = 2, label = "in local 'add'" }
+    return state
+end
+
+--- Return { [row] = raw row body with escapes } for one frame.
+local function split_raw_rows(frame)
+    local rows = {}
+    for row, body in frame:gmatch("\27%[(%d+);1H(.-)\27%[K") do
+        rows[tonumber(row)] = body
+    end
+    return rows
+end
+
+print("Test 12: colored frames show the same text as plain frames")
+for _, size in ipairs(SIZES) do
+    local cols, rows = size[1], size[2]
+    local label = string.format("%dx%d", cols, rows)
+    local colored = tui.render_frame(new_located_state(true), cols, rows)
+    local plain = tui.render_frame(new_located_state(false), cols, rows)
+    local colored_rows = split_frame_rows(colored)
+    local plain_rows = split_frame_rows(plain)
+    local same = true
+    for row = 1, rows do
+        if colored_rows[row] ~= plain_rows[row] then
+            same = false
+        end
+    end
+    check(same, label .. ": visible text matches plain (tabs, cuts, pad)")
+    local layout = tui.compute_layout(rows)
+    local raw_rows = split_raw_rows(colored)
+    local reset_before_clear = true
+    for row = layout.source_top, layout.source_top + layout.source_height - 1 do
+        local body = raw_rows[row] or ""
+        if body:find("\27%[") and body:sub(-4) ~= "\27[0m" then
+            reset_before_clear = false
+        end
+    end
+    check(reset_before_clear, label .. ": styled rows reset before \\27[K")
+end
+
+print("Test 13: colors, current line and NO_COLOR")
+do
+    local state = new_located_state(true)
+    local frame = tui.render_frame(state, 80, 24)
+    local raw_rows = split_raw_rows(frame)
+    check(contains(raw_rows[2], "\27[35mlocal")
+        and contains(raw_rows[2], "\27[35mfunction"),
+        "keywords are colored")
+    check(contains(raw_rows[3], "\27[48;5;237m")
+        and contains(raw_rows[3], "\226\150\182"),
+        "current line has the background and the marker")
+    check(contains(raw_rows[3], "\27[90m-- héllo wörld"),
+        "comment after a tab keeps its color and UTF-8")
+    local first_spans = state.highlight_cache[source_path]
+    tui.render_frame(state, 80, 24)
+    check(first_spans ~= nil and state.highlight_cache[source_path]
+        == first_spans, "a file is tokenized once and cached")
+
+    local plain = tui.render_frame(new_located_state(false), 80, 24)
+    check(not contains(plain, "\27[35m") and not contains(plain, "48;5;237"),
+        "color off: no syntax colors or background")
+    check(contains(split_raw_rows(plain)[3], "\27[7m"),
+        "color off: current line uses reverse video")
+
+    local function env(values)
+        return function(name)
+            return values[name]
+        end
+    end
+    check(tui.is_color_enabled(env({})), "color on by default")
+    check(not tui.is_color_enabled(env({ NO_COLOR = "1" })),
+        "NO_COLOR=1 turns color off")
+    check(tui.is_color_enabled(env({ NO_COLOR = "" })),
+        "empty NO_COLOR is ignored")
+    check(not tui.is_color_enabled(env({ DBG_NOCOLOR = "1" })),
+        "DBG_NOCOLOR=1 turns color off")
 end
 
 os.remove(source_path)

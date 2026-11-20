@@ -263,6 +263,13 @@ the program calls `io.read()`, the prompt changes to `input>` and the line
 goes to the program. After the program ends, press a key to leave; its
 output is printed again on the normal screen. `q` or Ctrl-C quits.
 
+The source pane is syntax highlighted by `lua_highlight.lua` (keywords,
+strings, numbers, comments, `nil`/`true`/`false`/`self`, standard
+globals; long strings and `--[[ ]]` comments across lines) in the
+terminal's own 16-color palette, with a grey background on the current
+line. Set `NO_COLOR=1` (or `DBG_NOCOLOR=1`) for plain text; the current
+line is then shown in reverse video.
+
 Limits: POSIX terminals only (uses `termkit.lua`; refused on Windows and
 when stdin/stdout is not a TTY). Only `print`, `io.write` and line reads
 with `io.read()` are routed through the TUI; direct `io.stdout:write` /

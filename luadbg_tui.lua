@@ -6,6 +6,10 @@
 -- input line takes debugger commands, or program input while the program
 -- waits in io.read(). Frames are built by pure functions (render_frame,
 -- render_input_row) so tests can check them without a terminal.
+-- Source lines are syntax highlighted (lua_highlight.lua) unless NO_COLOR
+-- or DBG_NOCOLOR is set.
+
+local lua_highlight = require("lua_highlight")
 
 local M = {}
 
@@ -42,6 +46,19 @@ local STYLE_RESET = CSI .. "0m"
 local STYLE_REVERSE = CSI .. "7m"
 local STYLE_BOLD = CSI .. "1m"
 local STYLE_DIM = CSI .. "2m"
+-- 256-color grey: a background that keeps syntax colors readable.
+local CURRENT_LINE_BACKGROUND = CSI .. "48;5;237m"
+
+-- Basic ANSI colors so highlighting follows the terminal's theme.
+local SYNTAX_STYLES = {
+    keyword = CSI .. "35m",
+    constant = CSI .. "36m",
+    builtin = CSI .. "34m",
+    string = CSI .. "32m",
+    number = CSI .. "33m",
+    comment = CSI .. "90m",
+    plain = "",
+}
 
 local STATUS_LABELS = {
     stopped = "stopped",
@@ -76,7 +93,9 @@ end
 --- Convert `text` into display cells, one character per column: tabs are
 --- expanded, terminal escape sequences dropped, other control bytes shown
 --- as "?". Wide (CJK) characters are counted as one column.
-local function to_display_chars(text)
+--- `start_column` (default 0) is where `text` begins, for tab stops.
+local function to_display_chars(text, start_column)
+    start_column = start_column or 0
     text = text:gsub("\27%[[%d;?]*[%a@~]", ""):gsub("\r", "")
     local cells = {}
     for _, char in ipairs(split_chars(text)) do
@@ -84,7 +103,7 @@ local function to_display_chars(text)
         if char == "\t" then
             repeat
                 cells[#cells + 1] = " "
-            until #cells % TAB_WIDTH == 0
+            until (start_column + #cells) % TAB_WIDTH == 0
         elseif byte < 32 or byte == 127 then
             cells[#cells + 1] = "?"
         else
@@ -124,6 +143,39 @@ local function display_width(text)
     return #to_display_chars(text)
 end
 
+--- Render highlighted `spans` into at most `width` columns. Every span
+--- starts from STYLE_RESET plus `base_style` (e.g. the current-line
+--- background) plus its syntax color. Tabs expand from the first span.
+--- Returns the styled text and the number of columns used.
+local function fit_spans(spans, width, base_style)
+    local out = {}
+    local column = 0
+    for _, span in ipairs(spans) do
+        if column >= width then
+            break
+        end
+        local cells = to_display_chars(span.text, column)
+        local count = math.min(#cells, width - column)
+        out[#out + 1] = STYLE_RESET .. base_style
+            .. (SYNTAX_STYLES[span.kind] or "")
+            .. table.concat(cells, "", 1, count)
+        column = column + count
+    end
+    return table.concat(out), column
+end
+
+--- Return true unless `getenv` reports NO_COLOR or DBG_NOCOLOR set to a
+--- non-empty value (NO_COLOR convention; DBG_NOCOLOR is debugger.lua's).
+function M.is_color_enabled(getenv)
+    for _, name in ipairs({ "NO_COLOR", "DBG_NOCOLOR" }) do
+        local value = getenv(name)
+        if value and value ~= "" then
+            return false
+        end
+    end
+    return true
+end
+
 -- =========================================================================
 -- State, log and source
 -- =========================================================================
@@ -134,13 +186,16 @@ function M.new_editor()
 end
 
 --- Create the UI state shared by the renderer and the input loop.
-function M.new_state()
+--- `options.color` turns on syntax highlighting (default off).
+function M.new_state(options)
     local command_editor = M.new_editor()
     return {
+        color = (options and options.color) == true,
         location = nil, -- { path, line, label } of the inspected frame
         status = "stopped",
         exit_message = nil,
         source_cache = {}, -- path -> array of lines, or false if unreadable
+        highlight_cache = {}, -- path -> array of span arrays, one per line
         source_offset = 0, -- PgUp/PgDn shift from the centred view
         log_lines = {},
         log_partial = "", -- text after the last newline
@@ -331,19 +386,52 @@ local function render_header(state, width)
     return fit_row(left, room, true) .. fit_row(right, width - room)
 end
 
-local function render_source_line(number, text, is_current, width)
+local function format_line_prefix(number, is_current)
     local marker = " "
     if is_current then
         marker = CURRENT_LINE_MARKER
     end
+    return string.format("%" .. LINE_NUMBER_WIDTH .. "d %s ", number, marker)
+end
+
+--- Render one source line without colors; the current line is reversed.
+local function render_plain_source_line(number, text, is_current, width)
     -- Expand tabs relative to the source text, not the screen row.
     local expanded = table.concat(to_display_chars(text))
-    local row = string.format("%" .. LINE_NUMBER_WIDTH .. "d %s %s",
-        number, marker, expanded)
+    local row = format_line_prefix(number, is_current) .. expanded
     if is_current then
         return STYLE_REVERSE .. fit_row(row, width, true) .. STYLE_RESET
     end
     return fit_row(row, width)
+end
+
+--- Render one source line from highlighted `spans`; the current line
+--- gets a grey background across the whole row.
+local function render_colored_source_line(number, spans, is_current, width)
+    local base_style = ""
+    if is_current then
+        base_style = CURRENT_LINE_BACKGROUND
+    end
+    local prefix = fit_row(format_line_prefix(number, is_current), width)
+    local prefix_width = display_width(prefix)
+    local body, used = fit_spans(spans, width - prefix_width, base_style)
+    local padding = ""
+    if is_current then
+        padding = string.rep(" ", width - prefix_width - used)
+    end
+    -- The padding is spaces, so the last span's color does not show and
+    -- the background from base_style is still active.
+    return base_style .. prefix .. body .. padding .. STYLE_RESET
+end
+
+--- Return the highlighted spans of every line of `path` (cached).
+local function get_source_spans(state, path, lines)
+    local spans = state.highlight_cache[path]
+    if not spans then
+        spans = lua_highlight.highlight_lines(lines)
+        state.highlight_cache[path] = spans
+    end
+    return spans
 end
 
 local function render_source_rows(state, width, height)
@@ -358,11 +446,19 @@ local function render_source_rows(state, width, height)
     local first = M.get_source_window_start(
         location.line, #lines, height, state.source_offset
     )
+    local spans = state.color and get_source_spans(state, location.path, lines)
     local rows = {}
     for number = first, math.min(#lines, first + height - 1) do
-        rows[#rows + 1] = render_source_line(
-            number, lines[number], number == location.line, width
-        )
+        local is_current = number == location.line
+        if spans then
+            rows[#rows + 1] = render_colored_source_line(
+                number, spans[number], is_current, width
+            )
+        else
+            rows[#rows + 1] = render_plain_source_line(
+                number, lines[number], is_current, width
+            )
+        end
     end
     return rows
 end
@@ -482,7 +578,7 @@ function M.new_session(termkit, dbg, stdout)
     session.termkit = termkit
     session.dbg = dbg
     session.stdout = stdout or io.stdout
-    session.state = M.new_state()
+    session.state = M.new_state({ color = M.is_color_enabled(os.getenv) })
     session.cols, session.rows = termkit.size()
     session.saved_io = { print = print, write = io.write, read = io.read }
     session.program_io_installed = false
