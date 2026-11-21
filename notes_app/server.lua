@@ -16,6 +16,7 @@ local notes = {
     { id = 1, text = "Learn Luvit HTTP servers" },
     { id = 2, text = "Build a note web app" }
 }
+local next_id = 3
 
 local function send_response(res, status_code, content_type, body)
     res.statusCode = status_code
@@ -42,6 +43,37 @@ local function serve_file(res, filename, content_type)
     end)
 end
 
+local function read_body(req, on_complete)
+    local chunks = {}
+    req:on("data", function(chunk)
+        chunks[#chunks + 1] = chunk
+    end)
+    req:on("end", function()
+        on_complete(table.concat(chunks))
+    end)
+end
+
+local function create_note(req, res)
+    read_body(req, function(body)
+        local ok, payload = pcall(json.parse, body)
+        if not ok or type(payload) ~= "table" then
+            send_json(res, 400, { error = "Invalid JSON" })
+            return
+        end
+        local text = type(payload.text) == "string"
+            and payload.text:match("^%s*(.-)%s*$")
+            or ""
+        if text == "" then
+            send_json(res, 400, { error = "Note text is required" })
+            return
+        end
+        local note = { id = next_id, text = text }
+        next_id = next_id + 1
+        notes[#notes + 1] = note
+        send_json(res, 201, note)
+    end)
+end
+
 local server = http.createServer(function(req, res)
     print(req.method, req.url)
     if req.method == "GET" and req.url == "/" then
@@ -54,6 +86,10 @@ local server = http.createServer(function(req, res)
     end
     if req.method == "GET" and req.url == "/api/notes" then
         send_json(res, 200, notes)
+        return
+    end
+    if req.method == "POST" and req.url == "/api/notes" then
+        create_note(req, res)
         return
     end
     send_response(res, 404, "text/plain; charset=utf-8", "Not Found\n")
