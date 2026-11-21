@@ -17,7 +17,6 @@
       --cyan: #22d3ee;
       --green: #34d399;
       --red: #f87171;
-      --blue: #60a5fa;
       --amber: #fbbf24;
       --on-accent: #fff;
 
@@ -39,9 +38,11 @@
       --grid: #334155;
       --cutline-glow: rgba(34, 211, 238, 0.6);
       --crosshair: rgba(251, 191, 36, 0.75);
-      --series-r: var(--red);
-      --series-g: var(--green);
-      --series-b: var(--blue);
+      /* Okabe-Ito hues, lightened for dark panels: red-green colorblind
+         viewers can still tell the R and G lines apart. */
+      --series-r: #ff7a3d;
+      --series-g: #2bc59a;
+      --series-b: #56b4e9;
       --series-luma: var(--text);
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
