@@ -13,15 +13,8 @@ local server = http.createServer(function(req, res)
     res:finish(body)
 end)
 
-net_util.check_port_free(HOST, PORT, function()
-    server:listen(PORT, HOST, function()
-        print(string.format(
-            "Notes server running at http://%s:%d/",
-            HOST,
-            PORT
-        ))
-    end)
-end, function(err)
+local is_free, err = net_util.check_port_free(HOST, PORT)
+if not is_free then
     io.stderr:write(string.format(
         "error: cannot listen on %s:%d (%s)\n",
         HOST,
@@ -29,4 +22,12 @@ end, function(err)
         tostring(err)
     ))
     os.exit(1)
+end
+
+server:listen(PORT, HOST, function()
+    print(string.format(
+        "Notes server running at http://%s:%d/",
+        HOST,
+        PORT
+    ))
 end)
