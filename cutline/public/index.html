@@ -17,6 +17,32 @@
       --cyan: #22d3ee;
       --green: #34d399;
       --red: #f87171;
+      --blue: #60a5fa;
+      --amber: #fbbf24;
+      --on-accent: #fff;
+
+      --surface-sunken: #0f172a;
+      --canvas-bg: #070b14;
+      --overlay-bg: rgba(15, 23, 42, 0.88);
+      --button-hover: #273549;
+      --primary: #0369a1;
+      --primary-hover: #075985;
+      --active: #0e7490;
+      --ok-bg: #0f291e;
+      --ok-edge: #10b98155;
+      --error-bg: #2c1215;
+      --error-edge: #f8717155;
+      --drop-bg: rgba(14, 116, 144, 0.25);
+      --swatch-edge: #64748b;
+
+      /* Canvas colors, read by theme.js. */
+      --grid: #334155;
+      --cutline-glow: rgba(34, 211, 238, 0.6);
+      --crosshair: rgba(251, 191, 36, 0.75);
+      --series-r: var(--red);
+      --series-g: var(--green);
+      --series-b: var(--blue);
+      --series-luma: var(--text);
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -51,18 +77,28 @@
       transition: background 0.15s, border-color 0.15s;
     }
     button, select { cursor: pointer; }
-    button:hover, select:hover { background: #273549; border-color: var(--accent); }
-    button.primary {
-      background: #0369a1; border-color: #38bdf8; color: #fff;
+    button:hover, select:hover {
+      background: var(--button-hover); border-color: var(--accent);
     }
-    button.primary:hover { background: #075985; }
-    button.active { background: #0e7490; border-color: var(--cyan); color: #fff; }
+    button.primary {
+      background: var(--primary); border-color: var(--accent);
+      color: var(--on-accent);
+    }
+    button.primary:hover { background: var(--primary-hover); }
+    button.active {
+      background: var(--active); border-color: var(--cyan);
+      color: var(--on-accent);
+    }
     .status-pill {
       display: flex; align-items: center; gap: 6px; font-size: 12px;
       padding: 5px 10px; border-radius: 999px;
-      background: #0f291e; border: 1px solid #10b98155; color: var(--green);
+      background: var(--ok-bg); border: 1px solid var(--ok-edge);
+      color: var(--green);
     }
-    .status-pill.offline { background: #2c1215; border-color: #f8717155; color: var(--red); }
+    .status-pill.offline {
+      background: var(--error-bg); border-color: var(--error-edge);
+      color: var(--red);
+    }
     .status-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
     main { flex: 1; display: flex; min-height: 0; }
     aside.toolbar {
@@ -80,37 +116,42 @@
     .toolbar-divider { width: 36px; height: 1px; background: var(--border); margin: 4px 0; }
     .colormap-select { width: 56px; padding: 4px 2px; font-size: 10px; text-align: center; }
     .canvas-pane {
-      flex: 1; min-width: 280px; position: relative; background: #070b14;
+      flex: 1; min-width: 280px; position: relative;
+      background: var(--canvas-bg);
       overflow: hidden; display: flex; align-items: center; justify-content: center;
     }
     .canvas-pane.drag-over::after {
       content: "Drop image to load"; position: absolute; inset: 14px;
       border: 2px dashed var(--cyan); border-radius: 12px;
-      background: rgba(14, 116, 144, 0.25); color: #fff; font-size: 18px;
+      background: var(--drop-bg); color: var(--on-accent); font-size: 18px;
       font-weight: 600; display: flex; align-items: center; justify-content: center;
       pointer-events: none;
     }
     #imageCanvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
     .canvas-overlay-info {
       position: absolute; bottom: 12px; left: 12px;
-      background: rgba(15, 23, 42, 0.88); border: 1px solid var(--border);
+      background: var(--overlay-bg); border: 1px solid var(--border);
       border-radius: 6px; padding: 6px 10px; font-size: 12px; color: var(--text);
       display: flex; align-items: center; gap: 8px;
       pointer-events: none; font-variant-numeric: tabular-nums;
     }
     .pixel-swatch {
       width: 12px; height: 12px; border-radius: 3px;
-      border: 1px solid #64748b; background: transparent; flex-shrink: 0;
+      border: 1px solid var(--swatch-edge); background: transparent;
+      flex-shrink: 0;
     }
     .colorbar-wrap {
       position: absolute; right: 12px; top: 16px;
-      background: rgba(15, 23, 42, 0.85); border: 1px solid var(--border);
+      background: var(--overlay-bg); border: 1px solid var(--border);
       border-radius: 6px; padding: 6px; display: none;
       flex-direction: column; align-items: center; gap: 4px;
       font-size: 10px; color: var(--muted); pointer-events: none;
     }
     .colorbar-wrap.visible { display: flex; }
-    #colorbarCanvas { width: 14px; height: 140px; border-radius: 3px; border: 1px solid #475569; }
+    #colorbarCanvas {
+      width: 14px; height: 140px; border-radius: 3px;
+      border: 1px solid var(--border);
+    }
     .split-divider {
       width: 6px; flex-shrink: 0; background: var(--border);
       cursor: col-resize; transition: background 0.15s;
@@ -138,14 +179,15 @@
     #plotCanvas { width: 100%; height: 100%; display: block; }
     .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
     .stat-box {
-      background: #0f172a; border: 1px solid var(--border);
+      background: var(--surface-sunken); border: 1px solid var(--border);
       border-radius: 8px; padding: 8px 10px;
     }
     .stat-label { font-size: 11px; color: var(--muted); margin-bottom: 3px; }
     .stat-value { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
     .endpoints-edit {
       display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
-      background: #0f172a; border-radius: 8px; padding: 8px 10px; font-size: 12px;
+      background: var(--surface-sunken); border-radius: 8px;
+      padding: 8px 10px; font-size: 12px;
     }
     .ep-group { display: flex; align-items: center; gap: 5px; color: var(--muted); }
     .ep-group strong { color: var(--cyan); }
@@ -153,6 +195,11 @@
       width: 62px; padding: 3px 6px; font-size: 12px; font-variant-numeric: tabular-nums;
     }
     .hint { font-size: 11px; color: var(--muted); }
+    .series-luma { color: var(--series-luma); }
+    .series-r { color: var(--series-r); }
+    .series-g { color: var(--series-g); }
+    .series-b { color: var(--series-b); }
+    .auto-y { color: var(--amber); }
   </style>
 </head>
 <body>
@@ -221,11 +268,21 @@
         <div class="card-header">
           <span>Cutline Intensity Profile (A → B)</span>
           <div class="channel-toggles">
-            <label style="color:#e2e8f0"><input type="checkbox" id="chkLuma" checked /> Luma</label>
-            <label style="color:#f87171"><input type="checkbox" id="chkR" checked /> R</label>
-            <label style="color:#34d399"><input type="checkbox" id="chkG" checked /> G</label>
-            <label style="color:#60a5fa"><input type="checkbox" id="chkB" checked /> B</label>
-            <label style="color:#fbbf24" title="Auto-scale Y axis to min/max"><input type="checkbox" id="chkAutoY" /> Auto Y</label>
+            <label class="series-luma">
+              <input type="checkbox" id="chkLuma" checked /> Luma
+            </label>
+            <label class="series-r">
+              <input type="checkbox" id="chkR" checked /> R
+            </label>
+            <label class="series-g">
+              <input type="checkbox" id="chkG" checked /> G
+            </label>
+            <label class="series-b">
+              <input type="checkbox" id="chkB" checked /> B
+            </label>
+            <label class="auto-y" title="Auto-scale Y axis to min/max">
+              <input type="checkbox" id="chkAutoY" /> Auto Y
+            </label>
           </div>
         </div>
         <div class="chart-wrap">

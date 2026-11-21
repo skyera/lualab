@@ -34,10 +34,11 @@ export function computeYRange(profile, seriesList, autoScale) {
   };
 }
 
-function drawPlotGrid(ctx, w, h, yMin, yMax) {
+function drawPlotGrid(ctx, w, h, yRange, theme) {
+  const { yMin, yMax } = yRange;
   const ph = h - PLOT_PAD.top - PLOT_PAD.bottom;
   const ySpan = Math.max(1e-3, yMax - yMin);
-  ctx.strokeStyle = "#334155";
+  ctx.strokeStyle = theme.grid;
   ctx.lineWidth = 1;
   ctx.font = "10px sans-serif";
   ctx.textAlign = "right";
@@ -47,15 +48,15 @@ function drawPlotGrid(ctx, w, h, yMin, yMax) {
     ctx.moveTo(PLOT_PAD.left, y);
     ctx.lineTo(w - PLOT_PAD.right, y);
     ctx.stroke();
-    ctx.fillStyle = "#94a3b8";
+    ctx.fillStyle = theme.axisLabel;
     const label = (yMax - (ySpan * i) / 4).toFixed(0);
     ctx.fillText(label, PLOT_PAD.left - 6, y + 3);
   }
 }
 
-function drawXAxisLabels(ctx, w, h, maxDist) {
+function drawXAxisLabels(ctx, w, h, maxDist, theme) {
   const pw = w - PLOT_PAD.left - PLOT_PAD.right;
-  ctx.fillStyle = "#94a3b8";
+  ctx.fillStyle = theme.axisLabel;
   ctx.textAlign = "center";
   ctx.font = "10px sans-serif";
   for (let i = 0; i <= 4; i++) {
@@ -82,13 +83,13 @@ function drawSeriesCurve(ctx, profile, series, bounds) {
   ctx.stroke();
 }
 
-function drawHoverCrosshair(ctx, profile, hoverIdx, bounds) {
+function drawHoverCrosshair(ctx, profile, hoverIdx, bounds, theme) {
   if (hoverIdx < 0 || hoverIdx >= profile.distance.length) {
     return;
   }
   const d = profile.distance[hoverIdx];
   const x = PLOT_PAD.left + (d / bounds.maxDist) * bounds.pw;
-  ctx.strokeStyle = "rgba(251,191,36,0.75)";
+  ctx.strokeStyle = theme.crosshair;
   ctx.setLineDash([4, 3]);
   ctx.beginPath();
   ctx.moveTo(x, PLOT_PAD.top);
@@ -98,9 +99,9 @@ function drawHoverCrosshair(ctx, profile, hoverIdx, bounds) {
 
   const text = `d=${d}px | L=${profile.luma[hoverIdx]} ` +
     `R=${profile.r[hoverIdx]} G=${profile.g[hoverIdx]} B=${profile.b[hoverIdx]}`;
-  ctx.fillStyle = "rgba(15,23,42,0.92)";
+  ctx.fillStyle = theme.tooltipBg;
   ctx.fillRect(PLOT_PAD.left + 4, PLOT_PAD.top + 2, 275, 18);
-  ctx.fillStyle = "#fbbf24";
+  ctx.fillStyle = theme.hover;
   ctx.textAlign = "left";
   ctx.font = "11px monospace";
   ctx.fillText(text, PLOT_PAD.left + 8, PLOT_PAD.top + 14);
@@ -111,11 +112,13 @@ export function renderPlot(canvas, profile, options) {
   canvas.width = rect.width;
   canvas.height = rect.height;
   const ctx = canvas.getContext("2d");
-  ctx.fillStyle = "#1e293b";
+  const { theme } = options;
+  ctx.fillStyle = theme.plotBg;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  const { yMin, yMax } = computeYRange(profile, options.series, options.autoY);
-  drawPlotGrid(ctx, canvas.width, canvas.height, yMin, yMax);
+  const yRange = computeYRange(profile, options.series, options.autoY);
+  const { yMin, yMax } = yRange;
+  drawPlotGrid(ctx, canvas.width, canvas.height, yRange, theme);
   if (!profile || profile.distance.length < 2) {
     return;
   }
@@ -127,11 +130,11 @@ export function renderPlot(canvas, profile, options) {
     yMin,
     ySpan: Math.max(1e-3, yMax - yMin)
   };
-  drawXAxisLabels(ctx, canvas.width, canvas.height, bounds.maxDist);
+  drawXAxisLabels(ctx, canvas.width, canvas.height, bounds.maxDist, theme);
   for (const s of options.series) {
     if (s.show) {
       drawSeriesCurve(ctx, profile, s, bounds);
     }
   }
-  drawHoverCrosshair(ctx, profile, options.hoverIdx, bounds);
+  drawHoverCrosshair(ctx, profile, options.hoverIdx, bounds, theme);
 }

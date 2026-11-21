@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Live tests for cutline/server.lua options: host, port and failures.
+"""Tests for cutline: server options and the UI color theme.
 
-Skips (exit 0) when luvit is not installed.
+The theme checks are static. The live server tests are skipped when
+luvit is not installed.
 """
 import http.client
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
@@ -14,6 +16,10 @@ import time
 
 ROOT = Path(__file__).resolve().parent
 SERVER = ROOT / "cutline" / "server.lua"
+PUBLIC_DIR = ROOT / "cutline" / "public"
+THEMED_FILES = ["index.html", "app.js", "plot.js", "theme.js"]
+COLOR_LITERAL = re.compile(r"#[0-9a-fA-F]{3,8}\b|\brgba?\((?!\$\{)")
+ROOT_BLOCK = re.compile(r":root\s*\{(.*?)\n    \}", re.S)
 STARTUP_TIMEOUT_SECONDS = 5
 EXIT_LISTEN_FAILED = 1
 EXIT_USAGE = 2
@@ -200,10 +206,49 @@ def test_listen_failures():
     check("EADDRNOTAVAIL" in stderr, "foreign --host: EADDRNOTAVAIL")
 
 
+def read_root_block(html):
+    match = ROOT_BLOCK.search(html)
+    return match.group(1) if match else ""
+
+
+def find_color_literals(path, text):
+    """Return "file:line: text" for each color literal in `text`."""
+    found = []
+    for number, line in enumerate(text.splitlines(), 1):
+        if COLOR_LITERAL.search(line):
+            found.append(f"{path}:{number}: {line.strip()}")
+    return found
+
+
+def test_theme_colors_in_root():
+    html = (PUBLIC_DIR / "index.html").read_text()
+    root_block = read_root_block(html)
+    check(root_block != "", "index.html has a :root block")
+
+    # Blank out :root but keep its newlines so line numbers stay true.
+    blanked = html.replace(root_block, "\n" * root_block.count("\n"))
+    stray = find_color_literals("index.html", blanked)
+    for name in THEMED_FILES[1:]:
+        stray += find_color_literals(name, (PUBLIC_DIR / name).read_text())
+    for line in stray:
+        print(f"  stray color: {line}")
+    check(stray == [], "colors are defined only in :root")
+
+    defined = set(re.findall(r"(--[\w-]+)\s*:", root_block))
+    used = set(re.findall(r"var\((--[\w-]+)\)", html))
+    theme_js = (PUBLIC_DIR / "theme.js").read_text()
+    used |= set(re.findall(r'"(--[\w-]+)"', theme_js))
+    missing = sorted(used - defined)
+    for name in missing:
+        print(f"  undefined variable: {name}")
+    check(missing == [], "every var(--x) and theme.js variable is defined")
+
+
 def main():
+    test_theme_colors_in_root()
     if shutil.which("luvit") is None:
-        print("SKIP test_cutline_server.py: luvit is not installed")
-        return 0
+        print("SKIP live server tests: luvit is not installed")
+        return 1 if failures else 0
     test_local_default_host()
     test_public_host()
     test_port_precedence()

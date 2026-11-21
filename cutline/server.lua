@@ -389,7 +389,8 @@ local STATIC_ASSETS = {
     ["/index.html"] = { file = "index.html", mime = MIME_HTML },
     ["/app.js"] = { file = "app.js", mime = MIME_JS },
     ["/plot.js"] = { file = "plot.js", mime = MIME_JS },
-    ["/colormaps.js"] = { file = "colormaps.js", mime = MIME_JS }
+    ["/colormaps.js"] = { file = "colormaps.js", mime = MIME_JS },
+    ["/theme.js"] = { file = "theme.js", mime = MIME_JS }
 }
 
 --- Serve a whitelisted static file from `STATIC_ASSETS`.
@@ -404,6 +405,7 @@ local ROUTES = {
     ["GET /app.js"] = serve_static_route,
     ["GET /plot.js"] = serve_static_route,
     ["GET /colormaps.js"] = serve_static_route,
+    ["GET /theme.js"] = serve_static_route,
     ["GET /api/health"] = serve_health,
     ["POST /api/image"] = store_uploaded_image,
     ["POST /api/cutline"] = serve_cutline_profile,

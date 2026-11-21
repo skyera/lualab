@@ -4,6 +4,7 @@ import {
   renderColorbar
 } from "./colormaps.js";
 import { renderPlot } from "./plot.js";
+import { readCanvasTheme } from "./theme.js";
 
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 40;
@@ -25,6 +26,7 @@ const dom = {
 };
 
 const ctx = dom.imageCanvas.getContext("2d");
+const theme = readCanvasTheme(document.documentElement);
 
 const state = {
   imageId: null,
@@ -80,12 +82,17 @@ function getPlotOptions() {
   const isChecked = (id) => document.getElementById(id).checked;
   return {
     hoverIdx: state.hoverIdx,
+    theme,
     autoY: isChecked("chkAutoY"),
     series: [
-      { key: "r", color: "#f87171", show: isChecked("chkR") },
-      { key: "g", color: "#34d399", show: isChecked("chkG") },
-      { key: "b", color: "#60a5fa", show: isChecked("chkB") },
-      { key: "luma", color: "#e2e8f0", show: isChecked("chkLuma") }
+      { key: "r", color: theme.seriesR, show: isChecked("chkR") },
+      { key: "g", color: theme.seriesG, show: isChecked("chkG") },
+      { key: "b", color: theme.seriesB, show: isChecked("chkB") },
+      {
+        key: "luma",
+        color: theme.seriesLuma,
+        show: isChecked("chkLuma")
+      }
     ]
   };
 }
@@ -95,14 +102,14 @@ function drawPlot() {
 }
 
 function drawAnchorHandle(pt, label) {
-  ctx.fillStyle = "#0f172a";
-  ctx.strokeStyle = "#22d3ee";
+  ctx.fillStyle = theme.surfaceSunken;
+  ctx.strokeStyle = theme.cutline;
   ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.arc(pt.x, pt.y, 8, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
-  ctx.fillStyle = "#e2e8f0";
+  ctx.fillStyle = theme.handleLabel;
   ctx.font = "bold 10px sans-serif";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
@@ -112,9 +119,9 @@ function drawAnchorHandle(pt, label) {
 function drawCutlineOverlay() {
   const p1 = imageToScreen(state.line.x1, state.line.y1);
   const p2 = imageToScreen(state.line.x2, state.line.y2);
-  ctx.strokeStyle = "#22d3ee";
+  ctx.strokeStyle = theme.cutline;
   ctx.lineWidth = 2.5;
-  ctx.shadowColor = "rgba(34,211,238,0.6)";
+  ctx.shadowColor = theme.cutlineGlow;
   ctx.shadowBlur = 6;
   ctx.beginPath();
   ctx.moveTo(p1.x, p1.y);
@@ -137,9 +144,9 @@ function drawHoverMarker() {
   const hx = state.line.x1 + (state.line.x2 - state.line.x1) * ratio;
   const hy = state.line.y1 + (state.line.y2 - state.line.y1) * ratio;
   const hp = imageToScreen(hx, hy);
-  ctx.fillStyle = "#fbbf24";
+  ctx.fillStyle = theme.hover;
   // Dark ring keeps the marker visible on bright pixels and yellow LUTs.
-  ctx.strokeStyle = "#0f172a";
+  ctx.strokeStyle = theme.surfaceSunken;
   ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.arc(hp.x, hp.y, 5, 0, Math.PI * 2);
