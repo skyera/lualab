@@ -1,4 +1,4 @@
-const PLOT_PAD = { top: 16, right: 16, bottom: 32, left: 42 };
+export const PLOT_PAD = { top: 16, right: 16, bottom: 32, left: 42 };
 
 function findSeriesMinMax(profile, seriesList) {
   let lo = 255;
@@ -71,7 +71,8 @@ function drawSeriesCurve(ctx, profile, series, bounds) {
   ctx.lineWidth = series.key === "luma" ? 2 : 1.3;
   ctx.beginPath();
   for (let i = 0; i < vals.length; i++) {
-    const x = PLOT_PAD.left + (profile.distance[i] / bounds.maxDist) * bounds.pw;
+    const frac = profile.distance[i] / bounds.maxDist;
+    const x = PLOT_PAD.left + frac * bounds.pw;
     const normY = (vals[i] - bounds.yMin) / bounds.ySpan;
     const y = PLOT_PAD.top + bounds.ph - normY * bounds.ph;
     if (i === 0) {
@@ -98,13 +99,17 @@ function drawHoverCrosshair(ctx, profile, hoverIdx, bounds, theme) {
   ctx.setLineDash([]);
 
   const text = `d=${d}px | L=${profile.luma[hoverIdx]} ` +
-    `R=${profile.r[hoverIdx]} G=${profile.g[hoverIdx]} B=${profile.b[hoverIdx]}`;
+    `R=${profile.r[hoverIdx]} G=${profile.g[hoverIdx]} ` +
+    `B=${profile.b[hoverIdx]}`;
+  ctx.font = "11px monospace";
+  const measured = Math.ceil(ctx.measureText(text).width) + 8;
+  const maxBoxW = Math.max(40, bounds.pw - 8);
+  const boxW = Math.min(measured, maxBoxW);
   ctx.fillStyle = theme.tooltipBg;
-  ctx.fillRect(PLOT_PAD.left + 4, PLOT_PAD.top + 2, 275, 18);
+  ctx.fillRect(PLOT_PAD.left + 4, PLOT_PAD.top + 2, boxW, 18);
   ctx.fillStyle = theme.tooltipText;
   ctx.textAlign = "left";
-  ctx.font = "11px monospace";
-  ctx.fillText(text, PLOT_PAD.left + 8, PLOT_PAD.top + 14);
+  ctx.fillText(text, PLOT_PAD.left + 8, PLOT_PAD.top + 14, boxW - 8);
 }
 
 export function renderPlot(canvas, profile, options) {

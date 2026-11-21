@@ -5,7 +5,11 @@ A lightweight web application powered by **Luvit (LuaJIT 2.1 + FFI)** to display
 ## Project Structure
 
 - `server.lua` — Luvit HTTP server + LuaJIT FFI `uint8_t[?]` pixel buffer & bilinear cutline sampler
-- `public/index.html` — Dark-mode web UI (image canvas, draggable cutline handles, colormaps, live intensity plot)
+- `public/index.html` — Themed web UI layout and CSS variables (Slate, Graphite, Paper)
+- `public/app.js` — Image canvas, draggable cutline handles, pan/zoom, and API client
+- `public/plot.js` — Intensity profile chart and hover crosshair renderer
+- `public/colormaps.js` — Gray, Viridis, and Inferno LUT colormaps and colorbar renderer
+- `public/theme.js` — Theme switcher, persistence, and canvas CSS variable reader
 
 ## Quick Start
 

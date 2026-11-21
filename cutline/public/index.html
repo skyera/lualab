@@ -254,6 +254,13 @@
       width: 62px; padding: 3px 6px; font-size: 12px; font-variant-numeric: tabular-nums;
     }
     .hint { font-size: 11px; color: var(--muted); }
+    .error-banner {
+      display: none;
+      background: var(--error-bg); border: 1px solid var(--error-edge);
+      color: var(--red); border-radius: 8px; padding: 8px 12px;
+      font-size: 12px; line-height: 1.4;
+    }
+    .error-banner.visible { display: block; }
     .series-luma { color: var(--series-luma); }
     .series-r { color: var(--series-r); }
     .series-g { color: var(--series-g); }
@@ -328,6 +335,7 @@
     <div class="split-divider" id="splitDivider" title="Drag to resize panel"></div>
 
     <section class="analysis-pane" id="analysisPane">
+      <div class="error-banner" id="errorBanner" role="alert"></div>
       <div class="card">
         <div class="card-header">
           <span>Cutline Intensity Profile (A → B)</span>
@@ -370,13 +378,13 @@
         <div class="endpoints-edit">
           <div class="ep-group">
             <strong>A</strong>
-            <input type="number" id="inX1" step="1" title="A.x" />
-            <input type="number" id="inY1" step="1" title="A.y" />
+            <input type="number" id="inX1" min="0" step="1" title="A.x" aria-label="Point A X" />
+            <input type="number" id="inY1" min="0" step="1" title="A.y" aria-label="Point A Y" />
           </div>
           <div class="ep-group">
             <strong>B</strong>
-            <input type="number" id="inX2" step="1" title="B.x" />
-            <input type="number" id="inY2" step="1" title="B.y" />
+            <input type="number" id="inX2" min="0" step="1" title="B.x" aria-label="Point B X" />
+            <input type="number" id="inY2" min="0" step="1" title="B.y" aria-label="Point B Y" />
           </div>
         </div>
         <div class="hint">Tip: Hold <strong>Shift</strong> while dragging A or B to snap to 0° / 45° / 90°.</div>

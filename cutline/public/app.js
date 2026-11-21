@@ -3,7 +3,7 @@ import {
   computeLuminance,
   renderColorbar
 } from "./colormaps.js";
-import { renderPlot } from "./plot.js";
+import { PLOT_PAD, renderPlot } from "./plot.js";
 import {
   applyTheme,
   loadSavedTheme,
@@ -27,6 +27,7 @@ const dom = {
   cursorText: document.getElementById("cursorText"),
   statusPill: document.getElementById("statusPill"),
   statusText: document.getElementById("statusText"),
+  errorBanner: document.getElementById("errorBanner"),
   fileInput: document.getElementById("fileInput")
 };
 
@@ -51,8 +52,31 @@ const state = {
   profile: null,
   hoverIdx: -1,
   pendingFetch: null,
+  cutlineRaf: null,
   resizingSplit: false
 };
+
+function showError(message) {
+  dom.errorBanner.textContent = message;
+  dom.errorBanner.classList.add("visible");
+}
+
+function clearError() {
+  dom.errorBanner.textContent = "";
+  dom.errorBanner.classList.remove("visible");
+}
+
+async function readResponseError(res, fallback) {
+  try {
+    const body = await res.json();
+    if (body && body.error) {
+      return `${fallback}: ${body.error}`;
+    }
+  } catch {
+    // Response body is not JSON; fall through to HTTP status.
+  }
+  return `${fallback} (HTTP ${res.status})`;
+}
 
 function clampCoord(val, max) {
   return Math.max(0, Math.min(max, val));
@@ -203,7 +227,7 @@ function fitImageToView() {
   const pad = 36;
   const sx = (dom.imageCanvas.width - pad * 2) / state.imgWidth;
   const sy = (dom.imageCanvas.height - pad * 2) / state.imgHeight;
-  state.scale = Math.min(sx, sy);
+  state.scale = Math.max(MIN_ZOOM, Math.min(sx, sy));
   state.offsetX = (dom.imageCanvas.width - state.imgWidth * state.scale) / 2;
   state.offsetY = (dom.imageCanvas.height - state.imgHeight * state.scale) / 2;
   renderImage();
@@ -231,7 +255,7 @@ async function fetchCutlineProfile(signal) {
     signal
   });
   if (!res.ok) {
-    throw new Error(`Cutline HTTP ${res.status}`);
+    throw new Error(await readResponseError(res, "Cutline request failed"));
   }
   return res.json();
 }
@@ -246,13 +270,25 @@ async function requestCutline() {
   state.pendingFetch = new AbortController();
   try {
     state.profile = await fetchCutlineProfile(state.pendingFetch.signal);
+    clearError();
     updateStatsUi(state.profile.stats);
     drawPlot();
   } catch (err) {
     if (err.name !== "AbortError") {
       console.error("Cutline request failed:", err);
+      showError(err.message || "Cutline request failed.");
     }
   }
+}
+
+function scheduleCutlineRequest() {
+  if (state.cutlineRaf !== null) {
+    return;
+  }
+  state.cutlineRaf = requestAnimationFrame(() => {
+    state.cutlineRaf = null;
+    requestCutline();
+  });
 }
 
 function resetCutlineCoords() {
@@ -265,10 +301,6 @@ function resetCutlineCoords() {
 }
 
 async function uploadRgba(rgba, width, height) {
-  state.rawRGBA = rgba;
-  state.imgWidth = width;
-  state.imgHeight = height;
-  document.getElementById("statSize").textContent = `${width}×${height}`;
   const res = await fetch("/api/image", {
     method: "POST",
     headers: {
@@ -279,9 +311,16 @@ async function uploadRgba(rgba, width, height) {
     body: rgba
   });
   if (!res.ok) {
-    throw new Error(`Image upload HTTP ${res.status}`);
+    throw new Error(await readResponseError(res, "Image upload failed"));
   }
-  state.imageId = (await res.json()).image_id;
+  const uploaded = await res.json();
+  clearError();
+  state.rawRGBA = rgba;
+  state.imgWidth = width;
+  state.imgHeight = height;
+  state.imageId = uploaded.image_id;
+  state.hoverIdx = -1;
+  document.getElementById("statSize").textContent = `${width}×${height}`;
   resetCutlineCoords();
   rebuildDisplayCanvas();
   fitImageToView();
@@ -289,20 +328,33 @@ async function uploadRgba(rgba, width, height) {
 }
 
 function loadImageFile(file) {
-  if (!file || !file.type.startsWith("image/")) {
+  if (!file) {
     return;
   }
+  if (!file.type.startsWith("image/")) {
+    showError("Unsupported file type; please select or drop an image.");
+    return;
+  }
+  const objectUrl = URL.createObjectURL(file);
   const img = new Image();
   img.onload = () => {
+    URL.revokeObjectURL(objectUrl);
     const tmp = document.createElement("canvas");
     tmp.width = img.width;
     tmp.height = img.height;
     const tctx = tmp.getContext("2d");
     tctx.drawImage(img, 0, 0);
     const rgba = tctx.getImageData(0, 0, img.width, img.height).data;
-    uploadRgba(rgba, img.width, img.height).catch(console.error);
+    uploadRgba(rgba, img.width, img.height).catch((err) => {
+      console.error("Image upload failed:", err);
+      showError(err.message || "Image upload failed.");
+    });
   };
-  img.src = URL.createObjectURL(file);
+  img.onerror = () => {
+    URL.revokeObjectURL(objectUrl);
+    showError(`Failed to decode image "${file.name}".`);
+  };
+  img.src = objectUrl;
 }
 
 function loadSampleImage() {
@@ -316,17 +368,22 @@ function loadSampleImage() {
       const s1 = Math.exp(-((x - 210) ** 2 + (y - 170) ** 2) / 4500);
       const s2 = Math.exp(-((x - 430) ** 2 + (y - 310) ** 2) / 6000);
       const i = (y * w + x) * 4;
+      const bVal = Math.round(65 + 160 * (1 - rings) + 120 * s1);
       rgba[i] = Math.min(255, Math.round(35 + 150 * rings + 140 * s1));
       rgba[i + 1] = Math.min(255, Math.round(45 + 130 * rings + 170 * s2));
-      rgba[i + 2] = Math.min(255, Math.round(65 + 160 * (1 - rings) + 120 * s1));
+      rgba[i + 2] = Math.min(255, bVal);
       rgba[i + 3] = 255;
     }
   }
-  uploadRgba(rgba, w, h).catch(console.error);
+  uploadRgba(rgba, w, h).catch((err) => {
+    console.error("Sample image upload failed:", err);
+    showError(err.message || "Sample image upload failed.");
+  });
 }
 
 function updateCursorInspector(sx, sy, rect) {
-  if (!state.imgWidth || sx < 0 || sy < 0 || sx > rect.width || sy > rect.height) {
+  const outOfBounds = sx < 0 || sy < 0 || sx > rect.width || sy > rect.height;
+  if (!state.imgWidth || outOfBounds) {
     return;
   }
   const pt = screenToImage(sx, sy);
@@ -366,7 +423,18 @@ function applyCutlineDrag(sx, sy, shiftKey) {
     state.line.y2 = cy;
   }
   renderImage();
-  requestCutline();
+  scheduleCutlineRequest();
+}
+
+function zoomAt(sx, sy, factor) {
+  if (!state.imgWidth) {
+    return;
+  }
+  const before = screenToImage(sx, sy);
+  state.scale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, state.scale * factor));
+  state.offsetX = sx - before.x * state.scale;
+  state.offsetY = sy - before.y * state.scale;
+  renderImage();
 }
 
 function bindCanvasEvents() {
@@ -378,12 +446,8 @@ function bindCanvasEvents() {
     const rect = dom.imageCanvas.getBoundingClientRect();
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
-    const before = screenToImage(sx, sy);
     const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-    state.scale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, state.scale * factor));
-    state.offsetX = sx - before.x * state.scale;
-    state.offsetY = sy - before.y * state.scale;
-    renderImage();
+    zoomAt(sx, sy, factor);
   }, { passive: false });
 
   dom.imageCanvas.addEventListener("mousedown", (e) => {
@@ -444,8 +508,11 @@ function bindGlobalDragEvents() {
 
   window.addEventListener("mouseup", () => {
     if (state.dragMode) {
+      const wasPan = state.dragMode === "pan";
       state.dragMode = null;
-      requestCutline();
+      if (!wasPan) {
+        requestCutline();
+      }
     }
     if (state.resizingSplit) {
       state.resizingSplit = false;
@@ -478,7 +545,8 @@ function bindDropAndPlotHover() {
       return;
     }
     const rect = dom.plotCanvas.getBoundingClientRect();
-    const t = clampCoord((e.clientX - rect.left - 42) / (rect.width - 58), 1);
+    const plotW = Math.max(1, rect.width - PLOT_PAD.left - PLOT_PAD.right);
+    const t = clampCoord((e.clientX - rect.left - PLOT_PAD.left) / plotW, 1);
     state.hoverIdx = Math.round(t * (state.profile.distance.length - 1));
     drawPlot();
     renderImage();
@@ -490,9 +558,36 @@ function bindDropAndPlotHover() {
   });
 }
 
+async function exportCsv() {
+  if (!state.imageId) {
+    return;
+  }
+  const q = new URLSearchParams({ image_id: state.imageId, ...state.line });
+  try {
+    const res = await fetch(`/api/export?${q.toString()}`);
+    if (!res.ok) {
+      throw new Error(await readResponseError(res, "CSV export failed"));
+    }
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.download = "cutline_profile.csv";
+    link.href = blobUrl;
+    link.click();
+    URL.revokeObjectURL(blobUrl);
+    clearError();
+  } catch (err) {
+    console.error("CSV export failed:", err);
+    showError(err.message || "CSV export failed.");
+  }
+}
+
 function bindToolbarButtons() {
   document.getElementById("btnUpload").onclick = () => dom.fileInput.click();
-  dom.fileInput.onchange = (e) => loadImageFile(e.target.files[0]);
+  dom.fileInput.onchange = (e) => {
+    loadImageFile(e.target.files[0]);
+    e.target.value = "";
+  };
   document.getElementById("btnSample").onclick = loadSampleImage;
   document.getElementById("btnExportPng").onclick = () => {
     const link = document.createElement("a");
@@ -500,14 +595,10 @@ function bindToolbarButtons() {
     link.href = dom.plotCanvas.toDataURL("image/png");
     link.click();
   };
-  document.getElementById("btnExport").onclick = () => {
-    if (!state.imageId) {
-      return;
-    }
-    const q = new URLSearchParams({ image_id: state.imageId, ...state.line });
-    window.location.href = `/api/export?${q.toString()}`;
+  document.getElementById("btnExport").onclick = exportCsv;
+  document.getElementById("toolCutline").onclick = () => {
+    setActiveTool("cutline");
   };
-  document.getElementById("toolCutline").onclick = () => setActiveTool("cutline");
   document.getElementById("toolPan").onclick = () => setActiveTool("pan");
   document.getElementById("toolReset").onclick = () => {
     if (!state.imgWidth) {
@@ -518,12 +609,10 @@ function bindToolbarButtons() {
     requestCutline();
   };
   document.getElementById("toolZoomIn").onclick = () => {
-    state.scale = Math.min(MAX_ZOOM, state.scale * 1.25);
-    renderImage();
+    zoomAt(dom.imageCanvas.width / 2, dom.imageCanvas.height / 2, 1.25);
   };
   document.getElementById("toolZoomOut").onclick = () => {
-    state.scale = Math.max(MIN_ZOOM, state.scale / 1.25);
-    renderImage();
+    zoomAt(dom.imageCanvas.width / 2, dom.imageCanvas.height / 2, 1 / 1.25);
   };
   document.getElementById("colormapSelect").onchange = (e) => {
     state.colormap = e.target.value;
