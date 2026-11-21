@@ -50,6 +50,7 @@ and choose the method that fits what changed:
 
 *   **Pre-Implementation Strategy**: Identify test commands, scripts, or reproduction steps *before* writing code.
 *   **Automated Tests**: Run the narrowest relevant test first, then the full suite (`--test`, unit tests, integration tests). Add new test cases covering the change and edge cases.
+*   **Keep Tests Simple & Readable**: Structure tests as small, flat, single-purpose functions — one behavior per function. Extract repetitive setup into tiny helpers, prefer `assert()` / `error()` over custom test boilerplate, and use OS-assigned ephemeral ports (port `0`) instead of hardcoded ports in network tests.
 *   **Live Verification**: Execute the actual command or utility in the environment to confirm the fix works in practice.
 *   **Edge Cases & Regressions**: Test boundary inputs, invalid parameters, error handling, and ensure existing behavior is preserved.
 *   **Verification is Mandatory**: Never assume a fix works without running verification commands and inspecting output.
@@ -195,6 +196,7 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
    * **Small, single-purpose functions**: Each function must do one thing well and be describable in one sentence without "and". Aim for about 30 lines; 50 is the hard limit. If a function mixes parsing with rendering, needs section comments to navigate, or takes more than 5 parameters, split it into focused local helpers (group related parameters into one table).
    * **Read top-down**: A function body should read as a short list of steps at one level of detail. Move the details of each step into a well-named helper rather than inlining them.
    * **Shallow nesting**: Prefer guard clauses and early returns over deeply nested blocks. Aim for at most 3 levels of indentation inside a function.
+   * **Flatten async callbacks (no callback pyramids)**: In callback-based APIs (such as Luvit `uv`, `http`, or `fs`), avoid nesting more than 2 callbacks deep. Extract each continuation step into a small, named local function so async flows read flat and top-down.
    * **No nested `and`/`or` chains**: Use `cond and a or b` only for a single simple choice. Write two or more chained choices as `if`/`elseif`, or as a lookup table.
      Never use it when `a` can be `false` or `nil`: the expression then returns `b` even though `cond` is true (`enabled and false or true` is always `true`). Use `if`/`else` instead.
    * **Named constants, not magic numbers**: Give thresholds, sizes, column widths, and key or signal codes an `UPPER_SNAKE_CASE` name at the top of the file.
