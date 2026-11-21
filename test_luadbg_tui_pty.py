@@ -378,6 +378,48 @@ def test_luvit_tui(tmp):
     s.send("q")
     check("luvit --tui exits 0", s.finish() == 0)
 
+    # Also verify interactive CLI mode (no --tui) waits on a TTY under Luvit
+    # instead of exiting on EAGAIN from Luvit's O_NONBLOCK stdin.
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.chdir(HERE)
+        os.execvp("luvit", ["luvit", LUADBG, script_path])
+    out = b""
+    deadline = time.time() + 2
+    while time.time() < deadline and b"debugger.lua> " not in out:
+        ready, _, _ = select.select([fd], [], [], 0.1)
+        if ready:
+            out += os.read(fd, 4096)
+    _, early_status = os.waitpid(pid, os.WNOHANG)
+    check("luvit CLI pauses at debugger.lua> on a TTY",
+          b"debugger.lua> " in out and early_status == 0,
+          f"status={early_status} out={out!r}")
+    os.write(fd, b"n\n")
+    deadline = time.time() + 2
+    while time.time() < deadline and b"luvit_async.lua:2" not in out:
+        ready, _, _ = select.select([fd], [], [], 0.1)
+        if ready:
+            out += os.read(fd, 4096)
+    check("luvit CLI accepts n on a TTY and steps to line 2",
+          b"luvit_async.lua:2" in out, repr(out))
+    os.write(fd, b"c\n")
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        ready, _, _ = select.select([fd], [], [], 0.1)
+        if ready:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            out += chunk
+    _, cli_status = os.waitpid(pid, 0)
+    os.close(fd)
+    check("luvit CLI finishes uv timer and exits 0",
+          b"luvit-ok" in out and os.WEXITSTATUS(cli_status) == 0,
+          f"status={cli_status} out={out!r}")
+
 
 def main():
     tmp = tempfile.mkdtemp(prefix="luadbg_tui_pty_")

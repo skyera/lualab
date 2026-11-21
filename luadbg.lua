@@ -167,6 +167,34 @@ local function wrap_luvit_event_loop(chunk)
     end
 end
 
+--- Build a `dbg.read` replacement for Luvit CLI mode on POSIX.
+--- Luvit sets a TTY stdin to O_NONBLOCK, so `io.read()` returns EAGAIN;
+--- waiting on `poll(0, POLLIN, -1)` blocks cleanly until a line is ready.
+local function make_luvit_reader(dbg_write)
+    local ffi = require("ffi")
+    if ffi.os == "Windows" then
+        return nil
+    end
+    pcall(ffi.cdef, [[
+        struct luadbg_pollfd { int fd; short events; short revents; };
+        int poll(struct luadbg_pollfd *fds, unsigned long nfds, int timeout);
+    ]])
+    local pfd = ffi.new("struct luadbg_pollfd[1]")
+    pfd[0].fd = 0
+    pfd[0].events = 1
+    return function(prompt)
+        dbg_write(prompt)
+        io.stderr:flush()
+        while true do
+            local line, err = io.read()
+            if line ~= nil or err == nil then
+                return line
+            end
+            ffi.C.poll(pfd, 1, -1)
+        end
+    end
+end
+
 -- =========================================================================
 -- Entry point
 -- =========================================================================
@@ -208,6 +236,12 @@ end
 
 local dbg = require("debugger")
 require("jit").off()
+if is_luvit and not tui then
+    local reader = make_luvit_reader(dbg.write)
+    if reader then
+        dbg.read = reader
+    end
+end
 if options.where_lines > 0 then
     -- Print this many source lines around the current line at each stop.
     dbg.auto_where = options.where_lines
