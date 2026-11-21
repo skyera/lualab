@@ -44,6 +44,64 @@
       --series-g: #2bc59a;
       --series-b: #56b4e9;
       --series-luma: var(--text);
+
+      /* Drawn on top of the image, so themes must not override these. */
+      --cutline: #22d3ee;
+      --handle-fill: #0f172a;
+      --handle-label: #e2e8f0;
+      --hover-marker: #fbbf24;
+      --hover-ring: #0f172a;
+    }
+    :root[data-theme="graphite"] {
+      /* Neutral grey: no tint competing with the image's own colors. */
+      --bg: #121212;
+      --panel: #1a1a1a;
+      --panel-2: #242424;
+      --border: #4d4d4d;
+      --text: #e6e6e6;
+      --muted: #a3a3a3;
+      --accent: #5aa9ff;
+      --surface-sunken: #161616;
+      --canvas-bg: #0a0a0a;
+      --overlay-bg: rgba(22, 22, 22, 0.88);
+      --button-hover: #2e2e2e;
+      --primary: #1f6feb;
+      --primary-hover: #1a5fd0;
+      --active: #3a3a3a;
+      --grid: #383838;
+    }
+    :root[data-theme="paper"] {
+      color-scheme: light;
+      --bg: #eef1f4;
+      --panel: #ffffff;
+      --panel-2: #f6f8fa;
+      --border: #8c959f;
+      --text: #1f2933;
+      --muted: #57606a;
+      --accent: #0969da;
+      --cyan: #0e7490;
+      --green: #1a7f37;
+      --red: #cf222e;
+      --amber: #8a5a00;
+      --surface-sunken: #eef1f4;
+      --canvas-bg: #d0d4d9;
+      --overlay-bg: rgba(255, 255, 255, 0.92);
+      --button-hover: #e6eaef;
+      --primary: #0969da;
+      --primary-hover: #0757b8;
+      --active: #0e7490;
+      --ok-bg: #dafbe1;
+      --ok-edge: #1a7f3755;
+      --error-bg: #ffebe9;
+      --error-edge: #cf222e55;
+      --drop-bg: rgba(14, 116, 144, 0.8);
+      --swatch-edge: #57606a;
+      --grid: #d8dee4;
+      --crosshair: rgba(138, 90, 0, 0.75);
+      /* Darker Okabe-Ito hues: legend text needs 4.5:1 on white. */
+      --series-r: #b84f00;
+      --series-g: #00775a;
+      --series-b: #005f94;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -215,6 +273,11 @@
       <button id="btnSample">Sample Image</button>
       <button id="btnExportPng">Export Plot PNG</button>
       <button id="btnExport">Export CSV</button>
+      <select id="themeSelect" title="Color theme" aria-label="Color theme">
+        <option value="slate">Slate</option>
+        <option value="graphite">Graphite</option>
+        <option value="paper">Paper</option>
+      </select>
       <div class="status-pill" id="statusPill">
         <span class="status-dot"></span>
         <span id="statusText">Checking LuaJIT...</span>

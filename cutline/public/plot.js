@@ -101,7 +101,7 @@ function drawHoverCrosshair(ctx, profile, hoverIdx, bounds, theme) {
     `R=${profile.r[hoverIdx]} G=${profile.g[hoverIdx]} B=${profile.b[hoverIdx]}`;
   ctx.fillStyle = theme.tooltipBg;
   ctx.fillRect(PLOT_PAD.left + 4, PLOT_PAD.top + 2, 275, 18);
-  ctx.fillStyle = theme.hover;
+  ctx.fillStyle = theme.tooltipText;
   ctx.textAlign = "left";
   ctx.font = "11px monospace";
   ctx.fillText(text, PLOT_PAD.left + 8, PLOT_PAD.top + 14);

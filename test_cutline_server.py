@@ -19,7 +19,13 @@ SERVER = ROOT / "cutline" / "server.lua"
 PUBLIC_DIR = ROOT / "cutline" / "public"
 THEMED_FILES = ["index.html", "app.js", "plot.js", "theme.js"]
 COLOR_LITERAL = re.compile(r"#[0-9a-fA-F]{3,8}\b|\brgba?\((?!\$\{)")
-ROOT_BLOCK = re.compile(r":root\s*\{(.*?)\n    \}", re.S)
+ROOT_BLOCK = re.compile(
+    r':root(?:\[data-theme="([\w-]+)"\])?\s*\{(.*?)\n    \}', re.S)
+CSS_VARIABLE = re.compile(r"(--[\w-]+)\s*:")
+IMAGE_OVERLAY_VARIABLES = {
+    "--cutline", "--cutline-glow", "--handle-fill", "--handle-label",
+    "--hover-marker", "--hover-ring",
+}
 STARTUP_TIMEOUT_SECONDS = 5
 EXIT_LISTEN_FAILED = 1
 EXIT_USAGE = 2
@@ -206,9 +212,9 @@ def test_listen_failures():
     check("EADDRNOTAVAIL" in stderr, "foreign --host: EADDRNOTAVAIL")
 
 
-def read_root_block(html):
-    match = ROOT_BLOCK.search(html)
-    return match.group(1) if match else ""
+def read_root_blocks(html):
+    """Return [(theme name or "", body)] for every :root block."""
+    return [(name, body) for name, body in ROOT_BLOCK.findall(html)]
 
 
 def find_color_literals(path, text):
@@ -222,11 +228,14 @@ def find_color_literals(path, text):
 
 def test_theme_colors_in_root():
     html = (PUBLIC_DIR / "index.html").read_text()
-    root_block = read_root_block(html)
-    check(root_block != "", "index.html has a :root block")
+    blocks = read_root_blocks(html)
+    check(blocks and blocks[0][0] == "", "index.html starts with :root")
+    root_block = blocks[0][1] if blocks else ""
 
-    # Blank out :root but keep its newlines so line numbers stay true.
-    blanked = html.replace(root_block, "\n" * root_block.count("\n"))
+    # Blank out :root blocks but keep newlines so line numbers stay true.
+    blanked = html
+    for _, body in blocks:
+        blanked = blanked.replace(body, "\n" * body.count("\n"))
     stray = find_color_literals("index.html", blanked)
     for name in THEMED_FILES[1:]:
         stray += find_color_literals(name, (PUBLIC_DIR / name).read_text())
@@ -234,7 +243,7 @@ def test_theme_colors_in_root():
         print(f"  stray color: {line}")
     check(stray == [], "colors are defined only in :root")
 
-    defined = set(re.findall(r"(--[\w-]+)\s*:", root_block))
+    defined = set(CSS_VARIABLE.findall(root_block))
     used = set(re.findall(r"var\((--[\w-]+)\)", html))
     theme_js = (PUBLIC_DIR / "theme.js").read_text()
     used |= set(re.findall(r'"(--[\w-]+)"', theme_js))
@@ -242,6 +251,35 @@ def test_theme_colors_in_root():
     for name in missing:
         print(f"  undefined variable: {name}")
     check(missing == [], "every var(--x) and theme.js variable is defined")
+    check_theme_blocks(html, blocks[1:], defined)
+
+
+def check_theme_blocks(html, theme_blocks, defined):
+    """Theme blocks may only override base variables, never the image
+    overlay ones, and must match the select options and theme.js."""
+    for name, body in theme_blocks:
+        overridden = set(CSS_VARIABLE.findall(body))
+        unknown = sorted(overridden - defined)
+        for variable in unknown:
+            print(f"  theme {name}: {variable} is not in base :root")
+        check(unknown == [], f"theme {name}: overrides base variables only")
+        fixed = sorted(overridden & IMAGE_OVERLAY_VARIABLES)
+        for variable in fixed:
+            print(f"  theme {name}: overrides image overlay {variable}")
+        check(fixed == [], f"theme {name}: keeps image overlay colors")
+
+    select = re.search(r'<select id="themeSelect".*?</select>', html, re.S)
+    options = re.findall(r'<option value="([\w-]+)"',
+                         select.group(0) if select else "")
+    theme_js = (PUBLIC_DIR / "theme.js").read_text()
+    names_match = re.search(r"THEME_NAMES = \[(.*?)\]", theme_js)
+    js_names = re.findall(r'"([\w-]+)"',
+                          names_match.group(1) if names_match else "")
+    block_names = ["slate"] + [name for name, _ in theme_blocks]
+    print(f"  themes: select={options} theme.js={js_names} "
+          f"css={block_names}")
+    check(options == js_names == block_names,
+          "theme select, THEME_NAMES and CSS theme blocks agree")
 
 
 def main():

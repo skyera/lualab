@@ -50,6 +50,22 @@ an inbound rule for `luvit.exe` on Windows.
 If the port is already in use, the server prints the error and a suggested
 `--port` and exits with status 1. Invalid options exit with status 2.
 
+## Color Themes
+
+Pick a theme from the header: **Slate** (default, dark), **Graphite**
+(neutral grey, so no tint competes with the image's colors) or **Paper**
+(light, for daylight and projectors). The choice is saved in the browser.
+If browser storage is blocked, the theme still switches, lasts until
+reload, and the console says so.
+
+Plot lines use Okabe-Ito colors in every theme, so red-green colorblind
+viewers can tell the R and G profiles apart. The cutline, its A/B
+handles and the hover marker keep the same colors in every theme,
+because they are drawn on the image, not on the UI.
+
+All colors are CSS variables in `public/index.html`: the base `:root`
+block is Slate, and each `:root[data-theme="..."]` block overrides it.
+
 ## Tests
 
 ```sh

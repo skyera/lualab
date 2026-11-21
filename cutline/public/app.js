@@ -4,7 +4,12 @@ import {
   renderColorbar
 } from "./colormaps.js";
 import { renderPlot } from "./plot.js";
-import { readCanvasTheme } from "./theme.js";
+import {
+  applyTheme,
+  loadSavedTheme,
+  readCanvasTheme,
+  saveTheme
+} from "./theme.js";
 
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 40;
@@ -26,7 +31,8 @@ const dom = {
 };
 
 const ctx = dom.imageCanvas.getContext("2d");
-const theme = readCanvasTheme(document.documentElement);
+applyTheme(document.documentElement, loadSavedTheme());
+let theme = readCanvasTheme(document.documentElement);
 
 const state = {
   imageId: null,
@@ -102,7 +108,7 @@ function drawPlot() {
 }
 
 function drawAnchorHandle(pt, label) {
-  ctx.fillStyle = theme.surfaceSunken;
+  ctx.fillStyle = theme.handleFill;
   ctx.strokeStyle = theme.cutline;
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -144,9 +150,9 @@ function drawHoverMarker() {
   const hx = state.line.x1 + (state.line.x2 - state.line.x1) * ratio;
   const hy = state.line.y1 + (state.line.y2 - state.line.y1) * ratio;
   const hp = imageToScreen(hx, hy);
-  ctx.fillStyle = theme.hover;
+  ctx.fillStyle = theme.hoverMarker;
   // Dark ring keeps the marker visible on bright pixels and yellow LUTs.
-  ctx.strokeStyle = theme.surfaceSunken;
+  ctx.strokeStyle = theme.hoverRing;
   ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.arc(hp.x, hp.y, 5, 0, Math.PI * 2);
@@ -535,6 +541,20 @@ function bindToolbarButtons() {
   });
 }
 
+// Switch themes from the header select and redraw both canvases, which
+// keep their old colors until theme is re-read.
+function bindThemeSelect() {
+  const select = document.getElementById("themeSelect");
+  select.value = document.documentElement.dataset.theme;
+  select.onchange = () => {
+    applyTheme(document.documentElement, select.value);
+    saveTheme(select.value);
+    theme = readCanvasTheme(document.documentElement);
+    renderImage();
+    drawPlot();
+  };
+}
+
 function setActiveTool(tool) {
   state.tool = tool;
   const isCut = tool === "cutline";
@@ -577,5 +597,6 @@ bindCanvasEvents();
 bindGlobalDragEvents();
 bindDropAndPlotHover();
 bindToolbarButtons();
+bindThemeSelect();
 checkBackendHealth();
 loadSampleImage();
