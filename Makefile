@@ -44,7 +44,7 @@ PY_SUITES = test_hwinfo_tui_pty.py test_termkit_pty.py test_luatop_pty.py \
     test_deploy_dependencies.py test_deploy_mdview.py test_battery_pty.py \
     test_ffi_duplicates_tui_pty.py test_mdview_pty.py test_lazygit_lite.py \
     test_lan_dashboard_scan.py test_landrop_web_http.py \
-    test_luadbg_tui_pty.py
+    test_luadbg_tui_pty.py test_cutline_server.py
 
 # Run every Lua suite (run_all_tests.lua) and every Python suite; keep going after a
 # failure and exit non-zero if anything failed. Uses `luajit` from PATH (LUAJIT=... to override).

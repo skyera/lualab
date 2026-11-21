@@ -12,14 +12,34 @@ local json = require("json")
 local url = require("url")
 local querystring = require("querystring")
 local ffi = require("ffi")
+local uv = require("uv")
 
 -- =============================================================================
 -- Constants
 -- =============================================================================
 
-local HOST = "127.0.0.1"
-local DEFAULT_PORT = 8080
-local PORT = tonumber(os.getenv("PORT")) or DEFAULT_PORT
+local DEFAULT_HOST = "127.0.0.1"
+local PUBLIC_HOST = "0.0.0.0"
+local DEFAULT_PORT = 8100
+local MIN_PORT = 1
+local MAX_PORT = 65535
+local PRIVILEGED_PORT_LIMIT = 1024
+local LISTEN_BACKLOG = 128
+local EXIT_LISTEN_FAILED = 1
+local EXIT_USAGE = 2
+
+local USAGE = "usage: luvit server.lua [--public | --host ADDR] [--port N]"
+local HELP_TEXT = USAGE .. [[
+
+
+  --public     listen on all interfaces (0.0.0.0) so other computers
+               can connect; there is no authentication
+  --host ADDR  listen on one IP address of this computer
+               (default 127.0.0.1, local only)
+  --port N     TCP port from 1 to 65535 (default 8100)
+  --help       show this help
+
+The PORT environment variable sets the default port; --port wins.]]
 
 local BASE_DIR = (module and module.dir) or process.cwd()
 local PUBLIC_DIR = path.join(BASE_DIR, "public")
@@ -391,6 +411,256 @@ local ROUTES = {
 }
 
 -- =============================================================================
+-- Command-Line Options
+-- =============================================================================
+
+--- Convert `text` to a TCP port number.
+--- Returns the port, or nil and an error that quotes `text`.
+local function parse_port(text)
+    local port = tonumber(text)
+    local is_valid = port ~= nil
+        and port == math.floor(port)
+        and port >= MIN_PORT
+        and port <= MAX_PORT
+    if not is_valid then
+        return nil, string.format(
+            'invalid port "%s" (expected an integer from %d to %d)',
+            tostring(text),
+            MIN_PORT,
+            MAX_PORT
+        )
+    end
+    return port
+end
+
+--- Return `value` when it can be the argument of `flag`.
+--- Returns nil and an error when it is missing or is another flag.
+local function require_option_value(flag, value)
+    if value == nil or value:sub(1, 1) == "-" then
+        return nil, "missing value for " .. flag
+    end
+    return value
+end
+
+local function select_public_host(options)
+    options.host = PUBLIC_HOST
+    return 0
+end
+
+local function select_host(options, value)
+    local host, err = require_option_value("--host", value)
+    if not host then
+        return nil, err
+    end
+    options.host = host
+    return 1
+end
+
+local function select_port(options, value)
+    local text, err = require_option_value("--port", value)
+    if not text then
+        return nil, err
+    end
+    local port, port_err = parse_port(text)
+    if not port then
+        return nil, port_err
+    end
+    options.port = port
+    return 1
+end
+
+local function select_help(options)
+    options.show_help = true
+    return 0
+end
+
+--- Option handlers: each updates `options` from the flag and the next
+--- argument, and returns how many extra arguments it used, or nil, err.
+local OPTION_HANDLERS = {
+    ["--public"] = select_public_host,
+    ["--host"] = select_host,
+    ["--port"] = select_port,
+    ["--help"] = select_help,
+    ["-h"] = select_help
+}
+
+--- Build the listen options from the defaults, `port_env` (the PORT
+--- environment variable) and `argv` (arguments after the script path).
+--- Command-line flags win over PORT.
+--- Returns { host, port, show_help }, or nil, err for invalid input.
+local function parse_options(argv, port_env)
+    local options = { host = DEFAULT_HOST, port = DEFAULT_PORT }
+    if port_env and port_env ~= "" then
+        local port, err = parse_port(port_env)
+        if not port then
+            return nil, "PORT environment variable: " .. err
+        end
+        options.port = port
+    end
+
+    local index = 1
+    while index <= #argv do
+        local flag = argv[index]
+        local handler = OPTION_HANDLERS[flag]
+        if not handler then
+            return nil, string.format('unknown option "%s"', flag)
+        end
+        local extra_count, err = handler(options, argv[index + 1])
+        if not extra_count then
+            return nil, err
+        end
+        index = index + 1 + extra_count
+    end
+    return options
+end
+
+--- Return the command-line arguments that follow the script path.
+local function get_script_arguments()
+    -- luvit keeps argv in the global `args`; args[1] is the script.
+    local luvit_args = args -- luacheck: ignore 113 (luvit global)
+    local script_args = {}
+    for i = 2, #luvit_args do
+        script_args[#script_args + 1] = luvit_args[i]
+    end
+    return script_args
+end
+
+-- =============================================================================
+-- Listening
+-- =============================================================================
+
+--- Bind `probe` to `host`:`port` and start listening on it.
+--- Returns true, or nil and the uv error message. An address that is not
+--- an IP literal makes uv raise, so the bind is protected.
+local function bind_and_listen(probe, host, port)
+    local ok, bind_result, bind_err = pcall(uv.tcp_bind, probe, host, port)
+    if not ok then
+        local message = tostring(bind_result):gsub("^.-:%d+: ", "")
+        return nil, message
+    end
+    if not bind_result then
+        return nil, bind_err
+    end
+    local listened, listen_err = uv.listen(probe, LISTEN_BACKLOG, function()
+    end)
+    if not listened then
+        return nil, listen_err
+    end
+    return true
+end
+
+--- Check that `host`:`port` can be listened on, using a throwaway socket.
+--- luvit's Server:listen ignores bind and listen errors, so this is the
+--- only way to report them. Calls `on_ready()` after the probe socket has
+--- closed, so the real listen can reuse the port (Windows sets no
+--- SO_REUSEADDR), or `on_error(message)`.
+local function probe_listen_address(host, port, on_ready, on_error)
+    local probe = uv.new_tcp()
+    local ok, err = bind_and_listen(probe, host, port)
+    uv.close(probe, function()
+        if ok then
+            on_ready()
+        else
+            on_error(err)
+        end
+    end)
+end
+
+--- Return a recovery hint for listen error `message` on `options`.
+local function get_listen_failure_hint(message, options)
+    if message:find("EADDRINUSE", 1, true) then
+        return string.format(
+            "Stop the other process or choose another port: --port %d",
+            options.port + 1
+        )
+    end
+    if message:find("EACCES", 1, true)
+        and options.port < PRIVILEGED_PORT_LIMIT then
+        return string.format(
+            "Ports below %d need root; choose another: --port %d",
+            PRIVILEGED_PORT_LIMIT,
+            DEFAULT_PORT
+        )
+    end
+    if message:find("EADDRNOTAVAIL", 1, true) then
+        return "The address is not one of this computer's; "
+            .. "use --public or one of its IP addresses"
+    end
+    if message:find("Invalid IP", 1, true) then
+        return "--host takes an IP address such as 127.0.0.1"
+    end
+    return "Check --host and --port, then try again"
+end
+
+--- Write the listen failure `message` and a recovery hint to stderr.
+local function report_listen_failure(options, message)
+    io.stderr:write(string.format(
+        "error: listen on %s:%d: %s\n%s\n",
+        options.host,
+        options.port,
+        message,
+        get_listen_failure_hint(message, options)
+    ))
+end
+
+--- Return the URLs that reach a server bound to all interfaces:
+--- one per IPv4 address of this computer, loopback first.
+local function list_public_urls(port)
+    local loopback_urls = {}
+    local network_urls = {}
+    for _, addresses in pairs(uv.interface_addresses()) do
+        for _, address in ipairs(addresses) do
+            if address.family == "inet" then
+                local target = network_urls
+                if address.internal then
+                    target = loopback_urls
+                end
+                target[#target + 1] = string.format(
+                    "http://%s:%d/", address.ip, port)
+            end
+        end
+    end
+    table.sort(loopback_urls)
+    table.sort(network_urls)
+    for _, network_url in ipairs(network_urls) do
+        loopback_urls[#loopback_urls + 1] = network_url
+    end
+    return loopback_urls
+end
+
+--- Print where the server listens and how to reach it.
+local function print_startup_banner(options)
+    local runtime = get_runtime_version()
+    if options.host ~= PUBLIC_HOST then
+        print(string.format(
+            "LuaJIT Cutline Analyzer running at http://%s:%d/ (%s)",
+            options.host,
+            options.port,
+            runtime
+        ))
+        if options.host == DEFAULT_HOST then
+            print("Local only. Use --public to allow other computers.")
+        end
+        return
+    end
+
+    local lines = {
+        string.format(
+            "LuaJIT Cutline Analyzer listening on %s:%d (%s)",
+            options.host,
+            options.port,
+            runtime
+        )
+    }
+    for _, public_url in ipairs(list_public_urls(options.port)) do
+        lines[#lines + 1] = "  " .. public_url
+    end
+    lines[#lines + 1] = "Warning: no authentication; anyone who can "
+        .. "reach this port can use it."
+    print(table.concat(lines, "\n"))
+end
+
+-- =============================================================================
 -- Entry Point
 -- =============================================================================
 
@@ -410,12 +680,37 @@ local function dispatch_request(req, res)
     end
 end
 
-local server = http.createServer(dispatch_request)
-server:listen(PORT, HOST, function()
-    print(string.format(
-        "LuaJIT Cutline Analyzer running at http://%s:%d/ (%s)",
-        HOST,
-        PORT,
-        get_runtime_version()
-    ))
-end)
+--- Start the HTTP server on `options.host`:`options.port`.
+local function start_server(options)
+    local server = http.createServer(dispatch_request)
+    server:listen(options.port, options.host, function()
+        print_startup_banner(options)
+    end)
+end
+
+--- Parse the command line, check the address, then serve.
+--- Exits with EXIT_USAGE for bad options and EXIT_LISTEN_FAILED when
+--- the address cannot be listened on.
+local function main()
+    local options, err = parse_options(
+        get_script_arguments(),
+        os.getenv("PORT")
+    )
+    if not options then
+        io.stderr:write("error: ", err, "\n", USAGE, "\n")
+        os.exit(EXIT_USAGE)
+    end
+    if options.show_help then
+        print(HELP_TEXT)
+        return
+    end
+
+    probe_listen_address(options.host, options.port, function()
+        start_server(options)
+    end, function(message)
+        report_listen_failure(options, message)
+        os.exit(EXIT_LISTEN_FAILED)
+    end)
+end
+
+main()
