@@ -1,3 +1,4 @@
+local json = require("json")
 local http = require("http")
 local fs = require("fs")
 local path = require("path")
@@ -11,6 +12,10 @@ local BASE_DIR = (module and module.dir) or process.cwd()
 
 -- luacheck: pop
 local PUBLIC_DIR = path.join(BASE_DIR, "public")
+local notes = {
+    { id = 1, text = "Learn Luvit HTTP servers" },
+    { id = 2, text = "Build a note web app" }
+}
 
 local function send_response(res, status_code, content_type, body)
     res.statusCode = status_code
@@ -19,21 +24,36 @@ local function send_response(res, status_code, content_type, body)
     res:finish(body)
 end
 
-local function serve_index(res)
-    local file_path = path.join(PUBLIC_DIR, "index.html")
+local function send_json(res, status_code, payload)
+    local body = json.stringify(payload)
+    send_response(res, status_code, "application/json", body)
+end
+
+local function serve_file(res, filename, content_type)
+    local file_path = path.join(PUBLIC_DIR, filename)
     fs.readFile(file_path, function(err, content)
         if err then
-            send_response(res, 500, "text/plain; charset=utf-8", tostring(err))
+            send_response(
+                res, 500, "text/plain; charset=utf-8", tostring(err)
+            )
             return
         end
-        send_response(res, 200, "text/html; charset=utf-8", content)
+        send_response(res, 200, content_type, content)
     end)
 end
 
 local server = http.createServer(function(req, res)
     print(req.method, req.url)
     if req.method == "GET" and req.url == "/" then
-        serve_index(res)
+        serve_file(res, "index.html", "text/html; charset=utf-8")
+        return
+    end
+    if req.method == "GET" and req.url == "/app.js" then
+        serve_file(res, "app.js", "application/javascript;charset=utf-8")
+        return
+    end
+    if req.method == "GET" and req.url == "/api/notes" then
+        send_json(res, 200, notes)
         return
     end
     send_response(res, 404, "text/plain; charset=utf-8", "Not Found\n")
