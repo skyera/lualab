@@ -193,7 +193,6 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
    * **Multi-line tables & arguments**: Format complex table constructors and long argument lists across multiple lines with clean indentation rather than sprawling horizontally.
 
 3. **Small Functions & Clean Code**:
-   * **Data + functions (C-like simplicity, no inheritance)**: Prefer plain tables (like C structs) passed to small standalone functions. At most define a single flat class/metatable (`__index = Class`) when grouping state with methods is clearly simpler — never use inheritance hierarchies, mixins, or chained metatables.
    * **Small, single-purpose functions**: Each function must do one thing well and be describable in one sentence without "and". Aim for about 30 lines; 50 is the hard limit. If a function mixes parsing with rendering, needs section comments to navigate, or takes more than 5 parameters, split it into focused local helpers (group related parameters into one table).
    * **Read top-down**: A function body should read as a short list of steps at one level of detail. Move the details of each step into a well-named helper rather than inlining them.
    * **Shallow nesting**: Prefer guard clauses and early returns over deeply nested blocks. Aim for at most 3 levels of indentation inside a function.
@@ -283,7 +282,6 @@ All JavaScript files created or modified in the repository MUST adhere to these 
    * Always use strict equality (`===`, `!==`); never leak globals onto `window`.
 
 3. **Naming & Structure**:
-   * **Data + functions (C-like simplicity, no inheritance)**: Prefer plain objects (like C structs) and standalone functions in ES modules. Avoid `class` hierarchies, `extends`/inheritance, prototype chains, and `this`-heavy abstractions.
    * `camelCase` for variables and functions (`renderChart`, `fetchProfile`), `UPPER_SNAKE_CASE` for constants (`MAX_ZOOM`, `DEFAULT_TIMEOUT_MS`), and `PascalCase` for classes/constructors.
    * Verb+object function names; avoid vague names (`handle`, `process`, `util`).
    * **Small, focused functions**: Aim for `<= 20` lines for logic/rendering functions (**50-line hard limit**); flat event-wiring or declarative setup functions may run up to ~40–50 lines rather than over-splitting.
