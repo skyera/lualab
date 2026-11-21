@@ -99,7 +99,8 @@ class Screen:
 
 
 class Session:
-    def __init__(self, args, rows=24, cols=80, extra_env=None):
+    def __init__(self, args, rows=24, cols=80, extra_env=None,
+                 interpreter="luajit"):
         env = dict(os.environ, TERM="xterm")
         # Colors are on unless a test asks otherwise.
         env.pop("NO_COLOR", None)
@@ -109,7 +110,8 @@ class Session:
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.chdir(HERE)
-            os.execvpe("luajit", ["luajit", LUADBG, "--tui", *args], env)
+            os.execvpe(interpreter,
+                       [interpreter, LUADBG, "--tui", *args], env)
         self.screen = Screen(rows, cols)
         self.resize(rows, cols, signal_child=False)
 
@@ -345,6 +347,38 @@ def test_highlighting(sample):
     check("large file session exits 0", s.finish() == 0)
 
 
+def test_luvit_tui(tmp):
+    print("\n▶ Luvit --tui with relative require and uv timer")
+    if shutil.which("luvit") is None:
+        print("  SKIP luvit is not installed")
+        return
+    helper_path = os.path.join(tmp, "luvit_helper.lua")
+    script_path = os.path.join(tmp, "luvit_async.lua")
+    with open(helper_path, "w") as f:
+        f.write('return { tag = "luvit-ok" }\n')
+    with open(script_path, "w") as f:
+        f.write(
+            'local uv = require("uv")\n'
+            'local helper = require("./luvit_helper")\n'
+            'local timer = uv.new_timer()\n'
+            'timer:start(5, 0, function()\n'
+            '    print("async", helper.tag)\n'
+            '    timer:close()\n'
+            'end)\n'
+        )
+    s = Session([script_path], interpreter="luvit")
+    s.read(0.6)
+    check("luvit --tui shows script in header",
+          "luvit_async.lua:" in s.screen.line(1), s.screen.line(1))
+    s.send("c\r")
+    s.read(0.6)
+    check("luvit --tui runs uv timer callback before finishing",
+          "async" in s.screen.text() and "luvit-ok" in s.screen.text(),
+          s.screen.text())
+    s.send("q")
+    check("luvit --tui exits 0", s.finish() == 0)
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="luadbg_tui_pty_")
     try:
@@ -361,6 +395,7 @@ def main():
         test_signal_and_oop_todo(tmp)
         test_not_a_tty(sample)
         test_highlighting(sample)
+        test_luvit_tui(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if FAILURES:

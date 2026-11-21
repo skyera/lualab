@@ -91,12 +91,13 @@ local LUADBG_PATH = read_command("pwd"):gsub("%s+$", "") .. "/luadbg.lua"
 --- Run luadbg.lua from `directory` with `debugger_input` on stdin and
 --- `arguments` (already shell-quoted) on its command line.
 --- Returns the combined stdout/stderr text and the exit status.
-local function run_luadbg(directory, debugger_input, arguments)
+local function run_luadbg(directory, debugger_input, arguments, interpreter)
+    local runtime = interpreter or LUAJIT
     local command = string.format(
         "cd %s && printf %s | DBG_NOCOLOR=1 %s %s %s 2>&1; echo \"EXIT=$?\"",
         shell_quote(directory),
         shell_quote(debugger_input),
-        shell_quote(LUAJIT),
+        shell_quote(runtime),
         shell_quote(LUADBG_PATH),
         arguments
     )
@@ -282,6 +283,43 @@ do
         "--tui --theme light " .. script)
     check(contains(output, "--tui needs an interactive terminal")
         and status == 2, "a valid --theme reaches the terminal check")
+end
+
+print("Test 7: luvit runtime supports relative require, uv, and --on-error")
+do
+    local has_luvit = os.execute("command -v luvit >/dev/null 2>&1") == 0
+    if not has_luvit then
+        print("  [SKIP] luvit is not installed")
+    else
+        local luvit_sample = fixture_dir .. "/luvit_sample.lua"
+        write_file(luvit_sample, [[
+local uv = require("uv")
+local helper = require("./luadbg_helper")
+local timer = uv.new_timer()
+timer:start(1, 0, function()
+    print("timer-ok", helper.name, args[2])
+    timer:close()
+end)
+]])
+        local output, status = run_luadbg(
+            other_dir,
+            "c\n",
+            shell_quote(luvit_sample) .. " hello",
+            "luvit"
+        )
+        check(contains(output, "timer-ok\thelper-ok\thello") and status == 0,
+            "luvit runs relative require, args, and uv timer callback")
+
+        local err_out, err_status = run_luadbg(
+            other_dir,
+            "c\n",
+            "--on-error " .. shell_quote(fixture_dir .. "/boom.lua"),
+            "luvit"
+        )
+        check(contains(err_out, "attempt to index local 't'")
+            and err_status == 1,
+            "luvit --on-error stops on script error and exits 1")
+    end
 end
 
 os.execute("rm -rf " .. shell_quote(fixture_dir) .. " "

@@ -124,11 +124,55 @@ local function load_script(script_path, break_at_start)
     return chunk
 end
 
+--- Return `self_path`, 1-based `argv`, and `is_luvit` for LuaJIT or Luvit.
+local function get_cli_args()
+    if arg then
+        return arg[0], arg, false
+    end
+    local luvit_args = args -- luacheck: ignore 113 (luvit global)
+    local argv = {}
+    for i = 2, #luvit_args do
+        argv[#argv + 1] = luvit_args[i]
+    end
+    return luvit_args[1] or "luadbg.lua", argv, true
+end
+
+--- Build Luvit's 1-based `args` table (`args[1]` is the script path).
+local function build_luvit_args(script_path, script_args)
+    local luvit_args = { script_path }
+    for i = 1, #script_args do
+        luvit_args[#luvit_args + 1] = script_args[i]
+    end
+    return luvit_args
+end
+
+--- Bind Luvit's per-file `require` and `module` onto `chunk`.
+local function setup_luvit_env(chunk, script_path)
+    local abs_path = require("path").resolve(script_path)
+    local script_require, script_module = require("require")(abs_path)
+    local env = setmetatable({
+        require = script_require,
+        module = script_module
+    }, { __index = _G, __newindex = _G })
+    setfenv(chunk, env)
+end
+
+--- Wrap `chunk` so Luvit's libuv event loop runs before `os.exit`.
+local function wrap_luvit_event_loop(chunk)
+    local uv = require("uv")
+    return function(...)
+        local results = { chunk(...) }
+        uv.run()
+        return unpack(results)
+    end
+end
+
 -- =========================================================================
 -- Entry point
 -- =========================================================================
 
-local options, parse_err = parse_command_line(arg)
+local self_path, cli_argv, is_luvit = get_cli_args()
+local options, parse_err = parse_command_line(cli_argv)
 if not options then
     if parse_err then
         io.stderr:write("luadbg: ", parse_err, "\n")
@@ -138,7 +182,7 @@ end
 
 -- Find debugger.lua next to this file, and the script's own modules.
 local script_dir = get_directory(options.script_path)
-package.path = get_directory(arg[0]) .. "/?.lua;"
+package.path = get_directory(self_path) .. "/?.lua;"
     .. script_dir .. "/?.lua;"
     .. package.path
 
@@ -173,6 +217,9 @@ local chunk, err = load_script(options.script_path, not options.on_error)
 if not chunk then
     fail(err, EXIT_USAGE)
 end
+if is_luvit then
+    setup_luvit_env(chunk, options.script_path)
+end
 
 local mode = options.on_error and "stop on error" or "stop at first line"
 io.stderr:write(
@@ -180,14 +227,21 @@ io.stderr:write(
     " (", mode, ", JIT off)\n"
 )
 
--- The script sees its own path in arg[0], as if run directly.
+-- The script sees its own path in arg[0] (and args[1] under Luvit).
 arg = options.script_args -- luacheck: ignore 121 (scripts read global arg)
+if is_luvit then
+    _G.args = build_luvit_args(options.script_path, options.script_args)
+end
 
 if tui then
+    local run_chunk = chunk
+    if is_luvit then
+        run_chunk = wrap_luvit_event_loop(chunk)
+    end
     -- The TUI always runs the script inside dbg.call, so a script error
     -- stops in the debugger instead of leaving the terminal in raw mode.
     local status, run_err = tui.run(
-        dbg, chunk, options.script_args, tui_options
+        dbg, run_chunk, options.script_args, tui_options
     )
     if not status then
         fail(run_err, EXIT_SCRIPT_ERROR)
@@ -201,5 +255,9 @@ if not options.on_error then
     return chunk(unpack(options.script_args))
 end
 
-local ok = dbg.call(chunk, unpack(options.script_args))
+local run_chunk = chunk
+if is_luvit then
+    run_chunk = wrap_luvit_event_loop(chunk)
+end
+local ok = dbg.call(run_chunk, unpack(options.script_args))
 os.exit(ok and 0 or EXIT_SCRIPT_ERROR)
