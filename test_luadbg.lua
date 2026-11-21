@@ -303,10 +303,13 @@ end)
 ]])
         local output, status = run_luadbg(
             other_dir,
-            "c\n",
+            "n\nn\nc\n",
             shell_quote(luvit_sample) .. " hello",
             "luvit"
         )
+        check(contains(output, "luvit_sample.lua:2")
+            and contains(output, "luvit_sample.lua:3"),
+            "luvit n steps cleanly over require('uv') and relative require")
         check(contains(output, "timer-ok\thelper-ok\thello") and status == 0,
             "luvit runs relative require, args, and uv timer callback")
 

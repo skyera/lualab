@@ -88,18 +88,26 @@ local repl
 -- which includes C frames, Lua bytecode, and `loadstring` functions
 local function frame_has_line(info) return info.currentline >= 0 end
 
+local function stack_depth(level)
+	local depth = 0
+	while debug.getinfo(level + depth, "f") do
+		depth = depth + 1
+	end
+	return depth
+end
+
 local function hook_factory(repl_threshold)
 	return function(offset, reason)
+		-- Measure real call depth so LuaJIT tail calls (which omit
+		-- "return" hook events) cannot drift the step-over counter.
+		local base_level = offset == 0 and 4 or (2 + offset)
+		local target_depth = repl_threshold > 0
+			and math.huge
+			or (stack_depth(base_level) + repl_threshold)
 		return function(event, _)
 			-- Skip events that don't have line information.
 			if not frame_has_line(debug.getinfo(2)) then return end
-			
-			-- Tail calls are specifically ignored since they also will have tail returns to balance out.
-			if event == "call" then
-				offset = offset + 1
-			elseif event == "return" and offset > repl_threshold then
-				offset = offset - 1
-			elseif event == "line" and offset <= repl_threshold then
+			if event == "line" and stack_depth(2) <= target_depth then
 				repl(reason)
 			end
 		end
