@@ -5,6 +5,7 @@ The theme checks are static. The live server tests are skipped when
 luvit is not installed.
 """
 import http.client
+import json
 import os
 from pathlib import Path
 import re
@@ -282,6 +283,142 @@ def check_theme_blocks(html, theme_blocks, defined):
           "theme select, THEME_NAMES and CSS theme blocks agree")
 
 
+def http_request(host, port, method, path, body=None, headers=None):
+    connection = http.client.HTTPConnection(host, port, timeout=2)
+    try:
+        connection.request(method, path, body=body, headers=headers or {})
+        response = connection.getresponse()
+        return response.status, response.headers, response.read()
+    finally:
+        connection.close()
+
+
+def test_api_endpoints():
+    port = find_free_port()
+    process = run_server(["--port", str(port)])
+    try:
+        status = wait_for_health("127.0.0.1", port)
+        check(status == 200, "api test server started")
+        if status != 200:
+            return
+
+        # 2x2 RGBA: (0,0)=red(200,0,0), (1,0)=green(0,200,0),
+        #           (0,1)=blue(0,0,200), (1,1)=white(200,200,200)
+        pixels = bytes([
+            200, 0, 0, 255, 0, 200, 0, 255,
+            0, 0, 200, 255, 200, 200, 200, 255,
+        ])
+        code, _, body = http_request(
+            "127.0.0.1", port, "POST", "/api/image", body=pixels,
+            headers={"X-Image-Width": "2", "X-Image-Height": "2"},
+        )
+        uploaded = json.loads(body)
+        image_id = uploaded.get("image_id")
+        check(code == 200 and image_id == "1",
+              "POST /api/image stores 2x2 RGBA buffer")
+
+        # Sample top row (0,0) -> (1,0) with 3 samples: midpoint is (100,100,0)
+        cut_body = json.dumps({
+            "image_id": image_id, "x1": 0, "y1": 0,
+            "x2": 1, "y2": 0, "samples": 3,
+        })
+        code, _, body = http_request(
+            "127.0.0.1", port, "POST", "/api/cutline", body=cut_body,
+            headers={"Content-Type": "application/json"},
+        )
+        profile = json.loads(body)
+        check(code == 200 and profile["r"] == [200, 100, 0]
+              and profile["g"] == [0, 100, 200]
+              and profile["b"] == [0, 0, 0],
+              "POST /api/cutline computes bilinear RGB profile")
+        check(profile["luma"] == [42.52, 92.78, 143.04]
+              and profile["stats"]["samples"] == 3
+              and profile["stats"]["length"] == 1,
+              "POST /api/cutline computes luma and stats")
+
+        # CSV export
+        code, headers, body = http_request(
+            "127.0.0.1", port, "GET",
+            f"/api/export?image_id={image_id}&x1=0&y1=0&x2=1&y2=0&samples=2",
+        )
+        csv_lines = body.decode().strip().splitlines()
+        check(code == 200
+              and "text/csv" in headers.get("Content-Type", "")
+              and csv_lines[0] == "index,distance_px,r,g,b,luminance"
+              and len(csv_lines) == 3,
+              "GET /api/export returns CSV profile")
+
+        # Validation & safety errors
+        bad_uploads = [
+            ("non-integer width", "0.5", "2", pixels[:4]),
+            ("NaN width", "nan", "2", pixels),
+            ("byte mismatch", "2", "2", pixels[:8]),
+        ]
+        for label, w, h, data in bad_uploads:
+            code, _, _ = http_request(
+                "127.0.0.1", port, "POST", "/api/image", body=data,
+                headers={"X-Image-Width": w, "X-Image-Height": h},
+            )
+            check(code == 400, f"POST /api/image rejects {label} with 400")
+
+        code, _, _ = http_request(
+            "127.0.0.1", port, "POST", "/api/image", body=b"",
+            headers={"X-Image-Width": "8192", "X-Image-Height": "8192"},
+        )
+        check(code == 413, "POST /api/image rejects oversized image with 413")
+
+        code, _, _ = http_request(
+            "127.0.0.1", port, "POST", "/api/cutline",
+            body=json.dumps({"image_id": image_id, "x1": "nan"}),
+        )
+        check(code == 400, "POST /api/cutline rejects NaN coord with 400")
+
+        code, _, _ = http_request(
+            "127.0.0.1", port, "GET",
+            f"/api/export?image_id={image_id}&x1=nan",
+        )
+        check(code == 400, "GET /api/export rejects NaN coord with 400")
+
+        code, _, _ = http_request(
+            "127.0.0.1", port, "POST", "/api/cutline",
+            body="x" * (65 * 1024),
+        )
+        check(code == 413, "POST /api/cutline rejects oversized JSON with 413")
+
+        code, _, _ = http_request(
+            "127.0.0.1", port, "POST", "/api/cutline",
+            body=json.dumps({"image_id": "9999"}),
+        )
+        check(code == 404, "POST /api/cutline returns 404 for unknown image")
+
+        # Eviction: upload 16 more images so image #1 is evicted
+        last_id = None
+        for _ in range(16):
+            code, _, body = http_request(
+                "127.0.0.1", port, "POST", "/api/image", body=pixels,
+                headers={"X-Image-Width": "2", "X-Image-Height": "2"},
+            )
+            last_id = json.loads(body).get("image_id")
+        old_code, _, _ = http_request(
+            "127.0.0.1", port, "GET", f"/api/export?image_id={image_id}",
+        )
+        new_code, _, _ = http_request(
+            "127.0.0.1", port, "GET", f"/api/export?image_id={last_id}",
+        )
+        check(old_code == 404 and new_code == 200,
+              "image cache evicts oldest image after 16 uploads")
+
+        # Static index + unknown route
+        idx_code, idx_hdrs, _ = http_request("127.0.0.1", port, "GET", "/")
+        miss_code, _, _ = http_request("127.0.0.1", port, "GET", "/nope")
+        check(idx_code == 200
+              and "text/html" in idx_hdrs.get("Content-Type", "")
+              and miss_code == 404,
+              "static / returns HTML and unknown route returns 404")
+    finally:
+        stop_server(process)
+
+
 def main():
     test_theme_colors_in_root()
     if shutil.which("luvit") is None:
@@ -292,6 +429,7 @@ def main():
     test_port_precedence()
     test_usage_errors()
     test_listen_failures()
+    test_api_endpoints()
     if failures:
         print(f"{len(failures)} FAILED")
         return 1

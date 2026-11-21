@@ -41,12 +41,18 @@ local HELP_TEXT = USAGE .. [[
 
 The PORT environment variable sets the default port; --port wins.]]
 
+-- luacheck: push ignore 113 143 (luvit globals)
 local BASE_DIR = (module and module.dir) or process.cwd()
+-- luacheck: pop
 local PUBLIC_DIR = path.join(BASE_DIR, "public")
 local MIME_HTML = "text/html; charset=utf-8"
 local MIME_JS = "application/javascript; charset=utf-8"
 
 local RGBA_CHANNELS = 4
+local MAX_IMAGE_DIM = 16384
+local MAX_UPLOAD_BYTES = 64 * 1024 * 1024
+local MAX_JSON_BYTES = 64 * 1024
+local MAX_STORED_IMAGES = 16
 local MIN_SAMPLES = 2
 local MAX_SAMPLES = 4096
 local MAX_INTENSITY = 255.0
@@ -60,15 +66,31 @@ local LUMA_WEIGHT_B = 0.0722
 -- =============================================================================
 
 local images = {}
+local image_order = {}
 local next_image_id = 1
 
 -- =============================================================================
 -- Helpers
 -- =============================================================================
 
+--- Return true when `value` is a finite number (not nil, NaN, or +/-inf).
+local function is_finite_number(value)
+    return type(value) == "number"
+        and value == value
+        and math.abs(value) < math.huge
+end
+
+--- Return true when `value` is a valid image width or height.
+local function is_valid_dimension(value)
+    return is_finite_number(value)
+        and value == math.floor(value)
+        and value >= 1
+        and value <= MAX_IMAGE_DIM
+end
+
 --- Clamp `value` into the inclusive range [`low`, `high`].
 local function clamp(value, low, high)
-    if value < low then
+    if value ~= value or value < low then
         return low
     end
     if value > high then
@@ -107,14 +129,51 @@ local function send_text(res, status_code, message)
     res:finish(message)
 end
 
---- Read the complete HTTP request body and invoke `on_complete(body)`.
-local function read_request_body(req, on_complete)
+--- Read an HTTP request body up to `max_bytes` and invoke `on_complete(body)`.
+--- Errors inside `on_complete` are caught and reported as HTTP 500.
+local function read_request_body(req, res, max_bytes, on_complete)
     local chunks = {}
+    local total_bytes = 0
+    local aborted = false
+
     req:on("data", function(chunk)
+        if aborted then
+            return
+        end
+        total_bytes = total_bytes + #chunk
+        if total_bytes > max_bytes then
+            aborted = true
+            chunks = nil
+            local msg = string.format(
+                "Request body exceeds limit of %d bytes",
+                max_bytes
+            )
+            send_json(res, 413, { error = msg })
+            return
+        end
         chunks[#chunks + 1] = chunk
     end)
+
+    req:on("error", function(err)
+        if aborted then
+            return
+        end
+        aborted = true
+        chunks = nil
+        io.stderr:write("Request stream error: " .. tostring(err) .. "\n")
+    end)
+
     req:on("end", function()
-        on_complete(table.concat(chunks))
+        if aborted then
+            return
+        end
+        local body = table.concat(chunks)
+        chunks = nil
+        local ok, err = pcall(on_complete, body)
+        if not ok then
+            io.stderr:write("Request error: " .. tostring(err) .. "\n")
+            send_json(res, 500, { error = "Internal server error" })
+        end
     end)
 end
 
@@ -244,15 +303,44 @@ local function compute_cutline(image, segment)
     return result
 end
 
+--- Parse optional finite numeric field `name` from `params`.
+--- Returns `value`, `default` when absent, or `nil, err` when invalid.
+local function parse_optional_number(params, name, default)
+    local raw = params[name]
+    if raw == nil or raw == "" then
+        return default
+    end
+    local num = tonumber(raw)
+    if not is_finite_number(num) then
+        return nil, string.format("Invalid numeric parameter: %s", name)
+    end
+    return num
+end
+
 --- Parse cutline segment coordinates from `params` with defaults for `image`.
+--- Returns `segment` table, or `nil, err` for non-numeric or NaN parameters.
 local function parse_segment_params(params, image)
-    return {
-        x1 = tonumber(params.x1) or 0,
-        y1 = tonumber(params.y1) or 0,
-        x2 = tonumber(params.x2) or (image.width - 1),
-        y2 = tonumber(params.y2) or (image.height - 1),
-        samples = tonumber(params.samples)
-    }
+    local x1, err1 = parse_optional_number(params, "x1", 0)
+    if err1 then
+        return nil, err1
+    end
+    local y1, err2 = parse_optional_number(params, "y1", 0)
+    if err2 then
+        return nil, err2
+    end
+    local x2, err3 = parse_optional_number(params, "x2", image.width - 1)
+    if err3 then
+        return nil, err3
+    end
+    local y2, err4 = parse_optional_number(params, "y2", image.height - 1)
+    if err4 then
+        return nil, err4
+    end
+    local samples, err5 = parse_optional_number(params, "samples", nil)
+    if err5 then
+        return nil, err5
+    end
+    return { x1 = x1, y1 = y1, x2 = x2, y2 = y2, samples = samples }
 end
 
 --- Format a cutline `result` table as a CSV string.
@@ -284,6 +372,14 @@ local function serve_health(_, res)
     })
 end
 
+--- Evict oldest stored images so memory stays bounded by `MAX_STORED_IMAGES`.
+local function evict_oldest_images()
+    while #image_order >= MAX_STORED_IMAGES do
+        local oldest_id = table.remove(image_order, 1)
+        images[oldest_id] = nil
+    end
+end
+
 --- Validate and store raw RGBA `body` in an FFI buffer; returns `id` or
 --- `nil, err`.
 local function save_rgba_buffer(body, w, h)
@@ -296,12 +392,14 @@ local function save_rgba_buffer(body, w, h)
         )
     end
 
+    evict_oldest_images()
     local buffer = ffi.new("uint8_t[?]", expected_bytes)
     ffi.copy(buffer, body, expected_bytes)
 
     local image_id = tostring(next_image_id)
     next_image_id = next_image_id + 1
     images[image_id] = { width = w, height = h, buffer = buffer }
+    image_order[#image_order + 1] = image_id
     return image_id
 end
 
@@ -309,13 +407,21 @@ end
 local function store_uploaded_image(req, res)
     local w = tonumber(req.headers["x-image-width"])
     local h = tonumber(req.headers["x-image-height"])
-    if not w or not h or w <= 0 or h <= 0 then
+    if not is_valid_dimension(w) or not is_valid_dimension(h) then
         local msg = "Missing or invalid X-Image-Width / X-Image-Height"
         send_json(res, 400, { error = msg })
         return
     end
+    if w * h * RGBA_CHANNELS > MAX_UPLOAD_BYTES then
+        local msg = string.format(
+            "Image exceeds upload limit of %d bytes",
+            MAX_UPLOAD_BYTES
+        )
+        send_json(res, 413, { error = msg })
+        return
+    end
 
-    read_request_body(req, function(body)
+    read_request_body(req, res, MAX_UPLOAD_BYTES, function(body)
         local image_id, err = save_rgba_buffer(body, w, h)
         if not image_id then
             send_json(res, 400, { error = err })
@@ -327,7 +433,7 @@ end
 
 --- Compute and return cutline profile JSON for the requested image segment.
 local function serve_cutline_profile(req, res)
-    read_request_body(req, function(body)
+    read_request_body(req, res, MAX_JSON_BYTES, function(body)
         local ok, payload = pcall(json.parse, body)
         if not ok or type(payload) ~= "table" then
             send_json(res, 400, { error = "Invalid JSON body" })
@@ -338,7 +444,11 @@ local function serve_cutline_profile(req, res)
             send_json(res, 404, { error = "Image not found" })
             return
         end
-        local segment = parse_segment_params(payload, image)
+        local segment, seg_err = parse_segment_params(payload, image)
+        if not segment then
+            send_json(res, 400, { error = seg_err })
+            return
+        end
         send_json(res, 200, compute_cutline(image, segment))
     end)
 end
@@ -352,7 +462,11 @@ local function export_cutline_csv(_, res, parsed_url)
         return
     end
 
-    local segment = parse_segment_params(query, image)
+    local segment, seg_err = parse_segment_params(query, image)
+    if not segment then
+        send_json(res, 400, { error = seg_err })
+        return
+    end
     local csv = format_cutline_csv(compute_cutline(image, segment))
     res.statusCode = 200
     res:setHeader("Content-Type", "text/csv; charset=utf-8")
@@ -571,9 +685,13 @@ end
 --- Return a recovery hint for listen error `message` on `options`.
 local function get_listen_failure_hint(message, options)
     if message:find("EADDRINUSE", 1, true) then
+        local next_port = options.port + 1
+        if next_port > MAX_PORT then
+            next_port = DEFAULT_PORT
+        end
         return string.format(
             "Stop the other process or choose another port: --port %d",
-            options.port + 1
+            next_port
         )
     end
     if message:find("EACCES", 1, true)
