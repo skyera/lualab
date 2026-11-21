@@ -241,11 +241,11 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
 7. **File Structure, Headers & Whitespace Discipline**:
    * **Hashbang**: Executable scripts start with `#!/usr/bin/env luajit`.
    * **Module / script banner**: Include a clear descriptive header comment at the top explaining the module's responsibility.
-   * **Section dividers**: Separate top-level sections (banner, requires, constants, helpers, core logic, entry point) with `-- ` plus `=` to 76 columns, and subsections inside one of them with `-` to 80 columns. Use one style per level within a file; do not mix widths.
+   * **Section dividers**: Separate top-level sections (banner, requires, constants, helpers, core logic, entry point) with `-- ` plus `=` to 80 columns, and subsections inside one of them with `-` to 80 columns. Use one style per level within a file; do not mix widths.
      ```lua
-     -- =========================================================================
+     -- =============================================================================
      -- Helpers
-     -- =========================================================================
+     -- =============================================================================
 
      --------------------------------------------------------------------------------
      ```
