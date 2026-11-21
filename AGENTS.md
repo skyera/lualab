@@ -265,6 +265,31 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
    * **`continue` is `goto continue`**: Lua has no `continue`. Prefer a guard clause or a helper function; when the loop body is long, jump to a `::continue::` label at the end of the body. Never emulate it with `repeat ... until true`.
    * **Double quotes by default**: Use `"..."` for strings; use `'...'` only when the text contains `"` to avoid escaping. Use `[[...]]` for multi-line text.
 
+## JavaScript Code Formatting & Style Standards
+
+All JavaScript files created or modified in the repository MUST adhere to these standards:
+
+1. **Formatting & Line Length**:
+   * **Line length**: Follow "Source Line Length (All Languages)" above: 80 characters is the hard limit.
+   * **2 spaces** per indentation level (no tabs), **semicolons** required, and **double quotes** (`"..."`) by default (use `'...'` only to avoid escaping `"`).
+   * **Braces & guard clauses**: Always use braces `{ ... }` for `if`/`for`/`while`; prefer guard clauses over deep nesting.
+   * **ES modules**: Split large inline `<script>` blocks into ES modules (`public/*.js`).
+
+2. **Variables & Comparisons**:
+   * Default to `const`; use `let` only when reassigned; never use `var`.
+   * Always use strict equality (`===`, `!==`); never leak globals onto `window`.
+
+3. **Naming & Structure**:
+   * `camelCase` for variables and functions (`renderChart`, `fetchProfile`), `UPPER_SNAKE_CASE` for constants (`MAX_ZOOM`, `DEFAULT_TIMEOUT_MS`), and `PascalCase` for classes/constructors.
+   * Verb+object function names; avoid vague names (`handle`, `process`, `util`).
+   * **Small, focused functions**: Aim for `<= 20` lines for logic/rendering functions (**50-line hard limit**); flat event-wiring or declarative setup functions may run up to ~40–50 lines rather than over-splitting.
+   * Separate pure logic (math, transforms, data formatting) from DOM/Canvas side effects.
+
+4. **Async & Error Handling**:
+   * Prefer `async`/`await` with explicit `try`/`catch`.
+   * Always check `res.ok` on `fetch()` responses and surface errors visibly.
+   * Cancel superseded in-flight requests with `AbortController`.
+
 ## Static Analysis (luacheck)
 
 Luacheck enforces the scoping and clean-code rules above mechanically: leaked or undefined globals, unused variables and arguments, shadowing, unreachable code, and syntax errors.
