@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LuaJIT Cutline Analyzer</title>
+  <style>
+    :root {
+      --bg: #0b1120;
+      --panel: #111827;
+      --panel-2: #1e293b;
+      --border: #334155;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --cyan: #22d3ee;
+      --green: #34d399;
+      --red: #f87171;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    header {
+      height: 54px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      gap: 12px;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 16px; }
+    .brand-dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: var(--cyan); box-shadow: 0 0 10px var(--cyan);
+    }
+    .actions { display: flex; align-items: center; gap: 8px; }
+    button, select, input[type="number"] {
+      background: var(--panel-2); color: var(--text);
+      border: 1px solid var(--border); border-radius: 6px;
+      padding: 6px 11px; font-size: 13px;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    button, select { cursor: pointer; }
+    button:hover, select:hover { background: #273549; border-color: var(--accent); }
+    button.primary { background: #0284c7; border-color: #38bdf8; color: #fff; }
+    button.primary:hover { background: #0369a1; }
+    button.active { background: #0e7490; border-color: var(--cyan); color: #fff; }
+    .status-pill {
+      display: flex; align-items: center; gap: 6px; font-size: 12px;
+      padding: 5px 10px; border-radius: 999px;
+      background: #0f291e; border: 1px solid #10b98155; color: var(--green);
+    }
+    .status-pill.offline { background: #2c1215; border-color: #f8717155; color: var(--red); }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+    main { flex: 1; display: flex; min-height: 0; }
+    aside.toolbar {
+      width: 68px; flex-shrink: 0; background: var(--panel);
+      border-right: 1px solid var(--border);
+      display: flex; flex-direction: column; align-items: center;
+      padding: 12px 6px; gap: 8px;
+    }
+    .tool-btn {
+      width: 48px; height: 44px; padding: 4px;
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; font-size: 10px; gap: 2px;
+    }
+    .tool-btn span.icon { font-size: 15px; line-height: 1; }
+    .toolbar-divider { width: 36px; height: 1px; background: var(--border); margin: 4px 0; }
+    .colormap-select { width: 56px; padding: 4px 2px; font-size: 10px; text-align: center; }
+    .canvas-pane {
+      flex: 1; min-width: 280px; position: relative; background: #070b14;
+      overflow: hidden; display: flex; align-items: center; justify-content: center;
+    }
+    .canvas-pane.drag-over::after {
+      content: "Drop image to load"; position: absolute; inset: 14px;
+      border: 2px dashed var(--cyan); border-radius: 12px;
+      background: rgba(14, 116, 144, 0.25); color: #fff; font-size: 18px;
+      font-weight: 600; display: flex; align-items: center; justify-content: center;
+      pointer-events: none;
+    }
+    #imageCanvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
+    .canvas-overlay-info {
+      position: absolute; bottom: 12px; left: 12px;
+      background: rgba(15, 23, 42, 0.88); border: 1px solid var(--border);
+      border-radius: 6px; padding: 6px 10px; font-size: 12px; color: var(--text);
+      display: flex; align-items: center; gap: 8px;
+      pointer-events: none; font-variant-numeric: tabular-nums;
+    }
+    .pixel-swatch {
+      width: 12px; height: 12px; border-radius: 3px;
+      border: 1px solid #64748b; background: transparent; flex-shrink: 0;
+    }
+    .colorbar-wrap {
+      position: absolute; right: 12px; top: 16px;
+      background: rgba(15, 23, 42, 0.85); border: 1px solid var(--border);
+      border-radius: 6px; padding: 6px; display: none;
+      flex-direction: column; align-items: center; gap: 4px;
+      font-size: 10px; color: var(--muted); pointer-events: none;
+    }
+    .colorbar-wrap.visible { display: flex; }
+    #colorbarCanvas { width: 14px; height: 140px; border-radius: 3px; border: 1px solid #475569; }
+    .split-divider {
+      width: 6px; flex-shrink: 0; background: var(--border);
+      cursor: col-resize; transition: background 0.15s;
+    }
+    .split-divider:hover, .split-divider.dragging { background: var(--cyan); }
+    section.analysis-pane {
+      width: 440px; min-width: 320px; max-width: 65vw; flex-shrink: 0;
+      background: var(--panel); display: flex; flex-direction: column;
+      padding: 14px; gap: 14px; overflow-y: auto;
+    }
+    .card {
+      background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: 10px; padding: 12px 14px;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .card-header {
+      display: flex; align-items: center; justify-content: space-between;
+      font-size: 13px; font-weight: 600; gap: 8px; flex-wrap: wrap;
+    }
+    .channel-toggles {
+      display: flex; gap: 8px; font-size: 11px; color: var(--muted); align-items: center;
+    }
+    .channel-toggles label { display: flex; align-items: center; gap: 3px; cursor: pointer; }
+    .chart-wrap { position: relative; height: 260px; width: 100%; }
+    #plotCanvas { width: 100%; height: 100%; display: block; }
+    .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .stat-box { background: #0f172a; border: 1px solid #1e293b; border-radius: 8px; padding: 8px 10px; }
+    .stat-label { font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+    .stat-value { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .endpoints-edit {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+      background: #0f172a; border-radius: 8px; padding: 8px 10px; font-size: 12px;
+    }
+    .ep-group { display: flex; align-items: center; gap: 5px; color: var(--muted); }
+    .ep-group strong { color: var(--cyan); }
+    .ep-group input[type="number"] {
+      width: 62px; padding: 3px 6px; font-size: 12px; font-variant-numeric: tabular-nums;
+    }
+    .hint { font-size: 11px; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="brand-dot"></div>
+      <span>LuaJIT Cutline Analyzer</span>
+    </div>
+    <div class="actions">
+      <input type="file" id="fileInput" accept="image/*" hidden />
+      <button class="primary" id="btnUpload">Upload Image</button>
+      <button id="btnSample">Sample Image</button>
+      <button id="btnExportPng">Export Plot PNG</button>
+      <button id="btnExport">Export CSV</button>
+      <div class="status-pill" id="statusPill">
+        <span class="status-dot"></span>
+        <span id="statusText">Checking LuaJIT...</span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <aside class="toolbar">
+      <button class="tool-btn active" id="toolCutline" title="Draw or Drag Cutline (Hold Shift to snap angle)">
+        <span class="icon">╱</span><span>Cutline</span>
+      </button>
+      <button class="tool-btn" id="toolPan" title="Pan Image">
+        <span class="icon">✋</span><span>Pan</span>
+      </button>
+      <button class="tool-btn" id="toolReset" title="Reset Cutline & Zoom">
+        <span class="icon">↺</span><span>Reset</span>
+      </button>
+      <div class="toolbar-divider"></div>
+      <button class="tool-btn" id="toolZoomIn" title="Zoom In">
+        <span class="icon">＋</span><span>Zoom</span>
+      </button>
+      <button class="tool-btn" id="toolZoomOut" title="Zoom Out">
+        <span class="icon">－</span><span>Zoom</span>
+      </button>
+      <div class="toolbar-divider"></div>
+      <select class="colormap-select" id="colormapSelect" title="Display Colormap">
+        <option value="original">RGB</option>
+        <option value="gray">Gray</option>
+        <option value="viridis">Viridis</option>
+        <option value="inferno">Inferno</option>
+      </select>
+    </aside>
+
+    <div class="canvas-pane" id="canvasPane">
+      <canvas id="imageCanvas"></canvas>
+      <div class="colorbar-wrap" id="colorbarWrap">
+        <span>255</span>
+        <canvas id="colorbarCanvas" width="14" height="140"></canvas>
+        <span>0</span>
+      </div>
+      <div class="canvas-overlay-info" id="cursorInfo">
+        <span class="pixel-swatch" id="pixelSwatch"></span>
+        <span id="cursorText">Wheel to zoom • Drag-and-drop image • Hold Shift to snap angle</span>
+      </div>
+    </div>
+
+    <div class="split-divider" id="splitDivider" title="Drag to resize panel"></div>
+
+    <section class="analysis-pane" id="analysisPane">
+      <div class="card">
+        <div class="card-header">
+          <span>Cutline Intensity Profile (A → B)</span>
+          <div class="channel-toggles">
+            <label style="color:#e2e8f0"><input type="checkbox" id="chkLuma" checked /> Luma</label>
+            <label style="color:#f87171"><input type="checkbox" id="chkR" checked /> R</label>
+            <label style="color:#34d399"><input type="checkbox" id="chkG" checked /> G</label>
+            <label style="color:#60a5fa"><input type="checkbox" id="chkB" checked /> B</label>
+            <label style="color:#fbbf24" title="Auto-scale Y axis to min/max"><input type="checkbox" id="chkAutoY" /> Auto Y</label>
+          </div>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="plotCanvas"></canvas>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <span>Line Statistics (Luminance)</span>
+          <span id="sampleCountBadge" style="font-size:11px;color:var(--muted)">0 samples</span>
+        </div>
+        <div class="stats-grid">
+          <div class="stat-box"><div class="stat-label">Length (px)</div><div class="stat-value" id="statLength">-</div></div>
+          <div class="stat-box"><div class="stat-label">Min</div><div class="stat-value" id="statMin">-</div></div>
+          <div class="stat-box"><div class="stat-label">Max</div><div class="stat-value" id="statMax">-</div></div>
+          <div class="stat-box"><div class="stat-label">Mean</div><div class="stat-value" id="statMean">-</div></div>
+          <div class="stat-box"><div class="stat-label">Std Dev</div><div class="stat-value" id="statStd">-</div></div>
+          <div class="stat-box"><div class="stat-label">Image Size</div><div class="stat-value" id="statSize">-</div></div>
+        </div>
+        <div class="endpoints-edit">
+          <div class="ep-group">
+            <strong>A</strong>
+            <input type="number" id="inX1" step="1" title="A.x" />
+            <input type="number" id="inY1" step="1" title="A.y" />
+          </div>
+          <div class="ep-group">
+            <strong>B</strong>
+            <input type="number" id="inX2" step="1" title="B.x" />
+            <input type="number" id="inY2" step="1" title="B.y" />
+          </div>
+        </div>
+        <div class="hint">Tip: Hold <strong>Shift</strong> while dragging A or B to snap to 0° / 45° / 90°.</div>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
