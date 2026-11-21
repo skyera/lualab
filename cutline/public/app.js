@@ -138,9 +138,13 @@ function drawHoverMarker() {
   const hy = state.line.y1 + (state.line.y2 - state.line.y1) * ratio;
   const hp = imageToScreen(hx, hy);
   ctx.fillStyle = "#fbbf24";
+  // Dark ring keeps the marker visible on bright pixels and yellow LUTs.
+  ctx.strokeStyle = "#0f172a";
+  ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.arc(hp.x, hp.y, 5, 0, Math.PI * 2);
   ctx.fill();
+  ctx.stroke();
 }
 
 function renderImage() {

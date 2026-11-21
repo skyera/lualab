@@ -6,10 +6,11 @@
   <title>LuaJIT Cutline Analyzer</title>
   <style>
     :root {
+      color-scheme: dark;
       --bg: #0b1120;
       --panel: #111827;
       --panel-2: #1e293b;
-      --border: #334155;
+      --border: #475569;
       --text: #e2e8f0;
       --muted: #94a3b8;
       --accent: #38bdf8;
@@ -51,8 +52,10 @@
     }
     button, select { cursor: pointer; }
     button:hover, select:hover { background: #273549; border-color: var(--accent); }
-    button.primary { background: #0284c7; border-color: #38bdf8; color: #fff; }
-    button.primary:hover { background: #0369a1; }
+    button.primary {
+      background: #0369a1; border-color: #38bdf8; color: #fff;
+    }
+    button.primary:hover { background: #075985; }
     button.active { background: #0e7490; border-color: var(--cyan); color: #fff; }
     .status-pill {
       display: flex; align-items: center; gap: 6px; font-size: 12px;
@@ -134,7 +137,10 @@
     .chart-wrap { position: relative; height: 260px; width: 100%; }
     #plotCanvas { width: 100%; height: 100%; display: block; }
     .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
-    .stat-box { background: #0f172a; border: 1px solid #1e293b; border-radius: 8px; padding: 8px 10px; }
+    .stat-box {
+      background: #0f172a; border: 1px solid var(--border);
+      border-radius: 8px; padding: 8px 10px;
+    }
     .stat-label { font-size: 11px; color: var(--muted); margin-bottom: 3px; }
     .stat-value { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
     .endpoints-edit {
