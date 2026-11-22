@@ -4,9 +4,89 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>My Notes</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f6f8fa;
+    --panel: #ffffff;
+    --border: #d0d7de;
+    --text: #1f2328;
+    --muted: #656d76;
+    --accent: #0969da;
+    --danger: #cf222e;
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #2f81f7;
+    --danger: #da3633;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    max-width: 560px;
+    margin: 36px auto;
+    padding: 0 16px;
+  }
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+  }
+  h1 { margin: 0;}
+  #noteForm { display: flex; gap: 8px; margin-bottom: 12px; }
+  #noteInput {
+    flex: 1;
+    padding: 8px 10px;
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 14px;
+  }
+  button {
+    padding: 8px 14px;
+    border: none;
+    border-radius: 6px;
+    background: var(--accent);
+    color: #fff;
+    cursor: pointer;
+    font-size: 14px;
+  }
+  #themeBtn, .edit-btn {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 5px 10px;
+    font-size: 12px;
+  }
+  #status { color: var(--muted); font-size: 13px; }
+  #notesList { list-style: none; padding: 0; display: grid; gap: 8px; }
+  #notesList li {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+  }
+  #notesList li span { flex: 1; }
+  .delete-btn { background: var(--danger); padding: 5px 10px; font-size: 12px; }
+</style>
   </head>
   <body>
-    <h1>My Notes</h1>
+    <header>
+      <h1>My Notes</h1>
+      <button id="themeBtn" type="button">Dark</button>
+    </header>
     <img
         src="/banner.png"
         alt="Minimalist desk with notebook and coffee"
