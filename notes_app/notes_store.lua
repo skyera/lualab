@@ -38,6 +38,23 @@ function NotesStore:add(raw_text)
     return note
 end
 
+function NotesStore:update(id, raw_text)
+    if type(raw_text) ~= "string" then
+        return nil, "Note text is required"
+    end
+    local text = trim(raw_text)
+    if text == "" then
+        return nil, "Note text is required"
+    end
+    for _, note in ipairs(self.items) do
+        if note.id == id then
+            note.text = text
+            return note
+        end
+    end
+    return nil, "Note not found"
+end
+
 function NotesStore:delete(id)
     for i, note in ipairs(self.items) do
         if note.id == id then

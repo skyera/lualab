@@ -68,10 +68,34 @@ local function test_load_missing_file_starts_empty()
     print("PASS load missing file starts empty")
 end
 
+local function test_update_changes_text_and_trims()
+    local store = NotesStore.new({
+        { id = 1, text = "Old text" }
+    })
+    local updated = assert(store:update(1, "  New text  "))
+    assert(updated.id == 1 and updated.text == "New text")
+    assert(store:list()[1].text == "New text")
+    print("PASS update changes text and trims")
+end
+
+local function test_update_rejects_empty_and_missing_id()
+    local store = NotesStore.new({
+        { id = 1, text = "Keep me" }
+    })
+    local n1, err1 = store:update(1, "   ")
+    assert(n1 == nil and err1 == "Note text is required")
+    local n2, err2 = store:update(999, "Valid")
+    assert(n2 == nil and err2 == "Note not found")
+    assert(store:list()[1].text == "Keep me")
+    print("PASS update rejects empty and missing id")
+end
+
 test_add_trims_and_increments_id()
 test_add_rejects_empty_and_not_string()
 test_delete_removes_without_holes()
 test_new_starts_after_max_id()
 test_save_and_load_round_trip()
 test_load_missing_file_starts_empty()
+test_update_changes_text_and_trims()
+test_update_rejects_empty_and_missing_id()
 print("ALL PASSED")
