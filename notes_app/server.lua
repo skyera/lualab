@@ -105,6 +105,10 @@ local server = http.createServer(function(req, res)
         )
         return
     end
+    if req.method == "GET" and req.url == "/banner.png" then
+        serve_file(res, "banner.png", "image/png")
+        return
+    end
     if req.method == "GET" and req.url == "/api/notes" then
         send_json(res, 200, store:list())
         return
