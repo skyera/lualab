@@ -479,3 +479,12 @@ If you re-bless objects (`setmetatable(obj, other_mt)`) or redefine methods dyna
 8. **To compose multiple behaviors**: Use mixins via `Class:include(mixin)` instead of multiple inheritance.
 9. **For LuaJIT performance**: Keep metatables static during runtime; never re-bless or mutate metatables in hot loops.
 10. **To check type hierarchy**: Walk `getmetatable(self)` / `.super` chain.
+
+---
+
+## 14. Recommended Reading (Readable Code & Simplicity)
+
+1. ***Clean Code*** — Robert C. Martin. Popularized *"code should read like well-written prose"*, descriptive naming, and reading top-down. *(Caveat: Java/OOP-heavy; avoid over-splitting tiny functions.)*
+2. ***The Art of Readable Code*** — Dustin Boswell & Trevor Foucher. Short, practical, language-agnostic guide to clear naming, shallow nesting, and readability without OOP dogma.
+3. ***A Philosophy of Software Design*** — John Ousterhout. Modern counterbalance to *Clean Code*; focuses on deep, simple modules and avoiding over-fragmentation.
+4. ***The Practice of Programming*** — Brian Kernighan & Rob Pike. Timeless C-style simplicity, clarity, debugging, and testing.

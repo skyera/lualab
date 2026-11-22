@@ -195,6 +195,7 @@ All Lua files created or modified in the repository MUST adhere to consistent, c
 3. **Small Functions & Clean Code**:
    * **Small, single-purpose functions**: Each function must do one thing well and be describable in one sentence without "and". Aim for about 30 lines; 50 is the hard limit. If a function mixes parsing with rendering, needs section comments to navigate, or takes more than 5 parameters, split it into focused local helpers (group related parameters into one table).
    * **Read top-down**: A function body should read as a short list of steps at one level of detail. Move the details of each step into a well-named helper rather than inlining them.
+   * **Name non-obvious expressions**: Extract a small helper when a name is clearer than the raw expression (e.g., `trim(text)` over `text:match("^%s*(.-)%s*$")`), without over-wrapping obvious one-liners.
    * **Shallow nesting**: Prefer guard clauses and early returns over deeply nested blocks. Aim for at most 3 levels of indentation inside a function.
    * **Flatten async callbacks (no callback pyramids)**: In callback-based APIs (such as Luvit `uv`, `http`, or `fs`), avoid nesting more than 2 callbacks deep. Extract each continuation step into a small, named local function so async flows read flat and top-down.
    * **No nested `and`/`or` chains**: Use `cond and a or b` only for a single simple choice. Write two or more chained choices as `if`/`elseif`, or as a lookup table.
