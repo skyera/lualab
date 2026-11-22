@@ -76,6 +76,28 @@ local function create_note(req, res)
     end)
 end
 
+local function update_note(req, res, id)
+    read_body(req, function(body)
+        local ok, payload = pcall(json.parse, body)
+        if not ok or type(payload) ~= "table" then
+            send_json(res, 400, { error = "Invalid JSON" })
+            return
+        end
+        local note, err = store:update(id, payload.text)
+        if not note then
+            local status = err == "Note not found" and 404 or 400
+            send_json(res, status, { error = err} )
+            return
+        end
+        local saved, save_err = store:save(DATA_FILE)
+        if not saved then
+            send_json(res, 500, { error = save_err} )
+            return
+        end
+        send_json(res, 200, note)
+    end)
+end
+
 local function delete_note(res, id)
     if not store:delete(id) then
         send_json(res, 404, { error = "Note not found" })
@@ -116,6 +138,13 @@ local server = http.createServer(function(req, res)
     if req.method == "POST" and req.url == "/api/notes" then
         create_note(req, res)
         return
+    end
+    if req.method == "PUT" then
+        local id_str = req.url:match("^/api/notes/(%d+)$")
+        if id_str then
+            update_note(req, res, tonumber(id_str))
+            return
+        end
     end
     if req.method == "DELETE" then
         local id_str = req.url:match("^/api/notes/(%d+)$")
