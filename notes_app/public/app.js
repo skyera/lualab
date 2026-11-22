@@ -1,10 +1,16 @@
 import { cleanNoteText, formatStatus } from "./notes_util.js";
+import { createRandomFlowerBlob } from "./flower.js";
 
 const themeBtnEl = document.getElementById("themeBtn");
 const formEl = document.getElementById("noteForm");
 const inputEl = document.getElementById("noteInput");
 const statusEl = document.getElementById("status");
 const notesListEl = document.getElementById("notesList");
+const photoInputEl = document.getElementById("photoInput");
+const photoPreviewEl = document.getElementById("photoPreview");
+const photoBtnEl = document.getElementById("photoBtn");
+const flowerBtnEl = document.getElementById("flowerBtn");
+let pendingImageUrl = null;
 
 function renderNotes(notes) {
   notesListEl.textContent = "";
@@ -20,6 +26,13 @@ function renderNotes(notes) {
     editBtn.textContent = "Edit";
     editBtn.className = "edit-btn";
     editBtn.addEventListener("click", () => editNote(note));
+    if (note.image) {
+      const img = document.createElement("img");
+      img.src = note.image;
+      img.alt = "";
+      img.className = "note-thumb";
+      li.appendChild(img);
+    }
     li.appendChild(span);
     li.appendChild(editBtn);
     li.appendChild(btn);
@@ -38,12 +51,14 @@ async function addNote(event) {
     const res = await fetch("/api/notes", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text })
+      body: JSON.stringify({ text, image:pendingImageUrl })
     });
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
     }
     inputEl.value = "";
+    pendingImageUrl = null;
+    photoPreviewEl.hidden = true;
     await loadNotes();
   } catch(err) {
     statusEl.textContent = `Error adding note: ${err.message}`;
@@ -86,7 +101,34 @@ async function editNote(note) {
   }
 }
 
+flowerBtnEl.addEventListener("click", async () => {
+  const blob = await createRandomFlowerBlob();
+  await uploadBlob(blob);
+})
+photoBtnEl.addEventListener("click", () => photoInputEl.click());
+photoInputEl.addEventListener("change", async () => {
+  if (photoInputEl.files[0]) {
+    await uploadBlob(photoInputEl.files[0]);
+    photoInputEl.value = "";
+  }
+})
+
 formEl.addEventListener("submit", addNote);
+
+async function uploadBlob(blob) {
+  try {
+    const res = await fetch("/api/upload", { method: "POST", body: blob });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    pendingImageUrl = data.url;
+    photoPreviewEl.src = data.url;
+    photoPreviewEl.hidden = false;
+  } catch(err) {
+    statusEl.textContent = `Error uploading image: ${err.message}`;
+  }
+}
 
 async function loadNotes() {
   try {

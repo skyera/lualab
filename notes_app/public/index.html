@@ -80,6 +80,14 @@
   }
   #notesList li span { flex: 1; }
   .delete-btn { background: var(--danger); padding: 5px 10px; font-size: 12px; }
+  .note-thumb {
+    width: 44px; height: 44px; border-radius: 6px;
+    object-fit: cover; flex-shrink: 0;
+  }
+  .icon-btn {
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--border); padding: 8px 10px;
+  }
 </style>
   </head>
   <body>
@@ -94,6 +102,10 @@
     />
     <form id="noteForm">
       <input id="noteInput" type="text" placeholder="Write a note..." required />
+      <input id="photoInput" type="file" accept="image/png" hidden />
+      <img id="photoPreview" class="note-thumb" alt="Preview" hidden />
+      <button id="photoBtn" class="icon-btn" type="button" title="Upload PNG">📷</button>
+      <button id="flowerBtn" class="icon-btn" type="button" title="Random FLower">🌸</button>
       <button type="submit">Add</button>
     </form>
     <p id="status">Loading...</p>
