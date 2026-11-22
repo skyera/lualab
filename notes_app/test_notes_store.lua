@@ -90,6 +90,19 @@ local function test_update_rejects_empty_and_missing_id()
     print("PASS update rejects empty and missing id")
 end
 
+local function test_add_and_save_optional_image()
+    local temp_path = os.tmpname()
+    local store = NotesStore.new()
+    local note = assert(store:add("Rose note", "/uploads/1.png"))
+    assert(note.image == "/uploads/1.png")
+    assert(store:save(temp_path))
+
+    local loaded = assert(NotesStore.load(temp_path))
+    os.remove(temp_path)
+    assert(loaded:list()[1].image == "/uploads/1.png")
+    print("PASS add and save optional image")
+end
+
 test_add_trims_and_increments_id()
 test_add_rejects_empty_and_not_string()
 test_delete_removes_without_holes()
@@ -98,4 +111,5 @@ test_save_and_load_round_trip()
 test_load_missing_file_starts_empty()
 test_update_changes_text_and_trims()
 test_update_rejects_empty_and_missing_id()
+test_add_and_save_optional_image()
 print("ALL PASSED")

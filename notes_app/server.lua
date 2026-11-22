@@ -14,6 +14,10 @@ local BASE_DIR = (module and module.dir) or process.cwd()
 -- luacheck: pop
 local PUBLIC_DIR = path.join(BASE_DIR, "public")
 local DATA_FILE = path.join(BASE_DIR, "notes.json")
+local UPLOADS_DIR = path.join(BASE_DIR, "uploads")
+local MAX_UPLOAD_BYTES = 2 * 1024 * 1024
+fs.mkdirSync(UPLOADS_DIR)
+
 local store, load_err = NotesStore.load(DATA_FILE)
 if not store then
     io.stderr:write("error: " .. tostring(load_err) .. "\n")
@@ -62,7 +66,7 @@ local function create_note(req, res)
             send_json(res, 400, { error = "Invalid JSON" })
             return
         end
-        local note, err = store:add(payload.text)
+        local note, err = store:add(payload.text, payload.image)
         if not note then
             send_json(res, 400, { error = err })
             return
@@ -111,6 +115,39 @@ local function delete_note(res, id)
     send_json(res, 200, { deleted = id })
 end
 
+local function upload_image(req, res)
+    read_body(req, function(body)
+        if #body == 0 or #body > MAX_UPLOAD_BYTES then
+            send_json(res, 400, { error = "Invalid image size" })
+            return
+        end
+        local filename = string.format(
+            "img_%d_%d.png", os.time(), math.random(1000, 9999)
+        )
+        local file_path = path.join(UPLOADS_DIR, filename)
+        fs.writeFile(file_path, body, function(err)
+            if err then
+                send_json(res, 500, { error = tostring(err) })
+                return
+            end
+            send_json(res, 201, { url = "/uploads/" .. filename })
+        end)
+    end)
+end
+
+local function serve_upload(res, filename)
+    local file_path = path.join(UPLOADS_DIR, filename)
+    fs.readFile(file_path, function(err, content)
+        if err then
+            send_response(
+                res, 404, "text/plain; charset=utf-8", "Not Found\n"
+            )
+            return
+        end
+        send_response(res, 200, "image/png", content)
+    end)
+end
+
 local server = http.createServer(function(req, res)
     print(req.method, req.url)
     if req.method == "GET" and req.url == "/" then
@@ -134,6 +171,23 @@ local server = http.createServer(function(req, res)
     if req.method == "GET" and req.url == "/api/notes" then
         send_json(res, 200, store:list())
         return
+    end
+    if req.method == "GET" and req.url == "/flower.js" then
+        serve_file(
+            res, "flower.js", "application/javascript; charset=utf-8"
+        )
+        return
+    end
+    if req.method == "POST" and req.url == "/api/upload" then
+        upload_image(req, res)
+        return
+    end
+    if req.method == "GET" then
+        local name = req.url:match("^/uploads/([%w_%-]+%.png)$")
+        if name then
+            serve_upload(res, name)
+            return
+        end
     end
     if req.method == "POST" and req.url == "/api/notes" then
         create_note(req, res)
