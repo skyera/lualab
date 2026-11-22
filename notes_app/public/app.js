@@ -15,7 +15,12 @@ function renderNotes(notes) {
     btn.textContent = "Delete";
     btn.className = "delete-btn";
     btn.addEventListener("click", () => deleteNote(note.id));
+    const editBtn = document.createElement("button");
+    editBtn.textContent = "Edit";
+    editBtn.className = "edit-btn";
+    editBtn.addEventListener("click", () => editNote(note));
     li.appendChild(span);
+    li.appendChild(editBtn);
     li.appendChild(btn);
     notesListEl.appendChild(li);
   }
@@ -53,6 +58,30 @@ async function deleteNote(id) {
     await loadNotes();
   } catch(err) {
     statusEl.textContent = `Error deleting note: ${err.message}`;
+  }
+}
+
+async function editNote(note) {
+  const raw = window.prompt("Edit note:", note.text);
+  if (raw === null) {
+    return;
+  }
+  const text = cleanNoteText(raw);
+  if (!text || text === note.text) {
+    return;
+  }
+  try {
+    const res = await fetch(`/api/notes/${note.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text })
+    });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    await loadNotes();
+  } catch(err) {
+    statusEl.textContent = `Error editing note: ${err.message}`;
   }
 }
 
