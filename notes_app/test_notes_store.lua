@@ -42,8 +42,36 @@ local function test_new_starts_after_max_id()
     print("PASS new starts after max id")
 end
 
+local function test_save_and_load_round_trip()
+    local temp_path = os.tmpname()
+    local store = NotesStore.new()
+    assert(store:add("First saved note"))
+    assert(store:add("Second saved note"))
+    assert(store:save(temp_path))
+
+    local loaded = assert(NotesStore.load(temp_path))
+    os.remove(temp_path)
+    local items = loaded:list()
+    assert(#items == 2)
+    assert(items[1].id == 1 and items[1].text == "First saved note")
+    assert(items[2].id == 2 and items[2].text == "Second saved note")
+    local third = assert(loaded:add("Third"))
+    assert(third.id == 3)
+    print("PASS save and load round trip")
+end
+
+local function test_load_missing_file_starts_empty()
+    local temp_path = os.tmpname()
+    os.remove(temp_path)
+    local loaded = assert(NotesStore.load(temp_path))
+    assert(#loaded:list() == 0)
+    print("PASS load missing file starts empty")
+end
+
 test_add_trims_and_increments_id()
 test_add_rejects_empty_and_not_string()
 test_delete_removes_without_holes()
 test_new_starts_after_max_id()
+test_save_and_load_round_trip()
+test_load_missing_file_starts_empty()
 print("ALL PASSED")

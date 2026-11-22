@@ -1,3 +1,5 @@
+local json = require("json")
+
 local NotesStore = {}
 NotesStore.__index = NotesStore
 
@@ -44,6 +46,33 @@ function NotesStore:delete(id)
         end
     end
     return false
+end
+
+function NotesStore:save(file_path)
+    local file, err = io.open(file_path, "wb")
+    if not file then
+        return nil, "open " .. file_path .. ": " .. tostring(err)
+    end
+    local ok, write_err = file:write(json.stringify(self.items) .. "\n")
+    file:close()
+    if not ok then
+        return nil, "write " .. file_path .. ": " .. tostring(write_err)
+    end
+    return true
+end
+
+function NotesStore.load(file_path)
+    local file = io.open(file_path, "rb")
+    if not file then
+        return NotesStore.new()
+    end
+    local raw = file:read("*a")
+    file:close()
+    local ok, parsed = pcall(json.parse, raw)
+    if not ok or type(parsed) ~= "table" then
+        return nil, "invalid JSON in " .. file_path
+    end
+    return NotesStore.new(parsed)
 end
 
 return NotesStore
