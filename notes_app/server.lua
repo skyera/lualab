@@ -87,6 +87,12 @@ local server = http.createServer(function(req, res)
         serve_file(res, "app.js", "application/javascript;charset=utf-8")
         return
     end
+    if req.method == "GET" and req.url == "/notes_util.js" then
+        serve_file(
+            res, "notes_util.js", "application/javascript; charset=utf-8"
+        )
+        return
+    end
     if req.method == "GET" and req.url == "/api/notes" then
         send_json(res, 200, store:list())
         return

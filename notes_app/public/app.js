@@ -1,3 +1,5 @@
+import { cleanNoteText, formatStatus } from "./notes_util.js";
+
 const formEl = document.getElementById("noteForm");
 const inputEl = document.getElementById("noteInput");
 const statusEl = document.getElementById("status");
@@ -7,15 +9,22 @@ function renderNotes(notes) {
   notesListEl.textContent = "";
   for (const note of notes) {
     const li = document.createElement("li");
-    li.textContent = note.text;
+    const span = document.createElement("span");
+    span.textContent = note.text;
+    const btn = document.createElement("button");
+    btn.textContent = "Delete";
+    btn.className = "delete-btn";
+    btn.addEventListener("click", () => deleteNote(note.id));
+    li.appendChild(span);
+    li.appendChild(btn);
     notesListEl.appendChild(li);
   }
-  statusEl.textContent = `${notes.length} notes`;
+  statusEl.textContent = formatStatus(notes.length);
 }
 
 async function addNote(event) {
   event.preventDefault();
-  const text = inputEl.value.trim();
+  const text = cleanNoteText(inputEl.value);
   if (!text) {
     return;
   }
@@ -32,6 +41,18 @@ async function addNote(event) {
     await loadNotes();
   } catch(err) {
     statusEl.textContent = `Error adding note: ${err.message}`;
+  }
+}
+
+async function deleteNote(id) {
+  try {
+    const res = await fetch(`/api/notes/${id}`, { method: "DELETE" });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    await loadNotes();
+  } catch(err) {
+    statusEl.textContent = `Error deleting note: ${err.message}`;
   }
 }
 
