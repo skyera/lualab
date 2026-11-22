@@ -1,5 +1,6 @@
 import { cleanNoteText, formatStatus } from "./notes_util.js";
 
+const themeBtnEl = document.getElementById("themeBtn");
 const formEl = document.getElementById("noteForm");
 const inputEl = document.getElementById("noteInput");
 const statusEl = document.getElementById("status");
@@ -98,6 +99,29 @@ async function loadNotes() {
   } catch(err) {
     statusEl.textContent = `Error loading notes: ${err.message}`;
   }
+}
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  themeBtnEl.textContent = theme === "dark" ? "Light" : "Dark";
+}
+
+function toggleTheme() {
+  const current = document.documentElement.dataset.theme;
+  const next = current === "dark" ? "light" : "dark";
+  applyTheme(next);
+  try {
+    localStorage.setItem("notes.theme", next);
+  } catch(err) {
+    console.warn("Cannot save theme:", err);
+  }
+}
+
+themeBtnEl.addEventListener("click", toggleTheme);
+try {
+  applyTheme(localStorage.getItem("notes.theme") || "light");
+} catch(err) {
+  applyTheme("light");
 }
 
 loadNotes();
