@@ -2,6 +2,7 @@ local json = require("json")
 local http = require("http")
 local fs = require("fs")
 local path = require("path")
+local NotesStore = require("./notes_store")
 local net_util = require("./net_util")
 
 local PORT = 8200
@@ -12,11 +13,10 @@ local BASE_DIR = (module and module.dir) or process.cwd()
 
 -- luacheck: pop
 local PUBLIC_DIR = path.join(BASE_DIR, "public")
-local notes = {
+local store = NotesStore.new({
     { id = 1, text = "Learn Luvit HTTP servers" },
     { id = 2, text = "Build a note web app" }
-}
-local next_id = 3
+})
 
 local function send_response(res, status_code, content_type, body)
     res.statusCode = status_code
@@ -60,18 +60,21 @@ local function create_note(req, res)
             send_json(res, 400, { error = "Invalid JSON" })
             return
         end
-        local text = type(payload.text) == "string"
-            and payload.text:match("^%s*(.-)%s*$")
-            or ""
-        if text == "" then
-            send_json(res, 400, { error = "Note text is required" })
+        local note, err = store:add(payload.text)
+        if not note then
+            send_json(res, 400, { error = err })
             return
         end
-        local note = { id = next_id, text = text }
-        next_id = next_id + 1
-        notes[#notes + 1] = note
         send_json(res, 201, note)
     end)
+end
+
+local function delete_note(res, id)
+    if not store:delete(id) then
+        send_json(res, 404, { error = "Note not found" })
+        return
+    end
+    send_json(res, 200, { deleted = id })
 end
 
 local server = http.createServer(function(req, res)
@@ -85,12 +88,19 @@ local server = http.createServer(function(req, res)
         return
     end
     if req.method == "GET" and req.url == "/api/notes" then
-        send_json(res, 200, notes)
+        send_json(res, 200, store:list())
         return
     end
     if req.method == "POST" and req.url == "/api/notes" then
         create_note(req, res)
         return
+    end
+    if req.method == "DELETE" then
+        local id_str = req.url:match("^/api/notes/(%d+)$")
+        if id_str then
+            delete_note(res, tonumber(id_str))
+            return
+        end
     end
     send_response(res, 404, "text/plain; charset=utf-8", "Not Found\n")
 end)
