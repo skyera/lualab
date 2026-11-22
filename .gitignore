@@ -27,3 +27,4 @@ shared_files/
 yt_downloads/
 test_yt_downloads/
 .devin/
+notes_app/notes.json

@@ -13,10 +13,12 @@ local BASE_DIR = (module and module.dir) or process.cwd()
 
 -- luacheck: pop
 local PUBLIC_DIR = path.join(BASE_DIR, "public")
-local store = NotesStore.new({
-    { id = 1, text = "Learn Luvit HTTP servers" },
-    { id = 2, text = "Build a note web app" }
-})
+local DATA_FILE = path.join(BASE_DIR, "notes.json")
+local store, load_err = NotesStore.load(DATA_FILE)
+if not store then
+    io.stderr:write("error: " .. tostring(load_err) .. "\n")
+    os.exit(1)
+end
 
 local function send_response(res, status_code, content_type, body)
     res.statusCode = status_code
@@ -65,6 +67,11 @@ local function create_note(req, res)
             send_json(res, 400, { error = err })
             return
         end
+        local saved, save_err = store:save(DATA_FILE)
+        if not saved then
+            send_json(res, 500, { error = save_err })
+            return
+        end
         send_json(res, 201, note)
     end)
 end
@@ -72,6 +79,11 @@ end
 local function delete_note(res, id)
     if not store:delete(id) then
         send_json(res, 404, { error = "Note not found" })
+        return
+    end
+    local saved, save_err = store:save(DATA_FILE)
+    if not saved then
+        send_json(res, 500, { error = save_err })
         return
     end
     send_json(res, 200, { deleted = id })
