@@ -48,6 +48,7 @@ and choose the method that fits what changed:
 | Refactor / formatting  | Existing tests unchanged; `git diff --check`; no behavior diff |
 | Docs / config only     | Syntax or lint check; confirm the file is still parsed       |
 
+*   **Test-Driven Development (Red → Green → Refactor)**: For logic changes, bug fixes, and new features, write a failing test *first* and run it to confirm it fails for the expected reason (Red), write the minimal implementation to make it pass (Green), then refactor for clarity while keeping all tests passing. (Docs/config-only changes are exempt.)
 *   **Pre-Implementation Strategy**: Identify test commands, scripts, or reproduction steps *before* writing code.
 *   **Automated Tests**: Run the narrowest relevant test first, then the full suite (`--test`, unit tests, integration tests). Add new test cases covering the change and edge cases.
 *   **Keep Tests Simple & Readable**: Structure tests as small, flat, single-purpose functions — one behavior per function. Extract repetitive setup into tiny helpers, prefer `assert()` / `error()` over custom test boilerplate, and use OS-assigned ephemeral ports (port `0`) instead of hardcoded ports in network tests.
