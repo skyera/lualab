@@ -5,11 +5,32 @@ local path = require("path")
 local NotesStore = require("./notes_store")
 local net_util = require("./net_util")
 
+local function is_verbose()
+    local luvit_args = args -- luacheck: ignore 113 (luvit global)
+    for i = 2, #luvit_args do
+        if luvit_args[i] == "--verbose" or luvit_args[i] == "-v" then
+            return true
+        end
+    end
+    return false
+end
+
+local VERBOSE = is_verbose()
+
+local function log_debug(fmt, ...)
+    if not VERBOSE then
+        return
+    end
+    local ts = os.date("%H:%M:%S")
+    print(string.format("[%s] " .. fmt, ts, ...))
+end
+
 local PORT = 8200
 local HOST = "0.0.0.0"
 
 -- luacheck: push ignore 113 143 (luvit globals)
 local BASE_DIR = (module and module.dir) or process.cwd()
+log_debug("base dir: %s", BASE_DIR)
 
 -- luacheck: pop
 local PUBLIC_DIR = path.join(BASE_DIR, "public")
@@ -23,12 +44,14 @@ if not store then
     io.stderr:write("error: " .. tostring(load_err) .. "\n")
     os.exit(1)
 end
+log_debug("loaded %d notes from %s", #store:list(), DATA_FILE)
 
 local function send_response(res, status_code, content_type, body)
     res.statusCode = status_code
     res:setHeader("Content-Type", content_type)
     res:setHeader("Content-Length", #body)
     res:finish(body)
+    log_debug("<- %d %s (%d bytes)", status_code, content_type, #body)
 end
 
 local function send_json(res, status_code, payload)
@@ -131,6 +154,7 @@ local function upload_image(req, res)
                 return
             end
             send_json(res, 201, { url = "/uploads/" .. filename })
+            log_debug("saved upload %s (%d bytes)", file_path, #body)
         end)
     end)
 end
@@ -149,7 +173,7 @@ local function serve_upload(res, filename)
 end
 
 local server = http.createServer(function(req, res)
-    print(req.method, req.url)
+    log_debug("-> %s %s", req.method, req.url)
     if req.method == "GET" and req.url == "/" then
         serve_file(res, "index.html", "text/html; charset=utf-8")
         return
