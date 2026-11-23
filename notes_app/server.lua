@@ -61,6 +61,7 @@ end
 
 local function serve_file(res, filename, content_type)
     local file_path = path.join(PUBLIC_DIR, filename)
+    log_debug("serve file %s", file_path)
     fs.readFile(file_path, function(err, content)
         if err then
             send_response(
@@ -161,6 +162,7 @@ end
 
 local function serve_upload(res, filename)
     local file_path = path.join(UPLOADS_DIR, filename)
+    log_debug("file path: %s", file_path)
     fs.readFile(file_path, function(err, content)
         if err then
             send_response(
@@ -212,6 +214,10 @@ local server = http.createServer(function(req, res)
             serve_upload(res, name)
             return
         end
+    end
+    if req.method == "GET" and req.url == "/favicon.ico" then
+        send_response(res, 204, "image/x-icon", "")
+        return
     end
     if req.method == "POST" and req.url == "/api/notes" then
         create_note(req, res)
